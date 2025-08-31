@@ -58,6 +58,8 @@
     const CELL_SIZE = 40; // Will be scaled
     const SHAPE_COLORS = ["#ff5252", "#ffd600", "#40c4ff", "#69f0ae", "#ff4081", "#7c4dff", "#ffab40", "#00bfae"];
     const DIAMOND_COLOR = "#e0f7fa";
+    const LAVA_COLOR = "#ff3d00";
+    const COOLED_LAVA_COLOR = "#8d6e63"; // Brown color for cooled lava
     const DIAMOND_COST = 10;
     const SHAPES = [
       // I
@@ -111,22 +113,39 @@ let peakScore = 0;
       }
       return newBlocks;
     }
-    function pickShape(isDiamond=false) {
+    function pickShape(isDiamond=false, isLava=false) {
       const idx = Math.floor(seededRandom()*SHAPES.length);
       const rot = Math.floor(seededRandom()*4); // 0,1,2,3
       let blocks = rotateShape(SHAPES[idx].map(([x,y])=>({x,y})), rot);
+      let color;
+      if (isDiamond) {
+        color = DIAMOND_COLOR;
+      } else if (isLava) {
+        color = LAVA_COLOR;
+      } else {
+        color = SHAPE_COLORS[Math.floor(seededRandom()*SHAPE_COLORS.length)];
+      }
       return {
         blocks,
-        color: isDiamond ? DIAMOND_COLOR : SHAPE_COLORS[Math.floor(seededRandom()*SHAPE_COLORS.length)],
+        color,
         isDiamond,
+        isLava,
         rot
       };
     }
     function refillShapes() {
       while (availableShapes.length < 3) {
-        // 1 in 8 chance for diamond
-        const isDiamond = seededRandom() < 0.125;
-        availableShapes.push(pickShape(isDiamond));
+        const rand = seededRandom();
+        if (rand < 0.125) {
+          // 1 in 8 chance for diamond
+          availableShapes.push(pickShape(true, false));
+        } else if (rand < 0.25) {
+          // 1 in 8 chance for lava (next 1/8)
+          availableShapes.push(pickShape(false, true));
+        } else {
+          // Normal piece
+          availableShapes.push(pickShape(false, false));
+        }
       }
     }
     function updateScoreDisplay() {
@@ -188,6 +207,16 @@ let peakScore = 0;
               ctx.strokeStyle = '#00bcd4';
               ctx.lineWidth = 3;
               ctx.strokeRect(x*cell+6, y*cell+6, cell-12, cell-12);
+            } else if (grid[y][x].isLava) {
+              // Lava effect: glowing border
+              ctx.strokeStyle = '#ff8a50';
+              ctx.lineWidth = 3;
+              ctx.strokeRect(x*cell+6, y*cell+6, cell-12, cell-12);
+            } else if (grid[y][x].isCooledLava) {
+              // Cooled lava effect: darker border
+              ctx.strokeStyle = '#5d4037';
+              ctx.lineWidth = 2;
+              ctx.strokeRect(x*cell+8, y*cell+8, cell-16, cell-16);
             }
           }
         }
@@ -215,6 +244,10 @@ let peakScore = 0;
             ctx.strokeStyle = '#00bcd4';
             ctx.lineWidth = 3;
             ctx.strokeRect(x0+(block.x-box.minX)*cell+6, yCenter+(block.y-box.minY)*cell+6, cell-12, cell-12);
+          } else if (shape.isLava) {
+            ctx.strokeStyle = '#ff8a50';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x0+(block.x-box.minX)*cell+6, yCenter+(block.y-box.minY)*cell+6, cell-12, cell-12);
           }
         }
       }
@@ -236,6 +269,14 @@ let peakScore = 0;
         ctx.globalAlpha = 1;
         if (draggingShape.isDiamond) {
           ctx.strokeStyle = '#00bcd4';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(
+            dragPos.x + (block.x-minX)*cell+6,
+            dragPos.y + (block.y-minY)*cell+6,
+            cell-12, cell-12
+          );
+        } else if (draggingShape.isLava) {
+          ctx.strokeStyle = '#ff8a50';
           ctx.lineWidth = 3;
           ctx.strokeRect(
             dragPos.x + (block.x-minX)*cell+6,
@@ -386,9 +427,9 @@ function renderDiamondCoinAnims() {
   render();
 }
     function canAnyShapeFit() {
-  // Only count non-diamond shapes for fit check
+  // Only count non-diamond and non-lava shapes for fit check
   for (const shape of availableShapes) {
-    if (shape.isDiamond) continue;
+    if (shape.isDiamond || shape.isLava) continue;
     for (let gy=0; gy<GRID_SIZE; gy++) {
       for (let gx=0; gx<GRID_SIZE; gx++) {
         if (canPlace(shape, gx, gy)) return true;
@@ -417,10 +458,33 @@ function renderDiamondCoinAnims() {
       let sumX = 0, sumY = 0;
       for (const block of shape.blocks) {
         const x = gx+block.x, y = gy+block.y;
-        grid[y][x] = {color:shape.color, isDiamond:shape.isDiamond};
+        // Place the piece first (lava becomes cooled when placed)
+        if (shape.isLava) {
+          grid[y][x] = {color: COOLED_LAVA_COLOR, isDiamond: false, isLava: false, isCooledLava: true};
+        } else {
+          grid[y][x] = {color: shape.color, isDiamond: shape.isDiamond, isLava: shape.isLava};
+        }
         sumX += gridX + x*cell + cell/2;
         sumY += gridY + y*cell + cell/2;
       }
+      
+      // If it's a lava piece, burn adjacent cells (including diagonals)
+      if (shape.isLava) {
+        for (const block of shape.blocks) {
+          const bx = gx+block.x, by = gy+block.y;
+          // Check all 8 adjacent cells (including diagonals)
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue; // Skip the lava piece itself (now cooled)
+              const adjX = bx + dx, adjY = by + dy;
+              if (adjX >= 0 && adjX < GRID_SIZE && adjY >= 0 && adjY < GRID_SIZE) {
+                grid[adjY][adjX] = null; // Burn the adjacent cell
+              }
+            }
+          }
+        }
+      }
+      
       piecesPlaced++;
       // Animate coin from piece center
       animateCoin(sumX/shape.blocks.length, sumY/shape.blocks.length);
@@ -503,7 +567,7 @@ function renderDiamondCoinAnims() {
       for (const block of shape.blocks) {
         const x = gx+block.x, y = gy+block.y;
         if (x<0||x>=GRID_SIZE||y<0||y>=GRID_SIZE) return false;
-        if (!shape.isDiamond && grid[y][x]) return false;
+        if (!shape.isDiamond && !shape.isLava && grid[y][x]) return false;
       }
       return true;
     }
@@ -586,8 +650,8 @@ function renderDiamondCoinAnims() {
         diamondsBought++;
         // Replace a non-diamond shape
         for (let i=0; i<availableShapes.length; i++) {
-          if (!availableShapes[i].isDiamond) {
-            availableShapes[i] = pickShape(true);
+          if (!availableShapes[i].isDiamond && !availableShapes[i].isLava) {
+            availableShapes[i] = pickShape(true, false);
             // Animate coins to new diamond piece
             // Find diamond piece's center
             const cell = getCellSize();
