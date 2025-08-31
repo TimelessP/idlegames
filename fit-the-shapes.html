@@ -242,6 +242,8 @@ let peakScore = 0;
       }
     }
     let coinAnim = null;
+// let shakeAnim = null;
+let freeCoinAnims = null;
 function animateCoin(fromX, fromY) {
   const start = Date.now();
   const duration = 700;
@@ -249,6 +251,54 @@ function animateCoin(fromX, fromY) {
   const endY = 0;
   coinAnim = {fromX, fromY, endX, endY, start, duration};
   requestAnimationFrame(render);
+}
+
+function animateFreeCoins(fromX, fromY) {
+  // Use a single animation instance for all coins, matching diamond buy
+  const start = Date.now();
+  const duration = 700;
+  const coins = [];
+  for (let i=0; i<10; i++) {
+    const angle = (-1.2 + 2.4*Math.random());
+    const speed = 1 + 0.7*(Math.random()-0.5);
+    coins.push({
+      duration: duration * speed,
+      angle,
+    });
+  }
+  freeCoinAnims = {
+    start,
+    fromX,
+    fromY,
+    toX: canvas.width/2,
+    toY: 0,
+    coins
+  };
+  requestAnimationFrame(render);
+}
+
+function renderFreeCoinAnims() {
+  if (!freeCoinAnims) return;
+  const now = Date.now();
+  let stillAnimating = false;
+  for (const coin of freeCoinAnims.coins) {
+    const t = Math.min(1, (now-freeCoinAnims.start)/coin.duration);
+    if (t < 1) stillAnimating = true;
+    const ease = 1 - Math.pow(1-t,3);
+    const x = freeCoinAnims.fromX + (freeCoinAnims.toX-freeCoinAnims.fromX)*ease + Math.sin(coin.angle)*120*(1-t);
+    const y = freeCoinAnims.fromY + (freeCoinAnims.toY-freeCoinAnims.fromY)*ease + Math.sin(coin.angle)*60*(1-t);
+    ctx.save();
+    ctx.font = `${canvas.height/24}px serif`;
+    ctx.globalAlpha = 0.7 + 0.3*(1-t);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('🪙', x, y);
+    ctx.restore();
+  }
+  if (!stillAnimating) {
+    freeCoinAnims = null;
+  }
+  return stillAnimating;
 }
 function renderCoinAnim() {
   if (!coinAnim) return;
@@ -265,11 +315,10 @@ function renderCoinAnim() {
   ctx.textBaseline = 'middle';
   ctx.fillText('🪙', x, y);
   ctx.restore();
-  if (t < 1) {
-    requestAnimationFrame(render);
-  } else {
+  if (t >= 1) {
     coinAnim = null;
   }
+  return t < 1;
 }
 let diamondCoinAnims = [];
 function animateDiamondCoins(toX, toY) {
@@ -310,11 +359,10 @@ function renderDiamondCoinAnims() {
     ctx.fillText('🪙', x, y);
     ctx.restore();
   }
-  if (stillAnimating) {
-    requestAnimationFrame(render);
-  } else {
+  if (!stillAnimating) {
     diamondCoinAnims = [];
   }
+  return stillAnimating;
 }
     function resetGame() {
   score = 0;
@@ -373,27 +421,44 @@ function renderDiamondCoinAnims() {
       // Animate coin from piece center
       animateCoin(sumX/shape.blocks.length, sumY/shape.blocks.length);
       // Clear rows/cols
-        // First, find all full rows and columns before clearing anything
-        let fullRows = [];
-        let fullCols = [];
-        for (let y=0; y<GRID_SIZE; y++) {
-          if (grid[y].every(cell=>cell)) fullRows.push(y);
-        }
-        for (let x=0; x<GRID_SIZE; x++) {
-          if (grid.every(row=>row[x])) fullCols.push(x);
-        }
-        // Now clear all full rows
+      // First, find all full rows and columns before clearing anything
+      let fullRows = [];
+      let fullCols = [];
+      for (let y=0; y<GRID_SIZE; y++) {
+        if (grid[y].every(cell=>cell)) fullRows.push(y);
+      }
+      for (let x=0; x<GRID_SIZE; x++) {
+        if (grid.every(row=>row[x])) fullCols.push(x);
+      }
+      // If both a row and column are cleared, trigger free coins animation only
+      if (fullRows.length > 0 && fullCols.length > 0) {
+        // Accumulate all intersection points
+        let sumX = 0, sumY = 0, count = 0;
         for (const y of fullRows) {
-          for (let x=0; x<GRID_SIZE; x++) grid[y][x]=null;
+          for (const x of fullCols) {
+            sumX += gridX + x*cell + cell/2;
+            sumY += gridY + y*cell + cell/2;
+            count++;
+          }
         }
-        // Now clear all full columns
-        for (const x of fullCols) {
-          for (let y=0; y<GRID_SIZE; y++) grid[y][x]=null;
+        // Animate coins from average intersection center
+        if (count > 0) {
+          animateFreeCoins(sumX/count, sumY/count);
         }
-        let cleared = fullRows.length + fullCols.length;
-        score += cleared*5 + 1;
-        updateScoreDisplay();
-        checkGameEnd();
+        score += 10; // Free coins
+      }
+      // Now clear all full rows
+      for (const y of fullRows) {
+        for (let x=0; x<GRID_SIZE; x++) grid[y][x]=null;
+      }
+      // Now clear all full columns
+      for (const x of fullCols) {
+        for (let y=0; y<GRID_SIZE; y++) grid[y][x]=null;
+      }
+      let cleared = fullRows.length + fullCols.length;
+      score += cleared*5 + 1;
+      updateScoreDisplay();
+      checkGameEnd();
     }
     function renderGameOver() {
   ctx.save();
@@ -415,13 +480,19 @@ function renderDiamondCoinAnims() {
   ctx.restore();
 }
     function render() {
-      ctx.clearRect(0,0,canvas.width,canvas.height);
-      drawGrid();
-      drawAvailableShapes();
-      drawDraggingShape();
-      renderCoinAnim();
-      renderDiamondCoinAnims();
-      if (gameOver) renderGameOver();
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawGrid();
+  drawAvailableShapes();
+  drawDraggingShape();
+  const coinAnimating = renderCoinAnim();
+  const diamondAnimating = renderDiamondCoinAnims();
+  const freeAnimating = renderFreeCoinAnims();
+  if (gameOver) renderGameOver();
+  
+  // Continue animation loop if any animation is still running
+  if (coinAnimating || diamondAnimating || freeAnimating) {
+    requestAnimationFrame(render);
+  }
     }
     // --- GAME LOGIC ---
     function canPlace(shape, gx, gy) {
