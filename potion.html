@@ -43,6 +43,14 @@
       backdrop-filter: none;
     }
 
+    #glowCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+
     #overlayCanvas {
       position: absolute;
       top: 0;
@@ -136,6 +144,7 @@
   <div id="container">
     <canvas id="particleCanvas"></canvas>
     <canvas id="liquidCanvas"></canvas>
+    <canvas id="glowCanvas"></canvas>
     <canvas id="overlayCanvas"></canvas>
     
     <div class="ui-panel">
@@ -166,8 +175,9 @@
 
   <script>
     // Global variables
-    let canvas, ctx, particleCanvas, particleCtx, overlayCanvas, overlayCtx;
+    let canvas, ctx, particleCanvas, particleCtx, overlayCanvas, overlayCtx, glowCanvas, glowCtx;
     let width, height;
+    let renderWidth, renderHeight; // Lower resolution for rendering
     let particles = [];
     let bubbles = []; // Array to hold bubble objects
     let gravity = { x: 0, y: 0.2 }; // Reduced gravity for better liquid behavior
@@ -189,8 +199,8 @@
     let smoothTiltX = 0, smoothTiltY = 0;
     
     // Physics constants (base values, will be scaled)
-    const maxTilt = 30; // degrees
-    const tiltSensitivity = 0.3;
+    const maxTilt = 90; // degrees - now allowing full 90-degree tilt range
+    const tiltSensitivity = 0.033; // Adjusted to maintain same energy at 90° as previous 30°
     const viscosity = 0.95;
     const cohesion = 0.8;
     const separation = 0.3;
@@ -230,21 +240,21 @@
         this.x += this.vx;
         this.y += this.vy;
         
-        // Boundary collisions with damping
+        // Boundary collisions with damping (using render dimensions)
         if (this.x - this.radius < 0) {
           this.x = this.radius;
           this.vx *= -damping;
         }
-        if (this.x + this.radius > width) {
-          this.x = width - this.radius;
+        if (this.x + this.radius > renderWidth) {
+          this.x = renderWidth - this.radius;
           this.vx *= -damping;
         }
         if (this.y - this.radius < 0) {
           this.y = this.radius;
           this.vy *= -damping;
         }
-        if (this.y + this.radius > height) {
-          this.y = height - this.radius;
+        if (this.y + this.radius > renderHeight) {
+          this.y = renderHeight - this.radius;
           this.vy *= -damping;
         }
       }
@@ -377,21 +387,21 @@
         this.x += this.vx;
         this.y += this.vy;
         
-        // Soft boundary collisions (bubbles can float near edges)
+        // Soft boundary collisions (bubbles can float near edges, using render dimensions)
         if (this.x < this.radius) {
           this.x = this.radius;
           this.vx *= -0.5;
         }
-        if (this.x > width - this.radius) {
-          this.x = width - this.radius;
+        if (this.x > renderWidth - this.radius) {
+          this.x = renderWidth - this.radius;
           this.vx *= -0.5;
         }
       }
       
       // Check if bubble is outside the liquid mask area
       isOutsideMask() {
-        // Check if bubble is at the edge of the screen bounds
-        if (this.x < 0 || this.x > width || this.y < 0 || this.y > height) {
+        // Check if bubble is at the edge of the render bounds
+        if (this.x < 0 || this.x > renderWidth || this.y < 0 || this.y > renderHeight) {
           return true;
         }
         
@@ -436,6 +446,10 @@
       particleCanvas = document.getElementById('particleCanvas');
       particleCtx = particleCanvas.getContext('2d', { willReadFrequently: true });
       
+      // Hidden glow canvas for inner glow effect
+      glowCanvas = document.getElementById('glowCanvas');
+      glowCtx = glowCanvas.getContext('2d');
+      
       // Overlay canvas for effects
       overlayCanvas = document.getElementById('overlayCanvas');
       overlayCtx = overlayCanvas.getContext('2d');
@@ -448,21 +462,33 @@
       width = window.innerWidth;
       height = window.innerHeight;
       
+      // Calculate render resolution at 1/8th scale for performance
+      const renderScale = 0.125; // 1/8th resolution
+      renderWidth = Math.floor(width * renderScale);
+      renderHeight = Math.floor(height * renderScale);
+      
       // Calculate scale based on minimum dimension (responsive scaling)
       const baseSize = 800; // Reference size for scaling
       scale = Math.min(width, height) / baseSize;
       scale = Math.max(0.3, Math.min(scale, 2.0)); // Clamp scale between 0.3x and 2x
       
-      // Update scaled values
-      scaledParticleRadius = baseParticleRadius * scale;
-      scaledMaskRadius = baseMaskRadius * scale;
-      scaledMinDistance = baseMinDistance * scale;
-      scaledBlurRadius = Math.max(4, baseBlurRadius * scale); // Minimum blur of 4px
+      // Update scaled values (adjusted for render resolution)
+      scaledParticleRadius = baseParticleRadius * scale * renderScale;
+      scaledMaskRadius = baseMaskRadius * scale * renderScale;
+      scaledMinDistance = baseMinDistance * scale * renderScale;
+      scaledBlurRadius = Math.max(1, baseBlurRadius * scale * renderScale); // Minimum blur of 1px at low res
       
-      [canvas, particleCanvas, overlayCanvas].forEach(c => {
-        c.width = width;
-        c.height = height;
-      });
+      // Set display canvas to full resolution
+      canvas.width = width;
+      canvas.height = height;
+      overlayCanvas.width = width;
+      overlayCanvas.height = height;
+      
+      // Set render canvases to lower resolution
+      particleCanvas.width = renderWidth;
+      particleCanvas.height = renderHeight;
+      glowCanvas.width = renderWidth;
+      glowCanvas.height = renderHeight;
       
       // Reinitialize particles if they exist (for resize events)
       if (particles.length > 0) {
@@ -473,19 +499,19 @@
     function initParticles() {
       particles = [];
       
-      // Create particles in bottom 3/4 of screen (like a bottle filled 3/4)
-      const startY = height * 0.25;
+      // Create particles in bottom 3/4 of render area (like a bottle filled 3/4)
+      const startY = renderHeight * 0.25;
       const particlesPerRow = Math.ceil(Math.sqrt(numParticles));
-      const spacing = (width * 0.8) / particlesPerRow;
+      const spacing = (renderWidth * 0.8) / particlesPerRow;
       
       for (let i = 0; i < numParticles; i++) {
         const row = Math.floor(i / particlesPerRow);
         const col = i % particlesPerRow;
         
-        const x = (width * 0.1) + col * spacing + (Math.random() - 0.5) * spacing * 0.5;
+        const x = (renderWidth * 0.1) + col * spacing + (Math.random() - 0.5) * spacing * 0.5;
         const y = startY + row * spacing + (Math.random() - 0.5) * spacing * 0.5;
         
-        if (y < height - scaledParticleRadius) {
+        if (y < renderHeight - scaledParticleRadius) {
           particles.push(new Particle(x, y));
         }
       }
@@ -521,9 +547,8 @@
     }
     
     function renderLiquid() {
-      // Clear canvases
-      particleCtx.clearRect(0, 0, width, height);
-      ctx.clearRect(0, 0, width, height);
+      // Clear render canvases
+      particleCtx.clearRect(0, 0, renderWidth, renderHeight);
       
       // Draw particles on hidden canvas with scaled mask radius for blurring
       particleCtx.fillStyle = 'white';
@@ -539,20 +564,91 @@
       particleCtx.drawImage(particleCanvas, 0, 0);
       particleCtx.filter = 'none';
       
-      // Create liquid gradient
+      // Clear main canvas and create liquid gradient
+      ctx.clearRect(0, 0, width, height);
       const gradient = ctx.createLinearGradient(0, 0, 0, height);
       gradient.addColorStop(0, '#ff00ff');
       gradient.addColorStop(0.3, '#8000ff');
       gradient.addColorStop(0.7, '#4000ff');
       gradient.addColorStop(1, '#0080ff');
       
-      // More efficient rendering: use globalCompositeOperation instead of pixel manipulation
+      // Render liquid with scaling from render resolution to display resolution
       ctx.save();
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, width, height);
       ctx.globalCompositeOperation = 'destination-in';
-      ctx.drawImage(particleCanvas, 0, 0);
+      // Use nearest-neighbor scaling for crisp pixels
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(particleCanvas, 0, 0, renderWidth, renderHeight, 0, 0, width, height);
+      ctx.imageSmoothingEnabled = true; // Reset for other operations
       ctx.restore();
+    }
+    
+    function renderInnerGlow() {
+      // Clear glow canvas
+      glowCtx.clearRect(0, 0, renderWidth, renderHeight);
+      
+      // Step 1: Create inner mask with higher alpha threshold
+      // Draw particles with slightly smaller radius to create inner boundary
+      const innerRadius = scaledMaskRadius * 0.7; // Smaller radius for inner shape
+      glowCtx.fillStyle = 'white';
+      particles.forEach(particle => {
+        glowCtx.beginPath();
+        glowCtx.arc(particle.x, particle.y, innerRadius, 0, Math.PI * 2);
+        glowCtx.fill();
+      });
+      
+      // Step 2: Apply blur to soften the inner mask
+      const innerBlur = scaledBlurRadius * 1.5;
+      glowCtx.filter = `blur(${innerBlur}px)`;
+      glowCtx.globalCompositeOperation = 'source-over';
+      glowCtx.drawImage(glowCanvas, 0, 0);
+      glowCtx.filter = 'none';
+      
+      // Step 3: Create inverted alpha channel for glow effect
+      // Get the image data to process alpha channel
+      const imageData = glowCtx.getImageData(0, 0, renderWidth, renderHeight);
+      const data = imageData.data;
+      
+      // Process pixels: invert alpha and create glow gradient
+      for (let i = 0; i < data.length; i += 4) {
+        const alpha = data[i + 3];
+        if (alpha > 10) { // Only process areas with some content
+          // Create inverted glow - stronger where alpha is weaker
+          const glowStrength = Math.max(0, 255 - alpha) / 255;
+          const glowIntensity = Math.pow(glowStrength, 2) * 0.8; // Quadratic falloff
+          
+          // UV-like magenta/purple glow colors
+          data[i] = Math.floor(255 * glowIntensity);     // Red
+          data[i + 1] = Math.floor(100 * glowIntensity); // Green  
+          data[i + 2] = Math.floor(255 * glowIntensity); // Blue
+          data[i + 3] = Math.floor(180 * glowIntensity); // Alpha
+        } else {
+          // Clear areas outside the glow
+          data[i] = 0;
+          data[i + 1] = 0;
+          data[i + 2] = 0;
+          data[i + 3] = 0;
+        }
+      }
+      
+      // Step 4: Put the processed glow back
+      glowCtx.clearRect(0, 0, renderWidth, renderHeight);
+      glowCtx.putImageData(imageData, 0, 0);
+      
+      // Step 5: Apply additional blur to the glow for smoothness
+      glowCtx.filter = `blur(${scaledBlurRadius * 0.5}px)`;
+      glowCtx.globalCompositeOperation = 'source-over';
+      glowCtx.drawImage(glowCanvas, 0, 0);
+      glowCtx.filter = 'none';
+      
+      // Step 6: Composite the glow onto the main canvas with scaling
+      ctx.globalCompositeOperation = 'screen'; // Additive blending for glow
+      // Use nearest-neighbor scaling for crisp pixels
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(glowCanvas, 0, 0, renderWidth, renderHeight, 0, 0, width, height);
+      ctx.imageSmoothingEnabled = true; // Reset for other operations
+      ctx.globalCompositeOperation = 'source-over'; // Reset to normal blending
     }
     
     function removeBubblesOutsideMask() {
@@ -561,26 +657,39 @@
     }
     
     function renderBubbles() {
-      // Calculate line width proportional to min(width, height)
-      const lineWidth = Math.max(1, Math.min(width, height) * 0.003); // 0.3% of minimum dimension
+      // Clear the glow canvas and use it for bubble rendering at render resolution
+      glowCtx.clearRect(0, 0, renderWidth, renderHeight);
       
-      // Set up bubble rendering style
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)'; // White with 15% opacity
-      ctx.lineWidth = lineWidth;
-      ctx.fillStyle = 'transparent'; // No fill
+      // Calculate line width proportional to render resolution (4x thicker than before)
+      const renderLineWidth = Math.max(1, Math.min(renderWidth, renderHeight) * 0.012); // 4x the previous 0.003
       
-      // Render each bubble
+      // Set up bubble rendering style at render resolution
+      glowCtx.strokeStyle = 'rgba(255, 255, 255, 0.15)'; // White with 15% opacity
+      glowCtx.lineWidth = renderLineWidth;
+      glowCtx.fillStyle = 'transparent'; // No fill
+      
+      // Render each bubble at render resolution
       bubbles.forEach(bubble => {
         if (bubble.radius > 0.5) { // Only render if bubble has grown enough to be visible
-          ctx.beginPath();
-          ctx.arc(bubble.x, bubble.y, bubble.radius, 0, Math.PI * 2);
-          ctx.stroke();
+          glowCtx.beginPath();
+          glowCtx.arc(bubble.x, bubble.y, bubble.radius, 0, Math.PI * 2);
+          glowCtx.stroke();
         }
       });
+      
+      // Now composite the bubble canvas onto the main canvas with pixel-perfect scaling
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.imageSmoothingEnabled = false; // Pixel-perfect scaling
+      ctx.drawImage(glowCanvas, 0, 0, renderWidth, renderHeight, 0, 0, width, height);
+      ctx.imageSmoothingEnabled = true; // Reset for other operations
     }
     
     function renderOverlay() {
       overlayCtx.clearRect(0, 0, width, height);
+      
+      // Calculate scale factor from render to display resolution
+      const scaleX = width / renderWidth;
+      const scaleY = height / renderHeight;
       
       // Add some magical sparkle effects
       overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.3)';
@@ -588,8 +697,8 @@
         if (Math.random() < 0.02) { // Random sparkles
           overlayCtx.beginPath();
           overlayCtx.arc(
-            particle.x + (Math.random() - 0.5) * 20,
-            particle.y + (Math.random() - 0.5) * 20,
+            (particle.x + (Math.random() - 0.5) * 20 / scaleX) * scaleX,
+            (particle.y + (Math.random() - 0.5) * 20 / scaleY) * scaleY,
             Math.random() * 2,
             0, Math.PI * 2
           );
@@ -617,6 +726,7 @@
     function animate() {
       updatePhysics();
       renderLiquid();
+      renderInnerGlow(); // Add the inner glow effect
       removeBubblesOutsideMask(); // Check bubbles against liquid mask after rendering
       renderBubbles();
       renderOverlay();
