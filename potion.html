@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Magic Potion - Physics Toy</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      font-family: 'Courier New', monospace;
+    }
+
+    #container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #particleCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #liquidCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      backdrop-filter: none;
+    }
+
+    #overlayCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    .ui-panel {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid #00ffff;
+      border-radius: 8px;
+      padding: 15px;
+      color: #00ffff;
+      font-size: 12px;
+      z-index: 20;
+      backdrop-filter: blur(10px);
+    }
+
+    .tilt-indicator {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      width: 60px;
+      height: 60px;
+      border: 2px solid #00ffff;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 20;
+    }
+
+    .tilt-dot {
+      width: 8px;
+      height: 8px;
+      background: #ff00ff;
+      border-radius: 50%;
+      transition: transform 0.1s ease;
+      box-shadow: 0 0 10px #ff00ff;
+    }
+
+    .permission-prompt {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, 0.9);
+      border: 2px solid #00ffff;
+      border-radius: 15px;
+      padding: 30px;
+      text-align: center;
+      color: #00ffff;
+      z-index: 100;
+      backdrop-filter: blur(15px);
+    }
+
+    .permission-button {
+      background: linear-gradient(45deg, #ff00ff, #00ffff);
+      border: none;
+      border-radius: 25px;
+      padding: 15px 30px;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+      margin-top: 20px;
+      font-size: 16px;
+      text-transform: uppercase;
+      transition: all 0.3s ease;
+      box-shadow: 0 0 20px rgba(255, 0, 255, 0.5);
+    }
+
+    .permission-button:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 30px rgba(255, 0, 255, 0.8);
+    }
+
+    @media (orientation: landscape) {
+      .ui-panel {
+        font-size: 10px;
+        padding: 10px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <canvas id="particleCanvas"></canvas>
+    <canvas id="liquidCanvas"></canvas>
+    <canvas id="overlayCanvas"></canvas>
+    
+    <div class="ui-panel">
+      <div>Magic Potion Simulator</div>
+      <div>Particles: <span id="particleCount">0</span></div>
+      <div>Bubbles: <span id="bubbleCount">0</span></div>
+      <div>Tilt X: <span id="tiltX">0</span>°</div>
+      <div>Tilt Y: <span id="tiltY">0</span>°</div>
+      <div>Physics: <span id="physicsMode">Liquid</span></div>
+    </div>
+
+    <div class="tilt-indicator">
+      <div class="tilt-dot" id="tiltDot"></div>
+    </div>
+
+    <div class="permission-prompt" id="permissionPrompt">
+      <h2>🧪 Magic Potion Physics</h2>
+      <p>Tilt your device to control the magical liquid!</p>
+      <p>Grant motion sensor access to begin the simulation.</p>
+      <button class="permission-button" onclick="requestMotionPermission()">
+        Enable Magic ✨
+      </button>
+      <div style="margin-top: 15px; font-size: 11px; opacity: 0.7;">
+        Desktop: Click and drag to tilt the bottle
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Global variables
+    let canvas, ctx, particleCanvas, particleCtx, overlayCanvas, overlayCtx;
+    let width, height;
+    let particles = [];
+    let bubbles = []; // Array to hold bubble objects
+    let gravity = { x: 0, y: 0.2 }; // Reduced gravity for better liquid behavior
+    let damping = 0.98;
+    let particleRadius = 8; // Base particle radius (will be scaled)
+    let numParticles = 150; // Reduced from 300 for better performance
+    let maxBubbles = 15; // Maximum number of bubbles at one time
+    let motionPermissionGranted = false;
+    
+    // Scaling variables
+    let scale = 1; // Will be calculated based on viewport size
+    let scaledParticleRadius = 64;
+    let scaledMaskRadius = 128;
+    let scaledMinDistance = 128;
+    let scaledBlurRadius = 8;
+    
+    // Tilt values
+    let tiltX = 0, tiltY = 0;
+    let smoothTiltX = 0, smoothTiltY = 0;
+    
+    // Physics constants (base values, will be scaled)
+    const maxTilt = 30; // degrees
+    const tiltSensitivity = 0.3;
+    const viscosity = 0.95;
+    const cohesion = 0.8;
+    const separation = 0.3;
+    const baseMinDistance = 128; // Base minimum distance between particles (scaled with particle size)
+    const repulsionStrength = 0.5; // How strong the repulsion force is
+    const baseParticleRadius = 64; // Base particle radius (8x larger: 8 * 8 = 64)
+    const baseMaskRadius = 128; // Base mask radius for contour (16x base: 8 * 16 = 128)
+    const baseBlurRadius = 8; // Base blur radius
+    
+    // Performance optimization
+    let physicsFrame = 0;
+    
+    // Particle class
+    class Particle {
+      constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 2;
+        this.vy = (Math.random() - 0.5) * 2;
+        this.radius = scaledParticleRadius + (Math.random() - 0.5) * 4 * scale;
+        this.density = 0;
+        this.pressure = 0;
+        this.nearDensity = 0;
+        this.nearPressure = 0;
+      }
+      
+      update() {
+        // Apply gravity with tilt
+        this.vx += gravity.x;
+        this.vy += gravity.y;
+        
+        // Apply viscosity
+        this.vx *= viscosity;
+        this.vy *= viscosity;
+        
+        // Update position
+        this.x += this.vx;
+        this.y += this.vy;
+        
+        // Boundary collisions with damping
+        if (this.x - this.radius < 0) {
+          this.x = this.radius;
+          this.vx *= -damping;
+        }
+        if (this.x + this.radius > width) {
+          this.x = width - this.radius;
+          this.vx *= -damping;
+        }
+        if (this.y - this.radius < 0) {
+          this.y = this.radius;
+          this.vy *= -damping;
+        }
+        if (this.y + this.radius > height) {
+          this.y = height - this.radius;
+          this.vy *= -damping;
+        }
+      }
+      
+      // Fluid dynamics - simplified SPH (Smoothed Particle Hydrodynamics)
+      calculateDensity() {
+        this.density = 0;
+        this.nearDensity = 0;
+        
+        particles.forEach(other => {
+          if (other === this) return;
+          
+          const dx = other.x - this.x;
+          const dy = other.y - this.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          
+          if (distance < this.radius * 2) {
+            const q = distance / (this.radius * 2);
+            if (q < 1) {
+              const density = (1 - q) * (1 - q);
+              this.density += density;
+              this.nearDensity += density * (1 - q);
+            }
+          }
+        });
+      }
+      
+      calculatePressure() {
+        this.pressure = this.density - 1;
+        this.nearPressure = this.nearDensity;
+      }
+      
+      applyPressureForce() {
+        particles.forEach(other => {
+          if (other === this) return;
+          
+          const dx = other.x - this.x;
+          const dy = other.y - this.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          
+          if (distance < this.radius * 2 && distance > 0) {
+            const q = distance / (this.radius * 2);
+            if (q < 1) {
+              const force = this.pressure * (1 - q) + this.nearPressure * (1 - q) * (1 - q);
+              const forceX = (dx / distance) * force * 0.5;
+              const forceY = (dy / distance) * force * 0.5;
+              
+              this.vx -= forceX;
+              this.vy -= forceY;
+            }
+          }
+        });
+      }
+      
+      // Apply separation force to maintain minimum distance between particles
+      applySeparationForce() {
+        particles.forEach(other => {
+          if (other === this) return;
+          
+          const dx = other.x - this.x;
+          const dy = other.y - this.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          
+          if (distance < scaledMinDistance && distance > 0) {
+            // Calculate repulsion force - stronger when particles are closer
+            const overlap = scaledMinDistance - distance;
+            const force = (overlap / scaledMinDistance) * repulsionStrength;
+            
+            // Apply force in opposite direction (away from other particle)
+            const forceX = -(dx / distance) * force;
+            const forceY = -(dy / distance) * force;
+            
+            this.vx += forceX;
+            this.vy += forceY;
+          }
+        });
+      }
+    }
+    
+    // Bubble class for magical bubble effects
+    class Bubble {
+      constructor(particle) {
+        this.spawnParticle = particle;
+        this.x = particle.x;
+        this.y = particle.y;
+        this.vx = (Math.random() - 0.5) * 1;
+        this.vy = (Math.random() - 0.5) * 1; // More neutral initial velocity
+        this.radius = 0; // Start at size 0 and grow
+        this.targetRadius = scaledParticleRadius;
+        this.age = 0;
+        this.maxAge = Math.random() * 300 + 200; // Lifespan before removal check
+        this.elasticity = 0.1; // How strongly it's pulled toward spawn particle
+        this.buoyancy = 0.02; // Upward drift strength
+        this.damping = 0.98;
+      }
+      
+      update() {
+        this.age++;
+        
+        // Grow the bubble from 0 to target size
+        if (this.radius < this.targetRadius) {
+          this.radius += (this.targetRadius - this.radius) * 0.05;
+        }
+        
+        // Elastic connection to spawn particle
+        const dx = this.spawnParticle.x - this.x;
+        const dy = this.spawnParticle.y - this.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        // Apply elastic force toward spawn particle (but weakly)
+        if (distance > 0) {
+          const elasticForce = this.elasticity * Math.min(distance / 100, 1);
+          this.vx += (dx / distance) * elasticForce;
+          this.vy += (dy / distance) * elasticForce;
+        }
+        
+        // Apply buoyancy (opposite to gravity direction)
+        this.vx -= gravity.x * this.buoyancy * 10; // Float opposite to gravity X
+        this.vy -= gravity.y * this.buoyancy * 10; // Float opposite to gravity Y
+        
+        // Apply gravity but much weaker than particles (bubbles are lighter)
+        this.vx += gravity.x * 0.1;
+        this.vy += gravity.y * 0.1;
+        
+        // Apply damping
+        this.vx *= this.damping;
+        this.vy *= this.damping;
+        
+        // Update position
+        this.x += this.vx;
+        this.y += this.vy;
+        
+        // Soft boundary collisions (bubbles can float near edges)
+        if (this.x < this.radius) {
+          this.x = this.radius;
+          this.vx *= -0.5;
+        }
+        if (this.x > width - this.radius) {
+          this.x = width - this.radius;
+          this.vx *= -0.5;
+        }
+      }
+      
+      // Check if bubble is outside the liquid mask area
+      isOutsideMask() {
+        // Check if bubble is at the edge of the screen bounds
+        if (this.x < 0 || this.x > width || this.y < 0 || this.y > height) {
+          return true;
+        }
+        
+        // Check if bubble is too old (failsafe)
+        if (this.age > this.maxAge) {
+          return true;
+        }
+        
+        // Sample the liquid mask at the bubble's position
+        try {
+          const imageData = particleCtx.getImageData(
+            Math.floor(this.x - 2), 
+            Math.floor(this.y - 2), 
+            4, 
+            4
+          );
+          
+          // Check if there's any liquid pixels in the sampled area
+          let hasLiquid = false;
+          for (let i = 0; i < imageData.data.length; i += 4) {
+            const alpha = imageData.data[i + 3]; // Alpha channel
+            if (alpha > 50) { // Threshold for liquid presence
+              hasLiquid = true;
+              break;
+            }
+          }
+          
+          return !hasLiquid; // Remove bubble if no liquid found
+        } catch (error) {
+          // If sampling fails, fall back to age-based removal
+          return this.age > this.maxAge * 0.8;
+        }
+      }
+    }
+    
+    function initCanvas() {
+      // Main liquid rendering canvas
+      canvas = document.getElementById('liquidCanvas');
+      ctx = canvas.getContext('2d');
+      
+      // Hidden particle canvas for blur operations (optimized for frequent readback)
+      particleCanvas = document.getElementById('particleCanvas');
+      particleCtx = particleCanvas.getContext('2d', { willReadFrequently: true });
+      
+      // Overlay canvas for effects
+      overlayCanvas = document.getElementById('overlayCanvas');
+      overlayCtx = overlayCanvas.getContext('2d');
+      
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+    }
+    
+    function resizeCanvas() {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      
+      // Calculate scale based on minimum dimension (responsive scaling)
+      const baseSize = 800; // Reference size for scaling
+      scale = Math.min(width, height) / baseSize;
+      scale = Math.max(0.3, Math.min(scale, 2.0)); // Clamp scale between 0.3x and 2x
+      
+      // Update scaled values
+      scaledParticleRadius = baseParticleRadius * scale;
+      scaledMaskRadius = baseMaskRadius * scale;
+      scaledMinDistance = baseMinDistance * scale;
+      scaledBlurRadius = Math.max(4, baseBlurRadius * scale); // Minimum blur of 4px
+      
+      [canvas, particleCanvas, overlayCanvas].forEach(c => {
+        c.width = width;
+        c.height = height;
+      });
+      
+      // Reinitialize particles if they exist (for resize events)
+      if (particles.length > 0) {
+        initParticles();
+      }
+    }
+    
+    function initParticles() {
+      particles = [];
+      
+      // Create particles in bottom 3/4 of screen (like a bottle filled 3/4)
+      const startY = height * 0.25;
+      const particlesPerRow = Math.ceil(Math.sqrt(numParticles));
+      const spacing = (width * 0.8) / particlesPerRow;
+      
+      for (let i = 0; i < numParticles; i++) {
+        const row = Math.floor(i / particlesPerRow);
+        const col = i % particlesPerRow;
+        
+        const x = (width * 0.1) + col * spacing + (Math.random() - 0.5) * spacing * 0.5;
+        const y = startY + row * spacing + (Math.random() - 0.5) * spacing * 0.5;
+        
+        if (y < height - scaledParticleRadius) {
+          particles.push(new Particle(x, y));
+        }
+      }
+    }
+    
+    function updatePhysics() {
+      // Update gravity based on device tilt
+      gravity.x = smoothTiltX * tiltSensitivity;
+      gravity.y = 0.2 + smoothTiltY * tiltSensitivity * 0.5; // Updated base gravity
+      
+      // Apply separation force every frame to maintain particle spacing
+      particles.forEach(p => p.applySeparationForce());
+      
+      // Run expensive fluid dynamics calculations every other frame for performance
+      physicsFrame++;
+      if (physicsFrame % 2 === 0) {
+        particles.forEach(p => p.calculateDensity());
+        particles.forEach(p => p.calculatePressure());
+        particles.forEach(p => p.applyPressureForce());
+      }
+      
+      // Update particle positions every frame
+      particles.forEach(p => p.update());
+      
+      // Update bubble physics (but not removal - that happens after liquid rendering)
+      bubbles.forEach(bubble => bubble.update());
+      
+      // Spawn new bubbles if we're below maximum
+      while (bubbles.length < maxBubbles && particles.length > 0) {
+        const randomParticle = particles[Math.floor(Math.random() * particles.length)];
+        bubbles.push(new Bubble(randomParticle));
+      }
+    }
+    
+    function renderLiquid() {
+      // Clear canvases
+      particleCtx.clearRect(0, 0, width, height);
+      ctx.clearRect(0, 0, width, height);
+      
+      // Draw particles on hidden canvas with scaled mask radius for blurring
+      particleCtx.fillStyle = 'white';
+      particles.forEach(particle => {
+        particleCtx.beginPath();
+        particleCtx.arc(particle.x, particle.y, scaledMaskRadius, 0, Math.PI * 2);
+        particleCtx.fill();
+      });
+      
+      // Apply Gaussian blur to create metaball effect with scaled blur radius
+      particleCtx.filter = `blur(${scaledBlurRadius}px)`;
+      particleCtx.globalCompositeOperation = 'source-over';
+      particleCtx.drawImage(particleCanvas, 0, 0);
+      particleCtx.filter = 'none';
+      
+      // Create liquid gradient
+      const gradient = ctx.createLinearGradient(0, 0, 0, height);
+      gradient.addColorStop(0, '#ff00ff');
+      gradient.addColorStop(0.3, '#8000ff');
+      gradient.addColorStop(0.7, '#4000ff');
+      gradient.addColorStop(1, '#0080ff');
+      
+      // More efficient rendering: use globalCompositeOperation instead of pixel manipulation
+      ctx.save();
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.drawImage(particleCanvas, 0, 0);
+      ctx.restore();
+    }
+    
+    function removeBubblesOutsideMask() {
+      // Remove bubbles that are outside the liquid mask (after liquid is rendered)
+      bubbles = bubbles.filter(bubble => !bubble.isOutsideMask());
+    }
+    
+    function renderBubbles() {
+      // Calculate line width proportional to min(width, height)
+      const lineWidth = Math.max(1, Math.min(width, height) * 0.003); // 0.3% of minimum dimension
+      
+      // Set up bubble rendering style
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)'; // White with 15% opacity
+      ctx.lineWidth = lineWidth;
+      ctx.fillStyle = 'transparent'; // No fill
+      
+      // Render each bubble
+      bubbles.forEach(bubble => {
+        if (bubble.radius > 0.5) { // Only render if bubble has grown enough to be visible
+          ctx.beginPath();
+          ctx.arc(bubble.x, bubble.y, bubble.radius, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      });
+    }
+    
+    function renderOverlay() {
+      overlayCtx.clearRect(0, 0, width, height);
+      
+      // Add some magical sparkle effects
+      overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+      particles.forEach(particle => {
+        if (Math.random() < 0.02) { // Random sparkles
+          overlayCtx.beginPath();
+          overlayCtx.arc(
+            particle.x + (Math.random() - 0.5) * 20,
+            particle.y + (Math.random() - 0.5) * 20,
+            Math.random() * 2,
+            0, Math.PI * 2
+          );
+          overlayCtx.fill();
+        }
+      });
+      
+      // Removed bottle neck lines - not needed
+    }
+    
+    function updateUI() {
+      document.getElementById('particleCount').textContent = particles.length;
+      document.getElementById('bubbleCount').textContent = bubbles.length;
+      document.getElementById('tiltX').textContent = smoothTiltX.toFixed(1);
+      document.getElementById('tiltY').textContent = smoothTiltY.toFixed(1);
+      
+      // Update tilt indicator
+      const dot = document.getElementById('tiltDot');
+      const maxOffset = 20;
+      const offsetX = (smoothTiltX / maxTilt) * maxOffset;
+      const offsetY = (smoothTiltY / maxTilt) * maxOffset;
+      dot.style.transform = `translate(${offsetX}px, ${offsetY}px)`;
+    }
+    
+    function animate() {
+      updatePhysics();
+      renderLiquid();
+      removeBubblesOutsideMask(); // Check bubbles against liquid mask after rendering
+      renderBubbles();
+      renderOverlay();
+      updateUI();
+      requestAnimationFrame(animate);
+    }
+    
+    function handleDeviceMotion(event) {
+      if (!motionPermissionGranted) return;
+      
+      // Get device orientation
+      const rawTiltX = event.accelerationIncludingGravity.x || 0;
+      const rawTiltY = event.accelerationIncludingGravity.y || 0;
+      
+      // Convert to degrees and smooth
+      tiltX = Math.max(-maxTilt, Math.min(maxTilt, rawTiltX * 5));
+      tiltY = Math.max(-maxTilt, Math.min(maxTilt, rawTiltY * 5));
+      
+      // Smooth the tilt values
+      smoothTiltX += (tiltX - smoothTiltX) * 0.1;
+      smoothTiltY += (tiltY - smoothTiltY) * 0.1;
+    }
+    
+    async function requestMotionPermission() {
+      if (!('ontouchstart' in window)) {
+        // Desktop - go straight to fallback controls
+        setupFallbackControls();
+        document.getElementById('permissionPrompt').style.display = 'none';
+        return;
+      }
+      
+      try {
+        if (typeof DeviceMotionEvent.requestPermission === 'function') {
+          // iOS 13+ permission request
+          const permission = await DeviceMotionEvent.requestPermission();
+          if (permission === 'granted') {
+            motionPermissionGranted = true;
+            setupMotionListeners();
+          }
+        } else {
+          // Android or older iOS
+          motionPermissionGranted = true;
+          setupMotionListeners();
+        }
+        
+        if (motionPermissionGranted) {
+          document.getElementById('permissionPrompt').style.display = 'none';
+        }
+      } catch (error) {
+        console.warn('Motion permission error:', error);
+        // Fallback to mouse/touch controls
+        setupFallbackControls();
+        document.getElementById('permissionPrompt').style.display = 'none';
+      }
+    }
+    
+    function setupMotionListeners() {
+      window.addEventListener('devicemotion', handleDeviceMotion);
+    }
+    
+    function setupFallbackControls() {
+      // Mouse/touch fallback
+      let isPointerDown = false;
+      
+      const handlePointerMove = (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        
+        if (isPointerDown) {
+          // Convert mouse position to tilt when dragging
+          tiltX = ((x / width) - 0.5) * maxTilt * 2;
+          tiltY = ((y / height) - 0.5) * maxTilt * 2;
+          
+          smoothTiltX += (tiltX - smoothTiltX) * 0.2;
+          smoothTiltY += (tiltY - smoothTiltY) * 0.2;
+        }
+      };
+      
+      canvas.addEventListener('mousedown', (e) => {
+        isPointerDown = true;
+        handlePointerMove(e); // Apply tilt immediately on click
+      });
+      canvas.addEventListener('mouseup', () => isPointerDown = false);
+      canvas.addEventListener('mousemove', handlePointerMove);
+      
+      canvas.addEventListener('touchstart', (e) => {
+        isPointerDown = true;
+        handlePointerMove(e.touches[0]);
+      });
+      canvas.addEventListener('touchend', () => isPointerDown = false);
+      canvas.addEventListener('touchmove', (e) => {
+        e.preventDefault();
+        handlePointerMove(e.touches[0]);
+      });
+      
+      motionPermissionGranted = true;
+    }
+    
+    // Initialize everything
+    function init() {
+      initCanvas();
+      initParticles();
+      animate();
+      
+      // Don't auto-hide permission prompt - wait for user interaction
+      // The permission prompt will be hidden when user clicks "Enable Magic"
+    }
+    
+    // Start when page loads
+    window.addEventListener('load', init);
+    
+    // Prevent scrolling on mobile
+    document.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+    }, { passive: false });
+    
+  </script>
+</body>
+</html>
