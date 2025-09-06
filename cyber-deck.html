@@ -1630,7 +1630,14 @@
       const activeMission = getActiveMission();
       if (!activeMission) return;
 
-      // Calculate system inadequacy multipliers (how under-spec we are)
+      // Define baseline system specs (starting hardware capabilities)
+      const baselineSystem = {
+        cpu: { speed: 1 },
+        memory: { capacity: 4096 },
+        storage: { capacity: 500000 }
+      };
+
+      // Calculate system inadequacy multipliers using current hardware (affects failure risk, not consumption)
       const cpuRatio = gameState.system.cpu.speed / activeMission.requirements.cpu;
       const memoryRatio = gameState.system.memory.capacity / activeMission.requirements.memory;
       const storageRatio = gameState.system.storage.capacity / activeMission.requirements.storage;
@@ -1651,13 +1658,31 @@
       const command = getMissionCommand(activeMission);
       addTerminalLine(`$ ${command}`);
       
-      // Use mission-specific resource usage with demand multipliers
+      // Use mission-specific resource usage with demand multipliers based on BASELINE hardware
+      // This ensures mission multipliers apply consistently regardless of upgrades
       const baseMemoryUsage = Math.floor(seededRandom() * activeMission.usage.memory) + activeMission.usage.memory * 0.5;
       const baseStorageUsage = Math.floor(seededRandom() * activeMission.usage.storage) + activeMission.usage.storage * 0.5;
-      // Apply penalty multipliers for under-spec systems
-      let memoryUsage = Math.floor(baseMemoryUsage * activeMission.demandMultipliers.memory * memoryPenalty);
-      const storageUsage = Math.floor(baseStorageUsage * activeMission.demandMultipliers.storage * storagePenalty);
-      const cpuDemand = activeMission.usage.cpu * activeMission.demandMultipliers.cpu * cpuPenalty;
+      
+      // Apply mission multipliers to baseline consumption (consistent regardless of current hardware)
+      const baselineMemoryConsumption = Math.floor(baseMemoryUsage * activeMission.demandMultipliers.memory);
+      const baselineStorageConsumption = Math.floor(baseStorageUsage * activeMission.demandMultipliers.storage);
+      const baselineCpuDemand = activeMission.usage.cpu * activeMission.demandMultipliers.cpu;
+      
+      // Apply penalties only for under-spec hardware (upgrades don't change base consumption)
+      let memoryUsage = baselineMemoryConsumption;
+      let storageUsage = baselineStorageConsumption; 
+      let cpuDemand = baselineCpuDemand;
+      
+      // Only add penalty consumption if current hardware is under-spec
+      if (memoryPenalty > 1) {
+        memoryUsage = Math.floor(baselineMemoryConsumption * memoryPenalty);
+      }
+      if (storagePenalty > 1) {
+        storageUsage = Math.floor(baselineStorageConsumption * storagePenalty);
+      }
+      if (cpuPenalty > 1) {
+        cpuDemand = baselineCpuDemand * cpuPenalty;
+      }
       
       // Idle missions gradually leak memory over time (memory fragmentation/bloat)
       if (activeMission.isIdle) {
@@ -1683,9 +1708,11 @@
         }
       }
       
-      // Mission-specific CPU temperature increase with demand multiplier AND penalty
-      const heatPenalty = Math.max(cpuPenalty, 1); // Heat is primarily CPU-dependent
-      const tempIncrease = cpuDemand * 0.5 * activeMission.demandMultipliers.heat * heatPenalty;
+      // Mission-specific CPU temperature increase: baseline heat + penalty only for under-spec hardware
+      let tempIncrease = baselineCpuDemand * 0.5 * activeMission.demandMultipliers.heat;
+      if (cpuPenalty > 1) {
+        tempIncrease *= cpuPenalty; // Only penalize heat if CPU is under-spec
+      }
       gameState.cpuTemp += tempIncrease;
 
       // Additional heat if software version is too high for CPU
@@ -2092,6 +2119,9 @@
         if (idleMissions.length > 0) {
           const safeMission = idleMissions[0];
           gameState.missions.active = safeMission.id;
+          // Initialize mission progress for the new mission
+          gameState.missions.progress.currentEarned = 0;
+          gameState.missions.progress.totalRequired = safeMission.totalPayout;
           addTerminalLine(`Auto-switched to: ${safeMission.name}`);
         }
         
@@ -2124,6 +2154,10 @@
           gameState.storageUsed = Math.max(0, gameState.storageUsed - 200);
           degradeSystem();
           break;
+        case 'storage':
+          gameState.memoryUsed = Math.max(0, gameState.memoryUsed - 300);
+          degradeSystem();
+          break;
         case 'thermal':
           gameState.software.efficiency = Math.max(0.1, gameState.software.efficiency * 0.9);
           degradeSystem();
@@ -2135,10 +2169,10 @@
         addTerminalLine(`PREMIUM INSURANCE: Full system restoration activated.`);
         gameState.system = systemBackup.cpu ? { ...systemBackup } : gameState.system;
         gameState.software = systemBackup.software ? { ...systemBackup.software } : gameState.software;
-        // Restore critical state values to pre-failure levels
-        gameState.memoryUsed = systemBackup.memoryUsed;
-        gameState.storageUsed = systemBackup.storageUsed;
-        gameState.cpuTemp = systemBackup.cpuTemp;
+        // Reset critical state values to safe levels (not backup values which may be dangerous)
+        gameState.memoryUsed = Math.floor(gameState.system.memory.capacity * 0.3); // 30% usage
+        gameState.storageUsed = Math.floor(gameState.system.storage.capacity * 0.3); // 30% usage  
+        gameState.cpuTemp = gameState.baseTemp + 10; // Safe temperature
         gameState.protection.premiuminsurance = false;
         addTerminalLine(`Insurance claim processed. Purchase again for continued coverage.`);
         
@@ -2147,6 +2181,9 @@
         if (idleMissions.length > 0) {
           const safeMission = idleMissions[0];
           gameState.missions.active = safeMission.id;
+          // Initialize mission progress for the new mission
+          gameState.missions.progress.currentEarned = 0;
+          gameState.missions.progress.totalRequired = safeMission.totalPayout;
           addTerminalLine(`Auto-switched to safe mission: ${safeMission.name}`);
         }
         
@@ -2154,10 +2191,10 @@
         addTerminalLine(`BASIC INSURANCE: 50% system restoration activated.`);
         // Restore to 50% between failed state and original state
         restoreSystemPartially(systemBackup, 0.5);
-        // Basic insurance provides safe levels for critical states
-        gameState.memoryUsed = Math.min(systemBackup.memoryUsed, Math.floor(gameState.system.memory.capacity * 0.5));
-        gameState.storageUsed = Math.min(systemBackup.storageUsed, Math.floor(gameState.system.storage.capacity * 0.5));
-        gameState.cpuTemp = Math.max(gameState.baseTemp + 5, Math.min(systemBackup.cpuTemp, 75)); // Safe temp range
+        // Reset critical state values to safe levels (not backup values which may be dangerous)
+        gameState.memoryUsed = Math.floor(gameState.system.memory.capacity * 0.4); // 40% usage
+        gameState.storageUsed = Math.floor(gameState.system.storage.capacity * 0.4); // 40% usage
+        gameState.cpuTemp = gameState.baseTemp + 15; // Slightly higher but safe temperature
         gameState.protection.basicinsurance = false;
         addTerminalLine(`Insurance claim processed. Purchase again for continued coverage.`);
         
@@ -2166,6 +2203,9 @@
         if (idleMissions.length > 0) {
           const safeMission = idleMissions[0];
           gameState.missions.active = safeMission.id;
+          // Initialize mission progress for the new mission
+          gameState.missions.progress.currentEarned = 0;
+          gameState.missions.progress.totalRequired = safeMission.totalPayout;
           addTerminalLine(`Auto-switched to safe mission: ${safeMission.name}`);
         }
       }
@@ -2734,13 +2774,29 @@
       let gameOver = false;
       let reason = '';
       
+      // Check for critical system conditions and try protection systems first
       if (gameState.memoryUsed >= gameState.system.memory.capacity) {
+        // Try protection system first
+        if (gameState.protection.systemWatchdog > 0 || gameState.protection.premiuminsurance || gameState.protection.basicinsurance) {
+          handleSystemFailure('memory', 'CRITICAL: Memory overflow detected. Protection systems activating...');
+          return; // Protection handled it, don't trigger game over
+        }
         gameOver = true;
         reason = 'Memory overflow! Your system ran out of RAM.';
       } else if (gameState.storageUsed >= gameState.system.storage.capacity) {
+        // Try protection system first  
+        if (gameState.protection.systemWatchdog > 0 || gameState.protection.premiuminsurance || gameState.protection.basicinsurance) {
+          handleSystemFailure('storage', 'CRITICAL: Storage full. Protection systems activating...');
+          return; // Protection handled it, don't trigger game over
+        }
         gameOver = true;
         reason = 'Storage full! No more space for data.';
       } else if (gameState.cpuTemp > 100) {
+        // Try protection system first
+        if (gameState.protection.systemWatchdog > 0 || gameState.protection.premiuminsurance || gameState.protection.basicinsurance) {
+          handleSystemFailure('thermal', 'CRITICAL: CPU temperature critical. Protection systems activating...');
+          return; // Protection handled it, don't trigger game over
+        }
         gameOver = true;
         reason = 'CPU overheated! Your processor burned out.';
       }
