@@ -1175,6 +1175,11 @@
           totalRequired: 0  // Total payout needed to complete mission
         }
       },
+      protection: {
+        basicInsurance: false,
+        premiumInsurance: false,
+        systemWatchdog: 0  // Changed to a counter (0 = no watchdog, >0 = uses remaining)
+      },
       gameRunning: true
     };
     
@@ -1211,6 +1216,33 @@
         { name: 'AI Assistant v3.0', version: 3.0, efficiency: 2.0, price: 1200 },
         { name: 'Neural Compiler v4.0', version: 4.0, efficiency: 3.0, price: 3500 },
         { name: 'Quantum IDE v5.0', version: 5.0, efficiency: 5.0, price: 10000 }
+      ],
+      protection: [
+        { 
+          name: 'Basic Insurance', 
+          type: 'insurance',
+          coverage: 0.5, 
+          description: 'Restores 50% of lost specs on system overload',
+          price: 800,
+          consumable: true
+        },
+        { 
+          name: 'Premium Insurance', 
+          type: 'insurance',
+          coverage: 1.0, 
+          description: 'Full replacement coverage - no questions asked',
+          price: 2000,
+          consumable: true
+        },
+        { 
+          name: 'System Watchdog', 
+          type: 'watchdog',
+          coverage: 1.0, 
+          description: 'Prevents 10 system failures - auto-switches to safe mode + resets stats',
+          price: 3500,
+          consumable: true,
+          maxUses: 10
+        }
       ]
     };
 
@@ -1674,25 +1706,20 @@
         }
       }
 
-      // System failure mechanics for severely over-taxed systems
+      // System failure mechanics with protection system
       if (cpuPenalty > 3) { // CPU less than 1/3 required speed
         if (Math.random() < 0.02) { // 2% chance per cycle
-          addTerminalLine(`SYSTEM CRASH: CPU overloaded. Process terminated.`);
-          gameState.memoryUsed = Math.max(0, gameState.memoryUsed - 500); // Lose some progress
-          gameState.cpuTemp += 15; // Spike temperature
+          handleSystemFailure('cpu', 'SYSTEM CRASH: CPU overloaded. Process terminated.');
         }
       }
       if (memoryPenalty > 2) { // Memory less than 1/2 required
         if (Math.random() < 0.03) { // 3% chance per cycle
-          addTerminalLine(`MEMORY ERROR: Out of memory. Data corruption detected.`);
-          gameState.storageUsed = Math.max(0, gameState.storageUsed - 200); // Lose data
+          handleSystemFailure('memory', 'MEMORY ERROR: Out of memory. Data corruption detected.');
         }
       }
       if (gameState.cpuTemp > 95 && heatPenalty > 2) { // Extreme heat + under-spec
         if (Math.random() < 0.05) { // 5% chance per cycle
-          addTerminalLine(`THERMAL THROTTLING: CPU performance degraded.`);
-          // Temporarily reduce efficiency for next few cycles
-          gameState.software.efficiency = Math.max(0.1, gameState.software.efficiency * 0.9);
+          handleSystemFailure('thermal', 'THERMAL THROTTLING: CPU performance degraded.');
         }
       }
       
@@ -1783,41 +1810,73 @@
           itemDiv.dataset.index = index;
           itemDiv.dataset.price = item.price;
 
-          // Calculate effective cost/refund
-          let currentItem = category === 'software' ? gameState.software : gameState.system[category];
-          let currentPrice = getCurrentItemPrice(category, currentItem);
-          let isItemUpgrade = isUpgrade(category, item);
-          let effectiveCost = item.price - currentPrice;
+          let priceDisplay, typeIndicator;
           
-          let priceDisplay;
-          let typeIndicator;
-          
-          if (isItemUpgrade) {
-            typeIndicator = 'UPGRADE';
-            priceDisplay = effectiveCost > 0 ? `Cost: $${effectiveCost}` : 'Cost: FREE';
-            itemDiv.classList.add('upgrade');
-            // Set affordability based on effective cost
-            if (gameState.credits < effectiveCost) {
-              itemDiv.classList.add('unaffordable');
+          if (category === 'protection') {
+            // Handle protection items (consumables)
+            const protectionKey = item.name.toLowerCase().replace(/\s+/g, '');
+            let hasProtection;
+            
+            if (protectionKey === 'systemwatchdog') {
+              hasProtection = gameState.protection.systemWatchdog > 0;
+              if (hasProtection) {
+                typeIndicator = 'ACTIVE';
+                priceDisplay = `${gameState.protection.systemWatchdog} uses left`;
+                itemDiv.classList.add('current');
+              } else {
+                typeIndicator = 'PURCHASE';
+                priceDisplay = `Cost: $${item.price}`;
+                if (gameState.credits < item.price) {
+                  itemDiv.classList.add('unaffordable');
+                }
+              }
+            } else {
+              hasProtection = gameState.protection[protectionKey];
+              if (hasProtection) {
+                typeIndicator = 'ACTIVE';
+                priceDisplay = 'Protected';
+                itemDiv.classList.add('current');
+              } else {
+                typeIndicator = 'PURCHASE';
+                priceDisplay = `Cost: $${item.price}`;
+                if (gameState.credits < item.price) {
+                  itemDiv.classList.add('unaffordable');
+                }
+              }
             }
-          } else if (!isItemUpgrade && !isCurrent(category, item)) {
-            typeIndicator = 'DOWNGRADE';
-            let refund = Math.floor((currentPrice - item.price) * 0.6);
-            priceDisplay = `Refund: $${refund}`;
-            itemDiv.classList.add('downgrade');
           } else {
-            typeIndicator = 'CURRENT';
-            priceDisplay = 'Equipped';
-            itemDiv.classList.add('current');
+            // Handle regular items (hardware/software)
+            let currentItem = category === 'software' ? gameState.software : gameState.system[category];
+            let currentPrice = getCurrentItemPrice(category, currentItem);
+            let isItemUpgrade = isUpgrade(category, item);
+            let effectiveCost = item.price - currentPrice;
+            
+            if (isItemUpgrade) {
+              typeIndicator = 'UPGRADE';
+              priceDisplay = effectiveCost > 0 ? `Cost: $${effectiveCost}` : 'Cost: FREE';
+              itemDiv.classList.add('upgrade');
+              if (gameState.credits < effectiveCost) {
+                itemDiv.classList.add('unaffordable');
+              }
+            } else if (!isItemUpgrade && !isCurrent(category, item)) {
+              typeIndicator = 'DOWNGRADE';
+              let refund = Math.floor((currentPrice - item.price) * 0.6);
+              priceDisplay = `Refund: $${refund}`;
+              itemDiv.classList.add('downgrade');
+            } else {
+              typeIndicator = 'CURRENT';
+              priceDisplay = 'Equipped';
+              itemDiv.classList.add('current');
+            }
           }
-          
+
           itemDiv.innerHTML = `
             <div class="name">${item.name}</div>
             <div class="type-indicator">${typeIndicator}</div>
             <div class="price">${priceDisplay}</div>
             <div class="stats">${getItemStats(category, item)}</div>
           `;
-          
+
           itemDiv.addEventListener('click', (e) => handleShopItemClick(category, index, item, e));
           itemsDiv.appendChild(itemDiv);
         });
@@ -1837,6 +1896,8 @@
           return `${item.capacity / 1000}GB ${item.type}`;
         case 'software':
           return `${item.efficiency}x efficiency, v${item.version}`;
+        case 'protection':
+          return item.description;
         default:
           return '';
       }
@@ -1849,16 +1910,37 @@
         const index = parseInt(itemElement.dataset.index);
         const item = shopData[category][index];
         
-        // Calculate effective cost for affordability check
-        let currentItem = category === 'software' ? gameState.software : gameState.system[category];
-        let currentPrice = getCurrentItemPrice(category, currentItem);
-        let isItemUpgrade = isUpgrade(category, item);
-        let effectiveCost = item.price - currentPrice;
-        
         const wasAffordable = !itemElement.classList.contains('unaffordable');
+        let isAffordable;
         
-        // Only upgrades need affordability check, downgrades are always "affordable"
-        const isAffordable = !isItemUpgrade || gameState.credits >= effectiveCost;
+        if (category === 'protection') {
+          // Protection items: check if affordable and not already owned
+          const protectionKey = item.name.toLowerCase().replace(/\s+/g, '');
+          let alreadyOwned;
+          
+          if (protectionKey === 'systemwatchdog') {
+            // For watchdog, check if we still have uses remaining
+            alreadyOwned = gameState.protection.systemWatchdog > 0;
+          } else {
+            // For insurance, check if already owned
+            alreadyOwned = gameState.protection[protectionKey];
+          }
+          
+          if (alreadyOwned) {
+            isAffordable = true; // Already owned items are not "unaffordable"
+          } else {
+            isAffordable = gameState.credits >= item.price;
+          }
+        } else {
+          // Regular items: calculate effective cost for affordability check
+          let currentItem = category === 'software' ? gameState.software : gameState.system[category];
+          let currentPrice = getCurrentItemPrice(category, currentItem);
+          let isItemUpgrade = isUpgrade(category, item);
+          let effectiveCost = item.price - currentPrice;
+          
+          // Only upgrades need affordability check, downgrades are always "affordable"
+          isAffordable = !isItemUpgrade || gameState.credits >= effectiveCost;
+        }
         
         if (wasAffordable !== isAffordable) {
           if (isAffordable) {
@@ -1905,7 +1987,51 @@
     // --- DRAG AND DROP ---
     
     function handleShopItemClick(category, index, item, event) {
-      // Get current item to check if this is an upgrade or downgrade
+      if (category === 'protection') {
+        // Handle protection items
+        const protectionKey = item.name.toLowerCase().replace(/\s+/g, '');
+        
+        // Check if already have this protection
+        if (protectionKey === 'systemWatchdog') {
+          // For watchdog, check if we still have uses remaining
+          if (gameState.protection.systemWatchdog > 0) {
+            return; // Still have watchdog uses, can't buy another
+          }
+        } else {
+          // For insurance, check if already have this type
+          if (gameState.protection[protectionKey]) {
+            return; // Already have protection, do nothing
+          }
+        }
+        
+        // Check affordability
+        if (gameState.credits < item.price) {
+          const itemElement = event.target.closest('.shop-item');
+          if (itemElement) {
+            itemElement.style.background = 'rgba(255, 0, 0, 0.2)';
+            setTimeout(() => {
+              itemElement.style.background = '';
+            }, 200);
+          }
+          return;
+        }
+        
+        // Purchase protection
+        gameState.credits -= item.price;
+        if (protectionKey === 'systemWatchdog') {
+          gameState.protection.systemWatchdog = item.maxUses || 10; // Set to max uses
+          addTerminalLine(`Purchased ${item.name} for $${item.price} (${gameState.protection.systemWatchdog} uses)`);
+        } else {
+          gameState.protection[protectionKey] = true;
+          addTerminalLine(`Purchased ${item.name} for $${item.price}`);
+        }
+        
+        createShop();
+        updateDisplay();
+        return;
+      }
+      
+      // Handle regular items (hardware/software)
       let currentItem = category === 'software' ? gameState.software : gameState.system[category];
       let currentPrice = getCurrentItemPrice(category, currentItem);
       
@@ -1946,6 +2072,152 @@
       updateComponents();
       createShop(); // Recreate shop to update upgrade/downgrade states
       updateDisplay();
+    }
+
+    // --- PROTECTION SYSTEM ---
+    function handleSystemFailure(failureType, message) {
+      // Check for System Watchdog first (prevents failure entirely)
+      if (gameState.protection.systemWatchdog > 0) {
+        addTerminalLine(`WATCHDOG ACTIVE: Switching to safe mode before system failure.`);
+        gameState.protection.systemWatchdog -= 1; // Decrease usage count
+        addTerminalLine(`Watchdog uses remaining: ${gameState.protection.systemWatchdog}`);
+        
+        // Reset critical stats to safe levels
+        gameState.memoryUsed = Math.floor(gameState.system.memory.capacity * 0.3); // 30% of capacity
+        gameState.storageUsed = Math.floor(gameState.system.storage.capacity * 0.3); // 30% of capacity
+        gameState.cpuTemp = gameState.baseTemp + 10; // Just above base temp
+        
+        // Switch to an idle mission automatically
+        const idleMissions = missionsData.filter(m => m.isIdle);
+        if (idleMissions.length > 0) {
+          const safeMission = idleMissions[0];
+          gameState.missions.active = safeMission.id;
+          addTerminalLine(`Auto-switched to: ${safeMission.name}`);
+        }
+        
+        createShop(); // Update shop to show watchdog count
+        return; // Prevent the actual failure
+      }
+      
+      // Failure occurs - check for insurance
+      addTerminalLine(message);
+      
+      // Store current system state for insurance restoration
+      const systemBackup = {
+        cpu: { ...gameState.system.cpu },
+        memory: { ...gameState.system.memory },
+        storage: { ...gameState.system.storage },
+        software: { ...gameState.software },
+        memoryUsed: gameState.memoryUsed,
+        storageUsed: gameState.storageUsed,
+        cpuTemp: gameState.cpuTemp
+      };
+      
+      // Apply failure effects
+      switch (failureType) {
+        case 'cpu':
+          gameState.memoryUsed = Math.max(0, gameState.memoryUsed - 500);
+          gameState.cpuTemp += 15;
+          degradeSystem();
+          break;
+        case 'memory':
+          gameState.storageUsed = Math.max(0, gameState.storageUsed - 200);
+          degradeSystem();
+          break;
+        case 'thermal':
+          gameState.software.efficiency = Math.max(0.1, gameState.software.efficiency * 0.9);
+          degradeSystem();
+          break;
+      }
+      
+      // Check for insurance coverage
+      if (gameState.protection.premiuminsurance) {
+        addTerminalLine(`PREMIUM INSURANCE: Full system restoration activated.`);
+        gameState.system = systemBackup.cpu ? { ...systemBackup } : gameState.system;
+        gameState.software = systemBackup.software ? { ...systemBackup.software } : gameState.software;
+        // Restore critical state values to pre-failure levels
+        gameState.memoryUsed = systemBackup.memoryUsed;
+        gameState.storageUsed = systemBackup.storageUsed;
+        gameState.cpuTemp = systemBackup.cpuTemp;
+        gameState.protection.premiuminsurance = false;
+        addTerminalLine(`Insurance claim processed. Purchase again for continued coverage.`);
+        
+        // Switch to safe idle mission after insurance restoration
+        const idleMissions = missionsData.filter(m => m.isIdle);
+        if (idleMissions.length > 0) {
+          const safeMission = idleMissions[0];
+          gameState.missions.active = safeMission.id;
+          addTerminalLine(`Auto-switched to safe mission: ${safeMission.name}`);
+        }
+        
+      } else if (gameState.protection.basicinsurance) {
+        addTerminalLine(`BASIC INSURANCE: 50% system restoration activated.`);
+        // Restore to 50% between failed state and original state
+        restoreSystemPartially(systemBackup, 0.5);
+        // Basic insurance provides safe levels for critical states
+        gameState.memoryUsed = Math.min(systemBackup.memoryUsed, Math.floor(gameState.system.memory.capacity * 0.5));
+        gameState.storageUsed = Math.min(systemBackup.storageUsed, Math.floor(gameState.system.storage.capacity * 0.5));
+        gameState.cpuTemp = Math.max(gameState.baseTemp + 5, Math.min(systemBackup.cpuTemp, 75)); // Safe temp range
+        gameState.protection.basicinsurance = false;
+        addTerminalLine(`Insurance claim processed. Purchase again for continued coverage.`);
+        
+        // Switch to safe idle mission after insurance restoration
+        const idleMissions = missionsData.filter(m => m.isIdle);
+        if (idleMissions.length > 0) {
+          const safeMission = idleMissions[0];
+          gameState.missions.active = safeMission.id;
+          addTerminalLine(`Auto-switched to safe mission: ${safeMission.name}`);
+        }
+      }
+      
+      updateComponents();
+      createShop();
+    }
+    
+    function degradeSystem() {
+      // Degrade system components when failure occurs
+      if (gameState.system.cpu.version > 1.0) {
+        const cpuOptions = shopData.cpu;
+        const currentIndex = cpuOptions.findIndex(c => c.version === gameState.system.cpu.version);
+        if (currentIndex > 0) {
+          gameState.system.cpu = { ...cpuOptions[currentIndex - 1] };
+          addTerminalLine(`CPU downgraded to ${gameState.system.cpu.name}`);
+        }
+      }
+      
+      if (gameState.system.memory.capacity > 4096) {
+        const memoryOptions = shopData.memory;
+        const currentIndex = memoryOptions.findIndex(m => m.capacity === gameState.system.memory.capacity);
+        if (currentIndex > 0) {
+          gameState.system.memory = { ...memoryOptions[currentIndex - 1] };
+          addTerminalLine(`Memory downgraded to ${gameState.system.memory.name}`);
+        }
+      }
+    }
+    
+    function restoreSystemPartially(backup, percentage) {
+      // Restore system to a point between current degraded state and backup
+      const cpuOptions = shopData.cpu;
+      const memoryOptions = shopData.memory;
+      const storageOptions = shopData.storage;
+      
+      // Find indices for interpolation
+      const currentCpuIndex = cpuOptions.findIndex(c => c.version === gameState.system.cpu.version);
+      const backupCpuIndex = cpuOptions.findIndex(c => c.version === backup.cpu.version);
+      
+      if (currentCpuIndex >= 0 && backupCpuIndex >= 0) {
+        const targetIndex = Math.floor(currentCpuIndex + (backupCpuIndex - currentCpuIndex) * percentage);
+        gameState.system.cpu = { ...cpuOptions[Math.min(targetIndex, cpuOptions.length - 1)] };
+      }
+      
+      // Similar logic for memory and storage...
+      const currentMemIndex = memoryOptions.findIndex(m => m.capacity === gameState.system.memory.capacity);
+      const backupMemIndex = memoryOptions.findIndex(m => m.capacity === backup.memory.capacity);
+      
+      if (currentMemIndex >= 0 && backupMemIndex >= 0) {
+        const targetIndex = Math.floor(currentMemIndex + (backupMemIndex - currentMemIndex) * percentage);
+        gameState.system.memory = { ...memoryOptions[Math.min(targetIndex, memoryOptions.length - 1)] };
+      }
     }
 
     function getCurrentItemPrice(category, currentItem) {
@@ -2515,6 +2787,11 @@
             currentEarned: 0,
             totalRequired: 0
           }
+        },
+        protection: {
+          basicinsurance: false,
+          premiuminsurance: false,
+          systemwatchdog: 0  // Counter instead of boolean
         },
         gameRunning: true
       };
