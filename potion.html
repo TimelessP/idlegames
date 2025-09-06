@@ -71,6 +71,12 @@
       font-size: 12px;
       z-index: 20;
       backdrop-filter: blur(10px);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .ui-panel.visible {
+      opacity: 1;
     }
 
     .tilt-indicator {
@@ -86,6 +92,12 @@
       align-items: center;
       justify-content: center;
       z-index: 20;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .tilt-indicator.visible {
+      opacity: 1;
     }
 
     .tilt-dot {
@@ -186,6 +198,10 @@
     let numParticles = 100; // Reduced from 150 for better performance and smoother physics
     let maxBubbles = 15; // Maximum number of bubbles at one time
     let motionPermissionGranted = false;
+    
+    // UI visibility
+    let uiVisible = false;
+    let uiHideTimeout = null;
     
     // Scaling variables
     let scale = 1; // Will be calculated based on viewport size
@@ -752,6 +768,44 @@
       dot.style.transform = `translate(${offsetX}px, ${offsetY}px)`;
     }
     
+    function showUI() {
+      uiVisible = true;
+      document.querySelector('.ui-panel').classList.add('visible');
+      document.querySelector('.tilt-indicator').classList.add('visible');
+      
+      // Clear existing timeout
+      if (uiHideTimeout) {
+        clearTimeout(uiHideTimeout);
+      }
+      
+      // Hide UI after 3 seconds of no interaction
+      uiHideTimeout = setTimeout(hideUI, 3000);
+    }
+    
+    function hideUI() {
+      uiVisible = false;
+      document.querySelector('.ui-panel').classList.remove('visible');
+      document.querySelector('.tilt-indicator').classList.remove('visible');
+      
+      if (uiHideTimeout) {
+        clearTimeout(uiHideTimeout);
+        uiHideTimeout = null;
+      }
+    }
+    
+    function requestFullscreen() {
+      const element = document.documentElement;
+      if (element.requestFullscreen) {
+        element.requestFullscreen().catch(err => {
+          console.log('Fullscreen request failed:', err);
+        });
+      } else if (element.webkitRequestFullscreen) {
+        element.webkitRequestFullscreen();
+      } else if (element.msRequestFullscreen) {
+        element.msRequestFullscreen();
+      }
+    }
+    
     function animate() {
       updatePhysics();
       renderLiquid();
@@ -770,8 +824,8 @@
       const rawTiltX = event.accelerationIncludingGravity.x || 0;
       const rawTiltY = event.accelerationIncludingGravity.y || 0;
       
-      // Convert to degrees and smooth
-      tiltX = Math.max(-maxTilt, Math.min(maxTilt, rawTiltX * 5));
+      // Convert to degrees and smooth (invert X for mobile)
+      tiltX = Math.max(-maxTilt, Math.min(maxTilt, -rawTiltX * 5)); // Inverted X tilt for mobile
       tiltY = Math.max(-maxTilt, Math.min(maxTilt, rawTiltY * 5));
       
       // Smooth the tilt values
@@ -780,6 +834,13 @@
     }
     
     async function requestMotionPermission() {
+      // Request fullscreen first
+      try {
+        await requestFullscreen();
+      } catch (error) {
+        console.log('Fullscreen not available or denied');
+      }
+      
       if (!('ontouchstart' in window)) {
         // Desktop - go straight to fallback controls
         setupFallbackControls();
@@ -803,6 +864,7 @@
         
         if (motionPermissionGranted) {
           document.getElementById('permissionPrompt').style.display = 'none';
+          setupFallbackControls(); // Setup controls but don't show UI yet
         }
       } catch (error) {
         console.warn('Motion permission error:', error);
@@ -814,6 +876,9 @@
     
     function setupMotionListeners() {
       window.addEventListener('devicemotion', handleDeviceMotion);
+      
+      // Add touch listeners for UI visibility only when interacting with the simulation
+      canvas.addEventListener('touchstart', showUI);
     }
     
     function setupFallbackControls() {
@@ -835,22 +900,37 @@
         }
       };
       
-      canvas.addEventListener('mousedown', (e) => {
-        isPointerDown = true;
-        handlePointerMove(e); // Apply tilt immediately on click
-      });
+      const handleInteraction = (e) => {
+        showUI(); // Show UI on canvas interaction
+        if (!isPointerDown) {
+          isPointerDown = true;
+          handlePointerMove(e);
+        }
+      };
+      
+      canvas.addEventListener('mousedown', handleInteraction);
       canvas.addEventListener('mouseup', () => isPointerDown = false);
-      canvas.addEventListener('mousemove', handlePointerMove);
+      canvas.addEventListener('mousemove', (e) => {
+        if (isPointerDown) {
+          showUI(); // Keep UI visible while dragging
+          handlePointerMove(e);
+        }
+      });
       
       canvas.addEventListener('touchstart', (e) => {
-        isPointerDown = true;
-        handlePointerMove(e.touches[0]);
+        handleInteraction(e.touches[0]);
       });
       canvas.addEventListener('touchend', () => isPointerDown = false);
       canvas.addEventListener('touchmove', (e) => {
         e.preventDefault();
-        handlePointerMove(e.touches[0]);
+        if (isPointerDown) {
+          showUI(); // Keep UI visible while touching
+          handlePointerMove(e.touches[0]);
+        }
       });
+      
+      // Only show UI when interacting with the canvas, not the whole document
+      canvas.addEventListener('click', showUI);
       
       motionPermissionGranted = true;
     }
@@ -860,6 +940,13 @@
       initCanvas();
       initParticles();
       animate();
+      
+      // Request fullscreen on desktop after a short delay to avoid blocking
+      if (!('ontouchstart' in window)) {
+        setTimeout(() => {
+          requestFullscreen();
+        }, 1000);
+      }
       
       // Don't auto-hide permission prompt - wait for user interaction
       // The permission prompt will be hidden when user clicks "Enable Magic"
