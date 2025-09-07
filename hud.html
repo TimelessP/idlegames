@@ -1,214 +1,357 @@
-<!--
-  Mobile Fighter Jet HUD (NATO-style)
-  - Core symbology: horizon, pitch ladder, heading, ground speed, FPV, boresight
-  - Font, scaling, and layout inspired by NATO/industry standards (see Wikipedia: Head-up display, ARINC 764, Skybrary)
-  - Numeric alignment, pitch ladder, and symbology follow typical NATO/ICAO conventions
-  - Uses device sensors (GPS, accelerometer/gyro)
-  - Responsive, high-contrast, green monochrome
-  - For best results, open on a mobile device
-  - See code comments for references to standards and design rationale
--->
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>Fighter Jet HUD</title>
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      background: #000;
-      color: #0f0;
-      width: 100vw;
-      height: 100vh;
-      overflow: hidden;
-      font-family: 'Share Tech Mono', 'Consolas', monospace;
-    }
-  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
-    #hud {
-      position: fixed;
-      top: 0; left: 0; width: 100vw; height: 100vh;
-      pointer-events: none;
-      z-index: 10;
-    }
-    .hud-text {
-      font-size: 2.5vw;
-      text-shadow: 0 0 4px #0f0, 0 0 8px #0f0;
-      user-select: none;
-      letter-spacing: 0.05em;
-    }
-    .hud-heading {
-      position: absolute;
-      top: 2vw; left: 50%;
-      transform: translateX(-50%);
-      font-size: 4vw;
-      letter-spacing: 0.2em;
-      text-align: center;
-      font-variant-numeric: tabular-nums;
-    }
-    .hud-speed {
-      position: absolute;
-      bottom: 4vw; left: 4vw;
-      text-align: right;
-      min-width: 8vw;
-      font-variant-numeric: tabular-nums;
-    }
-    .hud-alt {
-      position: absolute;
-      bottom: 4vw; right: 4vw;
-      text-align: right;
-      min-width: 8vw;
-      font-variant-numeric: tabular-nums;
-    }
-    canvas {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100vw; height: 100vh;
-      pointer-events: none;
-      z-index: 5;
-    }
-  </style>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+	<meta name="theme-color" content="#000000" />
+	<title>Mobile HUD</title>
+		<style>
+		:root {
+			--hud-green: #4aff6c;
+			--hud-green-dim: #1f5f2c;
+			--hud-bg: #000;
+			--hud-accent: #9bffb2;
+			--font-stack: 'IBM Plex Mono', 'Roboto Mono', 'Courier New', monospace;
+			--line-width: 2;
+			--tick-width: 1.5;
+			--update-ms: 33; /* ~30fps */
+			--safe-area-top: env(safe-area-inset-top, 0px);
+			--safe-area-bottom: env(safe-area-inset-bottom, 0px);
+		}
+		* { box-sizing: border-box; padding:0; margin:0; }
+		html,body { width:100%; height:100%; background:var(--hud-bg); color:var(--hud-green); font-family:var(--font-stack); overscroll-behavior:none; touch-action:none; }
+		body { display:flex; align-items:center; justify-content:center; }
+		#hudRoot { position:relative; width:100vw; height:100vh; overflow:hidden; }
+		svg { position:absolute; inset:0; width:100%; height:100%; }
+		.mono { font-variant-numeric:tabular-nums; }
+		#overlayText { position:absolute; inset:0; pointer-events:none; font-size:clamp(10px,2.2vh,20px); }
+		.block { position:absolute; padding:4px 6px; background:rgba(0,0,0,0.25); border:1px solid var(--hud-green-dim); backdrop-filter:blur(2px); }
+		.block label { font-size:0.65em; display:block; opacity:0.8; letter-spacing:0.08em; }
+		.value { font-size:1.1em; }
+		#speedBlock { left:2vw; top:10vh; }
+		#altBlock { right:2vw; top:10vh; }
+		#posBlock { left:2vw; bottom:10vh; }
+		#timeBlock { right:2vw; bottom:10vh; }
+		#statusBar { position:absolute; left:0; right:0; bottom:0; padding:4px 6px; font-size:0.6rem; background:linear-gradient(180deg,rgba(0,0,0,0),rgba(0,0,0,0.55)); display:flex; gap:12px; flex-wrap:wrap; }
+		button { background:#022; color:var(--hud-accent); border:1px solid var(--hud-green-dim); font:inherit; padding:4px 8px; border-radius:4px; cursor:pointer; }
+		button:active { transform:translateY(1px); }
+		#controls { position:absolute; top:var(--safe-area-top); left:0; right:0; padding:4px 6px; display:flex; gap:6px; justify-content:center; flex-wrap:wrap; }
+		#controls input[type=range] { width:110px; }
+		#controls button { font-size:0.65rem; }
+		.hidden { display:none !important; }
+		.dim { opacity:0.5; }
+		/* Basic fallback message */
+		#noSensor { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:2rem; font-size:1rem; }
+	</style>
 </head>
 <body>
-  <canvas id="hud-canvas"></canvas>
-  <div id="hud">
-    <div class="hud-text hud-heading" id="heading">HDG 000</div>
-    <div class="hud-text hud-speed" id="speed">GS 0</div>
-    <div class="hud-text hud-alt" id="altitude">ALT 0</div>
-  </div>
-  <script>
-  // --- NATO HUD symbology constants ---
-  // Pitch ladder: ±5°/10° increments, 1:1 scaling (see Wikipedia: Head-up display, ARINC 764)
-  const PITCH_LADDER_STEP = 5; // degrees
-  const PITCH_LADDER_RANGE = 45; // degrees up/down
-  const HUD_COLOR = '#0f0';
-  const HUD_LINE_WIDTH = 2;
-  // Monospaced, high-contrast, green (NATO/civil HUD convention)
-  const FONT = '2.5vw Share Tech Mono, Consolas, monospace';
-    // --- State ---
-    let pitch = 0, roll = 0, heading = 0, groundSpeed = 0, altitude = 0;
-    let lastGPS = null;
-    // --- Sensor setup ---
-    // DeviceOrientation: pitch, roll, heading (calibration may be needed for full range)
-    if (window.DeviceOrientationEvent) {
-      window.addEventListener('deviceorientation', e => {
-        // e.beta: pitch [-180,180], e.gamma: roll [-90,90], e.alpha: compass [0,360]
-        pitch = e.beta || 0;
-        roll = e.gamma || 0;
-        heading = e.alpha || 0;
-      });
-    }
-    // GPS: ground speed (knots), altitude (meters)
-    if (navigator.geolocation) {
-      navigator.geolocation.watchPosition(pos => {
-        const { latitude, longitude, altitude: alt, speed, timestamp } = pos.coords;
-        if (lastGPS) {
-          const dt = (timestamp - lastGPS.timestamp) / 1000;
-          if (dt > 0) {
-            // Calculate ground speed (m/s to knots)
-            groundSpeed = (speed !== null ? speed : calcSpeed(lastGPS, pos.coords, dt)) * 1.94384;
-          }
-        }
-        altitude = alt !== null ? alt : 0;
-        lastGPS = { latitude, longitude, timestamp };
-      }, err => {}, { enableHighAccuracy: true, maximumAge: 1000, timeout: 5000 });
-    }
-    function calcSpeed(last, curr, dt) {
-      // Haversine formula for distance
-      const R = 6371000;
-      const toRad = x => x * Math.PI / 180;
-      const dLat = toRad(curr.latitude - last.latitude);
-      const dLon = toRad(curr.longitude - last.longitude);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(last.latitude)) * Math.cos(toRad(curr.latitude)) * Math.sin(dLon/2)**2;
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      const d = R * c;
-      return d / dt;
-    }
-    // --- Drawing ---
-    const canvas = document.getElementById('hud-canvas');
-    const ctx = canvas.getContext('2d');
-    function resize() {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    }
-    window.addEventListener('resize', resize);
-    resize();
-    function drawHUD() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.save();
-      ctx.strokeStyle = HUD_COLOR;
-      ctx.lineWidth = HUD_LINE_WIDTH;
-      ctx.shadowColor = HUD_COLOR;
-      ctx.shadowBlur = 8;
-      ctx.font = FONT;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      // Center of HUD
-      const cx = canvas.width/2, cy = canvas.height/2;
-      // --- Horizon & Pitch Ladder ---
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.rotate(-roll * Math.PI / 180);
-      for (let p = -PITCH_LADDER_RANGE; p <= PITCH_LADDER_RANGE; p += PITCH_LADDER_STEP) {
-        const y = -(p - pitch) * (canvas.height/2) / 45; // 1:1 scaling, 45deg = half screen
-        if (Math.abs(y) < canvas.height/2) {
-          ctx.beginPath();
-          if (p === 0) {
-            // Horizon line (solid, with break at center)
-            ctx.moveTo(-cx*0.7, y);
-            ctx.lineTo(cx*0.7, y);
-            ctx.stroke();
-            ctx.fillStyle = HUD_COLOR;
-            ctx.fillText('—', 0, y-16);
-          } else {
-            // Pitch ladder (short lines, numbers at ends)
-            ctx.moveTo(-cx*0.2, y);
-            ctx.lineTo(cx*0.2, y);
-            ctx.stroke();
-            ctx.fillStyle = HUD_COLOR;
-            ctx.fillText((p > 0 ? '+' : '') + p, -cx*0.25, y);
-            ctx.fillText((p > 0 ? '+' : '') + p, cx*0.25, y);
-          }
-        }
-      }
-      ctx.restore();
-      // --- Boresight symbol (center, fixed) ---
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.strokeStyle = HUD_COLOR;
-      ctx.beginPath();
-      ctx.arc(0, 0, 18, 0, 2*Math.PI);
-      ctx.moveTo(-24, 0); ctx.lineTo(24, 0);
-      ctx.moveTo(0, -24); ctx.lineTo(0, 24);
-      ctx.stroke();
-      ctx.restore();
-      // --- Flight Path Vector (FPV) symbol (NATO style: circle, wings, vertical line) ---
-      // For demo, FPV = boresight (center); in real HUD, offset by velocity vector
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.strokeStyle = HUD_COLOR;
-      ctx.beginPath();
-      ctx.arc(0, 0, 28, 0, 2*Math.PI);
-      ctx.moveTo(-18, 18); ctx.lineTo(-8, 8);
-      ctx.moveTo(18, 18); ctx.lineTo(8, 8);
-      ctx.moveTo(0, 28); ctx.lineTo(0, 38);
-      ctx.stroke();
-      ctx.restore();
-      ctx.restore();
-    }
-    // Numeric text: right-aligned for tapes, centered for heading (NATO/ICAO convention)
-    function updateText() {
-      document.getElementById('heading').textContent = `HDG ${String(Math.round(heading)).padStart(3, '0')}`;
-      document.getElementById('speed').textContent = `GS ${Math.round(groundSpeed)}`;
-      document.getElementById('altitude').textContent = `ALT ${Math.round(altitude)}`;
-    }
-    function loop() {
-      drawHUD();
-      updateText();
-      requestAnimationFrame(loop);
-    }
-    loop();
-  </script>
+	<div id="hudRoot" aria-label="Flight HUD experimental">
+		<svg id="hudSvg" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid slice" role="img" aria-hidden="true">
+			<defs>
+				<filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+					<feGaussianBlur stdDeviation="2" result="b" />
+					<feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+				</filter>
+			</defs>
+			<!-- Pitch ladder group -->
+			<g id="pitchGroup" filter="url(#glow)"></g>
+			<!-- Horizon line (updated dynamically) -->
+			<g id="horizonGroup"></g>
+			<!-- Bank scale -->
+			<g id="bankGroup"></g>
+			<!-- Heading tape -->
+			<g id="headingGroup"></g>
+			<!-- Flight path marker -->
+			<g id="fpmGroup"></g>
+		</svg>
+		<div id="overlayText">
+			<div id="speedBlock" class="block mono"><label>GS KT</label><div class="value" id="speedVal">--</div></div>
+			<div id="altBlock" class="block mono"><label>ALT FT</label><div class="value" id="altVal">--</div></div>
+			<div id="vsBlock" class="block mono" style="right:2vw; top:28vh;"><label>V/S FPM</label><div class="value" id="vsVal">--</div></div>
+			<div id="posBlock" class="block mono"><label>POS</label><div class="value" id="posVal">--</div></div>
+			<div id="timeBlock" class="block mono"><label>UTC</label><div class="value" id="timeVal">--</div></div>
+		</div>
+		<div id="controls">
+			<button id="btnPerm">Enable Sensors</button>
+			<button id="btnCal" disabled>Calibrate Level</button>
+			<button id="btnUnits">Units: KT</button>
+			<button id="btnSim">Sim Mode</button>
+			<button id="btnReset">Reset</button>
+			<label style="display:flex; align-items:center; gap:4px; font-size:0.6rem;">Smoothing <input id="smoothRange" type="range" min="0" max="0.5" step="0.01" value="0.15" /></label>
+		</div>
+		<div id="statusBar" class="mono"></div>
+		<div id="noSensor" class="mono hidden">Grant motion & location permissions to start. Or use Sim Mode.</div>
+	</div>
+	<script>
+		/*
+			Experimental mobile HUD (non-certified, educational). Symbology approximates broadly published Western / NATO fast-jet conventions:
+				- Pitch ladder: ±90°, 10° major lines w/ numeric labels, 5° minor, horizon emphasized
+				- Bank (roll) scale: ±60° with emphasized 30° / 45° marks
+				- Heading tape: 0–360°, ticks 5°, numerics every 10°, cardinal + intercardinal labels
+				- Flight Path Marker (FPM) approximate using pitch/roll only (no wind / velocity vector)
+				- Ground speed derived from GPS (not airspeed). Altitude = GPS altitude (coarse). Vertical speed from altitude delta.
+			NOTE: Real NATO STANAG / MIL-STD HUD symbology includes precise stroke, spacing, fonts & collimation not reproduced here.
+			Use only for demonstration. Not for navigation or flight.
+		*/
+	const els = {
+		pitchGroup: document.getElementById('pitchGroup'),
+		horizonGroup: document.getElementById('horizonGroup'),
+		bankGroup: document.getElementById('bankGroup'),
+		headingGroup: document.getElementById('headingGroup'),
+		fpmGroup: document.getElementById('fpmGroup'),
+		speedVal: document.getElementById('speedVal'),
+		altVal: document.getElementById('altVal'),
+		vsVal: document.getElementById('vsVal'),
+		posVal: document.getElementById('posVal'),
+		timeVal: document.getElementById('timeVal'),
+		statusBar: document.getElementById('statusBar'),
+		noSensor: document.getElementById('noSensor'),
+		btnPerm: document.getElementById('btnPerm'),
+		btnCal: document.getElementById('btnCal'),
+		btnUnits: document.getElementById('btnUnits'),
+		btnSim: document.getElementById('btnSim'),
+		btnReset: document.getElementById('btnReset'),
+	};
+	const state = {
+		hasMotion:false,
+		hasGeo:false,
+		sim:false,
+		units:'KT',
+		cal:{pitch:0,roll:0,heading:0},
+		raw:{pitch:0,roll:0,heading:0},
+		smooth:{pitch:0,roll:0,heading:0},
+		alpha:0.15,
+		gpsHistory:[], // {lat,lon,time}
+		speedKt:null,
+		altitudeM:null,
+		lastAltSamples:[], // {altM,time}
+		vsFpm:null,
+		lastHeadingTapeUpdate:0
+	};
+		function log(msg){ const span=document.createElement('span'); span.textContent=msg; els.statusBar.appendChild(span); if(els.statusBar.children.length>8) els.statusBar.removeChild(els.statusBar.firstChild); }
+	function ema(prev, val, a){ return prev + a*(val-prev); }
+	function degToRad(d){ return d*Math.PI/180; }
+	function radToDeg(r){ return r*180/Math.PI; }
+	function normHeading(h){ h%=360; if(h<0) h+=360; return h; }
+	function buildPitchLadder(){
+		const g = els.pitchGroup; g.innerHTML='';
+		for(let deg=-90; deg<=90; deg+=5){
+			if(deg===0) continue; // horizon separate
+			const major = deg%10===0;
+			const y = -deg*6; // scale factor px per deg (tunable) in SVG units
+			const lineLen = major?160:80;
+			const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+			const x1=500-lineLen/2, x2=500+lineLen/2;
+			let d=`M ${x1} ${y} L ${x2} ${y}`;
+			if(deg>0){ // climb bars have vertical hooks downward
+				d += ` M ${x1} ${y} v 18 M ${x2} ${y} v 18`;
+			} else { // descent bars upward
+				d += ` M ${x1} ${y} v -18 M ${x2} ${y} v -18`;
+			}
+			path.setAttribute('d', d);
+			path.setAttribute('stroke','var(--hud-green)');
+			path.setAttribute('stroke-width', major?3:1.5);
+			path.setAttribute('fill','none');
+			g.appendChild(path);
+			if(major){
+				const txt = document.createElementNS('http://www.w3.org/2000/svg','text');
+				txt.setAttribute('x', 500 - lineLen/2 - 20);
+				txt.setAttribute('y', y+5);
+				txt.setAttribute('text-anchor','end');
+				txt.setAttribute('font-size','28');
+				txt.textContent = Math.abs(deg);
+				g.appendChild(txt);
+				const txt2 = txt.cloneNode(true);
+				txt2.setAttribute('x', 500 + lineLen/2 + 20);
+				txt2.setAttribute('text-anchor','start');
+				g.appendChild(txt2);
+			}
+		}
+	}
+	function buildBankScale(){
+		const g=els.bankGroup; g.innerHTML='';
+		const cx=500, cy=240, r=180;
+		const arc = document.createElementNS('http://www.w3.org/2000/svg','path');
+		arc.setAttribute('d', describeArc(cx,cy,r,-90,90));
+		arc.setAttribute('stroke','var(--hud-green)'); arc.setAttribute('stroke-width','3'); arc.setAttribute('fill','none');
+		g.appendChild(arc);
+		const marks=[-60,-45,-30,-20,-10,0,10,20,30,45,60];
+		for(const a of marks){
+			const len = (Math.abs(a)%30===0||a===-45||a===45)?24:14;
+			const p1=pointOnCircle(cx,cy,r,a);
+			const p2=pointOnCircle(cx,cy,r-len,a);
+			const line=document.createElementNS('http://www.w3.org/2000/svg','line');
+			line.setAttribute('x1',p1.x); line.setAttribute('y1',p1.y); line.setAttribute('x2',p2.x); line.setAttribute('y2',p2.y);
+			line.setAttribute('stroke','var(--hud-green)'); line.setAttribute('stroke-width','3');
+			g.appendChild(line);
+		}
+		// Fixed aircraft reference symbol (wings + tail)
+		const ref=document.createElementNS('http://www.w3.org/2000/svg','path');
+		ref.setAttribute('d','M 470 240 h -60 m 120 0 h -60 M 500 240 l 0 40');
+		ref.setAttribute('stroke','var(--hud-green)'); ref.setAttribute('stroke-width','4'); ref.setAttribute('fill','none');
+		g.appendChild(ref);
+		// Movable bank pointer triangle
+		const tri=document.createElementNS('http://www.w3.org/2000/svg','path');
+		tri.setAttribute('id','bankPointer');
+		tri.setAttribute('d','M 500 60 l -18 30 h 36 z');
+		tri.setAttribute('stroke','var(--hud-green)'); tri.setAttribute('fill','none'); tri.setAttribute('stroke-width','3');
+		g.appendChild(tri);
+	}
+	function buildHeadingTape(){
+		els.headingGroup.innerHTML='';
+		// We'll generate ticks dynamically each frame based on heading, but keep a container
+	}
+	function buildFPM(){
+		const g=els.fpmGroup; g.innerHTML='';
+		const ring=document.createElementNS('http://www.w3.org/2000/svg','circle');
+		ring.setAttribute('cx','500'); ring.setAttribute('cy','500'); ring.setAttribute('r','26');
+		ring.setAttribute('stroke','var(--hud-green)'); ring.setAttribute('stroke-width','3'); ring.setAttribute('fill','none');
+		g.appendChild(ring);
+		const wings=document.createElementNS('http://www.w3.org/2000/svg','path');
+		wings.setAttribute('d','M 440 500 h 50 m 20 0 h 50');
+		wings.setAttribute('stroke','var(--hud-green)'); wings.setAttribute('stroke-width','3'); wings.setAttribute('fill','none');
+		g.appendChild(wings);
+		const dot=document.createElementNS('http://www.w3.org/2000/svg','circle');
+		dot.setAttribute('cx','500'); dot.setAttribute('cy','500'); dot.setAttribute('r','4'); dot.setAttribute('fill','var(--hud-green)');
+		g.appendChild(dot);
+	}
+	function pointOnCircle(cx,cy,r,angleDeg){ const a=degToRad(angleDeg-90); return {x:cx + r*Math.cos(a), y:cy + r*Math.sin(a)}; }
+	function describeArc(x,y,r,startAngle,endAngle){ const start=pointOnCircle(x,y,r,endAngle); const end=pointOnCircle(x,y,r,startAngle); const largeArc=endAngle-startAngle<=180?0:1; return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArc} 0 ${end.x} ${end.y}`; }
+		function updateOrientationDisplay(){
+		// Apply calibration
+		const pitch= state.smooth.pitch - state.cal.pitch;
+		const roll= state.smooth.roll - state.cal.roll;
+		const heading= normHeading(state.smooth.heading - state.cal.heading);
+		// Pitch ladder vertical translate and roll rotate about center (500,500)
+		const ladderYOffset = pitch*6; // inverse sign vs build
+		els.pitchGroup.setAttribute('transform',`translate(0,${ladderYOffset}) rotate(${ -roll },500,500)`);
+		// Horizon
+		els.horizonGroup.innerHTML='';
+		const horiz=document.createElementNS('http://www.w3.org/2000/svg','line');
+		horiz.setAttribute('x1','200'); horiz.setAttribute('x2','800'); horiz.setAttribute('y1','0'); horiz.setAttribute('y2','0');
+		horiz.setAttribute('stroke','var(--hud-green)'); horiz.setAttribute('stroke-width','5');
+		const hg=els.horizonGroup; hg.appendChild(horiz);
+		hg.setAttribute('transform',`translate(0,${pitch*6}) rotate(${ -roll },500,500)`);
+		// Bank pointer rotation about top center
+		const bankPointer=document.getElementById('bankPointer');
+		bankPointer.setAttribute('transform',`rotate(${ -roll },500,240)`);
+		// Heading tape dynamic creation (center 500)
+		const g=els.headingGroup; g.innerHTML='';
+		const tapeWidth=800; // px of visible scale
+		const degPerPx=2; // scale (tunable)
+		// show ± (tapeWidth/2)*degPerPx/??? Actually we choose spacing: every 5 deg -> convert to pos
+		const centerHeading=heading;
+		const spanDeg= (tapeWidth/degPerPx)/2; // degrees to either side if degPerPx = px per degree or vice versa; we used degPerPx=2 px per deg
+		const start = centerHeading - spanDeg; const end = centerHeading + spanDeg;
+		for(let h=Math.floor(start/5)*5; h<=end; h+=5){
+			const hh = ((h%360)+360)%360;
+			const x = 500 + (h-centerHeading)*2; // 2 px per degree
+			const isTen = hh%10===0;
+			const tick=document.createElementNS('http://www.w3.org/2000/svg','line');
+			tick.setAttribute('x1',x); tick.setAttribute('x2',x);
+			tick.setAttribute('y1','880'); tick.setAttribute('y2', isTen? '840':'860');
+			tick.setAttribute('stroke','var(--hud-green)'); tick.setAttribute('stroke-width', isTen? '4':'2');
+			g.appendChild(tick);
+			if(isTen){
+				const label=document.createElementNS('http://www.w3.org/2000/svg','text');
+				label.setAttribute('x',x); label.setAttribute('y','830'); label.setAttribute('text-anchor','middle'); label.setAttribute('font-size','32');
+				label.textContent = headingLabel(hh);
+				g.appendChild(label);
+			}
+		}
+		// Current heading box
+		const box=document.createElementNS('http://www.w3.org/2000/svg','rect');
+		box.setAttribute('x',470); box.setAttribute('y',790); box.setAttribute('width',60); box.setAttribute('height',50); box.setAttribute('fill','none'); box.setAttribute('stroke','var(--hud-green)'); box.setAttribute('stroke-width','3');
+		g.appendChild(box);
+		const cur=document.createElementNS('http://www.w3.org/2000/svg','text'); cur.setAttribute('x',500); cur.setAttribute('y',825); cur.setAttribute('text-anchor','middle'); cur.setAttribute('font-size','34'); cur.textContent=headingLabel(Math.round(heading)); g.appendChild(cur);
+		// Flight path marker approximate: shift by pitch & roll
+		const fpmX = 500 + Math.sin(degToRad(roll))*80;
+		const fpmY = 500 - pitch*5;
+		els.fpmGroup.setAttribute('transform',`translate(${fpmX-500},${fpmY-500})`);
+	}
+	function headingLabel(h){
+		const card = {0:'N',90:'E',180:'S',270:'W'}; if(card[h]!==undefined) return card[h];
+		const inter = {45:'NE',135:'SE',225:'SW',315:'NW'}; if(inter[h]!==undefined) return inter[h];
+		return String(h).padStart(3,'0');
+	}
+		function updateDataBlocks(){
+			if(state.speedKt!=null){ let v=state.speedKt; if(state.units==='KMH'){ v*=1.852; } else if(state.units==='MPH'){ v*=1.15078; } const sp=Math.round(v); els.speedVal.textContent=sp.toString().padStart(3,'0'); }
+			if(state.altitudeM!=null){ let altFt=state.altitudeM*3.28084; els.altVal.textContent = Math.round(altFt).toString(); }
+			if(state.vsFpm!=null){ els.vsVal.textContent = Math.round(state.vsFpm).toString(); }
+			els.timeVal.textContent = new Date().toUTCString().slice(17,25);
+			// Sensor status indicators (simple colored tokens)
+			const tokens=[]; tokens.push(state.hasMotion? 'MOT✓':'MOT?'); tokens.push(state.hasGeo? 'GEO✓':'GEO?'); if(state.sim) tokens.push('SIM'); els.statusBar.setAttribute('data-status',tokens.join(' '));
+		}
+	function haversine(lat1,lon1,lat2,lon2){ const R=6371000; const dLat=degToRad(lat2-lat1); const dLon=degToRad(lon2-lon1); const a=Math.sin(dLat/2)**2 + Math.cos(degToRad(lat1))*Math.cos(degToRad(lat2))*Math.sin(dLon/2)**2; const c=2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)); return R*c; }
+		function updateSpeedFromHistory(){
+			const h=state.gpsHistory; if(h.length<2) return; const a=h[h.length-2], b=h[h.length-1]; const dt=(b.time-a.time)/1000; if(dt<0.5 || dt>20) return; const d=haversine(a.lat,a.lon,b.lat,b.lon); const mps=d/dt; const kts=mps*1.94384; state.speedKt = state.speedKt==null? kts : ema(state.speedKt, kts, 0.25); }
+		function updateVerticalSpeed(){
+			const arr=state.lastAltSamples; if(arr.length<2) return; const a=arr[arr.length-2], b=arr[arr.length-1]; const dt=(b.time-a.time)/1000; if(dt<0.5||dt>20) return; const climbMps=(b.altM - a.altM)/dt; state.vsFpm = ema(state.vsFpm==null? climbMps*196.85: state.vsFpm, climbMps*196.85, 0.3); }
+		function requestPermissions(){
+		// iOS motion permission
+		if(typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
+			DeviceMotionEvent.requestPermission().then(r=>{ log('motion perm '+r); if(r==='granted'){ state.hasMotion=true; attachMotion(); } });
+		} else {
+			attachMotion();
+		}
+			if(navigator.geolocation){ navigator.geolocation.watchPosition(pos=>{ state.hasGeo=true; const {latitude,longitude,altitude}=pos.coords; if(altitude!=null){ state.altitudeM = altitude; state.lastAltSamples.push({altM:altitude,time:Date.now()}); if(state.lastAltSamples.length>25) state.lastAltSamples.shift(); updateVerticalSpeed(); }
+				state.gpsHistory.push({lat:latitude,lon:longitude,time:Date.now()}); if(state.gpsHistory.length>30) state.gpsHistory.shift(); updateSpeedFromHistory(); els.posVal.textContent= latitude.toFixed(4)+','+longitude.toFixed(4); }, err=>{ log('geo err '+err.code); }, {enableHighAccuracy:true, maximumAge:5000, timeout:12000}); }
+	}
+	function attachMotion(){
+			function handler(ev){
+				const {alpha, beta, gamma} = ev; if(alpha==null) return;
+				// Screen orientation compensation (basic)
+				let so = (screen.orientation && screen.orientation.angle) || window.orientation || 0; so = (so||0); // 0,90,180,270
+				let pitch, roll;
+				if(so===0){ pitch = beta; roll = gamma; }
+				else if(so===90){ pitch = gamma; roll = -beta; }
+				else if(so===180){ pitch = -beta; roll = -gamma; }
+				else if(so===270){ pitch = -gamma; roll = beta; }
+				state.raw.heading = alpha;
+				state.raw.pitch = pitch;
+				state.raw.roll = roll;
+				state.smooth.pitch = ema(state.smooth.pitch, state.raw.pitch, state.alpha);
+				state.smooth.roll = ema(state.smooth.roll, state.raw.roll, state.alpha);
+				state.smooth.heading = ema(state.smooth.heading, state.raw.heading, state.alpha);
+			}
+			window.addEventListener('deviceorientation', handler);
+			window.addEventListener('deviceorientationabsolute', handler);
+	}
+		function calibrate(){ state.cal.pitch = state.smooth.pitch; state.cal.roll=state.smooth.roll; state.cal.heading=state.smooth.heading; saveCal(); log('Calibrated'); }
+		function saveCal(){ localStorage.setItem('hud_cal', JSON.stringify(state.cal)); }
+		function loadCal(){ try { const c=JSON.parse(localStorage.getItem('hud_cal')||'null'); if(c){ state.cal=c; log('Cal loaded'); } } catch(e){} }
+		function loadSettings(){ const s=localStorage.getItem('hud_alpha'); if(s){ state.alpha=parseFloat(s)||state.alpha; document.getElementById('smoothRange').value=state.alpha; } }
+	function loop(){ updateOrientationDisplay(); updateDataBlocks(); requestAnimationFrame(loop); }
+	// Controls
+		els.btnPerm.addEventListener('click',()=>{ requestPermissions(); els.btnCal.disabled=false; els.noSensor.classList.add('hidden'); });
+	els.btnCal.addEventListener('click', calibrate);
+	els.btnUnits.addEventListener('click',()=>{ const order=['KT','KMH','MPH']; const idx=(order.indexOf(state.units)+1)%order.length; state.units=order[idx]; els.btnUnits.textContent='Units: '+state.units; });
+	els.btnSim.addEventListener('click',()=>{ state.sim=!state.sim; els.btnSim.textContent= state.sim? 'Sim: ON':'Sim Mode'; if(state.sim) startSim(); });
+	els.btnReset.addEventListener('click',()=>{ localStorage.clear(); location.reload(); });
+		document.getElementById('smoothRange').addEventListener('input', e=>{ state.alpha=parseFloat(e.target.value); localStorage.setItem('hud_alpha', state.alpha); log('alpha '+state.alpha); });
+	function startSim(){
+		log('Simulation active (use WASD / arrows)');
+		window.addEventListener('keydown', e=>{
+			if(e.key==='ArrowUp' || e.key==='w') state.smooth.pitch -=1;
+			if(e.key==='ArrowDown' || e.key==='s') state.smooth.pitch +=1;
+			if(e.key==='ArrowLeft' || e.key==='a') state.smooth.roll -=2;
+			if(e.key==='ArrowRight' || e.key==='d') state.smooth.roll +=2;
+			if(e.key==='q') state.smooth.heading -=2;
+			if(e.key==='e') state.smooth.heading +=2;
+			state.smooth.heading=normHeading(state.smooth.heading);
+		});
+		setInterval(()=>{ // fake speed & position drift
+			state.speedKt = (state.speedKt||250) + (Math.random()-0.5)*2;
+			state.altitudeM = (state.altitudeM||300)* (1+ (Math.random()-0.5)*0.002);
+				state.lastAltSamples.push({altM:state.altitudeM,time:Date.now()}); if(state.lastAltSamples.length>25) state.lastAltSamples.shift(); updateVerticalSpeed();
+		},500);
+		els.noSensor.classList.add('hidden');
+	}
+	// Initial build
+		buildPitchLadder(); buildBankScale(); buildHeadingTape(); buildFPM(); loadCal(); loadSettings(); loop();
+	// Show permission hint
+	setTimeout(()=>{ if(!state.hasMotion||!state.hasGeo) els.noSensor.classList.remove('hidden'); }, 1500);
+	</script>
+	<!-- End of experimental HUD file -->
 </body>
 </html>
