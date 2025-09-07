@@ -1,0 +1,214 @@
+<!--
+  Mobile Fighter Jet HUD (NATO-style)
+  - Core symbology: horizon, pitch ladder, heading, ground speed, FPV, boresight
+  - Font, scaling, and layout inspired by NATO/industry standards (see Wikipedia: Head-up display, ARINC 764, Skybrary)
+  - Numeric alignment, pitch ladder, and symbology follow typical NATO/ICAO conventions
+  - Uses device sensors (GPS, accelerometer/gyro)
+  - Responsive, high-contrast, green monochrome
+  - For best results, open on a mobile device
+  - See code comments for references to standards and design rationale
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Fighter Jet HUD</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      color: #0f0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Share Tech Mono', 'Consolas', monospace;
+    }
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+    #hud {
+      position: fixed;
+      top: 0; left: 0; width: 100vw; height: 100vh;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .hud-text {
+      font-size: 2.5vw;
+      text-shadow: 0 0 4px #0f0, 0 0 8px #0f0;
+      user-select: none;
+      letter-spacing: 0.05em;
+    }
+    .hud-heading {
+      position: absolute;
+      top: 2vw; left: 50%;
+      transform: translateX(-50%);
+      font-size: 4vw;
+      letter-spacing: 0.2em;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+    .hud-speed {
+      position: absolute;
+      bottom: 4vw; left: 4vw;
+      text-align: right;
+      min-width: 8vw;
+      font-variant-numeric: tabular-nums;
+    }
+    .hud-alt {
+      position: absolute;
+      bottom: 4vw; right: 4vw;
+      text-align: right;
+      min-width: 8vw;
+      font-variant-numeric: tabular-nums;
+    }
+    canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      pointer-events: none;
+      z-index: 5;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="hud-canvas"></canvas>
+  <div id="hud">
+    <div class="hud-text hud-heading" id="heading">HDG 000</div>
+    <div class="hud-text hud-speed" id="speed">GS 0</div>
+    <div class="hud-text hud-alt" id="altitude">ALT 0</div>
+  </div>
+  <script>
+  // --- NATO HUD symbology constants ---
+  // Pitch ladder: ±5°/10° increments, 1:1 scaling (see Wikipedia: Head-up display, ARINC 764)
+  const PITCH_LADDER_STEP = 5; // degrees
+  const PITCH_LADDER_RANGE = 45; // degrees up/down
+  const HUD_COLOR = '#0f0';
+  const HUD_LINE_WIDTH = 2;
+  // Monospaced, high-contrast, green (NATO/civil HUD convention)
+  const FONT = '2.5vw Share Tech Mono, Consolas, monospace';
+    // --- State ---
+    let pitch = 0, roll = 0, heading = 0, groundSpeed = 0, altitude = 0;
+    let lastGPS = null;
+    // --- Sensor setup ---
+    // DeviceOrientation: pitch, roll, heading (calibration may be needed for full range)
+    if (window.DeviceOrientationEvent) {
+      window.addEventListener('deviceorientation', e => {
+        // e.beta: pitch [-180,180], e.gamma: roll [-90,90], e.alpha: compass [0,360]
+        pitch = e.beta || 0;
+        roll = e.gamma || 0;
+        heading = e.alpha || 0;
+      });
+    }
+    // GPS: ground speed (knots), altitude (meters)
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(pos => {
+        const { latitude, longitude, altitude: alt, speed, timestamp } = pos.coords;
+        if (lastGPS) {
+          const dt = (timestamp - lastGPS.timestamp) / 1000;
+          if (dt > 0) {
+            // Calculate ground speed (m/s to knots)
+            groundSpeed = (speed !== null ? speed : calcSpeed(lastGPS, pos.coords, dt)) * 1.94384;
+          }
+        }
+        altitude = alt !== null ? alt : 0;
+        lastGPS = { latitude, longitude, timestamp };
+      }, err => {}, { enableHighAccuracy: true, maximumAge: 1000, timeout: 5000 });
+    }
+    function calcSpeed(last, curr, dt) {
+      // Haversine formula for distance
+      const R = 6371000;
+      const toRad = x => x * Math.PI / 180;
+      const dLat = toRad(curr.latitude - last.latitude);
+      const dLon = toRad(curr.longitude - last.longitude);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(last.latitude)) * Math.cos(toRad(curr.latitude)) * Math.sin(dLon/2)**2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      const d = R * c;
+      return d / dt;
+    }
+    // --- Drawing ---
+    const canvas = document.getElementById('hud-canvas');
+    const ctx = canvas.getContext('2d');
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+    function drawHUD() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      ctx.strokeStyle = HUD_COLOR;
+      ctx.lineWidth = HUD_LINE_WIDTH;
+      ctx.shadowColor = HUD_COLOR;
+      ctx.shadowBlur = 8;
+      ctx.font = FONT;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // Center of HUD
+      const cx = canvas.width/2, cy = canvas.height/2;
+      // --- Horizon & Pitch Ladder ---
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-roll * Math.PI / 180);
+      for (let p = -PITCH_LADDER_RANGE; p <= PITCH_LADDER_RANGE; p += PITCH_LADDER_STEP) {
+        const y = -(p - pitch) * (canvas.height/2) / 45; // 1:1 scaling, 45deg = half screen
+        if (Math.abs(y) < canvas.height/2) {
+          ctx.beginPath();
+          if (p === 0) {
+            // Horizon line (solid, with break at center)
+            ctx.moveTo(-cx*0.7, y);
+            ctx.lineTo(cx*0.7, y);
+            ctx.stroke();
+            ctx.fillStyle = HUD_COLOR;
+            ctx.fillText('—', 0, y-16);
+          } else {
+            // Pitch ladder (short lines, numbers at ends)
+            ctx.moveTo(-cx*0.2, y);
+            ctx.lineTo(cx*0.2, y);
+            ctx.stroke();
+            ctx.fillStyle = HUD_COLOR;
+            ctx.fillText((p > 0 ? '+' : '') + p, -cx*0.25, y);
+            ctx.fillText((p > 0 ? '+' : '') + p, cx*0.25, y);
+          }
+        }
+      }
+      ctx.restore();
+      // --- Boresight symbol (center, fixed) ---
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.strokeStyle = HUD_COLOR;
+      ctx.beginPath();
+      ctx.arc(0, 0, 18, 0, 2*Math.PI);
+      ctx.moveTo(-24, 0); ctx.lineTo(24, 0);
+      ctx.moveTo(0, -24); ctx.lineTo(0, 24);
+      ctx.stroke();
+      ctx.restore();
+      // --- Flight Path Vector (FPV) symbol (NATO style: circle, wings, vertical line) ---
+      // For demo, FPV = boresight (center); in real HUD, offset by velocity vector
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.strokeStyle = HUD_COLOR;
+      ctx.beginPath();
+      ctx.arc(0, 0, 28, 0, 2*Math.PI);
+      ctx.moveTo(-18, 18); ctx.lineTo(-8, 8);
+      ctx.moveTo(18, 18); ctx.lineTo(8, 8);
+      ctx.moveTo(0, 28); ctx.lineTo(0, 38);
+      ctx.stroke();
+      ctx.restore();
+      ctx.restore();
+    }
+    // Numeric text: right-aligned for tapes, centered for heading (NATO/ICAO convention)
+    function updateText() {
+      document.getElementById('heading').textContent = `HDG ${String(Math.round(heading)).padStart(3, '0')}`;
+      document.getElementById('speed').textContent = `GS ${Math.round(groundSpeed)}`;
+      document.getElementById('altitude').textContent = `ALT ${Math.round(altitude)}`;
+    }
+    function loop() {
+      drawHUD();
+      updateText();
+      requestAnimationFrame(loop);
+    }
+    loop();
+  </script>
+</body>
+</html>
