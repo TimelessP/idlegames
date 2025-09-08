@@ -527,10 +527,10 @@
                     this.analyser.fftSize = 256;
                     this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
                     
-                    // Connect microphone to analyser by default
+                    // Create microphone source but don't connect it initially
                     this.microphoneSource = this.audioContext.createMediaStreamSource(this.stream);
-                    this.microphoneSource.connect(this.analyser);
                     
+                    // Start meter animation (will show idle state when nothing connected)
                     this.startMeterAnimation();
                 } catch (error) {
                     console.error('Error accessing microphone:', error);
@@ -670,6 +670,13 @@
                     this.updateTimeLabels();
                 }
 
+                // Connect microphone to analyser for meter display during recording
+                try {
+                    this.microphoneSource.connect(this.analyser);
+                } catch (e) {
+                    // Microphone might already be connected
+                }
+
                 try {
                     this.mediaRecorder = new MediaRecorder(this.stream, {
                         mimeType: 'audio/webm;codecs=opus'
@@ -706,6 +713,13 @@
                     this.stopRecordingUpdate();
                     this.updateStatus('Processing...');
                     this.updateUI(); // Update UI immediately when stopping
+                    
+                    // Disconnect microphone from analyser when not recording
+                    try {
+                        this.microphoneSource.disconnect(this.analyser);
+                    } catch (e) {
+                        // Microphone might already be disconnected
+                    }
                 }
             }
 
@@ -717,7 +731,7 @@
                     }
                     
                     this.isPTT = true;
-                    this.startRecording();
+                    this.startRecording(); // This will connect the microphone
                     this.elements.pttBtn.classList.add('recording');
                 }
             }
@@ -725,7 +739,7 @@
             stopPTT() {
                 if (this.isPTT) {
                     this.isPTT = false;
-                    this.stopRecording();
+                    this.stopRecording(); // This will disconnect the microphone
                     this.elements.pttBtn.classList.remove('recording');
                     // UI will be updated when processRecording completes
                 }
@@ -902,16 +916,11 @@
 
             pausePlayback() {
                 if (this.audioSource) {
-                    // Disconnect playback source from analyser and reconnect microphone
+                    // Disconnect playback source from analyser 
                     try {
                         this.audioSource.disconnect(this.analyser);
                     } catch (e) {
                         // Source might already be disconnected
-                    }
-                    try {
-                        this.microphoneSource.connect(this.analyser);
-                    } catch (e) {
-                        // Microphone might already be connected
                     }
                     
                     this.audioSource.stop();
@@ -937,17 +946,19 @@
                     this.stopPTT();
                 }
                 
-                // Ensure microphone is connected to analyser when stopped
-                if (this.audioSource && this.microphoneSource) {
+                // Ensure all audio sources are disconnected from analyser when stopped
+                if (this.audioSource) {
                     try {
                         this.audioSource.disconnect(this.analyser);
                     } catch (e) {
                         // Source might already be disconnected
                     }
+                }
+                if (this.microphoneSource) {
                     try {
-                        this.microphoneSource.connect(this.analyser);
+                        this.microphoneSource.disconnect(this.analyser);
                     } catch (e) {
-                        // Microphone might already be connected
+                        // Microphone might already be disconnected
                     }
                 }
                 
@@ -1044,6 +1055,9 @@
                     const position = this.getCurrentPosition();
                     const percentage = (position / this.audioBuffer.duration) * 100;
                     this.elements.positionSlider.value = Math.min(percentage, 100);
+                } else if (!this.audioBuffer) {
+                    // No audio buffer - reset slider to 0
+                    this.elements.positionSlider.value = 0;
                 }
             }
 
@@ -1054,6 +1068,10 @@
                     
                     this.elements.currentTime.textContent = this.formatTime(current);
                     this.elements.totalTime.textContent = this.formatTime(total);
+                } else {
+                    // No audio buffer - reset time labels to 0:00
+                    this.elements.currentTime.textContent = '0:00';
+                    this.elements.totalTime.textContent = '0:00';
                 }
             }
 
@@ -1075,9 +1093,17 @@
                         }
                         const average = sum / this.dataArray.length;
                         
-                        // Convert to rotation (-90 to 90 degrees)
-                        const rotation = (average / 255) * 180 - 90;
-                        this.elements.meterNeedle.style.transform = `translateX(-50%) rotate(${rotation}deg)`;
+                        // Check if we have any meaningful audio input connected
+                        const hasAudioInput = this.isRecording || this.isPlaying;
+                        
+                        if (hasAudioInput) {
+                            // Convert to rotation (-90 to 90 degrees) when we have active audio
+                            const rotation = (average / 255) * 180 - 90;
+                            this.elements.meterNeedle.style.transform = `translateX(-50%) rotate(${rotation}deg)`;
+                        } else {
+                            // Show idle state (needle at bottom) when no active audio
+                            this.elements.meterNeedle.style.transform = `translateX(-50%) rotate(-90deg)`;
+                        }
                     }
                     requestAnimationFrame(updateMeter);
                 };
