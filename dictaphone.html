@@ -77,6 +77,7 @@
             grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
             gap: 15px;
             margin-bottom: 30px;
+            align-items: center;
         }
 
         .skip-controls {
@@ -376,28 +377,78 @@
             font-size: 12px;
         }
 
-        .privacy-info {
-            margin-top: 20px;
-            padding: 15px;
+        .transcription-output {
+            margin-top: 30px;
+            padding: 20px;
+            background: var(--panel-bg);
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .transcription-output h3 {
+            margin-top: 0;
+            margin-bottom: 15px;
+            color: var(--text-color);
+        }
+
+        .transcription-chunk {
+            margin-bottom: 10px;
+            padding: 10px;
+            background: var(--bg-color);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            font-family: monospace;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+
+        .transcription-timestamp {
+            color: var(--button-bg);
+            font-weight: 600;
+            margin-right: 10px;
+        }
+
+        .transcription-progress {
+            margin: 15px 0;
+            padding: 10px;
             background: var(--panel-bg);
             border-radius: 8px;
-            font-size: 13px;
             border: 1px solid var(--border-color);
-            opacity: 0.9;
+            text-align: center;
         }
 
-        .privacy-info h4 {
-            margin: 0 0 8px 0;
-            font-size: 14px;
-            color: var(--text-color);
+        .transcription-progress .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+            border: 2px solid var(--border-color);
+            border-top: 2px solid var(--button-bg);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
         }
 
-        .privacy-info p {
-            margin: 0;
-            line-height: 1.4;
-            color: var(--text-color);
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
     </style>
+    <script type="module">
+        // Import Transformers.js
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
+        
+        // Disable local models to force downloading from Hugging Face
+        env.allowLocalModels = false;
+        
+        // Suppress ONNX runtime warnings in console
+        env.backends.onnx.logLevel = 'error';
+        
+        // Store the pipeline instance globally
+        window.transcriptionPipeline = null;
+        window.isTranscriptionModelLoading = false;
+    </script>
 </head>
 <body>
     <div class="container">
@@ -465,6 +516,12 @@
             <button class="button success" id="exportBtn" title="Export (E)">
                 <span>💾</span> Export
             </button>
+            <button class="button" id="transcribeTextBtn" title="Transcribe to Text (T)">
+                <span>📝</span> Text
+            </button>
+            <button class="button" id="transcribeJsonBtn" title="Transcribe to JSON (J)">
+                <span>📄</span> JSON
+            </button>
             <button class="button danger" id="eraseBtn" title="Erase All (Delete)">
                 <span>🗑️</span> Erase All
             </button>
@@ -479,7 +536,7 @@
                 </div>
                 <div class="shortcut">
                     <span>Push-to-Talk</span>
-                    <span class="key">T</span>
+                    <span class="key">Hold T</span>
                 </div>
                 <div class="shortcut">
                     <span>Stop</span>
@@ -506,6 +563,14 @@
                     <span class="key">E</span>
                 </div>
                 <div class="shortcut">
+                    <span>Transcribe Text</span>
+                    <span class="key">T</span>
+                </div>
+                <div class="shortcut">
+                    <span>Transcribe JSON</span>
+                    <span class="key">J</span>
+                </div>
+                <div class="shortcut">
                     <span>Erase All</span>
                     <span class="key">Del</span>
                 </div>
@@ -519,6 +584,11 @@
         <div class="privacy-info">
             <h4>🔒 Privacy & Data</h4>
             <p>Your audio stays private in your browser only - never uploaded anywhere. Use Export to save recordings to your device.</p>
+        </div>
+
+        <div class="transcription-output" id="transcriptionOutput" style="display: none;">
+            <h3>📝 Transcription</h3>
+            <div id="transcriptionContent"></div>
         </div>
     </div>
 
@@ -574,7 +644,11 @@
                     meterNeedle: document.getElementById('meterNeedle'),
                     currentTime: document.getElementById('currentTime'),
                     totalTime: document.getElementById('totalTime'),
-                    themeToggle: document.getElementById('themeToggle')
+                    themeToggle: document.getElementById('themeToggle'),
+                    transcribeTextBtn: document.getElementById('transcribeTextBtn'),
+                    transcribeJsonBtn: document.getElementById('transcribeJsonBtn'),
+                    transcriptionOutput: document.getElementById('transcriptionOutput'),
+                    transcriptionContent: document.getElementById('transcriptionContent')
                 };
             }
 
@@ -645,6 +719,8 @@
                 this.elements.exportBtn.addEventListener('click', () => this.export());
                 this.elements.eraseBtn.addEventListener('click', () => this.eraseAll());
                 this.elements.importFile.addEventListener('change', (e) => this.import(e));
+                this.elements.transcribeTextBtn.addEventListener('click', () => this.transcribeToText());
+                this.elements.transcribeJsonBtn.addEventListener('click', () => this.transcribeToJson());
 
                 // PTT events
                 this.elements.pttBtn.addEventListener('mousedown', () => this.startPTT());
@@ -713,7 +789,14 @@
                         break;
                     case 't':
                         e.preventDefault();
-                        if (!this.isPTT) this.startPTT();
+                        if (!this.isPTT) {
+                            // Check if we should start PTT or transcribe
+                            if (this.audioBuffer && !this.isRecording && !this.isPlaying) {
+                                this.transcribeToText();
+                            } else {
+                                this.startPTT();
+                            }
+                        }
                         break;
                     case ' ':
                         e.preventDefault();
@@ -738,6 +821,10 @@
                     case 'e':
                         e.preventDefault();
                         this.export();
+                        break;
+                    case 'j':
+                        e.preventDefault();
+                        if (this.audioBuffer) this.transcribeToJson();
                         break;
                     case 'delete':
                         e.preventDefault();
@@ -1529,6 +1616,233 @@
                 }
             }
 
+            async transcribeToText() {
+                if (!this.audioBuffer) {
+                    this.updateStatus('No audio to transcribe');
+                    return;
+                }
+
+                try {
+                    this.updateStatus('Initializing transcription...');
+                    this.elements.transcriptionOutput.style.display = 'block';
+                    
+                    // Show loading state
+                    this.elements.transcriptionContent.innerHTML = `
+                        <div class="transcription-progress">
+                            <div class="spinner"></div>
+                            Loading Whisper model... (this may take a moment on first use)
+                        </div>
+                    `;
+
+                    // Load the pipeline if not already loaded
+                    if (!window.transcriptionPipeline && !window.isTranscriptionModelLoading) {
+                        window.isTranscriptionModelLoading = true;
+                        
+                        // Import pipeline from the global scope created by our module script
+                        const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js');
+                        
+                        window.transcriptionPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en', {
+                            progress_callback: (progress) => {
+                                if (progress.status === 'progress') {
+                                    const percent = Math.round(progress.progress * 100);
+                                    this.elements.transcriptionContent.innerHTML = `
+                                        <div class="transcription-progress">
+                                            <div class="spinner"></div>
+                                            Loading model: ${progress.file} (${percent}%)
+                                        </div>
+                                    `;
+                                }
+                            }
+                        });
+                        
+                        window.isTranscriptionModelLoading = false;
+                    }
+
+                    // Wait for model to be ready
+                    while (window.isTranscriptionModelLoading) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+
+                    this.updateStatus('Transcribing audio...');
+                    this.elements.transcriptionContent.innerHTML = `
+                        <div class="transcription-progress">
+                            <div class="spinner"></div>
+                            Transcribing audio...
+                        </div>
+                    `;
+
+                    // Convert AudioBuffer to Float32Array for transcription
+                    const audioData = this.audioBuffer.getChannelData(0);
+
+                    // Run transcription
+                    const result = await window.transcriptionPipeline(audioData, {
+                        return_timestamps: true,
+                        chunk_length_s: 30,
+                        stride_length_s: 5
+                    });
+
+                    // Display results
+                    this.displayTranscriptionResult(result, 'text');
+                    this.updateStatus('Transcription complete');
+
+                } catch (error) {
+                    console.error('Transcription error:', error);
+                    this.updateStatus('Transcription failed');
+                    this.elements.transcriptionContent.innerHTML = `
+                        <div style="color: var(--button-danger); padding: 20px; text-align: center;">
+                            ❌ Transcription failed: ${error.message}
+                        </div>
+                    `;
+                }
+            }
+
+            async transcribeToJson() {
+                if (!this.audioBuffer) {
+                    this.updateStatus('No audio to transcribe');
+                    return;
+                }
+
+                try {
+                    this.updateStatus('Initializing transcription...');
+                    this.elements.transcriptionOutput.style.display = 'block';
+                    
+                    // Show loading state
+                    this.elements.transcriptionContent.innerHTML = `
+                        <div class="transcription-progress">
+                            <div class="spinner"></div>
+                            Loading Whisper model... (this may take a moment on first use)
+                        </div>
+                    `;
+
+                    // Load the pipeline if not already loaded
+                    if (!window.transcriptionPipeline && !window.isTranscriptionModelLoading) {
+                        window.isTranscriptionModelLoading = true;
+                        
+                        const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js');
+                        
+                        window.transcriptionPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en', {
+                            progress_callback: (progress) => {
+                                if (progress.status === 'progress') {
+                                    const percent = Math.round(progress.progress * 100);
+                                    this.elements.transcriptionContent.innerHTML = `
+                                        <div class="transcription-progress">
+                                            <div class="spinner"></div>
+                                            Loading model: ${progress.file} (${percent}%)
+                                        </div>
+                                    `;
+                                }
+                            }
+                        });
+                        
+                        window.isTranscriptionModelLoading = false;
+                    }
+
+                    // Wait for model to be ready
+                    while (window.isTranscriptionModelLoading) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+
+                    this.updateStatus('Transcribing audio...');
+                    this.elements.transcriptionContent.innerHTML = `
+                        <div class="transcription-progress">
+                            <div class="spinner"></div>
+                            Transcribing audio...
+                        </div>
+                    `;
+
+                    // Convert AudioBuffer to Float32Array for transcription
+                    const audioData = this.audioBuffer.getChannelData(0);
+
+                    // Run transcription with chunks for detailed timestamps
+                    const result = await window.transcriptionPipeline(audioData, {
+                        return_timestamps: 'word',
+                        chunk_length_s: 30,
+                        stride_length_s: 5
+                    });
+
+                    // Display results
+                    this.displayTranscriptionResult(result, 'json');
+                    this.updateStatus('Transcription complete');
+
+                } catch (error) {
+                    console.error('Transcription error:', error);
+                    this.updateStatus('Transcription failed');
+                    this.elements.transcriptionContent.innerHTML = `
+                        <div style="color: var(--button-danger); padding: 20px; text-align: center;">
+                            ❌ Transcription failed: ${error.message}
+                        </div>
+                    `;
+                }
+            }
+
+            displayTranscriptionResult(result, format) {
+                let content = '';
+                
+                if (format === 'text') {
+                    // Simple text format
+                    content = `
+                        <div class="transcription-chunk">
+                            <div style="margin-bottom: 10px; font-weight: bold;">📝 Transcribed Text:</div>
+                            <div style="font-family: sans-serif; line-height: 1.6;">${result.text}</div>
+                        </div>
+                        <div style="text-align: center; margin-top: 15px;">
+                            <button onclick="navigator.clipboard.writeText('${result.text.replace(/'/g, "\\'")}').then(() => alert('Text copied to clipboard!'))" 
+                                    style="padding: 8px 16px; background: var(--button-success); color: white; border: none; border-radius: 6px; cursor: pointer;">
+                                📋 Copy Text
+                            </button>
+                            <button onclick="this.downloadTranscription('${result.text.replace(/'/g, "\\'")}', 'transcript.txt', 'text/plain')" 
+                                    style="padding: 8px 16px; background: var(--button-bg); color: white; border: none; border-radius: 6px; cursor: pointer; margin-left: 10px;">
+                                💾 Download TXT
+                            </button>
+                        </div>
+                    `;
+                } else {
+                    // JSON format with timestamps
+                    const jsonData = {
+                        text: result.text,
+                        chunks: result.chunks || [{
+                            text: result.text,
+                            timestamp: [0, this.audioBuffer.duration]
+                        }],
+                        duration: this.audioBuffer.duration,
+                        transcribed_at: new Date().toISOString()
+                    };
+                    
+                    const jsonString = JSON.stringify(jsonData, null, 2);
+                    
+                    content = `
+                        <div class="transcription-chunk">
+                            <div style="margin-bottom: 10px; font-weight: bold;">📄 JSON Output:</div>
+                            <pre style="white-space: pre-wrap; font-size: 12px; max-height: 300px; overflow-y: auto;">${jsonString}</pre>
+                        </div>
+                        <div style="text-align: center; margin-top: 15px;">
+                            <button onclick="navigator.clipboard.writeText('${jsonString.replace(/'/g, "\\'")}').then(() => alert('JSON copied to clipboard!'))" 
+                                    style="padding: 8px 16px; background: var(--button-success); color: white; border: none; border-radius: 6px; cursor: pointer;">
+                                📋 Copy JSON
+                            </button>
+                            <button onclick="this.downloadTranscription('${jsonString.replace(/'/g, "\\'")}', 'transcript.json', 'application/json')" 
+                                    style="padding: 8px 16px; background: var(--button-bg); color: white; border: none; border-radius: 6px; cursor: pointer; margin-left: 10px;">
+                                💾 Download JSON
+                            </button>
+                        </div>
+                    `;
+                }
+                
+                this.elements.transcriptionContent.innerHTML = content;
+            }
+
+            downloadTranscription(content, filename, mimeType) {
+                const blob = new Blob([content], { type: mimeType });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
+
             updateUI() {
                 // Update button states - Record button should only show as recording for regular recording, not PTT
                 this.elements.recordBtn.classList.toggle('recording', this.isRecording && !this.isPTT);
@@ -1544,6 +1858,8 @@
                 this.elements.skipForwardBtn.disabled = !hasAudio || this.isRecording;
                 this.elements.exportBtn.disabled = !hasAudio;
                 this.elements.eraseBtn.disabled = !hasAudio;
+                this.elements.transcribeTextBtn.disabled = !hasAudio || this.isRecording;
+                this.elements.transcribeJsonBtn.disabled = !hasAudio || this.isRecording;
                 
                 // Mutual exclusion: Record and PTT should disable each other
                 this.elements.recordBtn.disabled = this.isPTT;
@@ -1560,7 +1876,12 @@
 
         // Initialize the dictaphone when the page loads
         document.addEventListener('DOMContentLoaded', () => {
-            new Dictaphone();
+            const dictaphone = new Dictaphone();
+            
+            // Make downloadTranscription method globally accessible for inline onclick handlers
+            window.downloadTranscription = (content, filename, mimeType) => {
+                dictaphone.downloadTranscription(content, filename, mimeType);
+            };
         });
     </script>
 </body>
