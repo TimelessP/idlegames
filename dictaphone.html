@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dictaphone</title>
     <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <!-- Dynamic manifest injected at runtime to preserve single-file SPA -->
     <style>
         :root {
             --bg-color: #ffffff;
@@ -408,6 +409,9 @@
             <button class="button success" id="playBtn" title="Play (P)">
                 <span>▶️</span> Play
             </button>
+            <button class="button" id="keepAwakeBtn" title="Prevent screen sleep / throttling">
+                <span>⚡</span> Keep Awake
+            </button>
         </div>
 
         <div class="skip-controls">
@@ -558,6 +562,10 @@
                 this.recordingStartPosition = 0;
                 this.isDragging = false;
                 this.currentThemeMode = 'system'; // Track the current theme mode (system/light/dark)
+                // Background persistence helpers
+                this.wakeLock = null;
+                this.keepAwakeEnabled = false;
+                this.hiddenVideo = null; // fallback tiny looping video element
                 
                 this.initializeElements();
                 this.initializeAudio();
@@ -573,6 +581,7 @@
                     pttBtn: document.getElementById('pttBtn'),
                     stopBtn: document.getElementById('stopBtn'),
                     playBtn: document.getElementById('playBtn'),
+                    keepAwakeBtn: document.getElementById('keepAwakeBtn'),
                     skipBackBtn: document.getElementById('skipBackBtn'),
                     skipForwardBtn: document.getElementById('skipForwardBtn'),
                     positionSlider: document.getElementById('positionSlider'),
@@ -615,6 +624,10 @@
                     
                     // Start meter animation (will show idle state when nothing connected)
                     this.startMeterAnimation();
+                    // Register service worker & visibility handlers early
+                    this.injectManifest();
+                    this.registerServiceWorker();
+                    this.setupVisibilityHandlers();
                 } catch (error) {
                     console.error('Error initializing audio context:', error);
                     this.updateStatus('Audio initialization failed');
@@ -661,6 +674,7 @@
                 this.elements.recordBtn.addEventListener('click', () => this.toggleRecord());
                 this.elements.stopBtn.addEventListener('click', () => this.stop());
                 this.elements.playBtn.addEventListener('click', () => this.togglePlay());
+                if (this.elements.keepAwakeBtn) this.elements.keepAwakeBtn.addEventListener('click', () => this.toggleWakeLock());
                 this.elements.skipBackBtn.addEventListener('click', () => this.skipBack());
                 this.elements.skipForwardBtn.addEventListener('click', () => this.skipForward());
                 this.elements.exportBtn.addEventListener('click', () => this.export());
@@ -1535,6 +1549,132 @@
                 }
             }
 
+            /* =============================
+               Background Persistence (Best Effort)
+               ============================= */
+            async registerServiceWorker() {
+                if (!('serviceWorker' in navigator)) return;
+                try {
+                    const swCode = `const CACHE='dictaphone-inline-v1';\nconst CORE=['./dictaphone.html'];\nself.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE)).then(()=>self.skipWaiting()));});\nself.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()));});\nself.addEventListener('fetch',e=>{if(e.request.method!=='GET') return; e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(resp=>{const copy=resp.clone(); caches.open(CACHE).then(c=>c.put(e.request,copy)); return resp;}).catch(()=>r)));});`;
+                    const blob = new Blob([swCode], { type: 'text/javascript' });
+                    const swUrl = URL.createObjectURL(blob);
+                    await navigator.serviceWorker.register(swUrl);
+                    console.log('[SW] Registered (inline)');
+                } catch (e) {
+                    console.warn('[SW] Inline registration failed', e);
+                }
+            }
+
+            injectManifest() {
+                try {
+                    const manifest = {
+                        name: 'Dictaphone',
+                        short_name: 'Dictaphone',
+                        description: 'Offline, private in-browser dictaphone with Whisper transcription.',
+                        start_url: './dictaphone.html',
+                        display: 'standalone',
+                        background_color: '#1a1a1a',
+                        theme_color: '#0d6efd',
+                        orientation: 'any',
+                        icons: []
+                    };
+                    const blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
+                    const url = URL.createObjectURL(blob);
+                    let link = document.querySelector('link[rel="manifest"]');
+                    if (!link) { link = document.createElement('link'); link.rel = 'manifest'; document.head.appendChild(link); }
+                    link.href = url;
+                } catch (e) {
+                    console.warn('Manifest injection failed', e);
+                }
+            }
+
+            setupVisibilityHandlers() {
+                document.addEventListener('visibilitychange', () => {
+                    if (document.visibilityState === 'visible') {
+                        // Re-acquire wake lock if user still wants it
+                        if (this.keepAwakeEnabled && !this.wakeLock) {
+                            this.acquireWakeLock();
+                        }
+                    }
+                });
+            }
+
+            async acquireWakeLock() {
+                if (!this.keepAwakeEnabled) return; // user may have toggled off
+                if (!('wakeLock' in navigator)) {
+                    console.log('[WakeLock] API unsupported, enabling fallback');
+                    this.enableFallbackVideo();
+                    return;
+                }
+                try {
+                    this.wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('[WakeLock] Acquired');
+                    this.wakeLock.addEventListener('release', () => {
+                        console.log('[WakeLock] Released');
+                        this.wakeLock = null;
+                        if (this.keepAwakeEnabled) {
+                            // Attempt to re-acquire (browser may release on screen off)
+                            setTimeout(() => this.acquireWakeLock(), 1200);
+                        }
+                    });
+                } catch (err) {
+                    console.warn('[WakeLock] Failed, using fallback', err);
+                    this.enableFallbackVideo();
+                }
+            }
+
+            releaseWakeLock() {
+                if (this.wakeLock) {
+                    try { this.wakeLock.release(); } catch(_) {}
+                    this.wakeLock = null;
+                }
+                this.disableFallbackVideo();
+            }
+
+            enableFallbackVideo() {
+                if (this.hiddenVideo) return; // already active
+                const v = document.createElement('video');
+                v.setAttribute('playsinline', '');
+                v.muted = true; v.loop = true; v.width = 1; v.height = 1;
+                v.style.cssText = 'position:fixed;bottom:0;left:0;opacity:0;pointer-events:none;z-index:-1;';
+                // Tiny blank webm (won't always prevent throttling but can help)
+                v.src = 'data:video/webm;base64,GkXfo0AgQoaBAUL3gQFC8oEEQvOBCEKCBAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAA/////wAAAD+//////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+                document.body.appendChild(v);
+                v.play().catch(()=>{});
+                this.hiddenVideo = v;
+                console.log('[Fallback] Hidden video enabled');
+            }
+
+            disableFallbackVideo() {
+                if (this.hiddenVideo) {
+                    try { this.hiddenVideo.pause(); } catch(_) {}
+                    this.hiddenVideo.remove();
+                    this.hiddenVideo = null;
+                    console.log('[Fallback] Hidden video removed');
+                }
+            }
+
+            toggleWakeLock() {
+                this.keepAwakeEnabled = !this.keepAwakeEnabled;
+                if (this.keepAwakeEnabled) {
+                    this.acquireWakeLock();
+                    this.updateStatus('Keep Awake enabled');
+                    console.log('[Info] Keep Awake attempts to reduce suspension; OS may still throttle in background.');
+                } else {
+                    this.releaseWakeLock();
+                    this.updateStatus('Keep Awake disabled');
+                }
+                this.updateKeepAwakeButton();
+            }
+
+            updateKeepAwakeButton() {
+                if (!this.elements.keepAwakeBtn) return;
+                const btn = this.elements.keepAwakeBtn;
+                btn.classList.toggle('success', this.keepAwakeEnabled);
+                btn.innerHTML = this.keepAwakeEnabled ? '<span>⚡</span> Awake ON' : '<span>⚡</span> Keep Awake';
+                btn.title = this.keepAwakeEnabled ? 'Click to allow screen sleep' : 'Prevent screen sleep / throttling';
+            }
+
             updateThemeIcon(mode) {
                 const icons = {
                     'system': '🌓', // Half moon for system (auto)
@@ -1918,6 +2058,7 @@
                 } else {
                     this.elements.pttBtn.classList.remove('recording');
                 }
+                this.updateKeepAwakeButton();
             }
         }
 
