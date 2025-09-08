@@ -1740,8 +1740,8 @@
                         // Import pipeline from the global scope created by our module script
                         const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js');
                         
-                        window.transcriptionPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en', {
-                            quantized: true,
+                        window.transcriptionPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en', {
+                            quantized: false,
                             progress_callback: (progress) => {
                                 if (progress.status === 'progress') {
                                     const percent = Math.min(Math.round(progress.progress * 100), 100);
@@ -1764,45 +1764,83 @@
                     // Give UI a chance to update before blocking preprocessing
                     await new Promise(resolve => setTimeout(resolve, 50));
 
-                    // Preprocess audio for Whisper (based on xenova/whisper-web implementation)
-                    let audioData;
+                    // === Preprocess audio (stereo->mono, resample to 16k, optional normalize, light HPF) ===
+                    const originalSampleRate = this.audioBuffer.sampleRate;
+                    const targetSampleRate = 16000; // Whisper expects 16k
+                    let mono;
                     if (this.audioBuffer.numberOfChannels === 2) {
-                        // Stereo to mono conversion with proper scaling
                         const SCALING_FACTOR = Math.sqrt(2);
                         const left = this.audioBuffer.getChannelData(0);
                         const right = this.audioBuffer.getChannelData(1);
-                        audioData = new Float32Array(left.length);
+                        mono = new Float32Array(left.length);
                         for (let i = 0; i < left.length; i++) {
-                            audioData[i] = SCALING_FACTOR * (left[i] + right[i]) / 2;
+                            mono[i] = SCALING_FACTOR * (left[i] + right[i]) / 2;
                         }
                     } else {
-                        // Mono audio - use first channel
-                        audioData = new Float32Array(this.audioBuffer.getChannelData(0));
+                        mono = new Float32Array(this.audioBuffer.getChannelData(0));
                     }
 
-                    // Audio normalization: Find the maximum amplitude and normalize if too quiet
+                    // Resample if needed (simple linear interpolation)
+                    let audioData;
+                    if (originalSampleRate !== targetSampleRate) {
+                        const resampleRatio = originalSampleRate / targetSampleRate;
+                        const newLength = Math.round(mono.length / resampleRatio);
+                        audioData = new Float32Array(newLength);
+                        for (let i = 0; i < newLength; i++) {
+                            const origIndex = i * resampleRatio;
+                            const i0 = Math.floor(origIndex);
+                            const i1 = Math.min(i0 + 1, mono.length - 1);
+                            const t = origIndex - i0;
+                            audioData[i] = mono[i0] * (1 - t) + mono[i1] * t;
+                        }
+                    } else {
+                        audioData = mono;
+                    }
+
+                    // Normalization only if below target (never attenuate)
                     let maxAmplitude = 0;
                     for (let i = 0; i < audioData.length; i++) {
-                        maxAmplitude = Math.max(maxAmplitude, Math.abs(audioData[i]));
+                        const v = Math.abs(audioData[i]);
+                        if (v > maxAmplitude) maxAmplitude = v;
                     }
-                    
-                    // Always normalize audio to a consistent level for better Whisper performance
-                    if (maxAmplitude > 0) {
-                        const targetAmplitude = 0.8; // Target 80% of max range for better speech detection
-                        const amplificationFactor = targetAmplitude / maxAmplitude;
-                        for (let i = 0; i < audioData.length; i++) {
-                            audioData[i] *= amplificationFactor;
-                        }
-                        console.log(`Audio normalized: max amplitude was ${maxAmplitude.toFixed(4)}, amplified by ${amplificationFactor.toFixed(2)}x to ${targetAmplitude}`);
+                    const targetAmplitude = 0.8;
+                    if (maxAmplitude > 0 && maxAmplitude < targetAmplitude * 0.98) { // add small hysteresis
+                        const gain = targetAmplitude / maxAmplitude;
+                        for (let i = 0; i < audioData.length; i++) audioData[i] *= gain;
+                        console.log(`Normalization applied (Text): peak ${maxAmplitude.toFixed(4)} -> target ${targetAmplitude} (gain ${gain.toFixed(2)})`);
+                    } else {
+                        console.log(`Normalization skipped (Text): peak ${maxAmplitude.toFixed(4)} already near/above target ${targetAmplitude}`);
                     }
-                    
-                    // Apply a simple high-pass filter to reduce low-frequency noise
-                    const filteredData = new Float32Array(audioData.length);
-                    filteredData[0] = audioData[0];
-                    for (let i = 1; i < audioData.length; i++) {
-                        filteredData[i] = audioData[i] - 0.95 * audioData[i-1]; // Simple high-pass
+
+                    // Compute stats pre-filter (avoid spread to prevent RangeError on large arrays)
+                    let preHPFMax = 0; let sumSquares = 0;
+                    for (let i = 0; i < audioData.length; i++) {
+                        const sample = audioData[i];
+                        const av = Math.abs(sample);
+                        if (av > preHPFMax) preHPFMax = av;
+                        sumSquares += sample * sample;
                     }
-                    audioData = filteredData;
+                    const preHPFRms = Math.sqrt(sumSquares / audioData.length);
+
+                    // Light high-pass (one-pole differentiator) - optional, we may disable in retries
+                    const applyHighPass = false; // disabled by default (short clips may lose energy)
+                    if (applyHighPass) {
+                        for (let i = audioData.length - 1; i > 0; i--) audioData[i] = audioData[i] - 0.97 * audioData[i - 1];
+                    }
+
+                    // Post-filter stats
+                    let postMax = 0; let postSumSq=0; for (let i=0;i<audioData.length;i++){ const v=Math.abs(audioData[i]); if (v>postMax) postMax=v; postSumSq+=audioData[i]*audioData[i]; }
+                    const postRms = Math.sqrt(postSumSq / audioData.length);
+
+                    console.log('Preprocess summary (Text):', {
+                        originalSampleRate,
+                        targetSampleRate,
+                        resampled: originalSampleRate !== targetSampleRate,
+                        originalLength: mono.length,
+                        finalLength: audioData.length,
+                        durationSeconds: this.audioBuffer.duration,
+                        preHPFMax, preHPFRms, postMax, postRms, highPassApplied: applyHighPass
+                    });
 
                     this.updateModalProgress('Transcribing audio...');
 
@@ -1818,20 +1856,60 @@
                         maxAmplitude: maxAmplitude
                     });
 
-                    // Run transcription with their exact working parameters
-                    const result = await window.transcriptionPipeline(audioData, {
-                        // Greedy
-                        top_k: 0,
-                        do_sample: false,
-
-                        // Sliding window
-                        chunk_length_s: 30,
-                        stride_length_s: 5,
-
-                        // Return timestamps
-                        return_timestamps: true,
-                        force_full_sequences: false
+                    const baseParams = { top_k: 0, do_sample: false, language: 'english', task: 'transcribe', temperature: 0 };
+                    // Introspect pipeline internals
+                    try {
+                        console.log('Pipeline introspection (Text):', {
+                            modelKeys: Object.keys(window.transcriptionPipeline?.model || {}),
+                            hasProcessor: !!window.transcriptionPipeline?.processor,
+                            config: window.transcriptionPipeline?._config || window.transcriptionPipeline?.model?._config || null
+                        });
+                    } catch(e){ console.warn('Pipeline introspection failed', e); }
+                    const modelIdInitial = window.transcriptionPipeline?.model?.modelId || window.transcriptionPipeline?.model?.id || 'unknown';
+                    console.log('Model (initial) config:', { modelIdInitial, quantized: false, baseParams });
+                    // Always assume worst-case (long) audio: use chunked + timestamps strategy.
+                    const durationSec = this.audioBuffer.duration;
+                    console.log(`Assuming long audio mode unconditionally (duration reported: ${durationSec.toFixed(1)}s).`);
+                    console.log('Audio data diagnostics (Text):', {
+                        type: typeof audioData,
+                        isFloat32Array: audioData instanceof Float32Array,
+                        constructor: audioData.constructor?.name,
+                        length: audioData.length,
+                        samplePreview: Array.from(audioData.slice(0, 8)).map(v=>+v.toFixed(4)),
+                        maxAbs: (()=>{let m=0;for(let i=0;i<audioData.length;i++){const av=Math.abs(audioData[i]); if(av>m)m=av;} return +m.toFixed(4);})()
                     });
+                    const attempts = [
+                        { desc: 'Attempt 0 (chunk30 stride5 ts)', fn: async () => window.transcriptionPipeline(audioData, { ...baseParams, chunk_length_s: 30, stride_length_s: 5, return_timestamps: true }) },
+                        { desc: 'Attempt 1 (chunk60 stride5 ts)', fn: async () => window.transcriptionPipeline(audioData, { ...baseParams, chunk_length_s: 60, stride_length_s: 5, return_timestamps: true }) },
+                        { desc: 'Attempt 2 (word ts chunk30 stride5)', fn: async () => window.transcriptionPipeline(audioData, { ...baseParams, chunk_length_s: 30, stride_length_s: 5, return_timestamps: 'word' }) },
+                        { desc: 'Attempt 3 (raw with timestamps)', fn: async () => window.transcriptionPipeline(audioData, { ...baseParams, return_timestamps: true }) },
+                        { desc: 'Attempt 4 (raw minimal fallback)', fn: async () => window.transcriptionPipeline(audioData) }
+                    ];
+                    let result = null; let successAttempt = null; let attemptIndex = 0;
+                    for (const a of attempts) {
+                        this.updateModalProgress(a.desc + '...');
+                        console.log(a.desc + ' starting');
+                        result = await a.fn(); // allow errors to propagate (no catch)
+                        console.log(a.desc + ' raw result preview:', { textLen: result?.text?.length, keys: Object.keys(result||{}) });
+                        if (result?.text && result.text.trim().length > 0) { successAttempt = a.desc; break; }
+                        console.warn(a.desc + ' empty');
+                        attemptIndex++;
+                    }
+                    if ((!result?.text || result.text.trim().length === 0)) {
+                        console.warn('All attempts empty, loading fallback base model (unquantized)');
+                        this.updateModalProgress('Fallback model...');
+                        const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js');
+                        window.transcriptionPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en', { quantized: false });
+                        this.updateModalProgress('Fallback inference...');
+                        // Always force timestamps + chunk on fallback
+                        result = await window.transcriptionPipeline(audioData, { ...baseParams, return_timestamps: true, chunk_length_s: 30, stride_length_s: 5 });
+                        if (!result?.text || result.text.trim().length === 0) {
+                            console.warn('Fallback attempt produced empty text; issuing raw fallback call');
+                            result = await window.transcriptionPipeline(audioData);
+                        }
+                        if (result?.text && result.text.trim().length > 0) successAttempt = 'Fallback base model';
+                    }
+                    console.log('Transcription attempts summary (Text):', { successAttempt, modelIdInitial });
 
                     // Debug: Log transcription result with more detail
                     console.log('Transcription result:', result);
@@ -1850,8 +1928,8 @@
                     this.hideTranscriptionModal();
                     this.updateStatus('Transcription failed');
                     this.elements.transcriptionContent.innerHTML = `
-                        <div style="color: var(--button-danger); padding: 20px; text-align: center;">
-                            ❌ Transcription failed: ${error.message}
+                        <div style="color: var(--button-danger); padding: 20px; text-align: left; font-family: monospace; white-space: pre-wrap;">
+                            ❌ Transcription failed: ${error.message}\n\n${error.stack || ''}
                         </div>
                     `;
                     
@@ -1881,8 +1959,8 @@
                         
                         const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js');
                         
-                        window.transcriptionPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en', {
-                            quantized: true,
+                        window.transcriptionPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en', {
+                            quantized: false,
                             progress_callback: (progress) => {
                                 if (progress.status === 'progress') {
                                     const percent = Math.min(Math.round(progress.progress * 100), 100);
@@ -1905,45 +1983,58 @@
                     // Give UI a chance to update before blocking preprocessing
                     await new Promise(resolve => setTimeout(resolve, 50));
 
-                    // Preprocess audio for Whisper (based on xenova/whisper-web implementation)
-                    let audioData;
+                    // === Preprocess audio (stereo->mono, resample to 16k, optional normalize, light HPF) ===
+                    const originalSampleRate = this.audioBuffer.sampleRate;
+                    const targetSampleRate = 16000;
+                    let mono;
                     if (this.audioBuffer.numberOfChannels === 2) {
-                        // Stereo to mono conversion with proper scaling
                         const SCALING_FACTOR = Math.sqrt(2);
                         const left = this.audioBuffer.getChannelData(0);
                         const right = this.audioBuffer.getChannelData(1);
-                        audioData = new Float32Array(left.length);
-                        for (let i = 0; i < left.length; i++) {
-                            audioData[i] = SCALING_FACTOR * (left[i] + right[i]) / 2;
-                        }
+                        mono = new Float32Array(left.length);
+                        for (let i = 0; i < left.length; i++) mono[i] = SCALING_FACTOR * (left[i] + right[i]) / 2;
                     } else {
-                        // Mono audio - use first channel
-                        audioData = new Float32Array(this.audioBuffer.getChannelData(0));
+                        mono = new Float32Array(this.audioBuffer.getChannelData(0));
                     }
-
-                    // Audio normalization: Find the maximum amplitude and normalize if too quiet
-                    let maxAmplitude = 0;
-                    for (let i = 0; i < audioData.length; i++) {
-                        maxAmplitude = Math.max(maxAmplitude, Math.abs(audioData[i]));
-                    }
-                    
-                    // Always normalize audio to a consistent level for better Whisper performance
-                    if (maxAmplitude > 0) {
-                        const targetAmplitude = 0.8; // Target 80% of max range for better speech detection
-                        const amplificationFactor = targetAmplitude / maxAmplitude;
-                        for (let i = 0; i < audioData.length; i++) {
-                            audioData[i] *= amplificationFactor;
+                    let audioData;
+                    if (originalSampleRate !== targetSampleRate) {
+                        const ratio = originalSampleRate / targetSampleRate;
+                        const newLength = Math.round(mono.length / ratio);
+                        audioData = new Float32Array(newLength);
+                        for (let i = 0; i < newLength; i++) {
+                            const origIndex = i * ratio;
+                            const i0 = Math.floor(origIndex);
+                            const i1 = Math.min(i0 + 1, mono.length - 1);
+                            const t = origIndex - i0;
+                            audioData[i] = mono[i0] * (1 - t) + mono[i1] * t;
                         }
-                        console.log(`Audio normalized (JSON): max amplitude was ${maxAmplitude.toFixed(4)}, amplified by ${amplificationFactor.toFixed(2)}x to ${targetAmplitude}`);
+                    } else { audioData = mono; }
+                    let maxAmplitude = 0;
+                    for (let i = 0; i < audioData.length; i++) { const v = Math.abs(audioData[i]); if (v > maxAmplitude) maxAmplitude = v; }
+                    const targetAmplitude = 0.8;
+                    if (maxAmplitude > 0 && maxAmplitude < targetAmplitude * 0.98) {
+                        const gain = targetAmplitude / maxAmplitude;
+                        for (let i = 0; i < audioData.length; i++) audioData[i] *= gain;
+                        console.log(`Normalization applied (JSON): peak ${maxAmplitude.toFixed(4)} -> target ${targetAmplitude}`);
+                    } else {
+                        console.log(`Normalization skipped (JSON): peak ${maxAmplitude.toFixed(4)} near/above ${targetAmplitude}`);
                     }
-                    
-                    // Apply a simple high-pass filter to reduce low-frequency noise
-                    const filteredData = new Float32Array(audioData.length);
-                    filteredData[0] = audioData[0];
-                    for (let i = 1; i < audioData.length; i++) {
-                        filteredData[i] = audioData[i] - 0.95 * audioData[i-1]; // Simple high-pass
-                    }
-                    audioData = filteredData;
+                    let preHPFMax = 0; let sumSquares = 0;
+                    for (let i=0;i<audioData.length;i++){ const s = audioData[i]; const av=Math.abs(s); if (av>preHPFMax) preHPFMax = av; sumSquares += s*s; }
+                    const preHPFRms = Math.sqrt(sumSquares / audioData.length);
+                    const applyHighPass = false;
+                    if (applyHighPass) { for (let i = audioData.length - 1; i > 0; i--) audioData[i] = audioData[i] - 0.97 * audioData[i - 1]; }
+                    let postMax = 0; let postSumSq=0; for (let i=0;i<audioData.length;i++){ const v=Math.abs(audioData[i]); if (v>postMax) postMax=v; postSumSq+=audioData[i]*audioData[i]; }
+                    const postRms = Math.sqrt(postSumSq / audioData.length);
+                    console.log('Preprocess summary (JSON):', {
+                        originalSampleRate,
+                        targetSampleRate,
+                        resampled: originalSampleRate !== targetSampleRate,
+                        originalLength: mono.length,
+                        finalLength: audioData.length,
+                        durationSeconds: this.audioBuffer.duration,
+                        preHPFMax, preHPFRms, postMax, postRms, highPassApplied: applyHighPass
+                    });
 
                     this.updateModalProgress('Transcribing audio...');
 
@@ -1959,20 +2050,57 @@
                         maxAmplitude: maxAmplitude
                     });
 
-                    // Run transcription with their exact working parameters
-                    const result = await window.transcriptionPipeline(audioData, {
-                        // Greedy
-                        top_k: 0,
-                        do_sample: false,
-
-                        // Sliding window
-                        chunk_length_s: 30,
-                        stride_length_s: 5,
-
-                        // Return timestamps
-                        return_timestamps: true,
-                        force_full_sequences: false
+                    const baseParams = { top_k: 0, do_sample: false, language: 'english', task: 'transcribe', temperature: 0 };
+                    try {
+                        console.log('Pipeline introspection (JSON):', {
+                            modelKeys: Object.keys(window.transcriptionPipeline?.model || {}),
+                            hasProcessor: !!window.transcriptionPipeline?.processor,
+                            config: window.transcriptionPipeline?._config || window.transcriptionPipeline?.model?._config || null
+                        });
+                    } catch(e){ console.warn('Pipeline introspection failed (JSON)', e); }
+                    const modelIdInitial = window.transcriptionPipeline?.model?.modelId || window.transcriptionPipeline?.model?.id || 'unknown';
+                    console.log('Model (initial JSON) config:', { modelIdInitial, quantized: false, baseParams });
+                    const durationSec = this.audioBuffer.duration;
+                    console.log(`Assuming long audio mode unconditionally (JSON) (duration reported: ${durationSec.toFixed(1)}s).`);
+                    console.log('Audio data diagnostics (JSON):', {
+                        type: typeof audioData,
+                        isFloat32Array: audioData instanceof Float32Array,
+                        constructor: audioData.constructor?.name,
+                        length: audioData.length,
+                        samplePreview: Array.from(audioData.slice(0, 8)).map(v=>+v.toFixed(4)),
+                        maxAbs: (()=>{let m=0;for(let i=0;i<audioData.length;i++){const av=Math.abs(audioData[i]); if(av>m)m=av;} return +m.toFixed(4);})()
                     });
+                    const attempts = [
+                        { desc: 'Attempt 0 (chunk30 stride5 ts)', fn: async () => window.transcriptionPipeline(audioData, { ...baseParams, chunk_length_s: 30, stride_length_s: 5, return_timestamps: true }) },
+                        { desc: 'Attempt 1 (chunk60 stride5 ts)', fn: async () => window.transcriptionPipeline(audioData, { ...baseParams, chunk_length_s: 60, stride_length_s: 5, return_timestamps: true }) },
+                        { desc: 'Attempt 2 (word ts chunk30 stride5)', fn: async () => window.transcriptionPipeline(audioData, { ...baseParams, chunk_length_s: 30, stride_length_s: 5, return_timestamps: 'word' }) },
+                        { desc: 'Attempt 3 (raw with timestamps)', fn: async () => window.transcriptionPipeline(audioData, { ...baseParams, return_timestamps: true }) },
+                        { desc: 'Attempt 4 (raw minimal fallback)', fn: async () => window.transcriptionPipeline(audioData) }
+                    ];
+                    let result = null; let successAttempt = null; let attemptIndex = 0;
+                    for (const a of attempts) {
+                        this.updateModalProgress(a.desc + '...');
+                        console.log(a.desc + ' starting (JSON)');
+                        result = await a.fn();
+                        console.log(a.desc + ' raw result preview (JSON):', { textLen: result?.text?.length, keys: Object.keys(result||{}) });
+                        if (result?.text && result.text.trim().length > 0) { successAttempt = a.desc; break; }
+                        console.warn(a.desc + ' empty (JSON)');
+                        attemptIndex++;
+                    }
+                    if ((!result?.text || result.text.trim().length === 0)) {
+                        console.warn('All attempts empty (JSON), loading fallback base model (unquantized)');
+                        this.updateModalProgress('Fallback model...');
+                        const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js');
+                        window.transcriptionPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en', { quantized: false });
+                        this.updateModalProgress('Fallback inference...');
+                        result = await window.transcriptionPipeline(audioData, { ...baseParams, return_timestamps: true, chunk_length_s: 30, stride_length_s: 5 });
+                        if (!result?.text || result.text.trim().length === 0) {
+                            console.warn('Fallback minimal attempt empty (JSON); trying raw');
+                            result = await window.transcriptionPipeline(audioData);
+                        }
+                        if (result?.text && result.text.trim().length > 0) successAttempt = 'Fallback base model';
+                    }
+                    console.log('Transcription attempts summary (JSON):', { successAttempt, modelIdInitial });
 
                     // Debug: Log transcription result with more detail
                     console.log('Transcription result (JSON):', result);
@@ -1991,8 +2119,8 @@
                     this.hideTranscriptionModal();
                     this.updateStatus('Transcription failed');
                     this.elements.transcriptionContent.innerHTML = `
-                        <div style="color: var(--button-danger); padding: 20px; text-align: center;">
-                            ❌ Transcription failed: ${error.message}
+                        <div style="color: var(--button-danger); padding: 20px; text-align: left; font-family: monospace; white-space: pre-wrap;">
+                            ❌ Transcription failed: ${error.message}\n\n${error.stack || ''}
                         </div>
                     `;
                     
