@@ -513,7 +513,25 @@
                     // Load saved volume level
                     this.loadVolumeFromStorage();
                     
-                    // Request microphone access
+                    // Set up audio analysis for meter (no microphone yet)
+                    this.analyser = this.audioContext.createAnalyser();
+                    this.analyser.fftSize = 256;
+                    this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+                    
+                    // Start meter animation (will show idle state when nothing connected)
+                    this.startMeterAnimation();
+                } catch (error) {
+                    console.error('Error initializing audio context:', error);
+                    this.updateStatus('Audio initialization failed');
+                }
+            }
+
+            async requestMicrophoneAccess() {
+                if (this.stream && this.microphoneSource) {
+                    return true; // Already have access
+                }
+
+                try {
                     this.stream = await navigator.mediaDevices.getUserMedia({ 
                         audio: {
                             echoCancellation: true,
@@ -522,19 +540,24 @@
                         } 
                     });
                     
-                    // Set up audio analysis for meter
-                    this.analyser = this.audioContext.createAnalyser();
-                    this.analyser.fftSize = 256;
-                    this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-                    
-                    // Create microphone source but don't connect it initially
+                    // Create microphone source
                     this.microphoneSource = this.audioContext.createMediaStreamSource(this.stream);
-                    
-                    // Start meter animation (will show idle state when nothing connected)
-                    this.startMeterAnimation();
+                    return true;
                 } catch (error) {
                     console.error('Error accessing microphone:', error);
                     this.updateStatus('Microphone access denied');
+                    return false;
+                }
+            }
+
+            releaseMicrophoneAccess() {
+                if (this.stream) {
+                    // Stop all tracks to release microphone
+                    this.stream.getTracks().forEach(track => {
+                        track.stop();
+                    });
+                    this.stream = null;
+                    this.microphoneSource = null;
                 }
             }
 
@@ -663,6 +686,12 @@
                     this.stop();
                 }
 
+                // Request microphone access just-in-time
+                const micAccess = await this.requestMicrophoneAccess();
+                if (!micAccess) {
+                    return; // Failed to get microphone access
+                }
+
                 // Move position to the end of existing audio before starting recording
                 if (this.audioBuffer) {
                     this.currentPosition = this.audioBuffer.duration;
@@ -720,10 +749,13 @@
                     } catch (e) {
                         // Microphone might already be disconnected
                     }
+                    
+                    // Release microphone access to stop the recording indicator
+                    this.releaseMicrophoneAccess();
                 }
             }
 
-            startPTT() {
+            async startPTT() {
                 if (!this.isPTT && !this.isRecording) {
                     // Stop playback if it's currently playing
                     if (this.isPlaying) {
@@ -731,7 +763,7 @@
                     }
                     
                     this.isPTT = true;
-                    this.startRecording(); // This will connect the microphone
+                    await this.startRecording(); // This will request microphone access
                     this.elements.pttBtn.classList.add('recording');
                 }
             }
@@ -739,7 +771,7 @@
             stopPTT() {
                 if (this.isPTT) {
                     this.isPTT = false;
-                    this.stopRecording(); // This will disconnect the microphone
+                    this.stopRecording(); // This will release microphone access
                     this.elements.pttBtn.classList.remove('recording');
                     // UI will be updated when processRecording completes
                 }
@@ -960,6 +992,11 @@
                     } catch (e) {
                         // Microphone might already be disconnected
                     }
+                }
+                
+                // Release microphone when stopping to clear recording indicator
+                if (!this.isRecording && !this.isPTT) {
+                    this.releaseMicrophoneAccess();
                 }
                 
                 this.currentPosition = 0;
