@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dictaphone</title>
     <link rel="icon" type="image/x-icon" href="favicon.ico">
-    <!-- Dynamic manifest injected at runtime to preserve single-file SPA -->
     <style>
         :root {
             --bg-color: #ffffff;
@@ -409,9 +408,6 @@
             <button class="button success" id="playBtn" title="Play (P)">
                 <span>▶️</span> Play
             </button>
-            <button class="button" id="keepAwakeBtn" title="Prevent screen sleep / throttling">
-                <span>⚡</span> Keep Awake
-            </button>
         </div>
 
         <div class="skip-controls">
@@ -540,14 +536,6 @@
     </div>
 
     <script>
-    /*
-     * Single-file Dictaphone Notes:
-     * - Service Worker: Cannot be registered from a blob: URL on GitHub Pages. A separate sw.js file would
-     *   violate the single-file constraint, so offline shell caching is intentionally disabled.
-     * - Manifest: start_url omitted to suppress invalid URL warnings under this hosting path setup.
-     * - Persistence: Audio is still cached via Cache API entry 'dictaphone-audio'; clearing browser data or
-     *   using a different path will reset it. This keeps core functionality while honoring one-file design.
-     */
         class Dictaphone {
             constructor() {
                 this.audioContext = null;
@@ -570,10 +558,6 @@
                 this.recordingStartPosition = 0;
                 this.isDragging = false;
                 this.currentThemeMode = 'system'; // Track the current theme mode (system/light/dark)
-                // Background persistence helpers
-                this.wakeLock = null;
-                this.keepAwakeEnabled = false;
-                this.hiddenVideo = null; // fallback tiny looping video element
                 
                 this.initializeElements();
                 this.initializeAudio();
@@ -589,7 +573,6 @@
                     pttBtn: document.getElementById('pttBtn'),
                     stopBtn: document.getElementById('stopBtn'),
                     playBtn: document.getElementById('playBtn'),
-                    keepAwakeBtn: document.getElementById('keepAwakeBtn'),
                     skipBackBtn: document.getElementById('skipBackBtn'),
                     skipForwardBtn: document.getElementById('skipForwardBtn'),
                     positionSlider: document.getElementById('positionSlider'),
@@ -632,10 +615,6 @@
                     
                     // Start meter animation (will show idle state when nothing connected)
                     this.startMeterAnimation();
-                    // Register service worker & visibility handlers early
-                    this.injectManifest();
-                    this.registerServiceWorker();
-                    this.setupVisibilityHandlers();
                 } catch (error) {
                     console.error('Error initializing audio context:', error);
                     this.updateStatus('Audio initialization failed');
@@ -682,7 +661,6 @@
                 this.elements.recordBtn.addEventListener('click', () => this.toggleRecord());
                 this.elements.stopBtn.addEventListener('click', () => this.stop());
                 this.elements.playBtn.addEventListener('click', () => this.togglePlay());
-                if (this.elements.keepAwakeBtn) this.elements.keepAwakeBtn.addEventListener('click', () => this.toggleWakeLock());
                 this.elements.skipBackBtn.addEventListener('click', () => this.skipBack());
                 this.elements.skipForwardBtn.addEventListener('click', () => this.skipForward());
                 this.elements.exportBtn.addEventListener('click', () => this.export());
@@ -1557,130 +1535,6 @@
                 }
             }
 
-            /* =============================
-               Background Persistence (Best Effort)
-               ============================= */
-            async registerServiceWorker() {
-                // Single-file mode on GitHub Pages: cannot register a Service Worker from a blob: URL.
-                // A SW would require an external file (e.g. sw.js) at or below scope root, which breaks the
-                // "one HTML file only" requirement. We therefore skip registration entirely.
-                // Offline caching of the HTML shell is not available, but we still use Cache API for audio blobs.
-                if ('serviceWorker' in navigator) {
-                    console.info('[SW] Skipped (single-file mode / blob SW unsupported). No offline shell cache; audio persistence uses Cache API key only.');
-                }
-            }
-
-            injectManifest() {
-                try {
-                    // Omit start_url to avoid manifest warning in single-file GitHub Pages context;
-                    // relative computed path produced an "invalid" warning previously.
-                    const manifest = {
-                        name: 'Dictaphone',
-                        short_name: 'Dictaphone',
-                        description: 'Offline, private in-browser dictaphone with Whisper transcription.',
-                        display: 'standalone',
-                        background_color: '#1a1a1a',
-                        theme_color: '#0d6efd',
-                        orientation: 'any',
-                        icons: []
-                    };
-                    const blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
-                    const url = URL.createObjectURL(blob);
-                    let link = document.querySelector('link[rel="manifest"]');
-                    if (!link) { link = document.createElement('link'); link.rel = 'manifest'; document.head.appendChild(link); }
-                    link.href = url;
-                } catch (e) {
-                    console.warn('Manifest injection failed', e);
-                }
-            }
-
-            setupVisibilityHandlers() {
-                document.addEventListener('visibilitychange', () => {
-                    if (document.visibilityState === 'visible') {
-                        // Re-acquire wake lock if user still wants it
-                        if (this.keepAwakeEnabled && !this.wakeLock) {
-                            this.acquireWakeLock();
-                        }
-                    }
-                });
-            }
-
-            async acquireWakeLock() {
-                if (!this.keepAwakeEnabled) return; // user may have toggled off
-                if (!('wakeLock' in navigator)) {
-                    console.log('[WakeLock] API unsupported, enabling fallback');
-                    this.enableFallbackVideo();
-                    return;
-                }
-                try {
-                    this.wakeLock = await navigator.wakeLock.request('screen');
-                    console.log('[WakeLock] Acquired');
-                    this.wakeLock.addEventListener('release', () => {
-                        console.log('[WakeLock] Released');
-                        this.wakeLock = null;
-                        if (this.keepAwakeEnabled) {
-                            // Attempt to re-acquire (browser may release on screen off)
-                            setTimeout(() => this.acquireWakeLock(), 1200);
-                        }
-                    });
-                } catch (err) {
-                    console.warn('[WakeLock] Failed, using fallback', err);
-                    this.enableFallbackVideo();
-                }
-            }
-
-            releaseWakeLock() {
-                if (this.wakeLock) {
-                    try { this.wakeLock.release(); } catch(_) {}
-                    this.wakeLock = null;
-                }
-                this.disableFallbackVideo();
-            }
-
-            enableFallbackVideo() {
-                if (this.hiddenVideo) return; // already active
-                const v = document.createElement('video');
-                v.setAttribute('playsinline', '');
-                v.muted = true; v.loop = true; v.width = 1; v.height = 1;
-                v.style.cssText = 'position:fixed;bottom:0;left:0;opacity:0;pointer-events:none;z-index:-1;';
-                // Tiny blank webm (won't always prevent throttling but can help)
-                v.src = 'data:video/webm;base64,GkXfo0AgQoaBAUL3gQFC8oEEQvOBCEKCBAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAA/////wAAAD+//////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
-                document.body.appendChild(v);
-                v.play().catch(()=>{});
-                this.hiddenVideo = v;
-                console.log('[Fallback] Hidden video enabled');
-            }
-
-            disableFallbackVideo() {
-                if (this.hiddenVideo) {
-                    try { this.hiddenVideo.pause(); } catch(_) {}
-                    this.hiddenVideo.remove();
-                    this.hiddenVideo = null;
-                    console.log('[Fallback] Hidden video removed');
-                }
-            }
-
-            toggleWakeLock() {
-                this.keepAwakeEnabled = !this.keepAwakeEnabled;
-                if (this.keepAwakeEnabled) {
-                    this.acquireWakeLock();
-                    this.updateStatus('Keep Awake enabled');
-                    console.log('[Info] Keep Awake attempts to reduce suspension; OS may still throttle in background.');
-                } else {
-                    this.releaseWakeLock();
-                    this.updateStatus('Keep Awake disabled');
-                }
-                this.updateKeepAwakeButton();
-            }
-
-            updateKeepAwakeButton() {
-                if (!this.elements.keepAwakeBtn) return;
-                const btn = this.elements.keepAwakeBtn;
-                btn.classList.toggle('success', this.keepAwakeEnabled);
-                btn.innerHTML = this.keepAwakeEnabled ? '<span>⚡</span> Awake ON' : '<span>⚡</span> Keep Awake';
-                btn.title = this.keepAwakeEnabled ? 'Click to allow screen sleep' : 'Prevent screen sleep / throttling';
-            }
-
             updateThemeIcon(mode) {
                 const icons = {
                     'system': '🌓', // Half moon for system (auto)
@@ -2064,7 +1918,6 @@
                 } else {
                     this.elements.pttBtn.classList.remove('recording');
                 }
-                this.updateKeepAwakeButton();
             }
         }
 
