@@ -106,6 +106,9 @@
     <button id="btnImport" class="fab" title="Import image" aria-label="Import image">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Zm0 2v9.59l-3.3-3.3a1 1 0 0 0-1.4 0L9 16l-2.3-2.3a1 1 0 0 0-1.4 0L5 14.99V5h14ZM7.5 8.5A1.5 1.5 0 1 0 9 7a1.5 1.5 0 0 0-1.5 1.5Z"/></svg>
     </button>
+    <button id="btnFit" class="fab" title="Fit view" aria-label="Fit view">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H3v4h2V5h2V3Zm14 0h-4v2h2v2h2V3ZM3 17v4h4v-2H5v-2H3Zm16 2h-2v2h4v-4h-2v2ZM7 11h2v2H7v-2Zm4 0h2v2h-2v-2Zm4 0h2v2h-2v-2Z"/></svg>
+    </button>
     <button id="btnFull" class="fab" title="Enter fullscreen" aria-label="Toggle fullscreen">
       <svg id="iconFull" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5h2V5h3V3Zm13 0h-5v2h3v3h2V3ZM3 21h5v-2H5v-3H3v5Zm18-5h-2v3h-3v2h5v-5Z"/></svg>
     </button>
@@ -184,6 +187,7 @@
   const impBegin = document.getElementById('impBegin');
   const impCancel = document.getElementById('impCancel');
   const btnImport = document.getElementById('btnImport');
+  const btnFit = document.getElementById('btnFit');
   const btnFull = document.getElementById('btnFull');
   const iconFull = document.getElementById('iconFull');
   const btnTheme = document.getElementById('btnTheme');
@@ -196,9 +200,12 @@
 
   let scale = 1, tx = 0, ty = 0; // world transform
   const minScale = 0.05, maxScale = 4;
+  const TOUCH_DRAG_OFFSET_PX = 56; // keep piece above finger by ~56px in screen space
 
   // current puzzle metrics
   let cellW = 0, cellH = 0, edgeTabRMax = 0;
+  // Flattened final image (after completion)
+  let flattened = null; // { x, y }
 
     const rng = (seed) => () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
 
@@ -298,6 +305,11 @@
       applyTheme(next);
     });
 
+    // Fit View button
+    btnFit.addEventListener('click', () => {
+      fitView(getContentBounds());
+    });
+
   // Modal UX: backdrop click and Escape to cancel
   importModal.addEventListener('click', (e) => { if(e.target === importModal) importModal.style.display = 'none'; });
   window.addEventListener('keydown', (e) => { if(e.key === 'Escape' && importModal.style.display === 'flex') importModal.style.display = 'none'; });
@@ -345,7 +357,7 @@
       // Reset layers/state
       piecesLayer.innerHTML = '';
       defs.innerHTML = '';
-      pieces = []; groups.clear(); nextGroupId = 1; winEl.style.display = 'none';
+      pieces = []; groups.clear(); nextGroupId = 1; winEl.style.display = 'none'; flattened = null;
 
       // Prepare edges
       hEdges = Array.from({length: rows+1}, () => Array(cols).fill(null));
@@ -501,6 +513,9 @@
 
     function getContentBounds(){
       // Compute world-space bounds of all piece rectangles with a margin for tabs
+      if(flattened){
+        return { minX: flattened.x, minY: flattened.y, maxX: flattened.x + imgW, maxY: flattened.y + imgH };
+      }
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       const tabMargin = edgeTabRMax + Math.min(cellW, cellH) * 0.05;
       groups.forEach(gr => {
@@ -568,6 +583,33 @@
       winEl.style.display='flex';
       // Hide all shading so the finished image looks flat
       document.querySelectorAll('.edge-shade').forEach(el => el.style.display = 'none');
+      // Flatten solved puzzle to a single image for performance
+      try{
+        // Use any remaining group's translate as the solved offset
+        let gx = 0, gy = 0;
+        if(groups && groups.size){
+          for(const gr of groups.values()){ gx = gr.x || 0; gy = gr.y || 0; break; }
+        }
+        // Clear heavy defs and per-piece DOM
+        defs.innerHTML = '';
+        piecesLayer.innerHTML = '';
+        const flatG = document.createElementNS('http://www.w3.org/2000/svg','g');
+        flatG.setAttribute('id','flat');
+        flatG.setAttribute('transform', `translate(${gx},${gy})`);
+        const flatImg = document.createElementNS('http://www.w3.org/2000/svg','image');
+        flatImg.setAttribute('href', imgHref);
+        flatImg.setAttribute('x','0');
+        flatImg.setAttribute('y','0');
+        flatImg.setAttribute('width', imgW);
+        flatImg.setAttribute('height', imgH);
+        flatImg.setAttribute('preserveAspectRatio','none');
+        flatG.appendChild(flatImg);
+        piecesLayer.appendChild(flatG);
+        flattened = { x: gx, y: gy };
+        // Free groups/pieces memory
+        groups.clear();
+        pieces = [];
+      }catch(_){}
     }
 
     function updateJoinedStatus(){
@@ -730,7 +772,8 @@
         }
         // start drag group
         const wgrp = { x: grp.x, y: grp.y };
-        dragging = { groupId: grp.id, dx: wpt.x - wgrp.x, dy: wpt.y - wgrp.y };
+        const isTouch = e.pointerType === 'touch';
+        dragging = { groupId: grp.id, dx: wpt.x - wgrp.x, dy: wpt.y - wgrp.y, touch: !!isTouch };
         e.preventDefault();
         return;
       }
@@ -763,8 +806,9 @@
       if(dragging){
         const grp = groups.get(dragging.groupId);
         const wpt = screenToWorld({ x: e.clientX, y: e.clientY });
+        const oy = dragging.touch ? -(TOUCH_DRAG_OFFSET_PX / scale) : 0;
         // Queue transform to next animation frame
-        dragNext = { gid: grp.id, x: wpt.x - dragging.dx, y: wpt.y - dragging.dy };
+        dragNext = { gid: grp.id, x: wpt.x - dragging.dx, y: wpt.y - dragging.dy + oy };
         if(!dragAnimId){
           dragAnimId = requestAnimationFrame(() => {
             dragAnimId = 0;
@@ -794,7 +838,10 @@
         // Flush any pending drag update
         if(dragAnimId){ cancelAnimationFrame(dragAnimId); dragAnimId = 0; }
         if(dragNext){ setGroupTransform(dragNext.gid, dragNext.x, dragNext.y); dragNext = null; }
-        trySnapGroup(gid);
+        // Avoid snapping if puzzle is already flattened or group no longer exists
+        if(!flattened && groups && groups.has(gid)){
+          trySnapGroup(gid);
+        }
       }
       if(panning){ panning = null; }
       if(svg.releasePointerCapture){ try{ svg.releasePointerCapture(e.pointerId); }catch(_){} }
@@ -815,22 +862,34 @@
 
     // --- Snapping ---
     function trySnapGroup(gid){
-      const grp = groups.get(gid); if(!grp) return;
+      // Do nothing if the puzzle has been flattened (completed)
+      if(flattened) return;
+      let grp = groups.get(gid); if(!grp) return;
       // For any piece in this group, check neighbors outside group for proximity
       const tol = snapTol / scale; // adjust for zoom
       let snapped = false;
-      for(const pid of grp.members){
+      // Snapshot member ids to avoid mutation issues during merges
+      const memberIds = Array.from(grp.members);
+      for(const pid of memberIds){
+        if(flattened || !groups || groups.size === 0 || !pieces || pieces.length === 0) return;
         const p = pieces[pid];
+        if(!p) continue;
         const nbrs = neighbors(p.r, p.c);
         for(const nb of nbrs){
           const qid = nb.r*cols + nb.c;
+          if(flattened || !groups || groups.size === 0 || !pieces || pieces.length === 0) return;
           const q = pieces[qid];
+          if(!q) continue;
+          if(!groups.has(grp.id) || !groups.has(q.groupId)) continue;
           if(q.groupId === grp.id) continue; // same group
           // Compute expected delta between anchors in solved state
           const expected = { x: (q.c - p.c)*(imgW/cols), y: (q.r - p.r)*(imgH/rows) };
           // Current world positions of anchors
-          const pw = { x: p.anchor.x + groups.get(p.groupId).x, y: p.anchor.y + groups.get(p.groupId).y };
-          const qw = { x: q.anchor.x + groups.get(q.groupId).x, y: q.anchor.y + groups.get(q.groupId).y };
+          const pGrp = groups.get(p.groupId);
+          const qGrp = groups.get(q.groupId);
+          if(!pGrp || !qGrp) continue;
+          const pw = { x: p.anchor.x + pGrp.x, y: p.anchor.y + pGrp.y };
+          const qw = { x: q.anchor.x + qGrp.x, y: q.anchor.y + qGrp.y };
           const dx = (qw.x - pw.x) - expected.x;
           const dy = (qw.y - pw.y) - expected.y;
           if(Math.hypot(dx, dy) <= tol){
@@ -840,14 +899,18 @@
             const newId = mergeGroups(grp.id, q.groupId);
             snapped = true;
             // Update reference to possibly new group id
-            grp.id = newId;
+            if(flattened || !groups || groups.size === 0) return;
+            grp = groups.get(newId);
+            if(!grp) return;
             // After merge, continue to check for cascading joins
           }
         }
       }
       if(snapped){
         // Try a quick flood to snap any other immediate neighbors
-        trySnapGroup(grp.id);
+        if(!flattened && groups && groups.has(grp.id)){
+          trySnapGroup(grp.id);
+        }
       }
     }
 
