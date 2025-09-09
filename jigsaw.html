@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Jigsaw Puzzle</title>
+  <style>
+    :root {
+      --bg: #0f1320;
+      --panel: #151a2b;
+      --text: #e6f0ff;
+      --muted: #9bb3d1;
+      --accent: #4fc3f7;
+      --accent-2: #7c4dff;
+      --shadow: rgba(0,0,0,0.35);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 800px at 10% 10%, #1a2240 0%, var(--bg) 60%);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+      overflow: hidden; /* we manage panning/zoom inside */
+      touch-action: none; /* we provide custom pan/zoom/drag */
+    }
+
+    .toolbar {
+      position: absolute;
+      top: 12px; left: 12px; right: 12px;
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      background: color-mix(in oklab, var(--panel) 88%, black 0%);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 8px 24px var(--shadow);
+      border-radius: 12px;
+      padding: 10px 12px;
+      z-index: 10;
+      backdrop-filter: blur(8px) saturate(1.1);
+    }
+    .toolbar label { font-size: 12px; color: var(--muted); }
+    .toolbar input[type="number"] { width: 70px; }
+    .toolbar input, .toolbar button, .toolbar select {
+      background: #0f152a;
+      color: var(--text);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 14px;
+      outline: none;
+    }
+    .toolbar button.primary {
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+      border: none;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      cursor: pointer;
+      box-shadow: 0 6px 16px rgba(79, 195, 247, 0.35);
+    }
+    .toolbar .spacer { flex: 1 1 auto; }
+    .toolbar .hint { font-size: 12px; color: var(--muted); opacity: 0.9; }
+
+    .stage {
+      position: absolute; inset: 0; overflow: hidden;
+    }
+
+    svg { width: 100%; height: 100%; display: block; touch-action: none; }
+    #bg { fill: transparent; pointer-events: all; }
+
+    .piece { cursor: grab; }
+    .piece:active { cursor: grabbing; }
+
+  .outline { fill: none; stroke: rgba(255,255,255,0.14); stroke-width: 1; }
+    .highlight { filter: drop-shadow(0 4px 8px rgba(0,0,0,0.35)); }
+    .hud { position: absolute; bottom: 12px; left: 12px; right: 12px; display: flex; justify-content: space-between; pointer-events: none; }
+    .badge { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); padding: 8px 12px; border-radius: 999px; font-size: 12px; color: var(--muted); }
+
+  /* Edge shading visuals */
+  .edge-shade { fill: none; pointer-events: none; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+  .edge-highlight { stroke: rgba(255,255,255,0.7); stroke-width: 2.2; }
+  .edge-shadow { stroke: rgba(0,0,0,0.45); stroke-width: 2.2; }
+
+    .win {
+      position: absolute; inset: 0; display: none; align-items: center; justify-content: center; backdrop-filter: blur(4px);
+      background: rgba(10, 14, 25, 0.35); z-index: 20;
+    }
+    .win .panel { background: var(--panel); border: 1px solid rgba(255,255,255,0.12); padding: 18px 22px; border-radius: 14px; box-shadow: 0 12px 30px var(--shadow); text-align: center; }
+    .win .panel h2 { margin: 0 0 8px 0; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <label>Image <input id="file" type="file" accept="image/*" /></label>
+    <label>Rows <input id="rows" type="number" min="2" max="20" value="4" /></label>
+    <label>Cols <input id="cols" type="number" min="2" max="20" value="6" /></label>
+    <label>Snap <input id="snap" type="number" min="2" max="50" value="12" /></label>
+    <div class="spacer"></div>
+    <button id="shuffle" class="primary">New Puzzle</button>
+    <span class="hint">Tip: drag pieces, two-finger pinch to zoom, two-finger pan. Mouse wheel zoom, right-drag pan.</span>
+  </div>
+  <div class="stage">
+    <svg id="svg" xmlns="http://www.w3.org/2000/svg">
+      <defs id="defs"></defs>
+      <g id="world">
+        <rect id="bg" x="-5000" y="-5000" width="10000" height="10000"></rect>
+        <g id="pieces"></g>
+      </g>
+    </svg>
+    <div class="hud">
+      <div class="badge" id="status">0 / 0 joined</div>
+      <div class="badge" id="zoomLabel">100%</div>
+    </div>
+    <div class="win" id="win">
+      <div class="panel">
+        <h2>🎉 Puzzle Complete!</h2>
+        <div style="margin-bottom:10px;color:var(--muted)">Pinch or scroll to view your masterpiece.</div>
+        <button id="closeWin" class="primary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function(){
+    'use strict';
+
+    // --- State ---
+    const svg = document.getElementById('svg');
+    const world = document.getElementById('world');
+    const defs = document.getElementById('defs');
+    const piecesLayer = document.getElementById('pieces');
+    const statusEl = document.getElementById('status');
+    const zoomLabel = document.getElementById('zoomLabel');
+    const winEl = document.getElementById('win');
+    const closeWin = document.getElementById('closeWin');
+
+    let imgHref = null;
+    let imgW = 0, imgH = 0;
+    let rows = 4, cols = 6;
+    let snapTol = 12;
+
+  let scale = 1, tx = 0, ty = 0; // world transform
+  const minScale = 0.05, maxScale = 4;
+
+  // current puzzle metrics
+  let cellW = 0, cellH = 0, edgeTabRMax = 0;
+
+    const rng = (seed) => () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+
+    // Edge params shared between neighboring pieces
+    let hEdges = []; // horizontal edges [r][c] r:0..rows, c:0..cols-1
+    let vEdges = []; // vertical edges [r][c] r:0..rows-1, c:0..cols
+
+    // Pieces and groups
+    let pieces = []; // {id, r,c, pathD, clipId, g, groupId, anchor:[x,y]}
+    let groups = new Map(); // groupId -> {id, members:Set<pieceId>, g, x,y}
+    let nextGroupId = 1;
+
+    // Active interactions
+    const pointers = new Map(); // id -> {x,y, sx,sy}
+    let dragging = null; // {groupId, dx, dy}
+    let pinching = null; // {startDist, startScale, startTx, startTy, startCenter}
+    let panning = null; // background pan via right mouse or space?
+  let dragAnimId = 0; // rAF id for drag
+  let dragNext = null; // {gid, x, y}
+
+    // --- UI wiring ---
+    const fileInput = document.getElementById('file');
+    const rowsInput = document.getElementById('rows');
+    const colsInput = document.getElementById('cols');
+    const snapInput = document.getElementById('snap');
+    const shuffleBtn = document.getElementById('shuffle');
+
+    fileInput.addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      imgHref = await readFileAsDataURL(f);
+      const dim = await getImageSize(imgHref);
+      imgW = dim.w; imgH = dim.h;
+      updateToolbarEnabled();
+    }, {passive: true});
+
+    rowsInput.addEventListener('change', () => { rows = clamp(int(rowsInput.value, 4), 2, 50); rowsInput.value = rows; });
+    colsInput.addEventListener('change', () => { cols = clamp(int(colsInput.value, 6), 2, 50); colsInput.value = cols; });
+    snapInput.addEventListener('change', () => { snapTol = clamp(int(snapInput.value, 12), 2, 100); snapInput.value = snapTol; });
+    shuffleBtn.addEventListener('click', () => { if (imgHref) initPuzzle(); });
+    closeWin.addEventListener('click', () => { winEl.style.display = 'none'; });
+
+    function updateToolbarEnabled(){ shuffleBtn.disabled = !imgHref; }
+
+    // --- Helpers ---
+    function int(v, d=0){ const n = parseInt(v,10); return Number.isFinite(n)?n:d; }
+    function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+    function lerp(a,b,t){ return a + (b-a)*t; }
+    function readFileAsDataURL(file){
+      return new Promise((resolve,reject)=>{
+        const fr = new FileReader();
+        fr.onerror = reject; fr.onload = () => resolve(fr.result);
+        fr.readAsDataURL(file);
+      });
+    }
+    function getImageSize(href){
+      return new Promise((resolve,reject)=>{
+        const im = new Image();
+        im.onload = () => resolve({w: im.naturalWidth, h: im.naturalHeight});
+        im.onerror = reject; im.src = href;
+      });
+    }
+
+    function setWorldTransform(ns, ntx, nty){
+      scale = clamp(ns, minScale, maxScale);
+      tx = ntx; ty = nty;
+      world.setAttribute('transform', `translate(${tx},${ty}) scale(${scale})`);
+      zoomLabel.textContent = Math.round(scale*100) + '%';
+    }
+
+    function screenToWorld(pt){
+      const rect = svg.getBoundingClientRect();
+      const x = (pt.x - rect.left - tx) / scale;
+      const y = (pt.y - rect.top - ty) / scale;
+      return {x,y};
+    }
+
+    function worldToScreen(pt){
+      const rect = svg.getBoundingClientRect();
+      return { x: pt.x*scale + tx + rect.left, y: pt.y*scale + ty + rect.top };
+    }
+
+    // --- Puzzle generation ---
+    function initPuzzle(){
+      // Reset layers/state
+      piecesLayer.innerHTML = '';
+      defs.innerHTML = '';
+      pieces = []; groups.clear(); nextGroupId = 1; winEl.style.display = 'none';
+
+      // Prepare edges
+      hEdges = Array.from({length: rows+1}, () => Array(cols).fill(null));
+      vEdges = Array.from({length: rows}, () => Array(cols+1).fill(null));
+
+  const rnd = rng((rows*73856093) ^ (cols*19349663) ^ (Math.floor(imgW+imgH) >>> 0));
+  cellW = imgW / cols;
+  cellH = imgH / rows;
+  const base = Math.min(cellW, cellH);
+      // Reasonable tab sizes
+  const tabRMin = base * 0.10, tabRMax = base * 0.18;
+  edgeTabRMax = tabRMax;
+      const tabWMin = base * 0.20, tabWMax = base * 0.32;
+
+      for(let r=0;r<=rows;r++){
+        for(let c=0;c<cols;c++){
+          if(r===0 || r===rows){
+            hEdges[r][c] = { border: true, p0: {x: c*cellW, y: r*cellH}, p1: {x: (c+1)*cellW, y: r*cellH} };
+          } else {
+            const dir = (rnd() < 0.5) ? 1 : -1; // +1 = bulge downward
+            const R = lerp(tabRMin, tabRMax, rnd());
+            const W = lerp(tabWMin, tabWMax, rnd());
+            const neck = 0.6 + rnd()*0.3; // 0..1 softness
+            const p0 = {x: c*cellW, y: r*cellH};
+            const p1 = {x: (c+1)*cellW, y: r*cellH};
+            const nodes = computeEdgeNodes(p0, p1, {dir, R, W, neck}, 'h');
+            hEdges[r][c] = { border: false, dir, R, W, neck, p0, p1, nodes };
+          }
+        }
+      }
+      for(let r=0;r<rows;r++){
+        for(let c=0;c<=cols;c++){
+          if(c===0 || c===cols){
+            vEdges[r][c] = { border: true, p0: {x: c*cellW, y: r*cellH}, p1: {x: c*cellW, y: (r+1)*cellH} };
+          } else {
+            const dir = (rnd() < 0.5) ? 1 : -1; // +1 = bulge right
+            const R = lerp(tabRMin, tabRMax, rnd());
+            const W = lerp(tabWMin, tabWMax, rnd());
+            const neck = 0.6 + rnd()*0.3;
+            const p0 = {x: c*cellW, y: r*cellH};
+            const p1 = {x: c*cellW, y: (r+1)*cellH};
+            const nodes = computeEdgeNodes(p0, p1, {dir, R, W, neck}, 'v');
+            vEdges[r][c] = { border: false, dir, R, W, neck, p0, p1, nodes };
+          }
+        }
+      }
+
+      // Define drop shadow filter once
+      const filterId = 'pieceShadow';
+      defs.insertAdjacentHTML('beforeend', `
+        <filter id="${filterId}" x="-30%" y="-30%" width="160%" height="160%">
+          <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="rgba(0,0,0,0.35)" />
+        </filter>`);
+
+      // Build pieces
+      const imgId = 'puzzleImage';
+      defs.insertAdjacentHTML('beforeend', `<image id="${imgId}" href="${imgHref}" x="0" y="0" width="${imgW}" height="${imgH}" preserveAspectRatio="none" />`);
+
+      for(let r=0;r<rows;r++){
+        for(let c=0;c<cols;c++){
+          const id = r*cols + c;
+          const d = buildPiecePath(r,c, cellW, cellH);
+          const clipId = `clip_${id}`;
+          defs.insertAdjacentHTML('beforeend', `<clipPath id="${clipId}"><path d="${d}"/></clipPath>`);
+
+          const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+          g.classList.add('piece');
+          g.setAttribute('data-id', id);
+          g.setAttribute('filter', `url(#${filterId})`);
+
+          // Image clipped to the piece path
+          const img = document.createElementNS('http://www.w3.org/2000/svg','use');
+          img.setAttributeNS('http://www.w3.org/1999/xlink','href', `#${imgId}`);
+          img.setAttribute('clip-path', `url(#${clipId})`);
+          img.classList.add('highlight');
+          g.appendChild(img);
+
+          // Outline path for crisp edges and pointer hit
+          const outline = document.createElementNS('http://www.w3.org/2000/svg','path');
+          outline.setAttribute('d', d);
+          outline.setAttribute('class','outline');
+          outline.setAttribute('pointer-events', 'stroke');
+          g.appendChild(outline);
+
+          // Edge shading group clipped to piece
+          const shadeG = document.createElementNS('http://www.w3.org/2000/svg','g');
+          shadeG.setAttribute('clip-path', `url(#${clipId})`);
+          const shadePaths = {};
+          const sides = ['top','right','bottom','left'];
+          for(const side of sides){
+            const sp = document.createElementNS('http://www.w3.org/2000/svg','path');
+            sp.setAttribute('class', `edge-shade ${ (side==='top'||side==='left') ? 'edge-highlight' : 'edge-shadow' }`);
+            sp.setAttribute('data-side', side);
+            sp.setAttribute('d', buildSidePathD(r,c,side));
+            shadeG.appendChild(sp);
+            shadePaths[side] = sp;
+          }
+          g.appendChild(shadeG);
+
+          piecesLayer.appendChild(g);
+
+          const anchor = { x: c*cellW, y: r*cellH };
+          pieces.push({ id, r, c, pathD: d, clipId, g, groupId: null, anchor, shades: shadePaths });
+        }
+      }
+
+      // Create individual groups, shuffle positions
+      pieces.forEach(p => {
+        const gid = newGroup();
+        joinPieceToGroup(p, gid);
+      });
+
+      // Shuffle in a donut around the puzzle
+      const pad = Math.min(imgW, imgH) * 0.15;
+      const leftArea = {x: -imgW - pad, y: -pad, w: imgW*0.9, h: imgH+2*pad};
+      const rightArea = {x: imgW + pad*0.1, y: -pad, w: imgW*0.9, h: imgH+2*pad};
+      const topArea = {x: -pad, y: -imgH - pad, w: imgW+2*pad, h: imgH*0.9};
+      const botArea = {x: -pad, y: imgH + pad*0.1, w: imgW+2*pad, h: imgH*0.9};
+      const areas = [leftArea, rightArea, topArea, botArea];
+      const rgen = rng(0xC0FFEE ^ (rows<<8) ^ cols);
+      pieces.forEach(p => {
+        const ar = areas[Math.floor(rgen()*areas.length)];
+        const gx = ar.x + rgen()*ar.w;
+        const gy = ar.y + rgen()*ar.h;
+        setGroupTransform(p.groupId, gx, gy);
+      });
+
+  // Fit view to the entire scattered content
+  fitView(getContentBounds());
+  updateJoinedStatus();
+  updateAllEdgeShading();
+
+      // Bind interactions
+      bindInteractions();
+    }
+
+    function fitView(bounds){
+      const rect = svg.getBoundingClientRect();
+      const pad = 40; // screen-space padding
+      let minX = 0, minY = 0, maxX = imgW, maxY = imgH;
+      if(bounds){
+        ({minX, minY, maxX, maxY} = bounds);
+      }
+      const width = Math.max(1, maxX - minX);
+      const height = Math.max(1, maxY - minY);
+      const sx = (rect.width - pad*2) / width;
+      const sy = (rect.height - pad*2) / height;
+      const s = Math.min(maxScale, Math.max(minScale, Math.min(sx, sy)));
+      const nx = pad + (rect.width - pad*2 - width*s)/2 - minX*s;
+      const ny = pad + (rect.height - pad*2 - height*s)/2 - minY*s;
+      setWorldTransform(s, nx, ny);
+    }
+
+    function getContentBounds(){
+      // Compute world-space bounds of all piece rectangles with a margin for tabs
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      const tabMargin = edgeTabRMax + Math.min(cellW, cellH) * 0.05;
+      groups.forEach(gr => {
+        gr.members.forEach(pid => {
+          const p = pieces[pid];
+          const x = p.anchor.x + gr.x;
+          const y = p.anchor.y + gr.y;
+          minX = Math.min(minX, x - tabMargin);
+          minY = Math.min(minY, y - tabMargin);
+          maxX = Math.max(maxX, x + cellW + tabMargin);
+          maxY = Math.max(maxY, y + cellH + tabMargin);
+        });
+      });
+      if(!Number.isFinite(minX)){
+        // Fallback to puzzle rectangle
+        minX = 0; minY = 0; maxX = imgW; maxY = imgH;
+      }
+      return { minX, minY, maxX, maxY };
+    }
+
+    function newGroup(){
+      const gid = nextGroupId++;
+      const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+      g.setAttribute('data-group', gid);
+      piecesLayer.appendChild(g);
+      groups.set(gid, { id: gid, members: new Set(), g, x: 0, y: 0 });
+      return gid;
+    }
+    function setGroupTransform(gid, x, y){
+      const grp = groups.get(gid); if(!grp) return;
+      grp.x = x; grp.y = y; grp.g.setAttribute('transform', `translate(${x},${y})`);
+    }
+    function joinPieceToGroup(piece, gid){
+      const grp = groups.get(gid);
+      if(piece.groupId && piece.groupId !== gid){
+        // remove from old group
+        const old = groups.get(piece.groupId);
+        old.members.delete(piece.id);
+      }
+      piece.groupId = gid;
+      grp.members.add(piece.id);
+      grp.g.appendChild(piece.g);
+    }
+    function mergeGroups(targetGid, sourceGid){
+      if(targetGid === sourceGid) return targetGid;
+      const A = groups.get(targetGid); const B = groups.get(sourceGid);
+      // Move B's children under A, keeping world position by adjusting their local positions (groups are translate-only)
+      const dx = B.x - A.x, dy = B.y - A.y;
+      // Move pieces from B to A
+      B.members.forEach(id => {
+        const p = pieces[id];
+        joinPieceToGroup(p, A.id);
+      });
+      // After reparent, A's translate stays; remove B group
+      piecesLayer.removeChild(B.g);
+      groups.delete(B.id);
+  // Update edge shading at the seam
+  updateEdgeShadingForGroup(A.id);
+      updateJoinedStatus();
+      if(groups.size === 1){ showWin(); }
+      return A.id;
+    }
+
+    function showWin(){
+      winEl.style.display='flex';
+      // Hide all shading so the finished image looks flat
+      document.querySelectorAll('.edge-shade').forEach(el => el.style.display = 'none');
+    }
+
+    function updateJoinedStatus(){
+      let maxSize = 0; groups.forEach(gr => maxSize = Math.max(maxSize, gr.members.size));
+      statusEl.textContent = `${maxSize} / ${pieces.length} joined`;
+    }
+
+    function buildSidePathD(r,c,side){
+      let p0, p1, edge;
+      if(side==='top'){
+        p0 = {x:c*cellW, y:r*cellH}; p1 = {x:(c+1)*cellW, y:r*cellH}; edge = hEdges[r][c];
+      } else if(side==='right'){
+        p0 = {x:(c+1)*cellW, y:r*cellH}; p1 = {x:(c+1)*cellW, y:(r+1)*cellH}; edge = vEdges[r][c+1];
+      } else if(side==='bottom'){
+        p0 = {x:(c+1)*cellW, y:(r+1)*cellH}; p1 = {x:c*cellW, y:(r+1)*cellH}; edge = hEdges[r+1][c];
+      } else { // left
+        p0 = {x:c*cellW, y:(r+1)*cellH}; p1 = {x:c*cellW, y:r*cellH}; edge = vEdges[r][c];
+      }
+      const segs = sideBezier(p0,p1,side,edge);
+      return `M ${p0.x.toFixed(2)} ${p0.y.toFixed(2)} ${segs.join(' ')}`;
+    }
+
+  function buildPiecePath(r, c, cellW, cellH){
+      const x0 = c*cellW, y0 = r*cellH;
+      const x1 = (c+1)*cellW, y1 = (r+1)*cellH;
+      const cmds = [];
+      const moveTo = (x,y) => cmds.push(`M ${x.toFixed(2)} ${y.toFixed(2)}`);
+  const lineTo = (x,y) => cmds.push(`L ${x.toFixed(2)} ${y.toFixed(2)}`);
+
+      moveTo(x0, y0);
+
+  // Top side
+  cmds.push(...sideBezier({x:x0,y:y0},{x:x1,y:y0}, 'top', hEdges[r][c]));
+      // Right side
+      cmds.push(...sideBezier({x:x1,y:y0},{x:x1,y:y1}, 'right', vEdges[r][c+1]));
+  // Bottom side
+  cmds.push(...sideBezier({x:x1,y:y1},{x:x0,y:y1}, 'bottom', hEdges[r+1][c]));
+      // Left side
+      cmds.push(...sideBezier({x:x0,y:y1},{x:x0,y:y0}, 'left', vEdges[r][c]));
+
+      cmds.push('Z');
+      return cmds.join(' ');
+    }
+
+    function sideBezier(p0, p1, side, edge){
+      // Returns array of path commands strings for this side using shared edge nodes
+      const cmds = [];
+      const pushC = (a,b,c) => cmds.push(`C ${a.x.toFixed(2)} ${a.y.toFixed(2)} ${b.x.toFixed(2)} ${b.y.toFixed(2)} ${c.x.toFixed(2)} ${c.y.toFixed(2)}`);
+      const pushL = (p) => cmds.push(`L ${p.x.toFixed(2)} ${p.y.toFixed(2)}`);
+
+      if(edge.border){ pushL(p1); return cmds; }
+
+      // Choose nodes forward or reversed depending on direction
+      const nodes = edge.nodes;
+      const forward = (Math.abs(nodes[0].x - p0.x) + Math.abs(nodes[0].y - p0.y)) < 0.1;
+      const seq = forward ? nodes : nodes.slice().reverse();
+      // Convert Catmull-Rom nodes to Bezier segments
+      const s = 1.0; // smoothing strength
+      for(let i=0;i<seq.length-1;i++){
+        const P0 = i>0 ? seq[i-1] : mirror(seq[i], seq[i+1]);
+        const P1 = seq[i];
+        const P2 = seq[i+1];
+        const P3 = (i+2<seq.length) ? seq[i+2] : mirror(seq[i+1], seq[i]);
+        const c1 = { x: P1.x + (P2.x - P0.x) * (s/6), y: P1.y + (P2.y - P0.y) * (s/6) };
+        const c2 = { x: P2.x - (P3.x - P1.x) * (s/6), y: P2.y - (P3.y - P1.y) * (s/6) };
+        pushC(c1, c2, P2);
+      }
+      return cmds;
+    }
+
+    function mirror(a, b){
+      // mirror of point a across b? We want pseudo previous/next: P(-1) = P0 + (P0-P1)
+      return { x: a.x + (a.x - b.x), y: a.y + (a.y - b.y) };
+    }
+
+    function computeEdgeNodes(p0, p1, params, type){
+      const dx = p1.x - p0.x, dy = p1.y - p0.y;
+      const L = Math.hypot(dx, dy) || 1;
+      const tx = dx / L, ty = dy / L; // tangent
+      // Consistent normal per edge type: horizontal normal down (+y), vertical normal right (+x)
+      const nx = (type==='h') ? 0 : 1;
+      const ny = (type==='h') ? 1 : 0;
+      const sign = params.dir; // +1 bulge along +normal
+      const R = params.R;
+      const W = Math.min(params.W, L*0.8);
+      const neckS = 0.25 + 0.5*params.neck; // 0.25..0.75
+
+      // Node parameters along baseline (0..1)
+      const span = (W / L);
+      const t1 = Math.max(0.15, 0.5 - span*0.5);
+      const t2 = 0.5;
+      const t3 = Math.min(0.85, 0.5 + span*0.5);
+
+      const small = R * 0.25 * neckS;
+      const mid = R;
+
+      const nodesT = [0, t1, t2, t3, 1];
+      const offs = [0, sign*small, sign*mid, sign*small, 0];
+
+      const nodes = nodesT.map((t,i) => ({
+        x: p0.x + tx * (t*L) + nx * offs[i],
+        y: p0.y + ty * (t*L) + ny * offs[i]
+      }));
+      return nodes;
+    }
+
+    // --- Interaction handling ---
+    let listenersBound = false;
+    function bindInteractions(){
+      if(listenersBound) return;
+      svg.addEventListener('pointerdown', onPointerDown);
+      svg.addEventListener('pointermove', onPointerMove);
+      window.addEventListener('pointerup', onPointerUp);
+      svg.addEventListener('wheel', onWheel, { passive: false });
+      svg.addEventListener('contextmenu', e => e.preventDefault());
+      listenersBound = true;
+    }
+
+    function pieceFromEventTarget(t){
+      // Find parent g with data-id
+      let el = t;
+      while(el && el !== svg){
+        if(el.classList && el.classList.contains('piece')){
+          const pid = parseInt(el.getAttribute('data-id'), 10);
+          return pieces[pid];
+        }
+        el = el.parentNode;
+      }
+      return null;
+    }
+
+    function getGroup(gid){ return groups.get(gid); }
+
+    function onPointerDown(e){
+      const pt = { x: e.clientX, y: e.clientY };
+      const wpt = screenToWorld(pt);
+      pointers.set(e.pointerId, { x: pt.x, y: pt.y, sx: wpt.x, sy: wpt.y, button: e.button });
+  // Capture pointer to the SVG for consistent move/up stream
+  if(svg.setPointerCapture){ try{ svg.setPointerCapture(e.pointerId); }catch(_){} }
+
+      const piece = pieceFromEventTarget(e.target);
+
+      if(pointers.size === 2){
+        // Start pinch
+        const arr = Array.from(pointers.values());
+        const c0 = { x: (arr[0].x + arr[1].x)/2, y: (arr[0].y + arr[1].y)/2 };
+        const w0 = screenToWorld(c0);
+        const d = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y);
+        pinching = { startDist: d, startScale: scale, startTx: tx, startTy: ty, startCenter: w0 };
+        dragging = null; panning = null;
+        e.preventDefault();
+        return;
+      }
+
+      if(piece && e.button === 0){
+        // Bring group's g to front by re-append
+        const grp = groups.get(piece.groupId);
+        if(piecesLayer.lastElementChild !== grp.g){
+          piecesLayer.appendChild(grp.g);
+        }
+        // start drag group
+        const wgrp = { x: grp.x, y: grp.y };
+        dragging = { groupId: grp.id, dx: wpt.x - wgrp.x, dy: wpt.y - wgrp.y };
+        e.preventDefault();
+        return;
+      }
+
+      // Background pan (right button or no piece)
+      panning = { dx: pt.x - tx, dy: pt.y - ty };
+      e.preventDefault();
+    }
+
+    function onPointerMove(e){
+      const p = pointers.get(e.pointerId);
+      if(!p) return;
+      p.x = e.clientX; p.y = e.clientY;
+
+      if(pinching && pointers.size >= 2){
+        const arr = Array.from(pointers.values());
+        const c = { x: (arr[0].x + arr[1].x)/2, y: (arr[0].y + arr[1].y)/2 };
+        const d = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y);
+        const pivotWorld = screenToWorld(c);
+        const s = clamp(pinching.startScale * (d / pinching.startDist), minScale, maxScale);
+        // Keep pivot fixed: adjust tx,ty so that pivotWorld maps to current screen c
+        const rect = svg.getBoundingClientRect();
+        const ntx = c.x - rect.left - pivotWorld.x * s;
+        const nty = c.y - rect.top - pivotWorld.y * s;
+        setWorldTransform(s, ntx, nty);
+        e.preventDefault();
+        return;
+      }
+
+      if(dragging){
+        const grp = groups.get(dragging.groupId);
+        const wpt = screenToWorld({ x: e.clientX, y: e.clientY });
+        // Queue transform to next animation frame
+        dragNext = { gid: grp.id, x: wpt.x - dragging.dx, y: wpt.y - dragging.dy };
+        if(!dragAnimId){
+          dragAnimId = requestAnimationFrame(() => {
+            dragAnimId = 0;
+            if(dragNext){
+              setGroupTransform(dragNext.gid, dragNext.x, dragNext.y);
+              dragNext = null;
+            }
+          });
+        }
+        e.preventDefault();
+        return;
+      }
+
+      if(panning){
+        setWorldTransform(scale, e.clientX - panning.dx, e.clientY - panning.dy);
+        e.preventDefault();
+        return;
+      }
+    }
+
+    function onPointerUp(e){
+      pointers.delete(e.pointerId);
+      if(pinching && pointers.size < 2){ pinching = null; }
+      if(dragging){
+        const gid = dragging.groupId;
+        dragging = null;
+        // Flush any pending drag update
+        if(dragAnimId){ cancelAnimationFrame(dragAnimId); dragAnimId = 0; }
+        if(dragNext){ setGroupTransform(dragNext.gid, dragNext.x, dragNext.y); dragNext = null; }
+        trySnapGroup(gid);
+      }
+      if(panning){ panning = null; }
+      if(svg.releasePointerCapture){ try{ svg.releasePointerCapture(e.pointerId); }catch(_){} }
+    }
+
+    function onWheel(e){
+      e.preventDefault();
+      const delta = e.deltaY;
+      const factor = Math.pow(1.0015, -delta);
+      const rect = svg.getBoundingClientRect();
+      const mouse = { x: e.clientX, y: e.clientY };
+      const pivot = screenToWorld(mouse);
+      const ns = clamp(scale * factor, minScale, maxScale);
+      const ntx = mouse.x - rect.left - pivot.x * ns;
+      const nty = mouse.y - rect.top - pivot.y * ns;
+      setWorldTransform(ns, ntx, nty);
+    }
+
+    // --- Snapping ---
+    function trySnapGroup(gid){
+      const grp = groups.get(gid); if(!grp) return;
+      // For any piece in this group, check neighbors outside group for proximity
+      const tol = snapTol / scale; // adjust for zoom
+      let snapped = false;
+      for(const pid of grp.members){
+        const p = pieces[pid];
+        const nbrs = neighbors(p.r, p.c);
+        for(const nb of nbrs){
+          const qid = nb.r*cols + nb.c;
+          const q = pieces[qid];
+          if(q.groupId === grp.id) continue; // same group
+          // Compute expected delta between anchors in solved state
+          const expected = { x: (q.c - p.c)*(imgW/cols), y: (q.r - p.r)*(imgH/rows) };
+          // Current world positions of anchors
+          const pw = { x: p.anchor.x + groups.get(p.groupId).x, y: p.anchor.y + groups.get(p.groupId).y };
+          const qw = { x: q.anchor.x + groups.get(q.groupId).x, y: q.anchor.y + groups.get(q.groupId).y };
+          const dx = (qw.x - pw.x) - expected.x;
+          const dy = (qw.y - pw.y) - expected.y;
+          if(Math.hypot(dx, dy) <= tol){
+            // Snap by moving dragged group by (dx,dy)
+            setGroupTransform(grp.id, grp.x + dx, grp.y + dy);
+            // Merge with q's group
+            const newId = mergeGroups(grp.id, q.groupId);
+            snapped = true;
+            // Update reference to possibly new group id
+            grp.id = newId;
+            // After merge, continue to check for cascading joins
+          }
+        }
+      }
+      if(snapped){
+        // Try a quick flood to snap any other immediate neighbors
+        trySnapGroup(grp.id);
+      }
+    }
+
+    function neighbors(r,c){
+      const arr = [];
+      if(r>0) arr.push({r:r-1,c});
+      if(r<rows-1) arr.push({r:r+1,c});
+      if(c>0) arr.push({r, c:c-1});
+      if(c<cols-1) arr.push({r, c:c+1});
+      return arr;
+    }
+
+    function updateAllEdgeShading(){
+      groups.forEach(gr => updateEdgeShadingForGroup(gr.id));
+    }
+
+    function updateEdgeShadingForGroup(gid){
+      const gr = groups.get(gid); if(!gr) return;
+      const sideOpp = { top: 'bottom', bottom: 'top', left: 'right', right: 'left' };
+      gr.members.forEach(pid => {
+        const p = pieces[pid];
+        const rc = { r: p.r, c: p.c };
+        const checks = [
+          { side:'top', nr: rc.r-1, nc: rc.c },
+          { side:'right', nr: rc.r, nc: rc.c+1 },
+          { side:'bottom', nr: rc.r+1, nc: rc.c },
+          { side:'left', nr: rc.r, nc: rc.c-1 },
+        ];
+        for(const ch of checks){
+          const inBounds = ch.nr>=0 && ch.nr<rows && ch.nc>=0 && ch.nc<cols;
+          if(!p.shades || !p.shades[ch.side]) continue;
+          if(!inBounds){
+            p.shades[ch.side].style.display = '';
+            continue;
+          }
+          const nid = ch.nr*cols + ch.nc;
+          const q = pieces[nid];
+          if(q && q.groupId === p.groupId && q.groupId === gid){
+            p.shades[ch.side].style.display = 'none';
+            if(q.shades && q.shades[sideOpp[ch.side]]) q.shades[sideOpp[ch.side]].style.display = 'none';
+          } else {
+            p.shades[ch.side].style.display = '';
+          }
+        }
+      });
+    }
+
+    // --- Kickoff ---
+    // Provide a default image if none chosen by user using a small data URI gradient
+    (function bootstrapDefault(){
+      const placeholder = createGradientImage(1024, 768);
+      imgHref = placeholder.href;
+      imgW = placeholder.w; imgH = placeholder.h;
+      updateToolbarEnabled();
+      initPuzzle();
+    })();
+
+    function createGradientImage(w,h){
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      const g = ctx.createLinearGradient(0,0,w,h);
+      g.addColorStop(0, '#2b5876'); g.addColorStop(1, '#4e4376');
+      ctx.fillStyle = g; ctx.fillRect(0,0,w,h);
+      ctx.globalAlpha = 0.18; ctx.fillStyle = '#ffffff';
+      for(let i=0;i<80;i++){
+        const x = Math.random()*w, y=Math.random()*h, r=6+Math.random()*28;
+        ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+      }
+      return { href: c.toDataURL('image/png'), w, h };
+    }
+  })();
+  </script>
+</body>
+</html>
