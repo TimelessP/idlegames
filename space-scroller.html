@@ -25,29 +25,41 @@
       min-height: 100vh;
     }
     canvas {
-      border: 2px solid #fff;
+      outline: 2px solid #fff;
       background: #000;
       display: block;
       touch-action: none; /* Prevent default touch behaviors */
-      max-width: 100vw;
-      max-height: 80vh;
+      width: 100vw;
+      height: 100vh;
+      box-sizing: border-box;
+      max-width: none;
+      max-height: none;
     }
     @media (max-width: 768px) {
-      canvas {
-        width: 100vw;
-        height: 75vh;
-      }
-      .ui {
-        font-size: 14px;
-      }
+      .hud { font-size: 14px; }
     }
-    .ui {
-      position: absolute;
-      top: 10px;
-      left: 10px;
+    /* Heads-up display */
+    .hud {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 150;
+      padding: 8px 12px;
+      box-sizing: border-box;
       font-size: 18px;
-      z-index: 10;
+      pointer-events: none; /* let gameplay through, except explicit controls */
     }
+    .hud-row { width: 100%; margin-bottom: 6px; }
+    .hud-row.stats {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      align-items: center;
+      gap: 8px;
+    }
+    .stat { display: flex; align-items: center; gap: 6px; min-height: 24px; }
+    .stat .emoji { filter: drop-shadow(0 1px 1px rgba(0,0,0,0.4)); }
+    .dim { opacity: 0.4; }
     
     /* Game Over Modal */
     .game-over-modal {
@@ -112,11 +124,11 @@
       margin-bottom: 5px;
     }
     .overheat-bar {
-      width: 200px;
-      height: 20px;
+      width: 100%;
+      height: 16px;
       background: #333;
       border: 1px solid #fff;
-      margin-top: 5px;
+      margin-top: 0;
     }
     .overheat-fill {
       height: 100%;
@@ -127,23 +139,47 @@
     .cooldown {
       background: #666 !important;
     }
+    /* Fullscreen button */
+    .fullscreen-btn {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      border: 2px solid #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      z-index: 200;
+      cursor: pointer;
+      pointer-events: auto; /* clickable over canvas */
+      backdrop-filter: blur(2px);
+    }
+    .fullscreen-btn:active { transform: scale(0.97); }
   </style>
 </head>
 <body>
-  <div class="ui">
-    <div>Score: <span id="score">0</span></div>
-    <div>Health: <span id="health">100</span></div>
-    <div>Bombs: <span id="bombs">0</span></div>
-  <div>Wingmen: <span id="wingmen">0</span></div>
-    <div>Overheat:</div>
-    <div class="overheat-bar">
-      <div class="overheat-fill" id="overheat-fill"></div>
+  <div class="hud">
+    <div class="hud-row stats">
+      <div class="stat"><span class="emoji">🪙</span><span id="score">0</span></div>
+      <div class="stat"><span id="hearts"></span></div>
+      <div class="stat"><span id="bomb-icons"></span></div>
+      <div class="stat"><span id="wingmen"></span></div>
+      <div class="stat"><span id="fire-power"></span></div>
+      <div class="stat"><span id="missile-power"></span></div>
+      <div class="stat"><span id="homing-power"></span></div>
     </div>
-    <div style="font-size: 12px; margin-top: 10px; opacity: 0.7;">
-      Mouse/Touch: Move & Fire<br>
-      Spacebar/Quick Tap: Bomb
+    <div class="hud-row">
+      <div class="overheat-bar">
+        <div class="overheat-fill" id="overheat-fill"></div>
+      </div>
     </div>
   </div>
+  <button id="fullscreenBtn" class="fullscreen-btn" aria-label="Toggle Fullscreen">⛶</button>
   <canvas id="gameCanvas" width="800" height="600"></canvas>
   
   <!-- Game Over Modal -->
@@ -156,18 +192,22 @@
   </div>
   
   <script>
-    const canvas = document.getElementById('gameCanvas');
+  const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const scoreEl = document.getElementById('score');
-    const healthEl = document.getElementById('health');
-  const bombsEl = document.getElementById('bombs');
+    const heartsEl = document.getElementById('hearts');
+  const bombIconsEl = document.getElementById('bomb-icons');
   const wingmenEl = document.getElementById('wingmen');
+  const firePowerEl = document.getElementById('fire-power');
+  const missilePowerEl = document.getElementById('missile-power');
+  const homingPowerEl = document.getElementById('homing-power');
     const overheatFill = document.getElementById('overheat-fill');
+    const fullscreenBtn = document.getElementById('fullscreenBtn');
     const gameOverModal = document.getElementById('gameOverModal');
     const finalScoreEl = document.getElementById('finalScore');
 
-    // Game variables
-    let player = { x: canvas.width / 2, y: canvas.height - 50, width: 30, height: 30, speed: 5 };
+  // Game variables
+  let player = { x: 0, y: 0, width: 30, height: 30, speed: 5 };
     let bullets = [];
     let enemies = [];
     let powerUps = [];
@@ -194,8 +234,50 @@
   const COOL_RATE = 1; // heat reduced per frame when not firing
   // Power-ups spawn randomly with equal probability per type
 
-    let mouseX = canvas.width / 2;
-    let mouseY = canvas.height - 50;
+  let mouseX = 0;
+  let mouseY = 0;
+  // Viewport scaling
+  let dpr = Math.max(1, window.devicePixelRatio || 1);
+  let viewW = 0, viewH = 0;
+  let scaleUnit = 1; // relative to base 600 min-dimension
+  // Scaled metrics
+  let shipW = 30, shipH = 30, enemySize = 30, powerUpSize = 20, bulletW = 4, bulletH = 10, missileW = 6, missileH = 16;
+  let shipOffsetTouch = 80; // finger offset
+  let collBulletEnemy = 20, collPlayerEnemy = 25, collPlayerPower = 20;
+  let spread10 = 10, spread20 = 20, wingmanOff = 60;
+  
+  // Handle canvas/device pixel ratio and scaled metrics
+  function resizeCanvas() {
+    const rect = document.documentElement.getBoundingClientRect();
+    viewW = window.innerWidth || rect.width;
+    viewH = window.innerHeight || rect.height;
+    dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = Math.floor(viewW * dpr);
+    canvas.height = Math.floor(viewH * dpr);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+    // scale unit based on smaller dimension vs base 600
+    scaleUnit = Math.max(0.5, Math.min(2.5, Math.min(viewW, viewH) / 600));
+    // update scaled metrics
+    shipW = 30 * scaleUnit; shipH = 30 * scaleUnit;
+    enemySize = 30 * scaleUnit; powerUpSize = 20 * scaleUnit;
+    bulletW = 4 * scaleUnit; bulletH = 10 * scaleUnit;
+    missileW = 6 * scaleUnit; missileH = 16 * scaleUnit;
+    shipOffsetTouch = 80 * scaleUnit;
+    collBulletEnemy = 20 * scaleUnit; collPlayerEnemy = 25 * scaleUnit; collPlayerPower = 20 * scaleUnit;
+    spread10 = 10 * scaleUnit; spread20 = 20 * scaleUnit; wingmanOff = 60 * scaleUnit;
+    // sync player size to scaled metrics and clamp position to viewport
+    player.width = shipW; player.height = shipH;
+    player.x = Math.max(player.width/2, Math.min(viewW - player.width/2, player.x));
+    player.y = Math.max(player.height/2, Math.min(viewH - player.height/2, player.y));
+  }
+  window.addEventListener('resize', resizeCanvas);
+  // Initial sizing
+  resizeCanvas();
+  // initialize position to bottom-center relative to viewport
+  player.x = viewW / 2;
+  player.y = viewH - shipH;
+  mouseX = player.x; mouseY = player.y;
     let firing = false;
     let lastShot = 0;
     let touchStartTime = 0;
@@ -217,7 +299,7 @@
     
     function restartGame() {
       // Reset all game variables
-      player = { x: canvas.width / 2, y: canvas.height - 50, width: 30, height: 30, speed: 5 };
+      player = { x: viewW / 2, y: viewH - shipH, width: shipW, height: shipH, speed: 5 };
       bullets = [];
       enemies = [];
       powerUps = [];
@@ -234,8 +316,8 @@
   homingActive = false;
   homingExpire = 0;
   lastHomingLaunch = 0;
-      mouseX = canvas.width / 2;
-      mouseY = canvas.height - 50;
+      mouseX = viewW / 2;
+      mouseY = viewH - shipH;
       firing = false;
       lastShot = 0;
       
@@ -265,18 +347,10 @@
         clientY = e.clientY;
       }
       
-      // Calculate position relative to canvas bounds
+      // Position in CSS pixels relative to canvas
       const x = clientX - rect.left;
       const y = clientY - rect.top;
-      
-      // Scale coordinates from display size to canvas internal size
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      
-      return {
-        x: x * scaleX,
-        y: y * scaleY
-      };
+      return { x, y };
     }
 
     function handleMove(e) {
@@ -348,11 +422,11 @@
     function getWingmanOffsets(count) {
       switch (count) {
         case 1:
-          return [{ x: -60, y: 0 }];
+          return [{ x: -wingmanOff, y: 0 }];
         case 2:
-          return [{ x: -60, y: 0 }, { x: 60, y: 0 }];
+          return [{ x: -wingmanOff, y: 0 }, { x: wingmanOff, y: 0 }];
         case 3:
-          return [{ x: -60, y: 0 }, { x: 60, y: 0 }, { x: 0, y: -60 }];
+          return [{ x: -wingmanOff, y: 0 }, { x: wingmanOff, y: 0 }, { x: 0, y: -wingmanOff }];
         default:
           return [];
       }
@@ -364,8 +438,8 @@
         const x = player.x + off.x;
         const y = player.y + off.y;
         return {
-          x: Math.max(player.width/2, Math.min(canvas.width - player.width/2, x)),
-          y: Math.max(player.height/2, Math.min(canvas.height - player.height/2, y))
+          x: Math.max(player.width/2, Math.min(viewW - player.width/2, x)),
+          y: Math.max(player.height/2, Math.min(viewH - player.height/2, y))
         };
       });
     }
@@ -381,14 +455,14 @@
     function drawBullets() {
       ctx.fillStyle = '#ffff00';
       bullets.forEach(bullet => {
-        ctx.fillRect(bullet.x - 2, bullet.y - 5, 4, 10);
+        ctx.fillRect(bullet.x - bulletW/2, bullet.y - bulletH/2, bulletW, bulletH);
       });
     }
 
     function drawEnemies() {
       ctx.fillStyle = '#ff0000';
       enemies.forEach(enemy => {
-        ctx.fillRect(enemy.x - 15, enemy.y - 15, 30, 30);
+        ctx.fillRect(enemy.x - enemySize/2, enemy.y - enemySize/2, enemySize, enemySize);
       });
     }
 
@@ -400,27 +474,27 @@
         else if (powerUp.type === 'wingman') ctx.fillStyle = '#00ff88';
         else if (powerUp.type === 'homing') ctx.fillStyle = '#ffaa00';
         else ctx.fillStyle = '#ffffff';
-        ctx.fillRect(powerUp.x - 10, powerUp.y - 10, 20, 20);
+        ctx.fillRect(powerUp.x - powerUpSize/2, powerUp.y - powerUpSize/2, powerUpSize, powerUpSize);
       });
     }
 
     function drawMissiles() {
       ctx.fillStyle = '#ff8800';
       missiles.forEach(missile => {
-        ctx.fillRect(missile.x - 3, missile.y - 8, 6, 16);
+        ctx.fillRect(missile.x - missileW/2, missile.y - missileH/2, missileW, missileH);
       });
     }
 
     function updatePlayer() {
       if (isCurrentlyTouch) {
         // For touch: offset the ship above the finger to avoid blocking the view
-        const shipOffset = 80; // Move ship up by this amount from finger position
-        player.x = Math.max(player.width/2, Math.min(canvas.width - player.width/2, mouseX));
-        player.y = Math.max(player.height/2, Math.min(canvas.height - player.height/2, mouseY - shipOffset));
+  const shipOffset = shipOffsetTouch; // scaled finger offset
+        player.x = Math.max(player.width/2, Math.min(viewW - player.width/2, mouseX));
+        player.y = Math.max(player.height/2, Math.min(viewH - player.height/2, mouseY - shipOffset));
       } else {
         // For mouse: normal positioning
-        player.x = Math.max(player.width/2, Math.min(canvas.width - player.width/2, mouseX));
-        player.y = Math.max(player.height/2, Math.min(canvas.height - player.height/2, mouseY));
+        player.x = Math.max(player.width/2, Math.min(viewW - player.width/2, mouseX));
+        player.y = Math.max(player.height/2, Math.min(viewH - player.height/2, mouseY));
       }
     }
 
@@ -435,14 +509,14 @@
       enemies.forEach(enemy => {
         enemy.y += 2;
       });
-      enemies = enemies.filter(enemy => enemy.y < canvas.height + 20);
+      enemies = enemies.filter(enemy => enemy.y < viewH + enemySize);
     }
 
     function updatePowerUps() {
       powerUps.forEach(powerUp => {
         powerUp.y += 1;
       });
-      powerUps = powerUps.filter(powerUp => powerUp.y < canvas.height + 20);
+      powerUps = powerUps.filter(powerUp => powerUp.y < viewH + powerUpSize);
     }
 
     function updateMissiles() {
@@ -477,7 +551,7 @@
       });
       missiles = missiles.filter(missile => {
         if (missile.homing) {
-          return missile.x > -20 && missile.x < canvas.width + 20 && missile.y > -20 && missile.y < canvas.height + 20;
+          return missile.x > -missileW && missile.x < viewW + missileW && missile.y > -missileH && missile.y < viewH + missileH;
         } else {
           return missile.y > 0;
         }
@@ -488,7 +562,7 @@
       // Bullets vs Enemies
       bullets.forEach(bullet => {
         enemies.forEach(enemy => {
-          if (Math.abs(bullet.x - enemy.x) < 20 && Math.abs(bullet.y - enemy.y) < 20) {
+          if (Math.abs(bullet.x - enemy.x) < collBulletEnemy && Math.abs(bullet.y - enemy.y) < collBulletEnemy) {
             bullets.splice(bullets.indexOf(bullet), 1);
             enemies.splice(enemies.indexOf(enemy), 1);
             score += 10;
@@ -499,7 +573,7 @@
       // Missiles vs Enemies
       missiles.forEach(missile => {
         enemies.forEach(enemy => {
-          if (Math.abs(missile.x - enemy.x) < 20 && Math.abs(missile.y - enemy.y) < 20) {
+          if (Math.abs(missile.x - enemy.x) < collBulletEnemy && Math.abs(missile.y - enemy.y) < collBulletEnemy) {
             missiles.splice(missiles.indexOf(missile), 1);
             enemies.splice(enemies.indexOf(enemy), 1);
             score += 20;
@@ -511,7 +585,7 @@
       if (wingmenCount > 0 && wingmenPositions.length > 0) {
         enemies.slice().forEach(enemy => {
           for (const w of wingmenPositions) {
-            if (Math.abs(w.x - enemy.x) < 25 && Math.abs(w.y - enemy.y) < 25) {
+            if (Math.abs(w.x - enemy.x) < collPlayerEnemy && Math.abs(w.y - enemy.y) < collPlayerEnemy) {
               const idx = enemies.indexOf(enemy);
               if (idx !== -1) enemies.splice(idx, 1);
               wingmenCount = Math.max(0, wingmenCount - 1);
@@ -523,7 +597,7 @@
 
       // Player vs Enemies
       enemies.slice().forEach(enemy => {
-        if (Math.abs(player.x - enemy.x) < 25 && Math.abs(player.y - enemy.y) < 25) {
+        if (Math.abs(player.x - enemy.x) < collPlayerEnemy && Math.abs(player.y - enemy.y) < collPlayerEnemy) {
           const idx = enemies.indexOf(enemy);
           if (idx !== -1) enemies.splice(idx, 1);
           if (wingmenCount > 0) {
@@ -536,7 +610,7 @@
 
       // Player vs PowerUps
       powerUps.forEach(powerUp => {
-        if (Math.abs(player.x - powerUp.x) < 20 && Math.abs(player.y - powerUp.y) < 20) {
+        if (Math.abs(player.x - powerUp.x) < collPlayerPower && Math.abs(player.y - powerUp.y) < collPlayerPower) {
           powerUps.splice(powerUps.indexOf(powerUp), 1);
           if (powerUp.type === 'fire') {
             fireRate = Math.min(fireRate + 1, 2);
@@ -567,17 +641,17 @@
       const shooters = [{ x: player.x, y: player.y }, ...wingmenPositions];
       const addPattern = (sx, sy) => {
         if (fireRate === 0) {
-          bullets.push({ x: sx, y: sy - 20 });
+          bullets.push({ x: sx, y: sy - 20 * scaleUnit });
         } else if (fireRate === 1) {
-          bullets.push({ x: sx, y: sy - 20 });
-          bullets.push({ x: sx - 10, y: sy - 15 });
-          bullets.push({ x: sx + 10, y: sy - 15 });
+          bullets.push({ x: sx, y: sy - 20 * scaleUnit });
+          bullets.push({ x: sx - spread10, y: sy - 15 * scaleUnit });
+          bullets.push({ x: sx + spread10, y: sy - 15 * scaleUnit });
         } else if (fireRate === 2) {
-          bullets.push({ x: sx, y: sy - 20 });
-          bullets.push({ x: sx - 10, y: sy - 15 });
-          bullets.push({ x: sx + 10, y: sy - 15 });
-          bullets.push({ x: sx - 20, y: sy - 10 });
-          bullets.push({ x: sx + 20, y: sy - 10 });
+          bullets.push({ x: sx, y: sy - 20 * scaleUnit });
+          bullets.push({ x: sx - spread10, y: sy - 15 * scaleUnit });
+          bullets.push({ x: sx + spread10, y: sy - 15 * scaleUnit });
+          bullets.push({ x: sx - spread20, y: sy - 10 * scaleUnit });
+          bullets.push({ x: sx + spread20, y: sy - 10 * scaleUnit });
         }
       };
       shooters.forEach(s => addPattern(s.x, s.y));
@@ -591,7 +665,7 @@
 
     function fireMissile() {
       if (missileRate > 0 && Math.random() < 0.1) { // Occasional missile fire
-        missiles.push({ x: player.x, y: player.y - 20 });
+        missiles.push({ x: player.x, y: player.y - 20 * scaleUnit });
       }
     }
 
@@ -600,7 +674,7 @@
       if (!homingActive) return;
       if (now >= homingExpire) { homingActive = false; return; }
       if (now - lastHomingLaunch >= HOMING_INTERVAL) {
-        missiles.push({ x: player.x, y: player.y - 20, vx: 0, vy: -HOMING_SPEED, speed: HOMING_SPEED, homing: true });
+        missiles.push({ x: player.x, y: player.y - 20 * scaleUnit, vx: 0, vy: -HOMING_SPEED, speed: HOMING_SPEED, homing: true });
         lastHomingLaunch = now;
       }
     }
@@ -615,23 +689,54 @@
 
     function spawnEnemies() {
       if (Math.random() < 0.02) {
-        enemies.push({ x: Math.random() * canvas.width, y: -20 });
+        enemies.push({ x: Math.random() * viewW, y: -enemySize });
       }
     }
 
     function spawnPowerUps() {
       if (Math.random() < 0.005) {
         const types = ['fire', 'missile', 'bomb', 'wingman', 'homing'];
-        powerUps.push({ x: Math.random() * canvas.width, y: -20, type: types[Math.floor(Math.random() * types.length)] });
+        powerUps.push({ x: Math.random() * viewW, y: -powerUpSize, type: types[Math.floor(Math.random() * types.length)] });
       }
     }
 
 
     function updateUI() {
+      // Score
       scoreEl.textContent = score;
-      healthEl.textContent = health;
-      bombsEl.textContent = bombs;
-      wingmenEl.textContent = wingmenCount;
+
+      // Health as hearts: 10 total, turn black as we lose 10% each
+      const totalHearts = 10;
+      const filled = Math.max(0, Math.min(totalHearts, Math.ceil((health / 100) * totalHearts)));
+      let heartsHTML = '';
+      for (let i = 0; i < totalHearts; i++) {
+        heartsHTML += i < filled ? '❤️' : '🖤';
+      }
+      heartsEl.innerHTML = heartsHTML;
+
+      // Bombs as emojis, max 5 shown even if we have more
+      const shownBombs = Math.min(5, bombs);
+      bombIconsEl.innerHTML = '💣'.repeat(shownBombs) + (bombs > 5 ? ` ×${bombs}` : '');
+
+      // Wingmen as emojis, one per wingman present
+      wingmenEl.innerHTML = '🛩️'.repeat(wingmenCount);
+
+  // Fire power: 0..2 → show 1-3 flames to indicate spread levels
+  const flames = ['🔥', '🔥🔥', '🔥🔥🔥'];
+  firePowerEl.textContent = flames[fireRate] || '';
+  firePowerEl.classList.toggle('dim', fireRate === 0);
+
+  // Missile power: 0/1 → show rockets when active
+  missilePowerEl.textContent = missileRate > 0 ? '🚀' : '🚀';
+  missilePowerEl.classList.toggle('dim', missileRate === 0);
+
+  // Homing power: active window indicator; simple target emoji, dim when inactive
+  const nowMs = Date.now();
+  const homingActiveNow = homingActive && nowMs < homingExpire;
+  homingPowerEl.textContent = '🎯';
+  homingPowerEl.classList.toggle('dim', !homingActiveNow);
+
+      // Overheat bar
       overheatFill.style.width = `${(overheat / maxOverheat) * 100}%`;
       if (cooldown) {
         overheatFill.classList.add('cooldown');
@@ -640,9 +745,20 @@
       }
     }
 
+    // Fullscreen toggle
+    function toggleFullscreen() {
+      const elem = document.documentElement;
+      if (!document.fullscreenElement) {
+        if (elem.requestFullscreen) elem.requestFullscreen();
+      } else {
+        if (document.exitFullscreen) document.exitFullscreen();
+      }
+    }
+    fullscreenBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleFullscreen(); });
+
     function gameLoop() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      
+      ctx.clearRect(0, 0, viewW, viewH);
+
   updatePlayer();
   updateWingmenPositions();
   updateBullets();
