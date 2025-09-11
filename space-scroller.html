@@ -192,6 +192,25 @@
       backdrop-filter: blur(2px);
     }
     .pause-btn:active { transform: scale(0.97); }
+
+    /* Paused overlay */
+    .paused-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 900; /* below game-over modal (1000), above canvas */
+      pointer-events: none; /* allow clicks to pass through */
+    }
+    .paused-overlay .paused-text {
+      color: #fff;
+      font-weight: bold;
+      text-shadow: 2px 2px 6px rgba(0,0,0,0.8);
+      font-size: clamp(24px, 10vw, 72px);
+      letter-spacing: 4px;
+    }
   </style>
 </head>
 <body>
@@ -214,6 +233,8 @@
   <button id="fullscreenBtn" class="fullscreen-btn" aria-label="Toggle Fullscreen">⛶</button>
   <button id="pauseBtn" class="pause-btn" aria-label="Pause">⏸</button>
   <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <!-- Paused Overlay -->
+  <div id="pausedOverlay" class="paused-overlay"><div class="paused-text">PAUSED</div></div>
   
   <!-- Game Over Modal -->
   <div id="gameOverModal" class="game-over-modal">
@@ -239,6 +260,7 @@
   const pauseBtn = document.getElementById('pauseBtn');
   const gameOverModal = document.getElementById('gameOverModal');
     const finalScoreEl = document.getElementById('finalScore');
+  const pausedOverlay = document.getElementById('pausedOverlay');
 
   // Game variables
   let player = { x: 0, y: 0, width: 30, height: 30, speed: 5 };
@@ -378,6 +400,58 @@
       e.preventDefault();
       restartGame();
     });
+
+    // --- Floating Emoji Animations ---
+    const floatAnims = [];
+    function getElementCenter(el) {
+      if (!el) return { x: viewW/2, y: 0 };
+      const r = el.getBoundingClientRect();
+      const c = canvas.getBoundingClientRect();
+      return { x: r.left + r.width/2 - c.left, y: r.top + r.height/2 - c.top };
+    }
+    function addEmojiFloat(fromX, fromY, toX, toY, emoji, options = {}) {
+      const start = Date.now();
+      const speed = 1 + 0.7 * (Math.random() - 0.5);
+      const duration = (options.duration || 700) * speed;
+      const angle = (-1.2 + 2.4 * Math.random());
+      const ampX = (options.ampX || 120) * (options.scaleAmpWithUnit ? scaleUnit : 1);
+      const ampY = (options.ampY || 60) * (options.scaleAmpWithUnit ? scaleUnit : 1);
+      const size = options.size || Math.max(16, Math.floor(viewH / 24));
+      floatAnims.push({ start, duration, fromX, fromY, toX, toY, angle, ampX, ampY, emoji, size });
+    }
+    function addEmojiFloatToElement(fromX, fromY, toEl, emoji, options = {}) {
+      const { x, y } = getElementCenter(toEl);
+      addEmojiFloat(fromX, fromY, x, y, emoji, options);
+    }
+    function addEmojiFloatFromElement(fromEl, toX, toY, emoji, options = {}) {
+      const { x, y } = getElementCenter(fromEl);
+      addEmojiFloat(x, y, toX, toY, emoji, options);
+    }
+    function renderEmojiAnims() {
+      if (!floatAnims.length) return false;
+      const now = Date.now();
+      let still = false;
+      for (const anim of floatAnims) {
+        const t = Math.min(1, (now - anim.start) / anim.duration);
+        if (t < 1) still = true;
+        const ease = 1 - Math.pow(1 - t, 3);
+        const x = anim.fromX + (anim.toX - anim.fromX) * ease + Math.sin(anim.angle) * anim.ampX * (1 - t);
+        const y = anim.fromY + (anim.toY - anim.fromY) * ease + Math.sin(anim.angle) * anim.ampY * (1 - t);
+        ctx.save();
+        ctx.font = `${anim.size}px serif`;
+        ctx.globalAlpha = 0.7 + 0.3 * (1 - t);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(anim.emoji, x, y);
+        ctx.restore();
+      }
+      // Purge finished
+      for (let i = floatAnims.length - 1; i >= 0; i--) {
+        const anim = floatAnims[i];
+        if (now - anim.start >= anim.duration) floatAnims.splice(i, 1);
+      }
+      return still;
+    }
 
     // Event handling functions
     function getEventPos(e) {
@@ -610,6 +684,8 @@
       bullets.forEach(bullet => {
         enemies.forEach(enemy => {
           if (Math.abs(bullet.x - enemy.x) < collBulletEnemy && Math.abs(bullet.y - enemy.y) < collBulletEnemy) {
+            // Animate coin to score before removal
+            addEmojiFloatToElement(enemy.x, enemy.y, scoreEl, '🪙', { scaleAmpWithUnit: true });
             bullets.splice(bullets.indexOf(bullet), 1);
             enemies.splice(enemies.indexOf(enemy), 1);
             score += 10;
@@ -621,6 +697,8 @@
       missiles.forEach(missile => {
         enemies.forEach(enemy => {
           if (Math.abs(missile.x - enemy.x) < collBulletEnemy && Math.abs(missile.y - enemy.y) < collBulletEnemy) {
+            // Animate coin to score
+            addEmojiFloatToElement(enemy.x, enemy.y, scoreEl, '🪙', { scaleAmpWithUnit: true });
             missiles.splice(missiles.indexOf(missile), 1);
             enemies.splice(enemies.indexOf(enemy), 1);
             score += 20;
@@ -634,7 +712,11 @@
           for (const w of wingmenPositions) {
             if (Math.abs(w.x - enemy.x) < collPlayerEnemy && Math.abs(w.y - enemy.y) < collPlayerEnemy) {
               const idx = enemies.indexOf(enemy);
-              if (idx !== -1) enemies.splice(idx, 1);
+              if (idx !== -1) {
+                // Animate coin to score
+                addEmojiFloatToElement(enemy.x, enemy.y, scoreEl, '🪙', { scaleAmpWithUnit: true });
+                enemies.splice(idx, 1);
+              }
               wingmenCount = Math.max(0, wingmenCount - 1);
               break;
             }
@@ -646,11 +728,17 @@
       enemies.slice().forEach(enemy => {
         if (Math.abs(player.x - enemy.x) < collPlayerEnemy && Math.abs(player.y - enemy.y) < collPlayerEnemy) {
           const idx = enemies.indexOf(enemy);
-          if (idx !== -1) enemies.splice(idx, 1);
+          if (idx !== -1) {
+            // Animate coin to score
+            addEmojiFloatToElement(enemy.x, enemy.y, scoreEl, '🪙', { scaleAmpWithUnit: true });
+            enemies.splice(idx, 1);
+          }
           if (wingmenCount > 0) {
             wingmenCount = Math.max(0, wingmenCount - 1);
           } else {
             health -= 10;
+            // Animate heart from hearts HUD to player ship
+            addEmojiFloatFromElement(heartsEl, player.x, player.y, '❤️', { scaleAmpWithUnit: true });
           }
         }
       });
@@ -661,17 +749,22 @@
           powerUps.splice(powerUps.indexOf(powerUp), 1);
           if (powerUp.type === 'fire') {
             fireRate = Math.min(fireRate + 1, 2);
+            addEmojiFloatToElement(powerUp.x, powerUp.y, firePowerEl, '🔥', { scaleAmpWithUnit: true });
           } else if (powerUp.type === 'missile') {
             missileRate = Math.min(missileRate + 1, 1);
+            addEmojiFloatToElement(powerUp.x, powerUp.y, missilePowerEl, '🚀', { scaleAmpWithUnit: true });
           } else if (powerUp.type === 'bomb') {
             bombs++;
+            addEmojiFloatToElement(powerUp.x, powerUp.y, bombIconsEl, '💣', { scaleAmpWithUnit: true });
           } else if (powerUp.type === 'wingman') {
             wingmenCount = Math.min(WINGMAN_MAX, wingmenCount + 1);
+            addEmojiFloatToElement(powerUp.x, powerUp.y, wingmenEl, '🛩️', { scaleAmpWithUnit: true });
           } else if (powerUp.type === 'homing') {
             const now = Date.now();
             homingActive = true;
             const EXT = 10000; // 10 seconds per pickup
             homingExpire = Math.max(homingExpire, now) + EXT;
+            addEmojiFloatToElement(powerUp.x, powerUp.y, homingPowerEl, '🎯', { scaleAmpWithUnit: true });
           }
         }
       });
@@ -837,10 +930,12 @@
         firing = false; // stop firing while paused
         pauseBtn.textContent = '▶';
         pauseBtn.setAttribute('aria-label', 'Play');
+        pausedOverlay.style.display = 'flex';
       } else {
         gameRunning = true; // resume
         pauseBtn.textContent = '⏸';
         pauseBtn.setAttribute('aria-label', 'Pause');
+        pausedOverlay.style.display = 'none';
         requestAnimationFrame(gameLoop);
       }
     }
@@ -880,10 +975,14 @@
       drawEnemies();
       drawPowerUps();
       drawMissiles();
+  // Render floating emoji animations (coins, pickups, hearts)
+  renderEmojiAnims();
       
       updateUI();
       
       if (health <= 0 && gameRunning) {
+        // Ensure paused overlay is hidden on game over
+        pausedOverlay.style.display = 'none';
         showGameOver();
         return; // Stop the game loop
       }
