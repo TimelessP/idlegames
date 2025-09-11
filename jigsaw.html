@@ -353,6 +353,8 @@
             <g id="world">
                 <rect id="bg" x="-5000" y="-5000" width="10000" height="10000"></rect>
                 <g id="pieces"></g>
+                <!-- Overlay for interactive hints (near-snap glow) above pieces -->
+                <g id="hints"></g>
             </g>
         </svg>
         <div class="hud">
@@ -407,6 +409,7 @@
             const world = document.getElementById('world');
             const defs = document.getElementById('defs');
             const piecesLayer = document.getElementById('pieces');
+            const hintsLayer = document.getElementById('hints');
             const statusEl = document.getElementById('status');
             const zoomLabel = document.getElementById('zoomLabel');
             const winEl = document.getElementById('win');
@@ -457,6 +460,7 @@
             let panning = null; // background pan via right mouse or space?
             let dragAnimId = 0; // rAF id for drag
             let dragNext = null; // {gid, x, y}
+            let glowState = null; // { gid }
 
             // --- UI wiring ---
             closeWin.addEventListener('click', () => { winEl.style.display = 'none'; });
@@ -1086,6 +1090,8 @@
                             dragAnimId = 0;
                             if (dragNext) {
                                 setGroupTransform(dragNext.gid, dragNext.x, dragNext.y);
+                                // Update near-snap glow for active group
+                                updateNearSnapGlow(dragNext.gid);
                                 dragNext = null;
                             }
                         });
@@ -1114,7 +1120,10 @@
                     if (dragNext) { setGroupTransform(dragNext.gid, dragNext.x, dragNext.y); dragNext = null; }
                     // Avoid snapping if puzzle is already flattened or group no longer exists
                     if (!flattened && groups && groups.has(gid)) {
-                        trySnapGroup(gid);
+                        const snapped = trySnapGroup(gid);
+                        // Clear glow after drop
+                        clearNearSnapGlow();
+                        if (snapped) { tryHapticSnap(); }
                     }
                 }
                 if (panning) { panning = null; }
@@ -1143,24 +1152,96 @@
                 setWorldTransform(ns, ntx, nty);
             }
 
+            // --- Near-snap glow rendering ---
+            function clearNearSnapGlow() {
+                glowState = null;
+                if (!hintsLayer) return;
+                while (hintsLayer.firstChild) hintsLayer.removeChild(hintsLayer.firstChild);
+            }
+
+            function updateNearSnapGlow(gid) {
+                if (!hintsLayer || flattened) return clearNearSnapGlow();
+                const grp = groups.get(gid); if (!grp) return clearNearSnapGlow();
+                const tol = (snapTol / scale) * 1.5; // a bit more lenient than snap
+                const frag = document.createDocumentFragment();
+                const seen = new Set();
+                grp.members.forEach(pid => {
+                    const p = pieces[pid];
+                    const rc = { r: p.r, c: p.c };
+                    const checks = [
+                        { side: 'top', nr: rc.r - 1, nc: rc.c },
+                        { side: 'right', nr: rc.r, nc: rc.c + 1 },
+                        { side: 'bottom', nr: rc.r + 1, nc: rc.c },
+                        { side: 'left', nr: rc.r, nc: rc.c - 1 },
+                    ];
+                    for (const ch of checks) {
+                        const inBounds = ch.nr >= 0 && ch.nr < rows && ch.nc >= 0 && ch.nc < cols;
+                        if (!inBounds) continue;
+                        const nid = ch.nr * cols + ch.nc;
+                        const q = pieces[nid]; if (!q) continue;
+                        if (q.groupId === p.groupId) continue; // same group -> internal seam
+                        const pGrp = groups.get(p.groupId); const qGrp = groups.get(q.groupId);
+                        if (!pGrp || !qGrp) continue;
+                        // world deltas
+                        const expected = { x: (q.c - p.c) * (imgW / cols), y: (q.r - p.r) * (imgH / rows) };
+                        const pw = { x: p.anchor.x + pGrp.x, y: p.anchor.y + pGrp.y };
+                        const qw = { x: q.anchor.x + qGrp.x, y: q.anchor.y + qGrp.y };
+                        const dx = (qw.x - pw.x) - expected.x;
+                        const dy = (qw.y - pw.y) - expected.y;
+                        if (Math.hypot(dx, dy) <= tol) {
+                            const key = `${p.id}:${ch.side}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            const d = buildSidePathD(p.r, p.c, ch.side);
+                            const wrap = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                            wrap.setAttribute('transform', `translate(${pGrp.x},${pGrp.y})`);
+                            const glow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                            glow.setAttribute('d', d);
+                            glow.setAttribute('fill', 'none');
+                            glow.setAttribute('pointer-events', 'none');
+                            glow.setAttribute('vector-effect', 'non-scaling-stroke');
+                            glow.setAttribute('stroke-linecap', 'round');
+                            glow.setAttribute('stroke-linejoin', 'round');
+                            glow.setAttribute('stroke', 'rgba(255,255,0,0.9)');
+                            glow.setAttribute('stroke-width', '3');
+                            glow.style.filter = 'drop-shadow(0 0 6px rgba(255,255,0,0.7))';
+                            wrap.appendChild(glow);
+                            frag.appendChild(wrap);
+                        }
+                    }
+                });
+                while (hintsLayer.firstChild) hintsLayer.removeChild(hintsLayer.firstChild);
+                hintsLayer.appendChild(frag);
+                glowState = { gid };
+            }
+
+            // --- Haptics on snap ---
+            function tryHapticSnap() {
+                try {
+                    if (navigator && typeof navigator.vibrate === 'function') {
+                        navigator.vibrate(15);
+                    }
+                } catch (_) { }
+            }
+
             // --- Snapping ---
             function trySnapGroup(gid) {
                 // Do nothing if the puzzle has been flattened (completed)
-                if (flattened) return;
+                if (flattened) return false;
                 let grp = groups.get(gid); if (!grp) return;
                 // For any piece in this group, check neighbors outside group for proximity
                 const tol = snapTol / scale; // adjust for zoom
-                let snapped = false;
+                let snappedAny = false;
                 // Snapshot member ids to avoid mutation issues during merges
                 const memberIds = Array.from(grp.members);
                 for (const pid of memberIds) {
-                    if (flattened || !groups || groups.size === 0 || !pieces || pieces.length === 0) return;
+                    if (flattened || !groups || groups.size === 0 || !pieces || pieces.length === 0) return snappedAny;
                     const p = pieces[pid];
                     if (!p) continue;
                     const nbrs = neighbors(p.r, p.c);
                     for (const nb of nbrs) {
                         const qid = nb.r * cols + nb.c;
-                        if (flattened || !groups || groups.size === 0 || !pieces || pieces.length === 0) return;
+                        if (flattened || !groups || groups.size === 0 || !pieces || pieces.length === 0) return snappedAny;
                         const q = pieces[qid];
                         if (!q) continue;
                         if (!groups.has(grp.id) || !groups.has(q.groupId)) continue;
@@ -1180,21 +1261,22 @@
                             setGroupTransform(grp.id, grp.x + dx, grp.y + dy);
                             // Merge with q's group
                             const newId = mergeGroups(grp.id, q.groupId);
-                            snapped = true;
+                            snappedAny = true;
                             // Update reference to possibly new group id
-                            if (flattened || !groups || groups.size === 0) return;
+                            if (flattened || !groups || groups.size === 0) return snappedAny;
                             grp = groups.get(newId);
-                            if (!grp) return;
+                            if (!grp) return snappedAny;
                             // After merge, continue to check for cascading joins
                         }
                     }
                 }
-                if (snapped) {
+                if (snappedAny) {
                     // Try a quick flood to snap any other immediate neighbors
                     if (!flattened && groups && groups.has(grp.id)) {
-                        trySnapGroup(grp.id);
+                        if (trySnapGroup(grp.id)) snappedAny = true;
                     }
                 }
+                return snappedAny;
             }
 
             function neighbors(r, c) {
