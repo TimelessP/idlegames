@@ -920,6 +920,7 @@
                 svg.addEventListener('pointerdown', onPointerDown);
                 svg.addEventListener('pointermove', onPointerMove);
                 window.addEventListener('pointerup', onPointerUp);
+                window.addEventListener('pointercancel', onPointerCancel);
                 svg.addEventListener('wheel', onWheel, { passive: false });
                 svg.addEventListener('contextmenu', e => e.preventDefault());
                 listenersBound = true;
@@ -943,18 +944,22 @@
             function onPointerDown(e) {
                 const pt = { x: e.clientX, y: e.clientY };
                 const wpt = screenToWorld(pt);
-                pointers.set(e.pointerId, { x: pt.x, y: pt.y, sx: wpt.x, sy: wpt.y, button: e.button });
+                pointers.set(e.pointerId, { x: pt.x, y: pt.y, sx: wpt.x, sy: wpt.y, button: e.button, type: e.pointerType || 'mouse', t: (typeof performance!=='undefined'&&performance.now)?performance.now():Date.now() });
                 // Capture pointer to the SVG for consistent move/up stream
                 if (svg.setPointerCapture) { try { svg.setPointerCapture(e.pointerId); } catch (_) { } }
 
                 const piece = pieceFromEventTarget(e.target);
 
-                if (pointers.size === 2) {
-                    // Start pinch
-                    const arr = Array.from(pointers.values());
-                    const c0 = { x: (arr[0].x + arr[1].x) / 2, y: (arr[0].y + arr[1].y) / 2 };
+                // Start pinch only when we have at least two active touch pointers
+                const touches = Array.from(pointers.values()).filter(p => p.type === 'touch');
+                if (touches.length >= 2) {
+                    // Use the two most recent touches for stable pinch pairing
+                    touches.sort((a, b) => a.t - b.t);
+                    const a = touches[touches.length - 1];
+                    const b = touches[touches.length - 2];
+                    const c0 = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
                     const w0 = screenToWorld(c0);
-                    const d = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y);
+                    const d = Math.hypot(a.x - b.x, a.y - b.y);
                     pinching = { startDist: d, startScale: scale, startTx: tx, startTy: ty, startCenter: w0 };
                     dragging = null; panning = null;
                     e.preventDefault();
@@ -983,21 +988,28 @@
             function onPointerMove(e) {
                 const p = pointers.get(e.pointerId);
                 if (!p) return;
-                p.x = e.clientX; p.y = e.clientY;
+                p.x = e.clientX; p.y = e.clientY; p.t = (typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
 
-                if (pinching && pointers.size >= 2) {
-                    const arr = Array.from(pointers.values());
-                    const c = { x: (arr[0].x + arr[1].x) / 2, y: (arr[0].y + arr[1].y) / 2 };
-                    const d = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y);
-                    const pivotWorld = screenToWorld(c);
-                    const s = clamp(pinching.startScale * (d / pinching.startDist), minScale, maxScale);
-                    // Keep pivot fixed: adjust tx,ty so that pivotWorld maps to current screen c
-                    const rect = svg.getBoundingClientRect();
-                    const ntx = c.x - rect.left - pivotWorld.x * s;
-                    const nty = c.y - rect.top - pivotWorld.y * s;
-                    setWorldTransform(s, ntx, nty);
-                    e.preventDefault();
-                    return;
+                if (pinching) {
+                    const touches = Array.from(pointers.values()).filter(q => q.type === 'touch');
+                    if (touches.length < 2) {
+                        pinching = null; // not enough touches to continue pinch
+                    } else {
+                        touches.sort((a, b) => a.t - b.t);
+                        const a = touches[touches.length - 1];
+                        const b = touches[touches.length - 2];
+                        const c = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+                        const d = Math.hypot(a.x - b.x, a.y - b.y);
+                        const pivotWorld = screenToWorld(c);
+                        const s = clamp(pinching.startScale * (d / pinching.startDist), minScale, maxScale);
+                        // Keep pivot fixed: adjust tx,ty so that pivotWorld maps to current screen c
+                        const rect = svg.getBoundingClientRect();
+                        const ntx = c.x - rect.left - pivotWorld.x * s;
+                        const nty = c.y - rect.top - pivotWorld.y * s;
+                        setWorldTransform(s, ntx, nty);
+                        e.preventDefault();
+                        return;
+                    }
                 }
 
                 if (dragging) {
@@ -1028,7 +1040,9 @@
 
             function onPointerUp(e) {
                 pointers.delete(e.pointerId);
-                if (pinching && pointers.size < 2) { pinching = null; }
+                // end pinch when fewer than 2 touch pointers remain
+                const touchesLeft = Array.from(pointers.values()).filter(p => p.type === 'touch').length;
+                if (pinching && touchesLeft < 2) { pinching = null; }
                 if (dragging) {
                     const gid = dragging.groupId;
                     dragging = null;
@@ -1041,6 +1055,15 @@
                     }
                 }
                 if (panning) { panning = null; }
+                if (svg.releasePointerCapture) { try { svg.releasePointerCapture(e.pointerId); } catch (_) { } }
+            }
+
+            // Clear interactions on pointercancel (common during UA gestures) to avoid stuck states
+            function onPointerCancel(e) {
+                pointers.delete(e.pointerId);
+                pinching = null; dragging = null; panning = null;
+                if (dragAnimId) { cancelAnimationFrame(dragAnimId); dragAnimId = 0; }
+                dragNext = null;
                 if (svg.releasePointerCapture) { try { svg.releasePointerCapture(e.pointerId); } catch (_) { } }
             }
 
