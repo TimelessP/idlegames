@@ -134,6 +134,7 @@
     <div>Score: <span id="score">0</span></div>
     <div>Health: <span id="health">100</span></div>
     <div>Bombs: <span id="bombs">0</span></div>
+  <div>Wingmen: <span id="wingmen">0</span></div>
     <div>Overheat:</div>
     <div class="overheat-bar">
       <div class="overheat-fill" id="overheat-fill"></div>
@@ -159,7 +160,8 @@
     const ctx = canvas.getContext('2d');
     const scoreEl = document.getElementById('score');
     const healthEl = document.getElementById('health');
-    const bombsEl = document.getElementById('bombs');
+  const bombsEl = document.getElementById('bombs');
+  const wingmenEl = document.getElementById('wingmen');
     const overheatFill = document.getElementById('overheat-fill');
     const gameOverModal = document.getElementById('gameOverModal');
     const finalScoreEl = document.getElementById('finalScore');
@@ -177,7 +179,20 @@
     let maxOverheat = 100;
     let cooldown = false;
     let fireRate = 0; // directions: 0=single, 1=3-way, 2=5-way
-    let missileRate = 0; // 0=none, 1=basic missiles
+  let missileRate = 0; // 0=none, 1=basic missiles
+  // Wingmen state
+  let wingmenCount = 0; // 0..3
+  let wingmenPositions = [];
+  const WINGMAN_MAX = 3;
+  // Homing missiles power-up state
+  let homingActive = false;
+  let homingExpire = 0;
+  let lastHomingLaunch = 0;
+  const HOMING_INTERVAL = 500; // ms
+  const HOMING_SPEED = 6; // px per frame
+  const HOMING_TURN = 0.12; // radians per frame
+  const COOL_RATE = 1; // heat reduced per frame when not firing
+  // Power-ups spawn randomly with equal probability per type
 
     let mouseX = canvas.width / 2;
     let mouseY = canvas.height - 50;
@@ -214,6 +229,11 @@
       cooldown = false;
       fireRate = 0;
       missileRate = 0;
+  wingmenCount = 0;
+  wingmenPositions = [];
+  homingActive = false;
+  homingExpire = 0;
+  lastHomingLaunch = 0;
       mouseX = canvas.width / 2;
       mouseY = canvas.height - 50;
       firing = false;
@@ -325,6 +345,39 @@
       ctx.fillRect(player.x - player.width/2, player.y - player.height/2, player.width, player.height);
     }
 
+    function getWingmanOffsets(count) {
+      switch (count) {
+        case 1:
+          return [{ x: -60, y: 0 }];
+        case 2:
+          return [{ x: -60, y: 0 }, { x: 60, y: 0 }];
+        case 3:
+          return [{ x: -60, y: 0 }, { x: 60, y: 0 }, { x: 0, y: -60 }];
+        default:
+          return [];
+      }
+    }
+
+    function updateWingmenPositions() {
+      const offsets = getWingmanOffsets(wingmenCount);
+      wingmenPositions = offsets.map(off => {
+        const x = player.x + off.x;
+        const y = player.y + off.y;
+        return {
+          x: Math.max(player.width/2, Math.min(canvas.width - player.width/2, x)),
+          y: Math.max(player.height/2, Math.min(canvas.height - player.height/2, y))
+        };
+      });
+    }
+
+    function drawWingmen() {
+      if (wingmenCount <= 0) return;
+      ctx.fillStyle = '#44ff44';
+      wingmenPositions.forEach(p => {
+        ctx.fillRect(p.x - player.width/2, p.y - player.height/2, player.width, player.height);
+      });
+    }
+
     function drawBullets() {
       ctx.fillStyle = '#ffff00';
       bullets.forEach(bullet => {
@@ -341,7 +394,12 @@
 
     function drawPowerUps() {
       powerUps.forEach(powerUp => {
-        ctx.fillStyle = powerUp.type === 'fire' ? '#ff00ff' : powerUp.type === 'missile' ? '#00ffff' : '#ffffff';
+        if (powerUp.type === 'fire') ctx.fillStyle = '#ff00ff';
+        else if (powerUp.type === 'missile') ctx.fillStyle = '#00ffff';
+        else if (powerUp.type === 'bomb') ctx.fillStyle = '#ffffff';
+        else if (powerUp.type === 'wingman') ctx.fillStyle = '#00ff88';
+        else if (powerUp.type === 'homing') ctx.fillStyle = '#ffaa00';
+        else ctx.fillStyle = '#ffffff';
         ctx.fillRect(powerUp.x - 10, powerUp.y - 10, 20, 20);
       });
     }
@@ -389,9 +447,41 @@
 
     function updateMissiles() {
       missiles.forEach(missile => {
-        missile.y -= 8;
+        if (missile.homing) {
+          // Find nearest enemy and steer toward it
+          let nearest = null;
+          let bestD2 = Infinity;
+          for (const e of enemies) {
+            const dx = e.x - missile.x;
+            const dy = e.y - missile.y;
+            const d2 = dx*dx + dy*dy;
+            if (d2 < bestD2) { bestD2 = d2; nearest = e; }
+          }
+          if (nearest) {
+            const desired = Math.atan2(nearest.y - missile.y, nearest.x - missile.x);
+            const current = Math.atan2(missile.vy, missile.vx);
+            let diff = desired - current;
+            while (diff > Math.PI) diff -= 2*Math.PI;
+            while (diff < -Math.PI) diff += 2*Math.PI;
+            const turn = Math.max(-HOMING_TURN, Math.min(HOMING_TURN, diff));
+            const newAngle = current + turn;
+            const spd = missile.speed || HOMING_SPEED;
+            missile.vx = Math.cos(newAngle) * spd;
+            missile.vy = Math.sin(newAngle) * spd;
+          }
+          missile.x += missile.vx;
+          missile.y += missile.vy;
+        } else {
+          missile.y -= 8;
+        }
       });
-      missiles = missiles.filter(missile => missile.y > 0);
+      missiles = missiles.filter(missile => {
+        if (missile.homing) {
+          return missile.x > -20 && missile.x < canvas.width + 20 && missile.y > -20 && missile.y < canvas.height + 20;
+        } else {
+          return missile.y > 0;
+        }
+      });
     }
 
     function checkCollisions() {
@@ -417,11 +507,30 @@
         });
       });
 
+      // Wingmen vs Enemies: if a wingman hits an enemy, remove both and lose one wingman
+      if (wingmenCount > 0 && wingmenPositions.length > 0) {
+        enemies.slice().forEach(enemy => {
+          for (const w of wingmenPositions) {
+            if (Math.abs(w.x - enemy.x) < 25 && Math.abs(w.y - enemy.y) < 25) {
+              const idx = enemies.indexOf(enemy);
+              if (idx !== -1) enemies.splice(idx, 1);
+              wingmenCount = Math.max(0, wingmenCount - 1);
+              break;
+            }
+          }
+        });
+      }
+
       // Player vs Enemies
-      enemies.forEach(enemy => {
+      enemies.slice().forEach(enemy => {
         if (Math.abs(player.x - enemy.x) < 25 && Math.abs(player.y - enemy.y) < 25) {
-          enemies.splice(enemies.indexOf(enemy), 1);
-          health -= 10;
+          const idx = enemies.indexOf(enemy);
+          if (idx !== -1) enemies.splice(idx, 1);
+          if (wingmenCount > 0) {
+            wingmenCount = Math.max(0, wingmenCount - 1);
+          } else {
+            health -= 10;
+          }
         }
       });
 
@@ -435,6 +544,13 @@
             missileRate = Math.min(missileRate + 1, 1);
           } else if (powerUp.type === 'bomb') {
             bombs++;
+          } else if (powerUp.type === 'wingman') {
+            wingmenCount = Math.min(WINGMAN_MAX, wingmenCount + 1);
+          } else if (powerUp.type === 'homing') {
+            const now = Date.now();
+            homingActive = true;
+            const EXT = 10000; // 10 seconds per pickup
+            homingExpire = Math.max(homingExpire, now) + EXT;
           }
         }
       });
@@ -448,34 +564,44 @@
       
       lastShot = now;
       
-      if (fireRate === 0) {
-        bullets.push({ x: player.x, y: player.y - 20 });
-      } else if (fireRate === 1) {
-        bullets.push({ x: player.x, y: player.y - 20 });
-        bullets.push({ x: player.x - 10, y: player.y - 15 });
-        bullets.push({ x: player.x + 10, y: player.y - 15 });
-      } else if (fireRate === 2) {
-        bullets.push({ x: player.x, y: player.y - 20 });
-        bullets.push({ x: player.x - 10, y: player.y - 15 });
-        bullets.push({ x: player.x + 10, y: player.y - 15 });
-        bullets.push({ x: player.x - 20, y: player.y - 10 });
-        bullets.push({ x: player.x + 20, y: player.y - 10 });
-      }
+      const shooters = [{ x: player.x, y: player.y }, ...wingmenPositions];
+      const addPattern = (sx, sy) => {
+        if (fireRate === 0) {
+          bullets.push({ x: sx, y: sy - 20 });
+        } else if (fireRate === 1) {
+          bullets.push({ x: sx, y: sy - 20 });
+          bullets.push({ x: sx - 10, y: sy - 15 });
+          bullets.push({ x: sx + 10, y: sy - 15 });
+        } else if (fireRate === 2) {
+          bullets.push({ x: sx, y: sy - 20 });
+          bullets.push({ x: sx - 10, y: sy - 15 });
+          bullets.push({ x: sx + 10, y: sy - 15 });
+          bullets.push({ x: sx - 20, y: sy - 10 });
+          bullets.push({ x: sx + 20, y: sy - 10 });
+        }
+      };
+      shooters.forEach(s => addPattern(s.x, s.y));
       
       overheat += 5;
       if (overheat >= maxOverheat) {
-        cooldown = true;
         overheat = maxOverheat;
-        setTimeout(() => {
-          cooldown = false;
-          overheat = 0;
-        }, 2000);
+        cooldown = true; // lock firing until cooled below threshold
       }
     }
 
     function fireMissile() {
       if (missileRate > 0 && Math.random() < 0.1) { // Occasional missile fire
         missiles.push({ x: player.x, y: player.y - 20 });
+      }
+    }
+
+    function maybeLaunchHoming() {
+      const now = Date.now();
+      if (!homingActive) return;
+      if (now >= homingExpire) { homingActive = false; return; }
+      if (now - lastHomingLaunch >= HOMING_INTERVAL) {
+        missiles.push({ x: player.x, y: player.y - 20, vx: 0, vy: -HOMING_SPEED, speed: HOMING_SPEED, homing: true });
+        lastHomingLaunch = now;
       }
     }
 
@@ -495,15 +621,17 @@
 
     function spawnPowerUps() {
       if (Math.random() < 0.005) {
-        const types = ['fire', 'missile', 'bomb'];
+        const types = ['fire', 'missile', 'bomb', 'wingman', 'homing'];
         powerUps.push({ x: Math.random() * canvas.width, y: -20, type: types[Math.floor(Math.random() * types.length)] });
       }
     }
+
 
     function updateUI() {
       scoreEl.textContent = score;
       healthEl.textContent = health;
       bombsEl.textContent = bombs;
+      wingmenEl.textContent = wingmenCount;
       overheatFill.style.width = `${(overheat / maxOverheat) * 100}%`;
       if (cooldown) {
         overheatFill.classList.add('cooldown');
@@ -515,22 +643,32 @@
     function gameLoop() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       
-      updatePlayer();
-      updateBullets();
+  updatePlayer();
+  updateWingmenPositions();
+  updateBullets();
       updateEnemies();
       updatePowerUps();
       updateMissiles();
       checkCollisions();
+      // Passive cooling when not firing
+      if (!firing && overheat > 0) {
+        overheat = Math.max(0, overheat - COOL_RATE);
+        if (cooldown && overheat <= maxOverheat * 0.6) {
+          cooldown = false; // unlock when sufficiently cooled
+        }
+      }
       
       if (firing) {
         fireBullet();
       }
-      fireMissile();
+  fireMissile();
+  maybeLaunchHoming();
       
-      spawnEnemies();
-      spawnPowerUps();
+    spawnEnemies();
+    spawnPowerUps();
       
-      drawPlayer();
+  drawPlayer();
+  drawWingmen();
       drawBullets();
       drawEnemies();
       drawPowerUps();
