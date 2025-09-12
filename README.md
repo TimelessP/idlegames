@@ -8,57 +8,57 @@ A curated collection of relaxing idle and puzzle games built with HTML5, CSS3, a
 
 The complete collection is hosted on GitHub Pages with a beautiful launcher interface.
 
-## 🎯 Featured Games
+## 🎯 Games (Single-Page HTML)
 
 ### 🧩 [Fit the Shapes](https://timelessp.github.io/idlegames/fit-the-shapes.html)
-A Tetris-inspired puzzle game with special diamond and lava pieces. Place shapes strategically to clear rows and columns while managing special abilities.
-- **Features:** Drag & drop mechanics, special pieces, scoring system, strategic gameplay
-- **Tags:** Puzzle, Strategy, Tetris-like
-
-### 🍪 [Cookie Clicker Lite](https://timelessp.github.io/idlegames/cookie-clicker-lite.html)
-The classic incremental clicking game. Start with manual clicks and build up to an automated cookie empire with upgrades and achievements.
-- **Features:** Incremental progression, upgrades, achievements, idle mechanics
-- **Tags:** Clicker, Incremental, Upgrades
-
-### 🌸 [Garden Grower](https://timelessp.github.io/idlegames/garden-grower.html)
-Cultivate a beautiful garden by planting seeds, watering plants, and watching them grow. A peaceful and meditative gardening experience.
-- **Features:** Plant simulation, growth mechanics, peaceful gameplay
-- **Tags:** Simulation, Relaxing, Nature
-
-### 💭 [Dream Weaver](https://timelessp.github.io/idlegames/dream-weaver.html)
-Explore abstract dreamscapes and create beautiful patterns. A surreal and artistic experience that blends creativity with relaxation.
-- **Features:** Abstract visuals, creative gameplay, artistic expression
-- **Tags:** Creative, Abstract, Artistic
-
-### 🐠 [Idle Aquarium](https://timelessp.github.io/idlegames/idle-aquarium.html)
-Build and manage your own aquarium. Collect different fish species, upgrade your tank, and create a thriving underwater ecosystem.
-- **Features:** Fish collection, tank management, idle progression
-- **Tags:** Idle, Management, Collection
-
-### 🏙️ [Idle City Builder](https://timelessp.github.io/idlegames/idle-city-builder.html)
-Construct and expand your own city. Manage resources, build structures, and watch your metropolis grow over time with idle progression.
-- **Features:** City building, resource management, idle growth
-- **Tags:** City Building, Idle, Strategy
-
-### 💎 [Match Collapse](https://timelessp.github.io/idlegames/match-collapse.html)
-A satisfying match-3 style game where you collapse groups of matching gems. Chain combos for higher scores and special effects.
-- **Features:** Match-3 mechanics, combo system, satisfying effects
-- **Tags:** Match-3, Puzzle, Casual
-
-### ⚾ [Physics Toy](https://timelessp.github.io/idlegames/physics-toy.html)
-Experiment with realistic physics simulations. Drop objects, create chain reactions, and explore the fascinating world of physics in a playful sandbox.
-- **Features:** Physics simulation, sandbox gameplay, experimentation
-- **Tags:** Physics, Sandbox, Experimental
-
-### 🎚️ [Slider Game](https://timelessp.github.io/idlegames/slider-game.html)
-Solve sliding puzzle challenges by moving tiles to recreate target patterns. Multiple difficulty levels test your spatial reasoning skills.
-- **Features:** Sliding puzzles, multiple difficulties, brain training
-- **Tags:** Puzzle, Logic, Brain Training
+Tetris-inspired placement puzzle with special Diamond and Lava pieces. Clear rows/columns and manage economy-like tradeoffs.
+- Features: Drag & drop, diamond refunds, lava burns, score animations, mobile-friendly
+- Tags: Puzzle, Strategy, Tetris-like
 
 ### 🚀 [Space Scroller](https://timelessp.github.io/idlegames/space-scroller.html)
-Navigate through space in this endless scrolling adventure. Dodge obstacles, collect power-ups, and see how far you can travel in the cosmos.
-- **Features:** Endless gameplay, space theme, power-ups
-- **Tags:** Action, Endless, Space
+Touch-friendly arcade scroller with power-ups and a modern HUD. Survive, manage overheat, and collect upgrades.
+- Features: Wingmen, missiles, homing, bombs, overheat system, pause/play, fullscreen, responsive HUD
+- Tags: Action, Arcade, Endless
+
+### 🧪 [Magic Potion](https://timelessp.github.io/idlegames/potion.html)
+Mesmerizing physics toy with layered canvases, glow, and tilt support. Play with a reactive “potion” and visual effects.
+- Features: Multi-canvas effects, touch-friendly UI, motion controls (with permission)
+- Tags: Physics, Toy, Visual
+
+### ⚙️ [Physics Toy](https://timelessp.github.io/idlegames/physics-toy.html)
+Simple sandbox with bouncing balls and gravity/friction. A calming pocket physics demo.
+- Features: Reset, theme toggle, responsive canvas
+- Tags: Physics, Sandbox, Casual
+
+### 🌿 [Garden Grower](https://timelessp.github.io/idlegames/garden-grower.html)
+Casual matching-with-a-garden-flavor mini game built for phones and desktops.
+- Features: Touch first, theme toggle, quick sessions
+- Tags: Casual, Memory, Puzzle
+
+### 🧩 [Jigsaw Puzzle](https://timelessp.github.io/idlegames/jigsaw.html)
+Satisfying, touch-friendly jigsaw with smooth pan/zoom and polished theming.
+- Features: Mobile pan/zoom, theme support, fluid UI
+- Tags: Puzzle, Casual
+
+### 🌀 [Maze Balls](https://timelessp.github.io/idlegames/maze-balls.html)
+Guide balls through mazes using touch or device tilt. Gentle difficulty ramp and clean UI.
+- Features: Theme toggle, optional tilt controls, timer/levels
+- Tags: Puzzle, Tilt, Skill
+
+### 🎲 [Yahtzee](https://timelessp.github.io/idlegames/yahtzee.html)
+Classic dice game with a clean scorecard and keyboard/touch controls.
+- Features: Score categories, rolling/holding dice, light/dark themes
+- Tags: Dice, Board Game, Casual
+
+### 🧪🖥️ [Cyber Deck](https://timelessp.github.io/idlegames/cyber-deck.html)
+Retro-styled terminal playground with theming, panels, and simulated terminal output.
+- Features: Multiple terminal themes, sticky layout, rich UI controls
+- Tags: Toy, Retro, Theming
+
+### 🎙️ [Dictaphone](https://timelessp.github.io/idlegames/dictaphone.html)
+Handy voice recorder with waveform/meter UI and export options. Built as a simple, elegant SPA.
+- Features: Record/playback, trimming/jumping, gain/volume controls, theme support
+- Tags: Utility, Audio, SPA
 
 ## ✨ Features
 
@@ -123,12 +123,12 @@ Simply visit [https://timelessp.github.io/idlegames/](https://timelessp.github.i
    npx serve
    ```
 
-## 🎮 Game Categories
+## 🎮 Categories
 
-- **🧩 Puzzle Games:** Fit the Shapes, Match Collapse, Slider Game
-- **⏰ Idle Games:** Cookie Clicker Lite, Idle Aquarium, Idle City Builder
-- **🎨 Creative Games:** Dream Weaver, Garden Grower
-- **🎯 Action Games:** Space Scroller, Physics Toy
+- 🧩 Puzzle/Casual: Fit the Shapes, Jigsaw Puzzle, Yahtzee, Maze Balls, Garden Grower
+- 🧪 Physics/Toys: Magic Potion, Physics Toy, Cyber Deck
+- 🎯 Action/Arcade: Space Scroller
+- 🛠️ Utilities/Extras: Dictaphone
 
 ## 🤝 Contributing
 
