@@ -84,12 +84,6 @@ Adorable, mobile-first organiser with Notes, Calendar, Tasks, Flip Cards, and Ca
 - High contrast ratios for accessibility
 - Touch-friendly controls
 
-### 🎯 **Zero Dependencies**
-- Pure HTML5, CSS3, and vanilla JavaScript
-- No frameworks or external libraries required
-- Fast loading times and minimal bandwidth usage
-- Works offline once loaded
-
 ## 🛠️ Technical Details
 
 ### **Built With**
