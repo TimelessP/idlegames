@@ -60,6 +60,11 @@ Handy voice recorder with waveform/meter UI and export options. Built as a simpl
 - Features: Record/playback, trimming/jumping, gain/volume controls, theme support
 - Tags: Utility, Audio, SPA
 
+### 📔 [Personal Organiser](https://timelessp.github.io/idlegames/organiser.html)
+Adorable, mobile-first organiser with Notes, Calendar, Tasks, Flip Cards, and Calculator — all local-first.
+- Features: Scalable UI, drag-and-drop sorting (touch + mouse), fullscreen, JSON import/export, mode persistence, autosizing calculator
+- Tags: Utility, Productivity, Notes, Calendar, Tasks
+
 ## ✨ Features
 
 ### 🎨 **Modern UI Design**
@@ -92,6 +97,9 @@ Handy voice recorder with waveform/meter UI and export options. Built as a simpl
 - **CSS3** with CSS Variables for theming and animations
 - **Vanilla JavaScript** for game logic and interactivity
 - **LocalStorage** for persistent game data and preferences
+
+### 🖼️ Favicon on GitHub Pages
+Each HTML page explicitly links `favicon.ico` so icons resolve correctly at `/idlegames/` on GitHub Pages instead of the site root.
 
 ### **Browser Compatibility**
 - Modern browsers (Chrome, Firefox, Safari, Edge)
@@ -128,7 +136,7 @@ Simply visit [https://timelessp.github.io/idlegames/](https://timelessp.github.i
 - 🧩 Puzzle/Casual: Fit the Shapes, Jigsaw Puzzle, Yahtzee, Maze Balls, Garden Grower
 - 🧪 Physics/Toys: Magic Potion, Physics Toy, Cyber Deck
 - 🎯 Action/Arcade: Space Scroller
-- 🛠️ Utilities/Extras: Dictaphone
+- 🛠️ Utilities/Extras: Dictaphone, Personal Organiser
 
 ## 🤝 Contributing
 
