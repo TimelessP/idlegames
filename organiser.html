@@ -581,6 +581,34 @@
             display: none !important;
         }
 
+        /* Wheel */
+        .wheel-body {
+            display: grid;
+            grid-template-columns: 60% 40%;
+            gap: calc(1.0 * var(--u));
+            align-items: stretch;
+            min-height: 0;
+        }
+        .wheel-editor textarea {
+            width: 100%;
+            height: 100%;
+            min-height: calc(22 * var(--u));
+        }
+        .wheel-canvas-wrap {
+            border: var(--bw) solid var(--ink);
+            border-radius: var(--radius-sm);
+            background: #fff;
+            display: grid;
+            place-items: center;
+            overflow: hidden;
+            min-height: calc(22 * var(--u));
+        }
+        #wheel-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
         /* Calculator */
         /* Make the calculator content scalable to fit its panel */
         #panel-calc .panel-body {
@@ -782,6 +810,15 @@
             #card-back {
                 min-height: calc(10 * var(--u));
             }
+
+            /* Wheel: stack vertically on small screens; wheel first, textarea follows */
+            .wheel-body {
+                grid-template-columns: 1fr;
+            }
+            .wheel-editor textarea {
+                height: auto;
+                min-height: calc(16 * var(--u));
+            }
         }
 
         @media (max-height: 640px) {
@@ -849,6 +886,7 @@
                 Cards</button>
             <button class="tab" role="tab" aria-selected="false" aria-controls="panel-calc"
                 id="tab-calc">Calculator</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="panel-wheel" id="tab-wheel">Wheel</button>
             <button class="tab" role="tab" aria-selected="false" aria-controls="panel-data" id="tab-data">Data</button>
         </div>
 
@@ -869,6 +907,29 @@
                         <div style="display:flex; gap: calc(0.6 * var(--u)); justify-content:flex-end;">
                             <button class="btn" id="delete-note">Delete</button>
                             <button class="btn mint" id="save-note">Save</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Wheel Panel -->
+            <section class="panel" role="tabpanel" id="panel-wheel" aria-labelledby="tab-wheel">
+                <div class="panel-header">
+                    <div style="display:flex; gap: calc(0.6 * var(--u)); align-items:center; flex-wrap:wrap;">
+                        <button class="btn mint" id="wheel-spin">Spin</button>
+                        <button class="btn peach" id="wheel-remove-spin">Remove &amp; Spin</button>
+                        <div class="mono" id="wheel-result" aria-live="polite"></div>
+                    </div>
+                </div>
+                <div class="panel-body wheel-body">
+                    <div class="wheel-canvas-wrap">
+                        <canvas id="wheel-canvas"></canvas>
+                    </div>
+                    <div class="wheel-editor">
+                        <textarea id="wheel-input" class="mono" placeholder="Enter one option per line..."></textarea>
+                        <div style="display:flex; gap: calc(0.6 * var(--u)); margin-top: calc(0.6 * var(--u)); justify-content:flex-end;">
+                            <button class="btn" id="wheel-clear">Clear</button>
+                            <button class="btn peach" id="wheel-sample">Sample</button>
                         </div>
                     </div>
                 </div>
@@ -1041,6 +1102,7 @@
                 cards: [],
                 // Shuffled order cache for flip cards: { cards: [ids...], index: number }
                 shuffledCache: { cards: [], index: 0 },
+                wheel: { itemsText: '' },
             };
 
             // Ensure the floating controls are anchored inside the title bar so they move with it
@@ -1087,6 +1149,7 @@
                 localStorage.setItem(SCALE_KEY, String(userScale));
                 updateScaleVars();
                 fitCalc();
+                if (state.ui.tab === 'wheel') resizeWheelCanvas();
             }
 
             window.addEventListener('resize', updateScaleVars);
@@ -1098,6 +1161,7 @@
                 updateScaleVars();
                 setStatus('Scale reset');
                 fitCalc();
+                if (state.ui.tab === 'wheel') resizeWheelCanvas();
             });
 
             // FULLSCREEN
@@ -1121,6 +1185,7 @@
                 { id: 'tasks', btn: gid('tab-tasks'), panel: gid('panel-tasks') },
                 { id: 'cards', btn: gid('tab-cards'), panel: gid('panel-cards') },
                 { id: 'calc', btn: gid('tab-calc'), panel: gid('panel-calc') },
+                { id: 'wheel', btn: gid('tab-wheel'), panel: gid('panel-wheel') },
                 { id: 'data', btn: gid('tab-data'), panel: gid('panel-data') },
             ];
             function showTab(id) {
@@ -1133,6 +1198,8 @@
                 if (id === 'calc') {
                     // Defer to after layout so sizes are measurable
                     setTimeout(fitCalc, 0);
+                } else if (id === 'wheel') {
+                    setTimeout(resizeWheelCanvas, 0);
                 }
             }
             tabs.forEach(t => t.btn.addEventListener('click', () => showTab(t.id)));
@@ -1868,6 +1935,7 @@
                 state.events = {};
                 state.cards = [];
                 state.shuffledCache = { cards: [], index: 0 };
+                state.wheel = { itemsText: '' };
                 // Clear the JSON textarea and reset validation state
                 if (jsonArea) {
                     jsonArea.value = '';
@@ -1877,6 +1945,262 @@
                 initRenderAll();
                 setStatus('Erased');
             });
+
+            // WHEEL
+            const wheelInput = gid('wheel-input');
+            const wheelSpinBtn = gid('wheel-spin');
+            const wheelRemoveSpinBtn = gid('wheel-remove-spin');
+            const wheelCanvas = gid('wheel-canvas');
+            const wheelResult = gid('wheel-result');
+            const wheelClearBtn = gid('wheel-clear');
+            const wheelSampleBtn = gid('wheel-sample');
+            // Initialize wheel state lazily
+            if (!state.wheel) state.wheel = { itemsText: '' };
+
+            let wheelAngle = 0; // current rotation in radians
+            let wheelSpinning = false;
+            let spinStart = 0;
+            let spinDuration = 0;
+            let startAngle = 0;
+            let targetAngle = 0; // absolute angle to end at
+
+            function getWheelItems() {
+                const text = (wheelInput?.value ?? state.wheel.itemsText ?? '').replace(/\r\n?/g, '\n');
+                return text.split(/\n/).map(s => s.trim()).filter(Boolean);
+            }
+
+            function resizeWheelCanvas() {
+                if (!wheelCanvas) return;
+                const wrap = wheelCanvas.parentElement;
+                if (!wrap) return;
+                const s = Math.max(50, Math.min(wrap.clientWidth, wrap.clientHeight));
+                const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+                wheelCanvas.width = Math.floor(s * dpr);
+                wheelCanvas.height = Math.floor(s * dpr);
+                wheelCanvas.style.width = s + 'px';
+                wheelCanvas.style.height = s + 'px';
+                drawWheel();
+            }
+
+            function wheelColors(i) {
+                const palette = [
+                    getComputedStyle(document.documentElement).getPropertyValue('--peach').trim() || '#ffc9a9',
+                    getComputedStyle(document.documentElement).getPropertyValue('--mint').trim() || '#b9f5c6',
+                    getComputedStyle(document.documentElement).getPropertyValue('--teal').trim() || '#9ee7e5',
+                    getComputedStyle(document.documentElement).getPropertyValue('--lav').trim() || '#cdb4ff',
+                    getComputedStyle(document.documentElement).getPropertyValue('--berry').trim() || '#ff6fa7'
+                ];
+                return palette[i % palette.length];
+            }
+
+            function drawRoundedTriangle(ctx, x, y, w, h, r) {
+                const rw = Math.min(r, w / 2), rh = Math.min(r, h / 2);
+                ctx.beginPath();
+                // Triangle pointing left: base centered at right, tip at left
+                // Points: A (x, y), B (x + w, y - h/2), C (x + w, y + h/2)
+                const A = { x: x, y: y };
+                const B = { x: x + w, y: y - h / 2 };
+                const C = { x: x + w, y: y + h / 2 };
+                // Move slightly inwards for rounded corners
+                ctx.moveTo(A.x + rw, A.y);
+                // Arc at B
+                ctx.lineTo(B.x - rw, B.y + rh);
+                ctx.quadraticCurveTo(B.x, B.y, B.x - rw, B.y - rh);
+                // Arc at C
+                ctx.lineTo(C.x - rw, C.y - rh);
+                ctx.quadraticCurveTo(C.x, C.y, C.x - rw, C.y + rh);
+                // Back to A with arc
+                ctx.lineTo(A.x + rw, A.y);
+                ctx.quadraticCurveTo(A.x, A.y, A.x + rw, A.y);
+                ctx.closePath();
+            }
+
+            function computeHitIndexByAngle(angle, n) {
+                // Determine which slice center is closest to pointer at +X for a given wheel angle
+                const a = ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+                for (let i = 0; i < n; i++) {
+                    const a0 = (i / n) * Math.PI * 2;
+                    const a1 = ((i + 1) / n) * Math.PI * 2;
+                    const aMid = (a0 + a1) / 2;
+                    const rel = (aMid + a + Math.PI * 2) % (Math.PI * 2);
+                    if (rel < Math.PI / n || rel > (Math.PI * 2 - Math.PI / n)) return i;
+                }
+                return 0;
+            }
+
+            function drawWheel() {
+                if (!wheelCanvas) return;
+                const ctx = wheelCanvas.getContext('2d');
+                const { width: W, height: H } = wheelCanvas;
+                ctx.clearRect(0, 0, W, H);
+                const items = getWheelItems();
+                const n = items.length || 1;
+                const highlightIdx = (!wheelSpinning && items.length) ? computeHitIndexByAngle(wheelAngle, n) : -1;
+                const cx = W / 2, cy = H / 2;
+                // Leave enough clearance for thick stroke so it isn't clipped by the canvas edge
+                const rawR = Math.min(cx, cy);
+                // Estimate stroke and ensure at least half the stroke width plus a small buffer fits
+                let r = rawR - 4;
+                let estStroke = Math.max(1.5, r * 0.045);
+                const minClear = Math.max(4, estStroke / 2 + 2);
+                r = rawR - minClear;
+                // Outer circle background
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.rotate(wheelAngle);
+                for (let i = 0; i < n; i++) {
+                    const a0 = (i / n) * Math.PI * 2;
+                    const a1 = ((i + 1) / n) * Math.PI * 2;
+                    // Slice
+                    ctx.beginPath();
+                    ctx.moveTo(0, 0);
+                    ctx.arc(0, 0, r, a0, a1);
+                    ctx.closePath();
+                    if (i === highlightIdx) {
+                        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--leaf').trim() || '#a0d468';
+                    } else {
+                        ctx.fillStyle = wheelColors(i);
+                    }
+                    ctx.fill();
+                    // Outline
+                    ctx.lineWidth = Math.max(1.5, r * 0.045);
+                    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#000';
+                    ctx.stroke();
+
+                    // Label: Angle the text along the slice bisector towards the wheel center.
+                    // Start of text should be closest to the center, flowing outward along the bisector.
+                    const aMid = (a0 + a1) / 2;
+                    ctx.save();
+                    // Rotate to bisector; draw text along +X in this local frame
+                    ctx.rotate(aMid);
+                    const inner = r * 0.32; // where text starts
+                    ctx.translate(inner, 0);
+                    // Text settings
+                    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#000';
+                    ctx.font = `${Math.max(10, Math.floor(r * 0.16))}px Noto Sans, sans-serif`;
+                    ctx.textAlign = 'left';
+                    ctx.textBaseline = 'middle';
+                    const label = items[i] || '';
+                    const maxWidth = r - inner - 4;
+                    ctx.save();
+                    // Slight white halo for readability
+                    ctx.shadowColor = 'rgba(255,255,255,0.9)';
+                    ctx.shadowBlur = Math.max(0, Math.floor(r * 0.03));
+                    ctx.fillText(label, 0, 0, maxWidth);
+                    ctx.restore();
+                    ctx.restore();
+                }
+                ctx.restore();
+
+                // Draw pointer on the right (east). Triangle with rounded outline.
+                ctx.save();
+                const outline = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#000';
+                const yellow = getComputedStyle(document.documentElement).getPropertyValue('--sun').trim() || '#ffd86b';
+                const pointerW = Math.min(W, H) * 0.14;
+                const pointerH = Math.min(W, H) * 0.18;
+                const pointerStroke = Math.max(2, Math.min(W, H) * 0.03);
+                const pad = Math.max(Math.min(W, H) * 0.02, pointerStroke / 2 + 2);
+                const px = W - pad - pointerW; // leftmost x of pointer body
+                const py = H / 2;
+                // Simple triangle: tip at (px, py), base on the right
+                ctx.beginPath();
+                ctx.moveTo(px, py);
+                ctx.lineTo(px + pointerW, py - pointerH / 2);
+                ctx.lineTo(px + pointerW, py + pointerH / 2);
+                ctx.closePath();
+                ctx.fillStyle = yellow;
+                ctx.fill();
+                ctx.lineWidth = pointerStroke;
+                ctx.strokeStyle = outline;
+                ctx.lineJoin = 'round';
+                ctx.lineCap = 'round';
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            function angleForIndex(i, n) { return (i / n) * Math.PI * 2; }
+
+            function spinWheel(onDone) {
+                const items = getWheelItems();
+                const n = items.length;
+                if (!n) { wheelResult.textContent = 'Add options to spin'; return; }
+                if (wheelSpinning) return;
+                // Choose a target slice randomly
+                const idx = Math.floor(Math.random() * n);
+                // Align slice center to pointer at +X.
+                const TAU = Math.PI * 2;
+                const aMid = (angleForIndex(idx, n) + angleForIndex(idx + 1, n)) / 2;
+                startAngle = wheelAngle;
+                const spins = 4 + Math.floor(Math.random() * 3); // 4-6 extra spins for fun
+                const norm = (a) => ((a % TAU) + TAU) % TAU;
+                const aStartMod = norm(startAngle);
+                const needed = norm(-aMid - aStartMod); // delta to bring aMid to 0 (pointer)
+                const delta = needed + spins * TAU;
+                targetAngle = startAngle + delta;
+                spinDuration = 1800 + Math.random() * 1200; // ms
+                spinStart = performance.now();
+                wheelSpinning = true;
+                if (wheelSpinBtn) wheelSpinBtn.disabled = true;
+                if (wheelRemoveSpinBtn) wheelRemoveSpinBtn.disabled = true;
+
+                function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+                const animate = (now) => {
+                    if (!wheelSpinning) return;
+                    const t = Math.min(1, (now - spinStart) / spinDuration);
+                    const eased = easeOutCubic(t);
+                    wheelAngle = startAngle + (targetAngle - startAngle) * eased;
+                    drawWheel();
+                    if (t < 1) { requestAnimationFrame(animate); }
+                    else {
+                        // Snap to exact target to avoid endless micro-rotation
+                        wheelAngle = targetAngle % (Math.PI * 2);
+                        wheelSpinning = false;
+                        if (wheelSpinBtn) wheelSpinBtn.disabled = false;
+                        if (wheelRemoveSpinBtn) wheelRemoveSpinBtn.disabled = false;
+                        drawWheel();
+                        // Announce result: which slice at +X
+                        const finalAngle = wheelAngle % (Math.PI * 2);
+                        const hit = computeHitIndexByAngle(finalAngle, n);
+                        const winner = items[hit] || '';
+                        wheelResult.textContent = winner;
+                        if (typeof onDone === 'function') onDone({ index: hit, text: winner, items });
+                    }
+                };
+                requestAnimationFrame(animate);
+            }
+
+            function wheelInputChanged() {
+                state.wheel.itemsText = wheelInput.value;
+                scheduleSave();
+                drawWheel();
+            }
+
+            wheelInput?.addEventListener('input', wheelInputChanged);
+            wheelSpinBtn?.addEventListener('click', () => spinWheel());
+            wheelRemoveSpinBtn?.addEventListener('click', () => {
+                if (wheelSpinning) return;
+                const items = getWheelItems();
+                const n = items.length;
+                if (!n) { wheelResult.textContent = 'Add options to spin'; return; }
+                // Remove the currently highlighted item (under the pointer at +X)
+                const idx = computeHitIndexByAngle(wheelAngle, n);
+                const updated = items.filter((_, i) => i !== idx);
+                wheelInput.value = updated.join('\n');
+                wheelInputChanged(); // persists + redraws wheel immediately
+                wheelResult.textContent = '';
+                // If any items remain, spin the updated wheel
+                if (updated.length > 0) {
+                    spinWheel();
+                }
+            });
+            wheelClearBtn?.addEventListener('click', () => { wheelInput.value = ''; wheelInputChanged(); wheelResult.textContent = ''; });
+            wheelSampleBtn?.addEventListener('click', () => {
+                if (!wheelInput) return;
+                const samples = ['Pizza', 'Sushi', 'Burgers', 'Salad', 'Pasta', 'Curry', 'Tacos'];
+                wheelInput.value = samples.join('\n');
+                wheelInputChanged();
+            });
+
 
             // INIT
             function initRenderAll() {
@@ -1929,6 +2253,11 @@
                 }
                 // Tabs
                 showTab(state.ui.tab || 'notes');
+                // Wheel
+                if (wheelInput) {
+                    wheelInput.value = state.wheel?.itemsText || '';
+                }
+                setTimeout(() => { resizeWheelCanvas(); }, 0);
             }
 
             // Start
@@ -1974,6 +2303,12 @@
             document.addEventListener('fullscreenchange', () => fitCalc());
             // If currently on calculator, fit immediately; else it will fit on tab switch
             if (state.ui.tab === 'calc') setTimeout(fitCalc, 0);
+
+            // Resize wheel on container changes
+            window.addEventListener('resize', () => { if (state.ui.tab === 'wheel') resizeWheelCanvas(); });
+            document.addEventListener('fullscreenchange', () => { if (state.ui.tab === 'wheel') resizeWheelCanvas(); });
+            // If starting on wheel, size it
+            if (state.ui.tab === 'wheel') setTimeout(resizeWheelCanvas, 0);
         })();
     </script>
 </body>
