@@ -913,6 +913,7 @@
                         </div>
                         <div style="flex:1"></div>
                         <button class="btn mint" id="shuffle-cards" title="Shuffle deck">Shuffle</button>
+                        <button class="btn" id="unshuffle-cards" title="Use list order">Unshuffle</button>
                     </div>
                     <div class="mono" id="cards-count">0 flip cards</div>
                 </div>
@@ -980,6 +981,7 @@
                         <button class="btn mint" id="export-json">Export JSON</button>
                         <button class="btn" id="import-json">Import JSON</button>
                         <input type="file" id="file-input" accept="application/json" style="display:none" />
+                        <button class="btn" id="to-text-json">To Text</button>
                         <button class="btn" id="apply-json" disabled>Apply Text</button>
                         <button class="btn berry" id="erase-all">Erase All</button>
                     </div>
@@ -1029,6 +1031,8 @@
                 tasks: [],
                 events: {}, // { 'YYYY-MM-DD': [ {id, text} ] }
                 cards: [],
+                // Shuffled order cache for flip cards: { cards: [ids...], index: number }
+                shuffledCache: { cards: [], index: 0 },
             };
 
             // Ensure the floating controls are anchored inside the title bar so they move with it
@@ -1487,6 +1491,64 @@
             let viewerIndex = 0;
             let viewerFront = true;
 
+            // --- Flip Cards: Shuffled cache helpers ---
+            function ensureShuffledCache() {
+                if (!state.shuffledCache || typeof state.shuffledCache !== 'object') {
+                    state.shuffledCache = { cards: [], index: 0 };
+                } else {
+                    if (!Array.isArray(state.shuffledCache.cards)) state.shuffledCache.cards = [];
+                    if (!Number.isInteger(state.shuffledCache.index)) state.shuffledCache.index = 0;
+                }
+            }
+
+            function listOrderIds() { return state.cards.map(c => c.id); }
+
+            function reconcileShuffledWithCards() {
+                ensureShuffledCache();
+                const existing = state.shuffledCache.cards || [];
+                const idsSet = new Set(state.cards.map(c => c.id));
+                // Keep only ids that still exist
+                let order = existing.filter(id => idsSet.has(id));
+                // Append any new ids not already in order
+                state.cards.forEach(c => { if (!order.includes(c.id)) order.push(c.id); });
+                state.shuffledCache.cards = order;
+                // Clamp index
+                if (order.length === 0) state.shuffledCache.index = 0; else state.shuffledCache.index = Math.max(0, Math.min(state.shuffledCache.index || 0, order.length - 1));
+                viewerIndex = state.shuffledCache.index;
+            }
+
+            function setCardsOrder(orderIds) {
+                ensureShuffledCache();
+                state.shuffledCache.cards = Array.isArray(orderIds) ? orderIds.slice() : [];
+                state.shuffledCache.index = 0;
+                viewerIndex = 0;
+            }
+
+            function getCardsOrder() {
+                ensureShuffledCache();
+                if (!state.shuffledCache.cards || state.shuffledCache.cards.length === 0) {
+                    // initialize to list order
+                    state.shuffledCache.cards = listOrderIds();
+                    state.shuffledCache.index = 0;
+                }
+                return state.shuffledCache.cards;
+            }
+
+            function getCurrentViewerCardId() {
+                const order = getCardsOrder();
+                if (order.length === 0) return null;
+                const idx = ((viewerIndex % order.length) + order.length) % order.length;
+                return order[idx] || null;
+            }
+
+            function setViewerIndex(newIdx) {
+                const order = getCardsOrder();
+                if (order.length === 0) { viewerIndex = 0; state.shuffledCache.index = 0; return; }
+                const len = order.length;
+                viewerIndex = ((newIdx % len) + len) % len;
+                state.shuffledCache.index = viewerIndex;
+            }
+
             function setCardsMode(mode) {
                 state.ui.cardsMode = mode;
                 const isPractice = mode === 'practice';
@@ -1498,7 +1560,7 @@
                     editor.classList.add('hidden');
                     cardsWrap.classList.add('practice');
                     cardsWrap.classList.remove('manage');
-                    // ensure we start on the front side when practicing
+                    // ensure we show the front side when practicing, keep position
                     viewerFront = true; updateViewer();
                 } else {
                     editor.classList.remove('hidden');
@@ -1512,20 +1574,29 @@
                 cardsList.innerHTML = '';
                 state.cards.forEach(c => {
                     const row = document.createElement('div'); row.className = 'task-item';
+                    row.dataset.id = c.id; row.setAttribute('draggable', 'true');
+                    // Drag handle for manual reordering in Manage
+                    const handle = document.createElement('button'); handle.type = 'button'; handle.className = 'drag-handle'; handle.title = 'Drag to reorder'; handle.setAttribute('aria-label', 'Drag to reorder'); handle.textContent = '⠿';
+                    handle.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
                     const preview = document.createElement('div'); preview.className = 'txt mono';
                     const firstLine = (c.front || '').split(/\r?\n/)[0] || '(front)';
                     preview.textContent = firstLine;
                     const sel = document.createElement('button'); sel.className = 'btn'; sel.textContent = 'Edit'; sel.onclick = () => { currentCardId = c.id; cardFront.value = c.front; cardBack.value = c.back; };
-                    const del = document.createElement('button'); del.className = 'btn'; del.textContent = 'Delete'; del.onclick = () => { state.cards = state.cards.filter(x => x.id !== c.id); scheduleSave(); renderCards(); updateViewer(); };
-                    row.append(preview, sel, del);
+                    const del = document.createElement('button'); del.className = 'btn'; del.textContent = 'Delete'; del.onclick = () => { deleteCardAndAdjust(c.id); };
+                    // Restrict native drag to only start from the handle
+                    row.addEventListener('dragstart', (e) => { if (!e.target.closest('.drag-handle')) { e.preventDefault(); return false; } });
+                    row.append(handle, preview, sel, del);
                     cardsList.appendChild(row);
                 });
                 gid('cards-count').textContent = `${state.cards.length} flip card${state.cards.length !== 1 ? 's' : ''}`;
             }
 
             function updateViewer() {
-                if (state.cards.length === 0) { flashcard.textContent = 'No flip cards yet'; return; }
-                const c = state.cards[(viewerIndex % state.cards.length + state.cards.length) % state.cards.length];
+                const order = getCardsOrder();
+                if (order.length === 0) { flashcard.textContent = 'No flip cards yet'; return; }
+                const idx = ((viewerIndex % order.length) + order.length) % order.length;
+                const id = order[idx];
+                const c = state.cards.find(x => x.id === id) || state.cards[0];
                 flashcard.textContent = viewerFront ? (c.front || '(front)') : (c.back || '(back)');
             }
 
@@ -1534,6 +1605,7 @@
             gid('add-card')?.addEventListener('click', () => {
                 const c = { id: uid(), front: '', back: '' };
                 state.cards.push(c); currentCardId = c.id; cardFront.value = ''; cardBack.value = '';
+                reconcileShuffledWithCards();
                 scheduleSave(); renderCards(); updateViewer();
             });
 
@@ -1544,20 +1616,50 @@
                 } else {
                     const c = state.cards.find(x => x.id === currentCardId); if (c) { c.front = cardFront.value; c.back = cardBack.value; }
                 }
-                currentCardId = null; cardFront.value = ''; cardBack.value = ''; scheduleSave(); renderCards(); updateViewer();
+                currentCardId = null; cardFront.value = ''; cardBack.value = ''; reconcileShuffledWithCards(); scheduleSave(); renderCards(); updateViewer();
             });
 
             gid('delete-card').addEventListener('click', () => {
-                if (!currentCardId) return; state.cards = state.cards.filter(x => x.id !== currentCardId); currentCardId = null; cardFront.value = ''; cardBack.value = ''; scheduleSave(); renderCards(); updateViewer();
+                if (!currentCardId) return; const id = currentCardId; currentCardId = null; cardFront.value = ''; cardBack.value = ''; deleteCardAndAdjust(id);
             });
+
+            function deleteCardAndAdjust(id) {
+                const order = getCardsOrder();
+                const currentId = getCurrentViewerCardId();
+                // Remove from main list
+                state.cards = state.cards.filter(x => x.id !== id);
+                // Remove from cache order
+                ensureShuffledCache();
+                state.shuffledCache.cards = (state.shuffledCache.cards || []).filter(cid => cid !== id);
+                // Adjust viewer index if we deleted the current one or shifted past end
+                if (currentId === id) {
+                    // keep same numeric index if possible; if index now equals length, move to previous
+                    const len = state.shuffledCache.cards.length;
+                    if (len === 0) { setViewerIndex(0); }
+                    else if (viewerIndex >= len) { setViewerIndex(len - 1); }
+                } else {
+                    // If deletion changed length and index is out of bounds, clamp
+                    const len = state.shuffledCache.cards.length;
+                    if (len === 0) setViewerIndex(0); else if (viewerIndex >= len) setViewerIndex(len - 1);
+                }
+                scheduleSave(); renderCards(); updateViewer();
+            }
 
             // Practice actions
             gid('shuffle-cards').addEventListener('click', () => {
-                for (let i = state.cards.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[state.cards[i], state.cards[j]] = [state.cards[j], state.cards[i]]; }
-                viewerIndex = 0; viewerFront = true; updateViewer(); scheduleSave();
+                // Build a shuffled order of IDs from the current list, without changing list order
+                const ids = listOrderIds();
+                for (let i = ids.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [ids[i], ids[j]] = [ids[j], ids[i]]; }
+                setCardsOrder(ids);
+                viewerFront = true; updateViewer(); scheduleSave();
             });
-            gid('prev-card').addEventListener('click', () => { viewerIndex--; viewerFront = true; updateViewer(); });
-            gid('next-card').addEventListener('click', () => { viewerIndex++; viewerFront = true; updateViewer(); });
+            gid('unshuffle-cards').addEventListener('click', () => {
+                // Reset cached order to current list order
+                setCardsOrder(listOrderIds());
+                viewerFront = true; updateViewer(); scheduleSave();
+            });
+            gid('prev-card').addEventListener('click', () => { setViewerIndex(viewerIndex - 1); viewerFront = true; updateViewer(); scheduleSave(); });
+            gid('next-card').addEventListener('click', () => { setViewerIndex(viewerIndex + 1); viewerFront = true; updateViewer(); scheduleSave(); });
             flashcard.addEventListener('click', () => { viewerFront = !viewerFront; updateViewer(); });
 
             // Mode toggle
@@ -1588,6 +1690,7 @@
             const importBtn = gid('import-json');
             const fileInput = gid('file-input');
             const jsonArea = gid('json-area');
+            const toTextBtn = gid('to-text-json');
             exportBtn.addEventListener('click', () => {
                 const data = JSON.stringify(state, null, 2);
                 jsonArea.value = data;
@@ -1601,21 +1704,62 @@
                 } catch { }
             });
             importBtn.addEventListener('click', () => fileInput.click());
+            toTextBtn.addEventListener('click', () => {
+                const data = JSON.stringify(state, null, 2);
+                jsonArea.value = data;
+                // Re-run validator to enable Apply if valid
+                try { validateJsonInput(); } catch {}
+            });
             fileInput.addEventListener('change', () => {
                 const f = fileInput.files && fileInput.files[0]; if (!f) return;
                 const r = new FileReader();
                 r.onload = () => {
-                    try { const obj = JSON.parse(String(r.result)); if (obj && typeof obj === 'object') { Object.assign(state, obj); scheduleSave(); initRenderAll(); setStatus('Imported'); } }
+                    try {
+                        let obj = JSON.parse(String(r.result));
+                        if (!isValidStateImport(obj)) { alert('Invalid JSON'); return; }
+                        if (Array.isArray(obj)) obj = { cards: obj };
+                        if (Array.isArray(obj.cards)) {
+                            obj.cards = obj.cards.map(c => ({ id: typeof c.id === 'string' ? c.id : uid(), front: c.front || '', back: c.back || '' }));
+                        }
+                        if (obj && typeof obj === 'object') { Object.assign(state, obj); ensureShuffledCache(); reconcileShuffledWithCards(); scheduleSave(); initRenderAll(); setStatus('Imported'); }
+                    }
                     catch (e) { alert('Invalid JSON'); }
                 };
                 r.readAsText(f);
             });
             // Validate JSON as user types/pastes; do not import until Apply is pressed
             const applyBtn = gid('apply-json');
+            // Lightweight shape validator: allows partials; validates optional shuffledCache
+            function isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
+            function isStringArray(v) { return Array.isArray(v) && v.every(x => typeof x === 'string'); }
+            function isCard(v) { return isPlainObject(v) && (typeof v.id === 'string' || !('id' in v)); }
+            function isCardArray(v) { return Array.isArray(v) && v.every(isCard); }
+            function isValidStateImport(obj) {
+                // Accept top-level array of cards as a shorthand
+                if (Array.isArray(obj)) return isCardArray(obj);
+                if (!isPlainObject(obj)) return false;
+                if ('ui' in obj && !isPlainObject(obj.ui)) return false;
+                if ('notes' in obj && !Array.isArray(obj.notes)) return false;
+                if ('tasks' in obj && !Array.isArray(obj.tasks)) return false;
+                if ('events' in obj && !isPlainObject(obj.events)) return false;
+                if ('cards' in obj && !isCardArray(obj.cards)) return false;
+                if ('shuffledCache' in obj) {
+                    const sc = obj.shuffledCache;
+                    if (!isPlainObject(sc)) return false;
+                    if ('cards' in sc && !isStringArray(sc.cards)) return false;
+                    if ('index' in sc && !(typeof sc.index === 'number' && Number.isFinite(sc.index))) return false;
+                }
+                return true;
+            }
             function validateJsonInput() {
                 const txt = jsonArea.value.trim();
                 if (!txt) { jsonArea.classList.remove('invalid'); applyBtn.disabled = true; return; }
-                try { JSON.parse(txt); jsonArea.classList.remove('invalid'); applyBtn.disabled = false; }
+                try {
+                    const obj = JSON.parse(txt);
+                    const ok = isValidStateImport(obj);
+                    if (ok) { jsonArea.classList.remove('invalid'); applyBtn.disabled = false; }
+                    else { jsonArea.classList.add('invalid'); applyBtn.disabled = true; }
+                }
                 catch { jsonArea.classList.add('invalid'); applyBtn.disabled = true; }
             }
             jsonArea.addEventListener('input', validateJsonInput);
@@ -1623,9 +1767,20 @@
             applyBtn.addEventListener('click', () => {
                 const txt = jsonArea.value.trim();
                 try {
-                    const obj = JSON.parse(txt);
+                    let obj = JSON.parse(txt);
+                    if (!isValidStateImport(obj)) { alert('Invalid JSON shape'); return; }
+                    // Support top-level cards array shorthand
+                    if (Array.isArray(obj)) {
+                        obj = { cards: obj };
+                    }
                     if (obj && typeof obj === 'object') {
+                        // Ensure cards have ids
+                        if (Array.isArray(obj.cards)) {
+                            obj.cards = obj.cards.map(c => ({ id: typeof c.id === 'string' ? c.id : uid(), front: c.front || '', back: c.back || '' }));
+                        }
                         Object.assign(state, obj);
+                        ensureShuffledCache();
+                        reconcileShuffledWithCards();
                         scheduleSave();
                         initRenderAll();
                         setStatus('Imported');
@@ -1636,11 +1791,24 @@
                 }
             });
             gid('erase-all').addEventListener('click', () => {
-                if (confirm('Erase ALL organiser data? This cannot be undone.')) {
-                    localStorage.removeItem(STORAGE_KEY);
-                    state.ui = { tab: 'notes' }; state.notes = []; state.tasks = []; state.events = {}; state.cards = [];
-                    initRenderAll(); setStatus('Erased');
+                if (!confirm('Erase ALL organiser data? This cannot be undone.')) return;
+                // Preserve current UI (tab/mode), wipe user data
+                const currentUI = { tab: state.ui?.tab || 'notes', cardsMode: state.ui?.cardsMode || 'practice' };
+                localStorage.removeItem(STORAGE_KEY);
+                state.ui = currentUI;
+                state.notes = [];
+                state.tasks = [];
+                state.events = {};
+                state.cards = [];
+                state.shuffledCache = { cards: [], index: 0 };
+                // Clear the JSON textarea and reset validation state
+                if (jsonArea) {
+                    jsonArea.value = '';
+                    jsonArea.classList.remove('invalid');
                 }
+                if (applyBtn) applyBtn.disabled = true;
+                initRenderAll();
+                setStatus('Erased');
             });
 
             // INIT
@@ -1670,7 +1838,22 @@
                 // Calendar
                 const d = new Date(); setMonth(d.getFullYear(), d.getMonth()); selectedDateStr = null; eventEditor.hidden = true;
                 // Cards
-                renderCards(); updateViewer(); setCardsMode(state.ui.cardsMode || 'practice');
+                ensureShuffledCache();
+                reconcileShuffledWithCards();
+                renderCards();
+                updateViewer();
+                setCardsMode(state.ui.cardsMode || 'practice');
+                // Enable sortable for cards manage list once
+                if (!window.__sortableCardsEnabled) {
+                    enableSortable(cardsList, '.task-item', (ids) => {
+                        state.cards = reorderArrayById(state.cards, ids);
+                        // Keep cache, but make sure any new/missing ids are reconciled
+                        reconcileShuffledWithCards();
+                        scheduleSave();
+                        renderCards();
+                    });
+                    window.__sortableCardsEnabled = true;
+                }
                 // Tabs
                 showTab(state.ui.tab || 'notes');
             }
