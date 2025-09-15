@@ -37,6 +37,8 @@ function _startSessionTimer() {
   _sessionTimerId = setTimeout(() => {
     _transientLoggedIn = false;
     _clearSessionTimer();
+    // notify UI that parental session expired
+    try { window.dispatchEvent(new CustomEvent('parental-expired')); } catch (e) { }
   }, SESSION_TIMEOUT_MS);
   // persist expiry so reloads can rehydrate transient login (write minimal persisted object)
   try {
