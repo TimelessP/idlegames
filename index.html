@@ -303,6 +303,9 @@
 <body>
   <header class="header">
     <button class="theme-toggle" id="theme-btn" title="Toggle theme">🌓</button>
+    <button id="parental-btn" title="Parental Controls"
+      style="position:absolute;left:1rem;top:1rem;background:rgba(255,255,255,0.12);border:none;border-radius:8px;padding:6px 10px;color:white;cursor:pointer">🔒
+      Parental</button>
     <h1>🎮 Idle Games Collection</h1>
     <p>A curated collection of relaxing idle and puzzle games, plus useful web tools. Perfect for unwinding, staying
       engaged during breaks, or getting productive work done.</p>
@@ -514,8 +517,48 @@
         const grid = document.getElementById(containerId);
         if (!grid) return;
         grid.innerHTML = '';
+
+        // Determine parental state and allowed map (prefer runtime API, fallback to localStorage)
+        function readParentalAllowed() {
+          try {
+            if (window.parental && window.parental.getAllowedMap) return window.parental.getAllowedMap() || {};
+          } catch (e) {}
+          try {
+            const raw = localStorage.getItem('idlegames-parental-v1');
+            if (!raw) return {};
+            const s = JSON.parse(raw);
+            return s && s.allowed ? s.allowed : {};
+          } catch (e) { return {}; }
+        }
+
+        function parentalActiveAndLockedMode() {
+          try {
+            if (window.parental && window.parental.isEnabled && window.parental.isLoggedIn) {
+              return window.parental.isEnabled() && !window.parental.isLoggedIn();
+            }
+          } catch (e) {}
+          try {
+            const raw = localStorage.getItem('idlegames-parental-v1');
+            if (!raw) return false;
+            const s = JSON.parse(raw);
+            return !!(s && s.enabled && !(s.session && s.session.loggedIn));
+          } catch (e) { return false; }
+        }
+
+        const allowedMap = readParentalAllowed();
+        let ordered = items;
+        // If parental is active and user not logged in, move locked items to the end
+        if (parentalActiveAndLockedMode()) {
+          ordered = items.slice().sort((a, b) => {
+            const aLocked = (allowedMap[a.href] === false);
+            const bLocked = (allowedMap[b.href] === false);
+            if (aLocked === bLocked) return 0;
+            return aLocked ? 1 : -1; // locked items go later
+          });
+        }
+
         const frag = document.createDocumentFragment();
-        items.forEach(item => frag.appendChild(createCard(item)));
+        ordered.forEach(item => frag.appendChild(createCard(item)));
         grid.appendChild(frag);
       }
 
@@ -537,6 +580,234 @@
       initTheme();
       renderAll();
       updateStats();
+      // parental controls: wire UI
+      (function setupParentalUI() {
+        // include parental.js dynamically
+        const s = document.createElement('script');
+        s.src = 'parental.js';
+    s.defer = true;
+    s.onload = () => setTimeout(() => { try { refreshParentalModal(); } catch(e){} try { renderAll(); } catch(e){} }, 120);
+        document.body.appendChild(s);
+
+        // create modal
+        const modal = document.createElement('div');
+        modal.id = 'parental-modal';
+        modal.style = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.4);z-index:9999;';
+        modal.innerHTML = `
+          <div style="background:var(--card-bg);color:var(--text-color);padding:1.25rem;border-radius:8px;min-width:320px;max-width:560px;box-shadow:0 6px 24px rgba(0,0,0,0.3)">
+            <h3 style="margin-bottom:0.5rem">Parental Controls</h3>
+            <div id="parental-stage">
+              <p id="parental-desc">Enable parental controls to manage which games are visible to non-logged-in users. Set a password (enter twice) to lock settings or sign in if already configured.</p>
+              <div id="parental-setup" style="margin-top:0.5rem">
+                <label style="display:block;margin-bottom:0.25rem">Password</label>
+                <input id="parental-pass1" name="parental-pass1" type="password" autocomplete="new-password" autocorrect="off" autocapitalize="off" style="width:100%;padding:0.5rem;margin-bottom:0.5rem">
+                <label style="display:block;margin-bottom:0.25rem">Confirm Password</label>
+                <input id="parental-pass2" name="parental-pass2" type="password" autocomplete="new-password" autocorrect="off" autocapitalize="off" style="width:100%;padding:0.5rem;margin-bottom:0.75rem">
+                <button id="parental-enable" style="padding:0.5rem 0.75rem">Enable</button>
+              </div>
+              <div id="parental-login" style="display:none;margin-top:0.5rem">
+                <label style="display:block;margin-bottom:0.25rem">Password</label>
+                <input id="parental-login-pass" name="parental-login-pass" type="password" autocomplete="current-password" autocorrect="off" autocapitalize="off" style="width:100%;padding:0.5rem;margin-bottom:0.5rem">
+                <div style="display:flex;gap:8px;justify-content:flex-end">
+                  <button id="parental-signin" style="padding:0.45rem 0.65rem">Sign In</button>
+                </div>
+              </div>
+              <div id="parental-admin" style="display:none;margin-top:0.5rem">
+                <p>Admin mode: manage which items are allowed. Check = visible when locked. Default is checked.</p>
+                <div id="parental-list" style="max-height:240px;overflow:auto;margin:0.5rem 0;padding-right:8px"></div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:0.5rem">
+                  <button id="parental-apply" style="padding:0.45rem 0.65rem">Apply & Enforce</button>
+                  <button id="parental-signout" style="padding:0.45rem 0.65rem">Sign Out (Exit Admin)</button>
+                  <button id="parental-disable" style="padding:0.45rem 0.65rem">Disable Parental</button>
+                </div>
+              </div>
+            </div>
+            <div style="text-align:right;margin-top:0.5rem"><button id="parental-close" style="padding:0.35rem 0.5rem">Close</button></div>
+          </div>`;
+        document.body.appendChild(modal);
+
+        document.getElementById('parental-btn').addEventListener('click', () => {
+          modal.style.display = 'flex';
+          refreshParentalModal();
+        });
+        document.getElementById('parental-close').addEventListener('click', () => modal.style.display = 'none');
+
+        async function refreshParentalModal() {
+          const enabled = window.parental && window.parental.isEnabled && window.parental.isEnabled();
+          const logged = window.parental && window.parental.isLoggedIn && window.parental.isLoggedIn();
+          // Show setup when not enabled; show login when enabled but not logged in; show admin when enabled and logged in
+          document.getElementById('parental-setup').style.display = (!enabled) ? 'block' : 'none';
+          document.getElementById('parental-login').style.display = (enabled && !logged) ? 'block' : 'none';
+          document.getElementById('parental-admin').style.display = (enabled && logged) ? 'block' : 'none';
+          // if admin, render list
+          if (enabled && logged) renderParentalList();
+        }
+
+        async function renderParentalList() {
+          const list = document.getElementById('parental-list');
+          list.innerHTML = '';
+          const allowed = window.parental.getAllowedMap();
+          const all = [...(DATA.games || []), ...(DATA.tools || [])];
+          all.forEach(it => {
+            const href = it.href || '';
+            const id = 'chk-' + href.replace(/[^a-z0-9.-]/gi, '_');
+            const row = document.createElement('div');
+            row.style = 'display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--card-border)';
+            row.innerHTML = `<input type="checkbox" id="${id}" ${(allowed[href] !== false) ? 'checked' : ''}><label for="${id}" style="flex:1;margin-left:6px">${it.title || href}</label><small style="color:var(--text-color);opacity:0.7">${href}</small>`;
+            list.appendChild(row);
+            row.querySelector('input').addEventListener('change', (e) => {
+              window.parental.setAllowedFor(href, e.target.checked);
+            });
+          });
+        }
+
+        // wire enable button
+        document.getElementById('parental-enable').addEventListener('click', async () => {
+          const p1el = document.getElementById('parental-pass1');
+          const p2el = document.getElementById('parental-pass2');
+          const p1 = p1el.value || '';
+          const p2 = p2el.value || '';
+          if (!p1 || p1 !== p2) { alert('Passwords must match and be non-empty'); return; }
+          await window.parental.setPassword(p1);
+          // clear inputs after use to avoid browser autofill/retained values
+          try { p1el.value = ''; p2el.value = ''; } catch (e) { }
+          alert('Parental controls enabled. You are now in admin mode. Configure items and click Apply & Enforce to lock.');
+          refreshParentalModal();
+        });
+
+        // sign-in handler (for parents to enter admin mode)
+        document.getElementById('parental-signin').addEventListener('click', async () => {
+          const passEl = document.getElementById('parental-login-pass');
+          const pass = passEl.value || '';
+          if (!pass) { alert('Enter password'); return; }
+          const ok = await window.parental.verifyPassword(pass);
+          if (!ok) { alert('Password incorrect'); return; }
+          // clear login input after successful signin
+          try { passEl.value = ''; } catch (e) { }
+          alert('Signed in to parental admin mode');
+          refreshParentalModal();
+          renderAll();
+        });
+
+        document.getElementById('parental-apply').addEventListener('click', () => {
+          window.parental.applyAndEnforce();
+          modal.style.display = 'none';
+          // re-render items to enforce
+          renderAll();
+        });
+
+        document.getElementById('parental-signout').addEventListener('click', () => {
+          window.parental.signOut();
+          // clear any lingering password inputs
+          try { document.getElementById('parental-login-pass').value = ''; document.getElementById('parental-pass1').value = ''; document.getElementById('parental-pass2').value = ''; } catch (e) {}
+          refreshParentalModal();
+          renderAll();
+        });
+
+        document.getElementById('parental-disable').addEventListener('click', () => {
+          if (!confirm('Disable parental controls and clear password?')) return;
+          window.parental.disable();
+          // clear inputs when disabling
+          try { document.getElementById('parental-login-pass').value = ''; document.getElementById('parental-pass1').value = ''; document.getElementById('parental-pass2').value = ''; } catch (e) {}
+          modal.style.display = 'none';
+          renderAll();
+        });
+
+        // initial attempt to refresh after script loads (script may be deferred)
+        setTimeout(refreshParentalModal, 400);
+
+        // expose a hook for createCard to show checkboxes when admin
+        window.__renderParentalCheckbox = function (href) {
+          try {
+            if (!(window.parental && window.parental.isEnabled && window.parental.isEnabled())) return '';
+            if (window.parental.isLoggedIn && window.parental.isLoggedIn()) {
+              const allowed = window.parental.getAllowedMap();
+              const checked = (allowed[href] !== false) ? 'checked' : '';
+              const id = 'pc-' + href.replace(/[^a-z0-9.-]/gi, '_');
+              return `<div style="margin-top:8px"><label style="font-size:0.85rem;display:flex;gap:8px;align-items:center"><input type=\"checkbox\" id=\"${id}\" ${checked} /> Admin visible</label></div>`;
+            }
+          } catch (e) { }
+          return '';
+        };
+
+        // listen for delegated checkbox clicks inside game cards (admin mode)
+        document.body.addEventListener('change', function (e) {
+          if (!e.target) return;
+          const id = e.target.id || '';
+          if (id.startsWith('pc-')) {
+            const href = id.slice(3).replace(/_/g, '');
+            // map back: our id used sanitized href; find closest match from data
+            const all = [...(DATA.games || []), ...(DATA.tools || [])];
+            const found = all.find(it => ('pc-' + (it.href || '').replace(/[^a-z0-9.-]/gi, '_')) === id);
+            if (found) window.parental.setAllowedFor(found.href, !!e.target.checked);
+          }
+        }, true);
+
+      // read parental state directly from localStorage as a fallback (avoid race with parental.js)
+      const PARENTAL_KEY = 'idlegames-parental-v1';
+      function readParentalLocal() {
+        try {
+          const raw = localStorage.getItem(PARENTAL_KEY);
+          if (!raw) return { enabled: false, session: { loggedIn: false }, allowed: {} };
+          const s = JSON.parse(raw);
+          return s || { enabled: false, session: { loggedIn: false }, allowed: {} };
+        } catch (e) { return { enabled: false, session: { loggedIn: false }, allowed: {} }; }
+      }
+
+      // initial enforcement rendering: wrap createCard to respect parental visibility
+        const origCreateCard = window.createCard;
+        window.createCard = function (item) {
+          // if parental enabled and not logged in, hide items that are disallowed
+          try {
+            // prefer runtime parental API when available
+            const apiAvailable = window.parental && window.parental.isEnabled && window.parental.isEnabled;
+            let enabled = false, logged = false, allowed = {};
+            if (apiAvailable) {
+              enabled = !!window.parental.isEnabled();
+              logged = !!window.parental.isLoggedIn();
+              try { allowed = window.parental.getAllowedMap() || {}; } catch (e) { allowed = {}; }
+            } else {
+              // fallback to reading localStorage directly to avoid race on initial page load
+              const ps = readParentalLocal();
+              enabled = !!ps.enabled;
+              logged = !!(ps.session && ps.session.loggedIn);
+              allowed = ps.allowed || {};
+            }
+            if (enabled && !logged) {
+              if ((allowed[item.href] === false)) {
+                const placeholder = document.createElement('div');
+                placeholder.className = 'game-card';
+                placeholder.style.opacity = '0.5';
+                placeholder.style.filter = 'grayscale(60%)';
+                placeholder.innerHTML = `<div class="game-preview" style="display:flex;align-items:center;justify-content:center">🔒</div><div class="game-info"><h3 class="game-title">Locked</h3><p class="game-description">This item is restricted by parental controls.</p></div>`;
+                return placeholder;
+              }
+            }
+          } catch (e) { console.error(e); }
+          const el = origCreateCard(item);
+          // if admin logged in, append small checkbox control inside card
+          try {
+            if (window.parental && window.parental.isEnabled && window.parental.isLoggedIn && window.parental.isLoggedIn()) {
+              const frag = document.createElement('div');
+              frag.innerHTML = window.__renderParentalCheckbox(item.href || '');
+              const info = el.querySelector('.game-info');
+              if (info) info.appendChild(frag);
+              // bind checkbox state to parental map
+              const chk = frag.querySelector('input');
+              if (chk) {
+                chk.addEventListener('change', (ev) => {
+                  window.parental.setAllowedFor(item.href, !!ev.target.checked);
+                });
+              }
+            }
+          } catch (e) { }
+          return el;
+        };
+
+  // After overriding createCard ensure current UI matches parental state
+  try { renderAll(); } catch (e) { /* ignore */ }
+
+      })();
     </script>
 </body>
 

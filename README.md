@@ -95,6 +95,20 @@ Adorable, mobile-first organiser with Notes, Calendar, Tasks, Flip Cards, and Ca
 ### 🖼️ Favicon on GitHub Pages
 Each HTML page explicitly links `favicon.ico` so icons resolve correctly at `/idlegames/` on GitHub Pages instead of the site root.
 
+### 🔒 Parental Controls
+
+The launcher includes a lightweight client-side Parental Controls feature. From the main `index.html` you can open the Parental Controls modal (top-left "🔒 Parental" button) to:
+- Set a password (enter it twice) and enable controls
+- Sign in to an admin mode that shows per-item checkboxes (checked = visible)
+- Apply & Enforce to lock the choices for non-logged-in users, or Disable to remove the password and allowed map
+
+Storage details:
+- The parental control state is stored locally in your browser's LocalStorage under the key `idlegames-parental-v1`.
+- The password is hashed (SHA-256) with a randomized salt before storing. No server-side storage or transmission occurs.
+
+Security note:
+- This is a client-side convenience feature intended to prevent casual access. It is not a replacement for device-level parental controls. Because data and logic live in the browser, a technically capable user could bypass or reset the controls by clearing LocalStorage or editing the files.
+
 ### **Browser Compatibility**
 - Modern browsers (Chrome, Firefox, Safari, Edge)
 - Mobile browsers (iOS Safari, Chrome Mobile)
