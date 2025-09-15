@@ -5,18 +5,63 @@
 
 const PARENTAL_KEY = 'idlegames-parental-v1';
 
+// session.loggedIn is intentionally transient (in-memory only). We persist enabled/hash/salt/allowed but never persist the loggedIn flag.
+let _transientLoggedIn = false;
+// session timer (in-memory only)
+let _sessionTimerId = null;
+let _sessionExpiry = null; // timestamp (ms) when session expires
+const SESSION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+
+function _clearSessionTimer() {
+  if (_sessionTimerId) {
+    clearTimeout(_sessionTimerId);
+    _sessionTimerId = null;
+  }
+  _sessionExpiry = null;
+}
+
+function _startSessionTimer() {
+  _clearSessionTimer();
+  _sessionExpiry = Date.now() + SESSION_TIMEOUT_MS;
+  _sessionTimerId = setTimeout(() => {
+    _transientLoggedIn = false;
+    _clearSessionTimer();
+  }, SESSION_TIMEOUT_MS);
+}
+
+function _isSessionActive() {
+  if (!_transientLoggedIn) return false;
+  if (_sessionExpiry && Date.now() > _sessionExpiry) {
+    // expired
+    _transientLoggedIn = false;
+    _clearSessionTimer();
+    return false;
+  }
+  return !!_transientLoggedIn;
+}
+
 function readState() {
   try {
     const raw = localStorage.getItem(PARENTAL_KEY);
-    return raw ? JSON.parse(raw) : { enabled: false, hash: null, salt: null, allowed: {}, session: { loggedIn: false } };
+    const base = raw ? JSON.parse(raw) : { enabled: false, hash: null, salt: null, allowed: {} };
+    // attach transient session flag
+    base.session = { loggedIn: !!_isSessionActive() };
+    return base;
   } catch (e) {
     console.error('par: read error', e);
-    return { enabled: false, hash: null, salt: null, allowed: {}, session: { loggedIn: false } };
+    return { enabled: false, hash: null, salt: null, allowed: {}, session: { loggedIn: !!_isSessionActive() } };
   }
 }
 
 function writeState(s) {
-  localStorage.setItem(PARENTAL_KEY, JSON.stringify(s));
+  // persist everything except session.loggedIn (transient)
+  try {
+    const copy = Object.assign({}, s);
+    if (copy.session) delete copy.session;
+    localStorage.setItem(PARENTAL_KEY, JSON.stringify(copy));
+  } catch (e) {
+    console.error('par: write error', e);
+  }
 }
 
 async function sha256Base64(message) {
@@ -55,8 +100,10 @@ window.parental = {
     s.enabled = true;
     s.salt = salt;
     s.hash = h;
-    s.session = { loggedIn: true };
-    writeState(s);
+    // mark transient session as logged in (in-memory) and start expiry timer
+    _transientLoggedIn = true;
+    _startSessionTimer();
+    writeState(s); // persist other fields
     return true;
   },
   async verifyPassword(pass) {
@@ -65,16 +112,17 @@ window.parental = {
     const h = await sha256Base64(s.salt + '|' + pass);
     const ok = h === s.hash;
     if (ok) {
-      s.session = s.session || {};
-      s.session.loggedIn = true;
+      // set in-memory logged-in flag only
+      _transientLoggedIn = true;
+      _startSessionTimer();
       writeState(s);
     }
     return ok;
   },
   signOut() {
-    const s = readState();
-    s.session = { loggedIn: false };
-    writeState(s);
+    _transientLoggedIn = false;
+    _clearSessionTimer();
+    // do not persist session
   },
   disable() {
     // disables parental controls and clears password & allowed
@@ -94,7 +142,9 @@ window.parental = {
   applyAndEnforce() {
     // set loggedIn=false and enforce mode
     const s = readState();
-    s.session = { loggedIn: false };
+    // ensure persistent state enabled=true, but reset transient login
+    _transientLoggedIn = false;
+    _clearSessionTimer();
     s.enabled = true;
     writeState(s);
   },
