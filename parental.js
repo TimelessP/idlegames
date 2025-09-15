@@ -18,6 +18,17 @@ function _clearSessionTimer() {
     _sessionTimerId = null;
   }
   _sessionExpiry = null;
+  // remove persisted expiry from localStorage (don't call readState/writeState here — they rehydrate)
+  try {
+    const raw = localStorage.getItem(PARENTAL_KEY);
+    if (raw) {
+      const o = JSON.parse(raw);
+      if (o && o.sessionExpiry) {
+        delete o.sessionExpiry;
+        localStorage.setItem(PARENTAL_KEY, JSON.stringify(o));
+      }
+    }
+  } catch (e) { }
 }
 
 function _startSessionTimer() {
@@ -27,6 +38,13 @@ function _startSessionTimer() {
     _transientLoggedIn = false;
     _clearSessionTimer();
   }, SESSION_TIMEOUT_MS);
+  // persist expiry so reloads can rehydrate transient login (write minimal persisted object)
+  try {
+    const raw = localStorage.getItem(PARENTAL_KEY);
+    const o = raw ? JSON.parse(raw) : {};
+    o.sessionExpiry = _sessionExpiry;
+    localStorage.setItem(PARENTAL_KEY, JSON.stringify(o));
+  } catch (e) { }
 }
 
 function _isSessionActive() {
@@ -44,6 +62,29 @@ function readState() {
   try {
     const raw = localStorage.getItem(PARENTAL_KEY);
     const base = raw ? JSON.parse(raw) : { enabled: false, hash: null, salt: null, allowed: {} };
+    // If storage contains a persisted session expiry and it's still valid, rehydrate the in-memory session
+    try {
+      if (base.sessionExpiry && typeof base.sessionExpiry === 'number') {
+        const now = Date.now();
+        if (now < base.sessionExpiry) {
+          // only start timer if we don't already have one for same expiry
+          if (!_sessionExpiry || _sessionExpiry !== base.sessionExpiry) {
+            _transientLoggedIn = true;
+            _clearSessionTimer();
+            _sessionExpiry = base.sessionExpiry;
+            const remaining = Math.max(0, base.sessionExpiry - now);
+            _sessionTimerId = setTimeout(() => {
+              _transientLoggedIn = false;
+              _clearSessionTimer();
+              try { writeState(readState()); } catch (e) { }
+            }, remaining);
+          }
+        } else {
+          // expired in storage; ensure it's removed on next write
+          delete base.sessionExpiry;
+        }
+      }
+    } catch (e) { /* ignore */ }
     // attach transient session flag
     base.session = { loggedIn: !!_isSessionActive() };
     return base;
@@ -58,6 +99,12 @@ function writeState(s) {
   try {
     const copy = Object.assign({}, s);
     if (copy.session) delete copy.session;
+    // persist transient expiry timestamp if present so reloads can rehydrate session
+    if (_sessionExpiry) {
+      copy.sessionExpiry = _sessionExpiry;
+    } else {
+      if (copy.sessionExpiry) delete copy.sessionExpiry;
+    }
     localStorage.setItem(PARENTAL_KEY, JSON.stringify(copy));
   } catch (e) {
     console.error('par: write error', e);
@@ -122,10 +169,22 @@ window.parental = {
   signOut() {
     _transientLoggedIn = false;
     _clearSessionTimer();
+    // ensure persisted expiry removed
+    try {
+      const raw = localStorage.getItem(PARENTAL_KEY);
+      if (raw) {
+        const o = JSON.parse(raw);
+        if (o && o.sessionExpiry) { delete o.sessionExpiry; localStorage.setItem(PARENTAL_KEY, JSON.stringify(o)); }
+      }
+    } catch (e) { }
     // do not persist session
   },
   disable() {
     // disables parental controls and clears password & allowed
+    _transientLoggedIn = false;
+    _clearSessionTimer();
+    // clear persisted expiry and then write cleared state
+    try { const raw = localStorage.getItem(PARENTAL_KEY); if (raw) { const o = JSON.parse(raw); if (o && o.sessionExpiry) delete o.sessionExpiry; } } catch (e) { }
     const s = { enabled: false, hash: null, salt: null, allowed: {}, session: { loggedIn: false } };
     writeState(s);
   },
