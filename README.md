@@ -2,6 +2,10 @@
 
 A curated collection of relaxing idle and puzzle games built with HTML5, CSS3, and JavaScript. Perfect for unwinding or keeping your mind engaged during breaks.
 
+> [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/timelessp)
+> 
+> Thank you for enjoying this little collection — if these games brought you a smile or a moment of calm, buying me a coffee helps keep the lights on and fuels future updates. Gratitude means the world. ❤️
+
 ## 🌐 Play Online
 
 **🚀 [Play All Games Live](https://timelessp.github.io/idlegames/)**
