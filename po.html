@@ -922,8 +922,12 @@
             <!-- Notes Panel -->
             <section class="panel active" id="p-notes" role="tabpanel" aria-labelledby="t-notes">
                 <header class="panel-header card">
-                    <div class="row gap-8">
+                    <div class="row gap-8" style="align-items:center; flex:1;">
                         <button class="icon-btn primary" id="add-note">Add Note</button>
+                        <div class="spacer"></div>
+                        <input id="notes-search-input" class="input" placeholder="Search notes…" aria-label="Search notes" style="max-width: 420px; flex: 0 1 420px;" />
+                        <button class="icon-btn" id="notes-search-clear" aria-label="Clear search">✕</button>
+                        <button class="icon-btn" id="notes-search-btn">Search</button>
                     </div>
                     <div id="notes-count" aria-live="polite"></div>
                 </header>
@@ -1179,7 +1183,7 @@
             // State
             function sanitizeState(raw) {
                 const def = {
-                    ui: { tab: 'notes', trackerMode: 'chart', cardsMode: 'practice', wheelMode: 'use', calendarSelected: null },
+                    ui: { tab: 'notes', trackerMode: 'chart', cardsMode: 'practice', wheelMode: 'use', calendarSelected: null, notesSearch: { query: '' } },
                     notes: [],
                     tasks: [],
                     events: {},
@@ -1200,6 +1204,7 @@
                         out.ui.cardsMode = raw.ui.cardsMode === 'manage' ? 'manage' : 'practice';
                         out.ui.wheelMode = raw.ui.wheelMode === 'manage' ? 'manage' : 'use';
                         out.ui.calendarSelected = (isStr(raw.ui.calendarSelected) && isDateKey(raw.ui.calendarSelected)) ? raw.ui.calendarSelected : null;
+                        const q = raw.ui.notesSearch?.query; out.ui.notesSearch = { query: isStr(q) ? q : '' };
                     }
                     if (Array.isArray(raw.notes)) {
                         out.notes = raw.notes.map(n => ({ id: isStr(n?.id) ? n.id : Math.random().toString(36).slice(2, 10), title: isStr(n?.title) ? n.title : '', content: isStr(n?.content) ? n.content : '' }));
@@ -1250,7 +1255,7 @@
             }
             let state = (function () {
                 const raw = loadState(); return raw ? sanitizeState(raw) : {
-                    ui: { tab: 'notes', trackerMode: 'chart', cardsMode: 'practice', wheelMode: 'use', calendarSelected: null },
+                    ui: { tab: 'notes', trackerMode: 'chart', cardsMode: 'practice', wheelMode: 'use', calendarSelected: null, notesSearch: { query: '' } },
                     notes: [],
                     tasks: [],
                     events: {}, // yyyy-mm-dd -> [strings]
@@ -1325,6 +1330,9 @@
 
             // NOTES
             let currentNoteId = null; let inlineEditorEl = null; let draftNote = null;
+            // Search state: query string for current query
+            state.ui = state.ui || {}; // ensure
+            state.ui.notesSearch = state.ui.notesSearch || { query: '' };
             // Generic reorder helper using Pointer Events
             const reorderBound = new WeakSet();
             function enableReorder(listEl, getItems, setItems) {
@@ -1383,14 +1391,142 @@
                 listEl.addEventListener('pointercancel', endDrag);
                 listEl.addEventListener('pointerleave', (e) => { if (dragIdx !== null) endDrag(e); });
             }
+            // Basic text normalization for similarity
+            function tokenize(str) {
+                return (str || '').toLowerCase().replace(/[^a-z0-9\s]+/g, ' ').split(/\s+/).filter(Boolean);
+            }
+            function termFreq(tokens) {
+                const m = new Map(); for (const t of tokens) m.set(t, (m.get(t) || 0) + 1); return m;
+            }
+            function cosineSim(aStr, bStr) {
+                const aT = tokenize(aStr); const bT = tokenize(bStr);
+                if (!aT.length || !bT.length) return 0;
+                const a = termFreq(aT); const b = termFreq(bT);
+                let dot = 0; let a2 = 0; let b2 = 0;
+                for (const [, v] of a) a2 += v * v;
+                for (const [, v] of b) b2 += v * v;
+                const keys = new Set([...a.keys(), ...b.keys()]);
+                for (const k of keys) dot += (a.get(k) || 0) * (b.get(k) || 0);
+                const denom = Math.sqrt(a2) * Math.sqrt(b2);
+                return denom ? dot / denom : 0;
+            }
+            // Simple Soundex implementation (English)
+            function soundex(s) {
+                s = (s || '').toUpperCase().replace(/[^A-Z]/g, ''); if (!s) return '';
+                const first = s[0];
+                const map = { B:1,F:1,P:1,V:1, C:2,G:2,J:2,K:2,Q:2,S:2,X:2,Z:2, D:3,T:3, L:4, M:5,N:5, R:6 };
+                const codes = [first];
+                let prev = map[first] || 0;
+                for (let i = 1; i < s.length && codes.length < 4; i++) {
+                    const ch = s[i]; const code = map[ch] || 0; if (code !== 0 && code !== prev) codes.push(String(code)); prev = code; if (code === 0) prev = 0;
+                }
+                while (codes.length < 4) codes.push('0');
+                return codes.join('');
+            }
+            function computeSearchOrder(query) {
+                const q = (query || '').trim();
+                const notes = state.notes || [];
+                if (!q) return { ids: notes.map(n => n.id), map: new Map(notes.map((n, i) => [n.id, i])) };
+                const originalIndex = new Map(notes.map((n, i) => [n.id, i]));
+                const titleOf = (n) => n.title || '';
+                const bodyOf = (n) => n.content || '';
+
+                // Helpers: build ranking maps (id -> 1-based rank) based on earliest index in string
+                function rankByIndex(getStr, extractor) {
+                    const arr = [];
+                    for (const n of notes) {
+                        const s = getStr(n);
+                        const key = extractor(s);
+                        if (key != null && key >= 0) arr.push({ id: n.id, key });
+                    }
+                    arr.sort((a, b) => a.key - b.key || originalIndex.get(a.id) - originalIndex.get(b.id));
+                    return new Map(arr.map((x, i) => [x.id, i + 1]));
+                }
+
+                // Substring (case-sensitive) on title and content
+                const rSubCsTitle = rankByIndex(titleOf, (s) => s.indexOf(q));
+                const rSubCsBody = rankByIndex(bodyOf, (s) => s.indexOf(q));
+                // Substring (case-insensitive) on title and content
+                const ql = q.toLowerCase();
+                const rSubCiTitle = rankByIndex(titleOf, (s) => s.toLowerCase().indexOf(ql));
+                const rSubCiBody = rankByIndex(bodyOf, (s) => s.toLowerCase().indexOf(ql));
+
+                // Regex (case-sensitive and case-insensitive) on title and content
+                let rReCsTitle = new Map(), rReCsBody = new Map(), rReCiTitle = new Map(), rReCiBody = new Map();
+                try {
+                    const re = new RegExp(q);
+                    rReCsTitle = rankByIndex(titleOf, (s) => { const m = re.exec(s); return m ? (m.index ?? 0) : -1; });
+                    rReCsBody = rankByIndex(bodyOf, (s) => { const m = re.exec(s); return m ? (m.index ?? 0) : -1; });
+                } catch { /* invalid regex => ignore CS */ }
+                try {
+                    const rei = new RegExp(q, 'i');
+                    rReCiTitle = rankByIndex(titleOf, (s) => { const m = rei.exec(s); return m ? (m.index ?? 0) : -1; });
+                    rReCiBody = rankByIndex(bodyOf, (s) => { const m = rei.exec(s); return m ? (m.index ?? 0) : -1; });
+                } catch { /* invalid regex => ignore CI */ }
+
+                // Soundex on title and content (rank by earliest matching word index)
+                function rankSoundexField(getStr) {
+                    const qS = soundex(q); if (!qS) return new Map();
+                    const arr = [];
+                    for (const n of notes) {
+                        const words = getStr(n).split(/\b/);
+                        let best = Infinity;
+                        for (let i = 0; i < words.length; i++) { const w = words[i].trim(); if (!w) continue; if (soundex(w) === qS) { best = i; break; } }
+                        if (Number.isFinite(best)) arr.push({ id: n.id, key: best });
+                    }
+                    arr.sort((a, b) => a.key - b.key || originalIndex.get(a.id) - originalIndex.get(b.id));
+                    return new Map(arr.map((x, i) => [x.id, i + 1]));
+                }
+                const rSdxTitle = rankSoundexField(titleOf);
+                const rSdxBody = rankSoundexField(bodyOf);
+
+                // Cosine similarity on title and content (convert to rank using inverse sim)
+                function rankCosineField(getStr) {
+                    const arr = [];
+                    for (const n of notes) { const sim = cosineSim(q, getStr(n)); if (sim > 0) arr.push({ id: n.id, key: -sim }); }
+                    arr.sort((a, b) => a.key - b.key || originalIndex.get(a.id) - originalIndex.get(b.id));
+                    return new Map(arr.map((x, i) => [x.id, i + 1]));
+                }
+                const rCosTitle = rankCosineField(titleOf);
+                const rCosBody = rankCosineField(bodyOf);
+
+                const ranks = [
+                    rSubCsTitle, rSubCsBody,
+                    rSubCiTitle, rSubCiBody,
+                    rReCsTitle, rReCsBody,
+                    rReCiTitle, rReCiBody,
+                    rSdxTitle, rSdxBody,
+                    rCosTitle, rCosBody,
+                ];
+                const totals = new Map(); const hits = new Map();
+                for (const r of ranks) {
+                    for (const [id, pos] of r.entries()) {
+                        totals.set(id, (totals.get(id) || 0) + pos);
+                        hits.set(id, (hits.get(id) || 0) + 1);
+                    }
+                }
+                const cand = Array.from(totals.entries()).filter(([id]) => (hits.get(id) || 0) > 0).map(([id, score]) => ({ id, score }));
+                cand.sort((a, b) => a.score - b.score || originalIndex.get(a.id) - originalIndex.get(b.id));
+                const ids = cand.map(c => c.id);
+                const map = new Map(ids.map((id, i) => [id, i]));
+                return { ids, map };
+            }
+            function getNotesRenderSpec() {
+                const q = state.ui?.notesSearch?.query || '';
+                const { ids } = computeSearchOrder(q);
+                return ids.map(id => state.notes.find(n => n.id === id)).filter(Boolean);
+            }
             function renderNotes() {
                 const ul = gid('notes-list'); ul.innerHTML = '';
                 let selectedIdx = -1;
-                state.notes.forEach((n, idx) => {
+                const viewNotes = getNotesRenderSpec();
+                const idToIdx = new Map(state.notes.map((n, i) => [n.id, i]));
+                viewNotes.forEach((n, idx) => {
                     const li = document.createElement('li');
                     li.setAttribute('role', 'option');
                     li.setAttribute('tabindex', '0');
                     li.setAttribute('data-idx', String(idx));
+                    li.setAttribute('data-id', n.id);
                     li.style.display = 'grid';
                     li.style.gridTemplateColumns = 'auto 1fr auto auto';
                     li.style.gap = '6px';
@@ -1407,21 +1543,53 @@
                     const drag = document.createElement('span'); drag.className = 'drag-handle'; drag.textContent = '⋮⋮'; drag.title = 'Drag to reorder'; drag.setAttribute('aria-hidden', 'true');
                     const title = document.createElement('div'); title.textContent = n.title || '(untitled)'; title.style.fontWeight = '600';
                     const up = document.createElement('button'); up.className = 'icon-btn'; up.textContent = '↑'; up.title = 'Move up';
-                    up.addEventListener('click', (e) => { e.stopPropagation(); if (idx > 0) { [state.notes[idx - 1], state.notes[idx]] = [state.notes[idx], state.notes[idx - 1]]; scheduleSave(); renderNotes(); } });
+                    up.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        // Move this note up within the current view; reflect in global ordering
+                        if (idx > 0) {
+                            const ids = viewNotes.map(x => x.id);
+                            const thisId = n.id; const prevId = ids[idx - 1];
+                            const gi = idToIdx.get(thisId); const pj = idToIdx.get(prevId);
+                            if (gi != null && pj != null) { [state.notes[gi], state.notes[pj]] = [state.notes[pj], state.notes[gi]]; scheduleSave(); renderNotes(); }
+                        }
+                    });
                     const down = document.createElement('button'); down.className = 'icon-btn'; down.textContent = '↓'; down.title = 'Move down';
-                    down.addEventListener('click', (e) => { e.stopPropagation(); if (idx < state.notes.length - 1) { [state.notes[idx + 1], state.notes[idx]] = [state.notes[idx], state.notes[idx + 1]]; scheduleSave(); renderNotes(); } });
+                    down.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const ids = viewNotes.map(x => x.id);
+                        if (idx < ids.length - 1) {
+                            const thisId = n.id; const nextId = ids[idx + 1];
+                            const gi = idToIdx.get(thisId); const nk = idToIdx.get(nextId);
+                            if (gi != null && nk != null) { [state.notes[gi], state.notes[nk]] = [state.notes[nk], state.notes[gi]]; scheduleSave(); renderNotes(); }
+                        }
+                    });
                     li.append(drag, title, up, down); ul.appendChild(li);
                 });
-                // Enable pointer-based reordering for notes list
-                enableReorder(gid('notes-list'), () => state.notes.slice(), (items) => { state.notes = items; scheduleSave(); renderNotes(); });
-                gid('notes-count').textContent = `${state.notes.length} notes`;
+                // Enable pointer-based reordering for notes list (projected into global order when filtered)
+                enableReorder(gid('notes-list'), () => {
+                    // return the array currently displayed, not the global backing
+                    return getNotesRenderSpec().slice();
+                }, (viewItems) => {
+                    // Replace view items at their original global positions with the new order
+                    const viewIds = viewItems.map(n => n.id);
+                    const global = state.notes.slice();
+                    const positions = [];
+                    for (let i = 0; i < global.length; i++) { if (viewIds.includes(global[i].id)) positions.push(i); }
+                    positions.sort((a, b) => a - b);
+                    const newGlobal = global.slice();
+                    for (let i = 0; i < positions.length; i++) newGlobal[positions[i]] = viewItems[i];
+                    state.notes = newGlobal;
+                    scheduleSave(); renderNotes();
+                });
+                const total = state.notes.length; const shown = viewNotes.length; const q = state.ui?.notesSearch?.query || '';
+                gid('notes-count').textContent = q ? `${shown}/${total} notes (search)` : `${total} notes`;
                 function clearSelection() { ul.querySelectorAll('.selected').forEach(el => el.classList.remove('selected')); }
                 function selectRow(row) { clearSelection(); row.classList.add('selected'); }
                 ul.addEventListener('focusin', (e) => { const li = e.target.closest('li[data-idx]'); if (li) selectRow(li); });
                 ul.addEventListener('focusout', (e) => { if (!ul.contains(e.relatedTarget)) { clearSelection(); } });
                 // Re-attach inline editor below the current note if present
                 if (inlineEditorEl && currentNoteId) {
-                    const idx = state.notes.findIndex(n => n.id === currentNoteId);
+                    const idx = getNotesRenderSpec().findIndex(n => n.id === currentNoteId);
                     const li = gid('notes-list').querySelector(`li[data-idx="${idx}"]`);
                     if (li && inlineEditorEl.previousElementSibling !== li) { li.insertAdjacentElement('afterend', inlineEditorEl); }
                 }
@@ -1459,6 +1627,18 @@
                 state.notes.unshift(n); currentNoteId = n.id; scheduleSave(); renderNotes();
                 const firstLi = gid('notes-list').querySelector('li[data-idx="0"]'); if (firstLi) { openInlineEditor(firstLi, n); inlineEditorEl?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
             });
+            // Search UI handlers
+            const searchInput = gid('notes-search-input');
+            const searchBtn = gid('notes-search-btn');
+            const searchClear = gid('notes-search-clear');
+            function applySearch(q) {
+                state.ui.notesSearch.query = (q || '').trim(); scheduleSave(); renderNotes();
+            }
+            if (searchInput && searchBtn && searchClear) {
+                searchBtn.addEventListener('click', () => applySearch(searchInput.value));
+                searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applySearch(searchInput.value); } });
+                searchClear.addEventListener('click', () => { searchInput.value = ''; applySearch(''); });
+            }
 
             // TASKS
             function renderTasks() {
@@ -2019,7 +2199,13 @@
                 });
                 updateTypeSelection();
                 const metrics = gid('chart-metrics'); metrics.innerHTML = '';
-                const selectedSet = new Set(state.tracker.selectedMetrics && state.tracker.selectedMetrics.length ? state.tracker.selectedMetrics : state.tracker.metrics.map(x => x.id));
+                // Persisted selection: if defined, even empty, respect it; otherwise default to all
+                const selectedSet = new Set(Array.isArray(state.tracker.selectedMetrics) ? state.tracker.selectedMetrics : state.tracker.metrics.map(x => x.id));
+                // If selection wasn't persisted, default to all and persist once
+                if (!Array.isArray(state.tracker.selectedMetrics)) {
+                    state.tracker.selectedMetrics = state.tracker.metrics.map(x => x.id);
+                    scheduleSave();
+                }
                 state.tracker.metrics.forEach((m, i) => {
                     const btn = document.createElement('button'); btn.className = 'icon-btn'; btn.textContent = m.name; btn.dataset.id = m.id;
                     const col = getMetricColorById(m.id);
@@ -2035,7 +2221,7 @@
                             btn.classList.remove('active');
                         }
                     }
-                    // Start from persisted selection
+                    // Start from persisted selection (can be empty)
                     applyBtnStyle(selectedSet.has(m.id));
                     btn.addEventListener('click', () => {
                         const willBeActive = !btn.classList.contains('active');
@@ -2054,10 +2240,7 @@
             }
             function getSelectedMetrics() {
                 const btns = Array.from(gid('chart-metrics').querySelectorAll('.active'));
-                if (btns.length) { return btns.map(b => b.dataset.id); }
-                // fallback to persisted selection
-                if (state.tracker.selectedMetrics && state.tracker.selectedMetrics.length) return state.tracker.selectedMetrics.slice();
-                return state.tracker.metrics.map(m => m.id);
+                return btns.map(b => b.dataset.id);
             }
             function getChartDateRange() { const s = gid('chart-start').value; const e = gid('chart-end').value; return { start: s || null, end: e || null }; }
             function resizeTrackerChart() {
@@ -2092,7 +2275,12 @@
                 const cs = getComputedStyle(gid('app'));
                 const textCol = cs.getPropertyValue('--text').trim() || '#111827';
                 const borderCol = cs.getPropertyValue('--border').trim() || '#e5e7eb';
-                if (!dates.length || !ids.length) { ctx.fillStyle = textCol; ctx.globalAlpha = 0.65; ctx.font = '14px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('Add metrics and data to see the chart', W / 2, H / 2); ctx.globalAlpha = 1; return; }
+                if (!dates.length || !ids.length) {
+                    ctx.fillStyle = textCol; ctx.globalAlpha = 0.65; ctx.font = '14px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    const msg = !ids.length ? 'Select metrics to see the chart' : 'Add metrics and data to see the chart';
+                    ctx.fillText(msg, W / 2, H / 2);
+                    ctx.globalAlpha = 1; return;
+                }
                 const colors = getChartColors();
                 const xMargin = 48, yMargin = 24; const bottomMargin = 36; // extra space for x labels, tighten margins
                 const chartW = W - xMargin - 10, chartH = H - yMargin - bottomMargin;
@@ -2292,7 +2480,8 @@
                                 trackerMode: { enum: ['data', 'chart'] },
                                 cardsMode: { enum: ['practice', 'manage'] },
                                 wheelMode: { enum: ['use', 'manage'] },
-                                calendarSelected: { anyOf: [ { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' }, { type: 'null' } ] }
+                                calendarSelected: { anyOf: [ { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' }, { type: 'null' } ] },
+                                notesSearch: { type: 'object', additionalProperties: false, properties: { query: { type: 'string' } } }
                             },
                             required: ['tab']
                         },
@@ -2388,7 +2577,7 @@
             gid('import-json').addEventListener('click', () => gid('file-input').click());
             gid('file-input').addEventListener('change', () => { const f = gid('file-input').files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { try { const obj = JSON.parse(r.result); if (!obj || typeof obj !== 'object') throw new Error('Invalid data'); state = sanitizeState(obj); scheduleSave(); initAll(); } catch (e) { alert('Import failed: ' + e.message); } }; r.readAsText(f); });
             gid('apply-json').addEventListener('click', () => { try { const obj = JSON.parse(gid('json-area').value); if (!obj || typeof obj !== 'object') throw new Error('Invalid data'); state = sanitizeState(obj); scheduleSave(); initAll(); } catch (e) { alert('Invalid JSON: ' + e.message); } });
-            gid('erase-all').addEventListener('click', () => { if (confirm('Erase all Personal Organiser data?')) { localStorage.removeItem(STORAGE_KEY); state = { ui: { tab: 'notes', trackerMode: 'chart', cardsMode: 'practice', wheelMode: 'use', calendarSelected: null }, notes: [], tasks: [], events: {}, cards: [], shuffledCache: { enabled: false, order: [] }, cardsPractice: { idx: 0 }, wheel: { itemsText: '', lastHit: null }, tracker: { metrics: [], data: {}, chartType: 'stacked', selectedMetrics: [], chartRange: { start: null, end: null } } }; initAll(); } });
+            gid('erase-all').addEventListener('click', () => { if (confirm('Erase all Personal Organiser data?')) { localStorage.removeItem(STORAGE_KEY); state = { ui: { tab: 'notes', trackerMode: 'chart', cardsMode: 'practice', wheelMode: 'use', calendarSelected: null, notesSearch: { query: '' } }, notes: [], tasks: [], events: {}, cards: [], shuffledCache: { enabled: false, order: [] }, cardsPractice: { idx: 0 }, wheel: { itemsText: '', lastHit: null }, tracker: { metrics: [], data: {}, chartType: 'stacked', selectedMetrics: [], chartRange: { start: null, end: null } } }; initAll(); } });
 
             // INIT bundle
             function initAll() {
@@ -2399,6 +2588,8 @@
                 // tabs
                 showTab(state.ui.tab || 'notes');
                 // notes
+                // initialize notes search UI from state
+                const si = gid('notes-search-input'); if (si) si.value = (state.ui?.notesSearch?.query || '');
                 renderNotes();
                 // tasks
                 renderTasks();
