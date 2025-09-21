@@ -396,13 +396,25 @@
         }
         .md-preview p { margin: 0.5em 0; }
         .md-preview pre { background: var(--surface); padding: 10px; border-radius: 8px; overflow: auto; }
-        .md-preview code { background: color-mix(in oklab, var(--primary) 10%, var(--card)); padding: 1px 4px; border-radius: 6px; }
+    .md-preview code { background: color-mix(in oklab, var(--primary) 10%, var(--card)); padding: 1px 4px; border-radius: 6px; }
         .md-preview pre code { background: transparent; padding: 0; }
         .md-preview ul, .md-preview ol { margin: 0.5em 1.25em; }
         .md-preview hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
         .md-preview table { border-collapse: collapse; width: 100%; margin: 8px 0; }
         .md-preview th, .md-preview td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
         .md-preview img { max-width: 100%; height: auto; }
+        .md-preview blockquote {
+            margin: 8px 0;
+            padding: 6px 10px;
+            border-left: 3px solid var(--border);
+            background: color-mix(in oklab, var(--primary) 8%, var(--card));
+        }
+    /* Simple syntax highlight tokens */
+    .md-preview .tk-kw { color: #a78bfa; font-weight: 700; }
+    .md-preview .tk-str { color: #22c55e; }
+    .md-preview .tk-num { color: #f59e0b; }
+    .md-preview .tk-lit { color: #f97316; }
+    .md-preview .tk-com { color: var(--text-muted); font-style: italic; }
 
         .input::placeholder,
         .textarea::placeholder {
@@ -1110,6 +1122,7 @@
                 <header class="panel-header card">
                     <div class="row gap-8" style="align-items:center; flex:1;">
                         <button class="icon-btn primary" id="add-note">Add Note</button>
+                        <button class="icon-btn" id="notes-help" aria-label="Insert markdown help example">Formatting Help</button>
                         <div class="spacer"></div>
                         <input id="notes-search-input" class="input" placeholder="Search notes…" aria-label="Search notes" style="max-width: 420px; flex: 0 1 420px;" />
                         <button class="icon-btn" id="notes-search-clear" aria-label="Clear search">✕</button>
@@ -1913,9 +1926,42 @@
                 }
             }
             function removeInlineEditor() { if (inlineEditorEl && inlineEditorEl.parentNode) { inlineEditorEl.parentNode.removeChild(inlineEditorEl); } inlineEditorEl = null; draftNote = null; }
+            // Lightweight syntax highlighting for a few languages (js/ts/json/python)
+            function simpleHighlight(code, lang) {
+                const esc = (s) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+                const L = (lang || '').toLowerCase();
+                const isJs = /^(js|javascript|ts|typescript)$/.test(L);
+                const isJson = /^(json)$/.test(L);
+                const isPy = /^(py|python)$/.test(L);
+                if (!(isJs || isJson || isPy)) return esc(code);
+                let s = code;
+                // Escape first, then annotate via placeholders to avoid nested escaping issues.
+                s = esc(s);
+                // Comments
+                if (isJs || isJson) {
+                    s = s.replace(/(^|[^:])\/\/.*$/gm, (m) => `<span class="tk-com">${m}</span>`);
+                    s = s.replace(/\/\*[\s\S]*?\*\//g, (m) => `<span class="tk-com">${m}</span>`);
+                } else if (isPy) {
+                    s = s.replace(/#.*/g, (m) => `<span class="tk-com">${m}</span>`);
+                }
+                // Strings
+                s = s.replace(/(["'])(?:\\.|(?!\1).)*\1/g, (m) => `<span class="tk-str">${m}</span>`);
+                if (isJs || isJson) {
+                    // Keywords
+                    s = s.replace(/\b(const|let|var|function|return|if|else|for|while|switch|case|break|continue|try|catch|finally|throw|new|class|extends|super|import|from|export|default|await|async|yield|in|of|this|delete|typeof|instanceof)\b/g, '<span class="tk-kw">$1</span>');
+                } else if (isPy) {
+                    s = s.replace(/\b(def|return|if|elif|else|for|while|break|continue|try|except|finally|raise|class|from|import|as|pass|lambda|with|yield|in|is|and|or|not|None|True|False)\b/g, '<span class="tk-kw">$1</span>');
+                }
+                // Numbers
+                s = s.replace(/\b-?(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/g, (m) => `<span class="tk-num">${m}</span>`);
+                // Literals
+                s = s.replace(/\b(true|false|null)\b/g, '<span class="tk-lit">$1</span>');
+                return s;
+            }
             // Basic, safe-ish Markdown renderer supporting headings, lists (incl. task lists), hr, emphasis, underline, sup/sub,
             // inline/code fences, tables, images, and links. Not a full spec; keeps things simple and escaped by default.
-            function renderMarkdown(md) {
+            // Optionally collect task checkbox -> source line mappings via opts.collectTask(id, lineIndex)
+            function renderMarkdown(md, opts) {
                 const escapeHtml = (s) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
                 const lines = (md || '').replace(/\r\n?/g, '\n').split('\n');
                 const out = [];
@@ -1924,10 +1970,16 @@
                 const applyInline = (s) => {
                     // Escape first, then re-introduce our tags
                     s = escapeHtml(s);
-                    // images ![alt](url)
-                    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"([^\"]*)\")?\)/g, (m, alt, url, title) => `<img src="${url}" alt="${alt || ''}"${title ? ` title="${escapeHtml(title)}"` : ''}>`);
-                    // links [text](url)
-                    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+\"([^\"]*)\")?\)/g, (m, txt, url, title) => `<a href="${url}" target="_blank" rel="noreferrer">${txt}</a>`);
+                    // images ![alt](url "title") or 'title'
+                    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+(?:\"([^\"]*)\"|'([^']*)'))?\)/g, (m, alt, url, t1, t2) => {
+                        const title = t1 || t2 || '';
+                        return `<img src="${url}" alt="${alt || ''}"${title ? ` title="${escapeHtml(title)}"` : ''}>`;
+                    });
+                    // links [text](url "title") or 'title'
+                    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+(?:\"([^\"]*)\"|'([^']*)'))?\)/g, (m, txt, url, t1, t2) => {
+                        const title = t1 || t2 || '';
+                        return `<a href="${url}" target="_blank" rel="noreferrer"${title ? ` title="${escapeHtml(title)}"` : ''}>${txt}</a>`;
+                    });
                     // inline code `code`
                     s = s.replace(/`([^`]+)`/g, (m, code) => `<code>${code}</code>`);
                     // bold (** or __)
@@ -1952,7 +2004,9 @@
                         const codeLines = [];
                         while (i < lines.length && !/^```\s*$/.test(lines[i])) { codeLines.push(lines[i]); i++; }
                         if (i < lines.length && /^```\s*$/.test(lines[i])) i++; // consume closing fence
-                        out.push(`<pre><code${lang ? ` class="lang-${lang}"` : ''}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+                        const raw = codeLines.join('\n');
+                        const highlighted = simpleHighlight(raw, lang);
+                        out.push(`<pre><code${lang ? ` class=\"lang-${lang}\"` : ''}>${highlighted}</code></pre>`);
                         continue;
                     }
                     // Horizontal rule
@@ -1960,6 +2014,18 @@
                     // Headings # .. ######
                     const h = line.match(/^(#{1,6})\s+(.*)$/);
                     if (h) { const level = h[1].length; out.push(`<h${level}>${applyInline(h[2].trim())}</h${level}>`); i++; continue; }
+                    // Blockquotes: lines starting with '>' (support nesting via recursion)
+                    if (/^\s*>\s?/.test(line)) {
+                        const qLines = [];
+                        while (i < lines.length && /^\s*>\s?.*$/.test(lines[i])) {
+                            qLines.push(lines[i].replace(/^\s*>\s?/, ''));
+                            i++;
+                        }
+                        const inner = qLines.join('\n');
+                        const innerHtml = renderMarkdown(inner, opts);
+                        out.push(`<blockquote>${innerHtml}</blockquote>`);
+                        continue;
+                    }
                     // Tables (GitHub-like simple): header | header\n|---|---| then rows with | ... |
                     if (line.includes('|')) {
                         const next = lines[i + 1] || '';
@@ -1984,13 +2050,15 @@
                         const items = [];
                         while (i < lines.length) {
                             const m = lines[i].match(/^\s*[-*+]\s+(.*)$/);
-                            if (!m) break; items.push(m[1]); i++;
+                            if (!m) break; const lineIndex = i; items.push({ txt: m[1], line: lineIndex }); i++;
                         }
-                        const lis = items.map(txt => {
+                        const lis = items.map(({ txt, line }) => {
                             const task = txt.match(/^\[( |x|X)\]\s+(.*)$/);
                             if (task) {
                                 const checked = /x/i.test(task[1]) ? ' checked' : '';
-                                return `<li><input type="checkbox" disabled${checked}> ${applyInline(task[2])}</li>`;
+                                const tid = 't' + Math.random().toString(36).slice(2, 9);
+                                if (opts && typeof opts.collectTask === 'function') { opts.collectTask(tid, line); }
+                                return `<li><input type=\"checkbox\" data-task-id=\"${tid}\"${checked}> ${applyInline(task[2])}</li>`;
                             }
                             return `<li>${applyInline(txt)}</li>`;
                         }).join('');
@@ -2000,9 +2068,18 @@
                         const items = [];
                         while (i < lines.length) {
                             const m = lines[i].match(/^\s*(\d+)\.\s+(.*)$/);
-                            if (!m) break; items.push(m[2]); i++;
+                            if (!m) break; const lineIndex = i; items.push({ txt: m[2], line: lineIndex }); i++;
                         }
-                        const lis = items.map(txt => `<li>${applyInline(txt)}</li>`).join('');
+                        const lis = items.map(({ txt, line }) => {
+                            const task = txt.match(/^\[( |x|X)\]\s+(.*)$/);
+                            if (task) {
+                                const checked = /x/i.test(task[1]) ? ' checked' : '';
+                                const tid = 't' + Math.random().toString(36).slice(2, 9);
+                                if (opts && typeof opts.collectTask === 'function') { opts.collectTask(tid, line); }
+                                return `<li><input type=\"checkbox\" data-task-id=\"${tid}\"${checked}> ${applyInline(task[2])}</li>`;
+                            }
+                            return `<li>${applyInline(txt)}</li>`;
+                        }).join('');
                         out.push(`<ol>${lis}</ol>`);
                         continue;
                     }
@@ -2014,6 +2091,11 @@
                     flushParagraph(buf);
                 }
                 return out.join('\n');
+            }
+            function renderMarkdownWithTasks(md) {
+                const taskMap = new Map();
+                const html = renderMarkdown(md, { collectTask: (id, line) => { taskMap.set(id, line); } });
+                return { html, taskMap };
             }
             function openInlineEditor(afterLi, note) {
                 removeInlineEditor();
@@ -2027,11 +2109,13 @@
                 modeBar.append(btnText, btnPreview);
                 const body = document.createElement('textarea'); body.className = 'textarea'; body.placeholder = 'Write your note…'; body.value = note.content || '';
                 const preview = document.createElement('div'); preview.className = 'md-preview hidden';
+                let taskLineMap = new Map();
                 const actions = document.createElement('div'); actions.className = 'row gap-8 row-end';
                 const save = document.createElement('button'); save.className = 'icon-btn'; save.textContent = 'Save';
+                const copyBtn = document.createElement('button'); copyBtn.className = 'icon-btn'; copyBtn.textContent = 'Copy'; copyBtn.setAttribute('aria-label', 'Copy note content');
                 const cancel = document.createElement('button'); cancel.className = 'icon-btn'; cancel.textContent = 'Cancel';
                 const del = document.createElement('button'); del.className = 'icon-btn'; del.textContent = 'Delete';
-                actions.append(save, cancel, del);
+                actions.append(save, copyBtn, cancel, del);
                 inlineEditorEl.append(title, modeBar, body, preview, actions);
                 afterLi.insertAdjacentElement('afterend', inlineEditorEl);
                 draftNote = { id: note.id, title: note.title, content: note.content };
@@ -2044,17 +2128,87 @@
                         body.classList.remove('hidden');
                         preview.classList.add('hidden');
                     } else {
-                        preview.innerHTML = renderMarkdown(body.value);
+                        const res = renderMarkdownWithTasks(body.value);
+                        taskLineMap = res.taskMap;
+                        preview.innerHTML = res.html;
                         body.classList.add('hidden');
                         preview.classList.remove('hidden');
                     }
                 };
-                body.addEventListener('input', () => { draftNote.content = body.value; if (state.ui.notesEditMode === 'preview') { preview.innerHTML = renderMarkdown(body.value); } });
+                body.addEventListener('input', () => { draftNote.content = body.value; if (state.ui.notesEditMode === 'preview') { const res = renderMarkdownWithTasks(body.value); taskLineMap = res.taskMap; preview.innerHTML = res.html; } });
+                // Toggle task checkboxes in preview to update markdown source
+                preview.addEventListener('change', (e) => {
+                    const el = e.target;
+                    if (!(el instanceof HTMLInputElement)) return;
+                    const tid = el.getAttribute('data-task-id');
+                    if (!tid) return;
+                    const lineIdx = taskLineMap.get(tid);
+                    if (typeof lineIdx !== 'number') return;
+                    const lines = (body.value || '').replace(/\r\n?/g, '\n').split('\n');
+                    const ln = lines[lineIdx] || '';
+                    // Unordered and ordered task patterns
+                    const rxUl = /^(\s*[-*+]\s+\[)( |x|X)(\]\s.*)$/;
+                    const rxOl = /^(\s*\d+\.\s+\[)( |x|X)(\]\s.*)$/;
+                    let newLine = null;
+                    if (rxUl.test(ln)) newLine = ln.replace(rxUl, (m, a, _b, c) => `${a}${el.checked ? 'x' : ' '}${c}`);
+                    else if (rxOl.test(ln)) newLine = ln.replace(rxOl, (m, a, _b, c) => `${a}${el.checked ? 'x' : ' '}${c}`);
+                    if (newLine != null) {
+                        lines[lineIdx] = newLine;
+                        const updated = lines.join('\n');
+                        body.value = updated;
+                        draftNote.content = updated;
+                        scheduleSave();
+                        // Re-render to refresh mapping and state
+                        const res = renderMarkdownWithTasks(updated);
+                        taskLineMap = res.taskMap;
+                        preview.innerHTML = res.html;
+                    }
+                });
                 btnText.addEventListener('click', () => { state.ui.notesEditMode = 'text'; scheduleSave(); applyMode(); });
                 btnPreview.addEventListener('click', () => { state.ui.notesEditMode = 'preview'; scheduleSave(); applyMode(); });
                 inlineEditorEl.addEventListener('keydown', (e) => {
                     if (e.key === 'Escape') { e.preventDefault(); removeInlineEditor(); }
                     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save.click(); }
+                });
+                // Copy helper: tries HTML first (when provided), then text; falls back to execCommand
+                async function doCopy({ text, html }) {
+                    try {
+                        if (html && navigator.clipboard && 'write' in navigator.clipboard && window.ClipboardItem) {
+                            const item = new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([(text != null ? text : '')], { type: 'text/plain' }) });
+                            await navigator.clipboard.write([item]);
+                            return true;
+                        }
+                    } catch (_) { /* fall through */ }
+                    try {
+                        const s = html || text || '';
+                        if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(s); return true; }
+                    } catch (_) { /* fall through */ }
+                    // Fallback
+                    try {
+                        const ta = document.createElement('textarea');
+                        ta.style.position = 'fixed'; ta.style.opacity = '0'; ta.value = (html ? (text || '') : (text || ''));
+                        document.body.appendChild(ta);
+                        ta.select();
+                        const ok = document.execCommand('copy');
+                        document.body.removeChild(ta);
+                        return ok;
+                    } catch (_) { return false; }
+                }
+                copyBtn.addEventListener('click', async () => {
+                    const mode = state.ui.notesEditMode;
+                    let ok = false;
+                    if (mode === 'preview') {
+                        // Ensure preview is up-to-date
+                        const res = renderMarkdownWithTasks(body.value);
+                        taskLineMap = res.taskMap; preview.innerHTML = res.html;
+                        ok = await doCopy({ text: preview.innerText, html: preview.innerHTML });
+                    } else {
+                        ok = await doCopy({ text: body.value || '' });
+                    }
+                    const prev = copyBtn.textContent;
+                    copyBtn.textContent = ok ? 'Copied!' : 'Copy failed';
+                    copyBtn.disabled = true;
+                    setTimeout(() => { copyBtn.textContent = prev; copyBtn.disabled = false; }, 1200);
                 });
                 save.addEventListener('click', () => {
                     const n = state.notes.find(n => n.id === note.id); if (n) { n.title = draftNote.title; n.content = draftNote.content; scheduleSave(); }
@@ -2069,6 +2223,111 @@
                 const n = { id: Math.random().toString(36).slice(2, 10), title: '', content: '' };
                 state.notes.unshift(n); currentNoteId = n.id; scheduleSave(); renderNotes();
                 const firstLi = gid('notes-list').querySelector('li[data-idx="0"]'); if (firstLi) { openInlineEditor(firstLi, n); inlineEditorEl?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+            });
+            // Insert or refresh a built-in Markdown formatting help note
+            function buildMarkdownHelp() {
+                return [
+                    '# Markdown Formatting Help',
+                    '',
+                    'Welcome! This note shows common Markdown you can use in Notes. Switch between Text and Preview modes to learn by example.',
+                    '',
+                    '---',
+                    '',
+                    '## Headings',
+                    '',
+                    '# H1',
+                    '## H2',
+                    '### H3',
+                    '#### H4',
+                    '##### H5',
+                    '###### H6',
+                    '',
+                    '## Emphasis',
+                    '',
+                    '- **Bold** with `**text**` or `__text__`',
+                    '- *Italics* with `*text*` or `_text_`',
+                    '- ++Underline++ with `++text++` (non-standard)',
+                    '- Superscript like 2^10^ and subscript like H~2~O',
+                    '- Inline code like `const x = 42`',
+                    '',
+                    '## Lists',
+                    '',
+                    '- Unordered item A',
+                    '- Unordered item B',
+                    '  - Nested item',
+                    '',
+                    '1. Ordered item one',
+                    '2. Ordered item two',
+                    '3. Ordered item three',
+                    '',
+                    '### Task lists',
+                    '',
+                    '- [ ] Do something',
+                    '- [x] Already done',
+                    '1. [ ] Numbered task',
+                    '',
+                    '## Horizontal rule',
+                    '',
+                    '---',
+                    '',
+                    '## Links and Images',
+                    '',
+                    '- Link: [Example](https://example.com "Opens in new tab")',
+                    '- Image:',
+                    '  ',
+                    '  ![A placeholder image](https://picsum.photos/400/160 "Random image")',
+                    '',
+                    '## Tables',
+                    '',
+                    '| Feature | Syntax |',
+                    '| --- | --- |',
+                    '| Bold | `**text**` |',
+                    '| Italic | `*text*` |',
+                    '| Code | `` `code` `` |',
+                    '',
+                    '## Code Blocks',
+                    '',
+                    '```js',
+                    'function greet(name) {',
+                    '  const msg = `Hello, ${name}!`; // comment',
+                    '  return msg;',
+                    '}',
+                    '```',
+                    '',
+                    '```python',
+                    'def fib(n):',
+                    '    a, b = 0, 1',
+                    '    for _ in range(n):',
+                    '        a, b = b, a + b  # comment',
+                    '    return a',
+                    '```',
+                    '',
+                    '> Tip: In Preview, you can click checkboxes to toggle task list items; the source text will be updated automatically.',
+                    ''
+                ].join('\n');
+            }
+            gid('notes-help').addEventListener('click', () => {
+                const HELP_ID = '__md_help__';
+                const title = 'Formatting Help (Markdown)';
+                const content = buildMarkdownHelp();
+                let note = state.notes.find(n => n.id === HELP_ID);
+                if (!note) {
+                    note = { id: HELP_ID, title, content };
+                    // Put the help at the top for easy discovery
+                    state.notes.unshift(note);
+                } else {
+                    note.title = title;
+                    note.content = content;
+                }
+                currentNoteId = HELP_ID;
+                scheduleSave();
+                renderNotes();
+                // Try to open the inline editor for the help note if visible in current filter
+                const li = gid('notes-list').querySelector(`li[data-id="${HELP_ID}"]`) || (function(){
+                    const idx = getNotesRenderSpec().findIndex(n => n.id === HELP_ID);
+                    return gid('notes-list').querySelector(`li[data-idx="${idx}"]`);
+                })();
+                if (li) { openInlineEditor(li, note); inlineEditorEl?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
             });
             // Search UI handlers
             const searchInput = gid('notes-search-input');
