@@ -380,6 +380,30 @@
             overflow-x: hidden;
         }
 
+        /* Markdown preview area (used in Notes preview mode) */
+        .md-preview {
+            width: 100%;
+            min-height: 0;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: var(--card);
+            color: var(--text);
+            overflow: auto;
+        }
+        .md-preview h1, .md-preview h2, .md-preview h3, .md-preview h4, .md-preview h5, .md-preview h6 {
+            margin: 0.6em 0 0.4em;
+        }
+        .md-preview p { margin: 0.5em 0; }
+        .md-preview pre { background: var(--surface); padding: 10px; border-radius: 8px; overflow: auto; }
+        .md-preview code { background: color-mix(in oklab, var(--primary) 10%, var(--card)); padding: 1px 4px; border-radius: 6px; }
+        .md-preview pre code { background: transparent; padding: 0; }
+        .md-preview ul, .md-preview ol { margin: 0.5em 1.25em; }
+        .md-preview hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+        .md-preview table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+        .md-preview th, .md-preview td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+        .md-preview img { max-width: 100%; height: auto; }
+
         .input::placeholder,
         .textarea::placeholder {
             color: var(--text-muted);
@@ -1889,21 +1913,145 @@
                 }
             }
             function removeInlineEditor() { if (inlineEditorEl && inlineEditorEl.parentNode) { inlineEditorEl.parentNode.removeChild(inlineEditorEl); } inlineEditorEl = null; draftNote = null; }
+            // Basic, safe-ish Markdown renderer supporting headings, lists (incl. task lists), hr, emphasis, underline, sup/sub,
+            // inline/code fences, tables, images, and links. Not a full spec; keeps things simple and escaped by default.
+            function renderMarkdown(md) {
+                const escapeHtml = (s) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+                const lines = (md || '').replace(/\r\n?/g, '\n').split('\n');
+                const out = [];
+                let i = 0;
+                const flushParagraph = (buf) => { if (buf.length) { out.push('<p>' + applyInline(buf.join(' ')) + '</p>'); buf.length = 0; } };
+                const applyInline = (s) => {
+                    // Escape first, then re-introduce our tags
+                    s = escapeHtml(s);
+                    // images ![alt](url)
+                    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"([^\"]*)\")?\)/g, (m, alt, url, title) => `<img src="${url}" alt="${alt || ''}"${title ? ` title="${escapeHtml(title)}"` : ''}>`);
+                    // links [text](url)
+                    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+\"([^\"]*)\")?\)/g, (m, txt, url, title) => `<a href="${url}" target="_blank" rel="noreferrer">${txt}</a>`);
+                    // inline code `code`
+                    s = s.replace(/`([^`]+)`/g, (m, code) => `<code>${code}</code>`);
+                    // bold (** or __)
+                    s = s.replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (m, a, b) => `<strong>${a || b}</strong>`);
+                    // italics (* or _)
+                    s = s.replace(/\*(?!\*)([^*]+)\*|_(?!_)([^_]+)_/g, (m, a, b) => `<em>${a || b}</em>`);
+                    // underline ++text++ (non-standard)
+                    s = s.replace(/\+\+([^+]+)\+\+/g, (m, u) => `<u>${u}</u>`);
+                    // superscript ^text^
+                    s = s.replace(/\^([^\^]+)\^/g, (m, sup) => `<sup>${sup}</sup>`);
+                    // subscript ~text~ (avoid ~~)
+                    s = s.replace(/(?<!~)~([^~]+)~(?!~)/g, (m, sub) => `<sub>${sub}</sub>`);
+                    return s;
+                };
+                while (i < lines.length) {
+                    let line = lines[i];
+                    // Fenced code blocks
+                    const fenceMatch = line.match(/^```(\w+)?\s*$/);
+                    if (fenceMatch) {
+                        const lang = fenceMatch[1] || '';
+                        i++;
+                        const codeLines = [];
+                        while (i < lines.length && !/^```\s*$/.test(lines[i])) { codeLines.push(lines[i]); i++; }
+                        if (i < lines.length && /^```\s*$/.test(lines[i])) i++; // consume closing fence
+                        out.push(`<pre><code${lang ? ` class="lang-${lang}"` : ''}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+                        continue;
+                    }
+                    // Horizontal rule
+                    if (/^\s*(?:---+|\*\*\*+|___+)\s*$/.test(line)) { out.push('<hr>'); i++; continue; }
+                    // Headings # .. ######
+                    const h = line.match(/^(#{1,6})\s+(.*)$/);
+                    if (h) { const level = h[1].length; out.push(`<h${level}>${applyInline(h[2].trim())}</h${level}>`); i++; continue; }
+                    // Tables (GitHub-like simple): header | header\n|---|---| then rows with | ... |
+                    if (line.includes('|')) {
+                        const next = lines[i + 1] || '';
+                        const isSep = /^\s*\|?\s*:?\-+\s*(?:\|\s*:?\-+\s*)+\|?\s*$/.test(next);
+                        if (isSep) {
+                            // collect table lines
+                            const header = line;
+                            i += 2; // skip header + sep
+                            const rows = [];
+                            while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') { rows.push(lines[i]); i++; }
+                            const splitRow = (r) => r.replace(/^\|/, '').replace(/\|$/, '').split('|').map(s => s.trim());
+                            const ths = splitRow(header).map(c => `<th>${applyInline(c)}</th>`).join('');
+                            const trs = rows.map(r => `<tr>${splitRow(r).map(c => `<td>${applyInline(c)}</td>`).join('')}</tr>`).join('');
+                            out.push(`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`);
+                            continue;
+                        }
+                    }
+                    // Lists (unordered, ordered, task)
+                    const ulItem = line.match(/^\s*[-*+]\s+(.*)$/);
+                    const olItem = line.match(/^\s*(\d+)\.\s+(.*)$/);
+                    if (ulItem) {
+                        const items = [];
+                        while (i < lines.length) {
+                            const m = lines[i].match(/^\s*[-*+]\s+(.*)$/);
+                            if (!m) break; items.push(m[1]); i++;
+                        }
+                        const lis = items.map(txt => {
+                            const task = txt.match(/^\[( |x|X)\]\s+(.*)$/);
+                            if (task) {
+                                const checked = /x/i.test(task[1]) ? ' checked' : '';
+                                return `<li><input type="checkbox" disabled${checked}> ${applyInline(task[2])}</li>`;
+                            }
+                            return `<li>${applyInline(txt)}</li>`;
+                        }).join('');
+                        out.push(`<ul>${lis}</ul>`);
+                        continue;
+                    } else if (olItem) {
+                        const items = [];
+                        while (i < lines.length) {
+                            const m = lines[i].match(/^\s*(\d+)\.\s+(.*)$/);
+                            if (!m) break; items.push(m[2]); i++;
+                        }
+                        const lis = items.map(txt => `<li>${applyInline(txt)}</li>`).join('');
+                        out.push(`<ol>${lis}</ol>`);
+                        continue;
+                    }
+                    // Blank line => paragraph break
+                    if (line.trim() === '') { out.push(''); i++; continue; }
+                    // Paragraphs (collect until blank)
+                    const buf = [];
+                    while (i < lines.length && lines[i].trim() !== '') { buf.push(lines[i]); i++; }
+                    flushParagraph(buf);
+                }
+                return out.join('\n');
+            }
             function openInlineEditor(afterLi, note) {
                 removeInlineEditor();
                 inlineEditorEl = document.createElement('li'); inlineEditorEl.className = 'note-editor-row'; inlineEditorEl.setAttribute('role', 'region'); inlineEditorEl.setAttribute('aria-label', 'Edit note');
                 const title = document.createElement('input'); title.className = 'input mb-8'; title.placeholder = 'Title'; title.value = note.title || '';
+                // Mode bar: Text / Preview
+                state.ui = state.ui || {}; state.ui.notesEditMode = state.ui.notesEditMode || 'text';
+                const modeBar = document.createElement('div'); modeBar.className = 'row gap-8';
+                const btnText = document.createElement('button'); btnText.className = 'icon-btn'; btnText.textContent = 'Text'; btnText.setAttribute('aria-pressed', state.ui.notesEditMode === 'text' ? 'true' : 'false');
+                const btnPreview = document.createElement('button'); btnPreview.className = 'icon-btn'; btnPreview.textContent = 'Preview'; btnPreview.setAttribute('aria-pressed', state.ui.notesEditMode === 'preview' ? 'true' : 'false');
+                modeBar.append(btnText, btnPreview);
                 const body = document.createElement('textarea'); body.className = 'textarea'; body.placeholder = 'Write your note…'; body.value = note.content || '';
+                const preview = document.createElement('div'); preview.className = 'md-preview hidden';
                 const actions = document.createElement('div'); actions.className = 'row gap-8 row-end';
                 const save = document.createElement('button'); save.className = 'icon-btn'; save.textContent = 'Save';
                 const cancel = document.createElement('button'); cancel.className = 'icon-btn'; cancel.textContent = 'Cancel';
                 const del = document.createElement('button'); del.className = 'icon-btn'; del.textContent = 'Delete';
                 actions.append(save, cancel, del);
-                inlineEditorEl.append(title, body, actions);
+                inlineEditorEl.append(title, modeBar, body, preview, actions);
                 afterLi.insertAdjacentElement('afterend', inlineEditorEl);
                 draftNote = { id: note.id, title: note.title, content: note.content };
                 title.addEventListener('input', () => { draftNote.title = title.value; });
-                body.addEventListener('input', () => { draftNote.content = body.value; });
+                const applyMode = () => {
+                    const mode = state.ui.notesEditMode;
+                    btnText.setAttribute('aria-pressed', mode === 'text' ? 'true' : 'false');
+                    btnPreview.setAttribute('aria-pressed', mode === 'preview' ? 'true' : 'false');
+                    if (mode === 'text') {
+                        body.classList.remove('hidden');
+                        preview.classList.add('hidden');
+                    } else {
+                        preview.innerHTML = renderMarkdown(body.value);
+                        body.classList.add('hidden');
+                        preview.classList.remove('hidden');
+                    }
+                };
+                body.addEventListener('input', () => { draftNote.content = body.value; if (state.ui.notesEditMode === 'preview') { preview.innerHTML = renderMarkdown(body.value); } });
+                btnText.addEventListener('click', () => { state.ui.notesEditMode = 'text'; scheduleSave(); applyMode(); });
+                btnPreview.addEventListener('click', () => { state.ui.notesEditMode = 'preview'; scheduleSave(); applyMode(); });
                 inlineEditorEl.addEventListener('keydown', (e) => {
                     if (e.key === 'Escape') { e.preventDefault(); removeInlineEditor(); }
                     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save.click(); }
@@ -1914,6 +2062,7 @@
                 });
                 cancel.addEventListener('click', () => { removeInlineEditor(); });
                 del.addEventListener('click', () => { const i = state.notes.findIndex(n => n.id === note.id); if (i >= 0) { state.notes.splice(i, 1); scheduleSave(); } removeInlineEditor(); renderNotes(); });
+                applyMode();
                 title.focus();
             }
             gid('add-note').addEventListener('click', () => {
