@@ -155,6 +155,8 @@
             height: 100%;
             display: block;
             touch-action: none;
+            /* Prefer speed over crispness during motion */
+            shape-rendering: optimizeSpeed;
         }
 
         #bg {
@@ -179,6 +181,22 @@
         .highlight {
             filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.35));
         }
+
+        /* Disable heavy effects on pieces while dragging a group */
+        .piece.no-effects {
+            filter: none !important;
+        }
+        .piece.no-effects .edge-shade {
+            display: none !important;
+        }
+        .piece.no-effects .highlight {
+            filter: none !important;
+        }
+
+        /* Motion mode: globally disable heavy effects during pan/zoom for perf */
+        .motion .piece { filter: none !important; }
+        .motion .piece .edge-shade { display: none !important; }
+        .motion .piece .highlight { filter: none !important; }
 
         /* .hud absolute version removed; using fixed-position .hud defined above */
 
@@ -280,20 +298,53 @@
         .modal input[type="number"],
         .modal input[type="file"] {
             width: 100%;
-            background: #0f152a;
+            background: var(--panel);
             color: var(--text);
-            border: 1px solid rgba(255, 255, 255, 0.12);
+            border: 1px solid color-mix(in oklab, var(--text) 12%, transparent);
             border-radius: 10px;
             padding: 10px 12px;
             font-size: 18px;
             /* Re-enable selection and callouts for inputs */
             -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+            caret-color: var(--accent);
         }
 
-        [data-theme="light"] .modal input[type="number"],
-        [data-theme="light"] .modal input[type="file"] {
-            background: #f5f7fb;
-            border-color: rgba(0, 0, 0, 0.12);
+        /* Inputs adapt to current theme via CSS variables; no hard-coded light/dark overrides needed */
+
+        /* Input focus uses theme accent */
+        .modal input[type="number"]:focus,
+        .modal input[type="file"]:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 35%, transparent);
+        }
+
+        /* Themed file selection button (cross-browser) */
+        .modal input[type="file"]::file-selector-button,
+        .modal input[type="file"]::-webkit-file-upload-button {
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 8px 12px;
+            margin-right: 10px;
+            cursor: pointer;
+            font-size: 14px;
+            box-shadow: 0 4px 10px rgba(79, 195, 247, 0.25);
+            transition: filter 120ms ease, box-shadow 120ms ease;
+        }
+        .modal input[type="file"]::file-selector-button:hover,
+        .modal input[type="file"]::-webkit-file-upload-button:hover {
+            filter: saturate(1.05) brightness(1.03);
+        }
+        .modal input[type="file"]::file-selector-button:active,
+        .modal input[type="file"]::-webkit-file-upload-button:active {
+            filter: saturate(0.98) brightness(0.98);
+        }
+        .modal input[type="file"]:focus-visible::file-selector-button,
+        .modal input[type="file"]:focus-visible::-webkit-file-upload-button {
+            outline: none;
+            box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 55%, transparent), 0 6px 14px rgba(79, 195, 247, 0.25);
         }
 
         .modal .actions {
@@ -304,13 +355,21 @@
         }
 
         .btn {
-            background: #0f152a;
+            background: var(--panel);
             color: var(--text);
-            border: 1px solid rgba(255, 255, 255, 0.12);
+            border: 1px solid color-mix(in oklab, var(--text) 12%, transparent);
             border-radius: 10px;
             padding: 10px 14px;
             font-size: 14px;
             cursor: pointer;
+            transition: filter 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+        }
+
+        .btn:hover { filter: brightness(1.06); }
+        .btn:active { filter: brightness(0.98); }
+        .btn:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 45%, transparent);
         }
 
         .btn.primary {
@@ -319,6 +378,13 @@
             font-weight: 700;
             letter-spacing: 0.2px;
             box-shadow: 0 6px 16px rgba(79, 195, 247, 0.35);
+        }
+
+        .btn.primary:hover { filter: saturate(1.05) brightness(1.03); }
+        .btn.primary:active { filter: saturate(0.98) brightness(0.98); }
+        .btn.primary:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 55%, transparent), 0 8px 18px rgba(79, 195, 247, 0.35);
         }
     </style>
 </head>
@@ -355,7 +421,7 @@
                 <rect id="bg" x="-5000" y="-5000" width="10000" height="10000"></rect>
                 <g id="pieces"></g>
                 <!-- Overlay for interactive hints (near-snap glow) above pieces -->
-                <g id="hints"></g>
+                <g id="hints" style="pointer-events:none"></g>
             </g>
         </svg>
         <div class="hud">
@@ -462,6 +528,13 @@
             let dragAnimId = 0; // rAF id for drag
             let dragNext = null; // {gid, x, y}
             let glowState = null; // { gid }
+            let glowRAF = 0; // rAF id for glow
+            let glowDirtyGid = null; // group id requesting glow update
+            // Cache of side path data per piece and side to avoid recompute during dragging
+            const sidePathCache = new Map(); // key: `${id}:${side}` -> pathD
+            let viewRAF = 0; // rAF for coalescing pan/zoom transforms
+            let pendingView = null; // { s, tx, ty }
+            let motionTimeout = 0; // timer to remove motion class after pan/zoom settles
 
             // --- UI wiring ---
             closeWin.addEventListener('click', () => { winEl.style.display = 'none'; });
@@ -599,10 +672,23 @@
             }
 
             function setWorldTransform(ns, ntx, nty) {
-                scale = clamp(ns, minScale, maxScale);
-                tx = ntx; ty = nty;
-                world.setAttribute('transform', `translate(${tx},${ty}) scale(${scale})`);
-                zoomLabel.textContent = Math.round(scale * 100) + '%';
+                // Coalesce transforms to next frame
+                pendingView = { s: clamp(ns, minScale, maxScale), tx: ntx, ty: nty };
+                if (!viewRAF) {
+                    // Enter motion mode to reduce effects during heavy panning/zooming
+                    document.body.classList.add('motion');
+                    viewRAF = requestAnimationFrame(() => {
+                        viewRAF = 0;
+                        if (!pendingView) return;
+                        scale = pendingView.s; tx = pendingView.tx; ty = pendingView.ty;
+                        world.setAttribute('transform', `translate(${tx},${ty}) scale(${scale})`);
+                        zoomLabel.textContent = Math.round(scale * 100) + '%';
+                        pendingView = null;
+                        // Debounce exit from motion mode shortly after last update
+                        if (motionTimeout) clearTimeout(motionTimeout);
+                        motionTimeout = setTimeout(() => { document.body.classList.remove('motion'); }, 80);
+                    });
+                }
             }
 
             function screenToWorld(pt) {
@@ -623,6 +709,8 @@
                 piecesLayer.innerHTML = '';
                 defs.innerHTML = '';
                 pieces = []; groups.clear(); nextGroupId = 1; winEl.style.display = 'none'; flattened = null;
+                // Clear any cached side paths from previous puzzle
+                sidePathCache.clear && sidePathCache.clear();
 
                 // Prepare edges
                 hEdges = Array.from({ length: rows + 1 }, () => Array(cols).fill(null));
@@ -716,7 +804,11 @@
                             const sp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                             sp.setAttribute('class', `edge-shade ${(side === 'top' || side === 'left') ? 'edge-highlight' : 'edge-shadow'}`);
                             sp.setAttribute('data-side', side);
-                            sp.setAttribute('d', buildSidePathD(r, c, side));
+                            // Cache side path d to avoid recomputation during drag
+                            const key = `${id}:${side}`;
+                            let pd = sidePathCache.get(key);
+                            if (!pd) { pd = buildSidePathD(r, c, side); sidePathCache.set(key, pd); }
+                            sp.setAttribute('d', pd);
                             shadeG.appendChild(sp);
                             shadePaths[side] = sp;
                         }
@@ -1044,6 +1136,11 @@
                     const wgrp = { x: grp.x, y: grp.y };
                     const isTouch = e.pointerType === 'touch';
                     dragging = { groupId: grp.id, dx: wpt.x - wgrp.x, dy: wpt.y - wgrp.y, touch: !!isTouch };
+                    // Disable heavy effects on pieces in this group while dragging
+                    grp.members.forEach(pid => {
+                        const p = pieces[pid];
+                        if (p && p.g) p.g.classList.add('no-effects');
+                    });
                     e.preventDefault();
                     return;
                 }
@@ -1119,6 +1216,11 @@
                     // Flush any pending drag update
                     if (dragAnimId) { cancelAnimationFrame(dragAnimId); dragAnimId = 0; }
                     if (dragNext) { setGroupTransform(dragNext.gid, dragNext.x, dragNext.y); dragNext = null; }
+                    // Re-enable effects for that group
+                    if (!flattened && groups && groups.has(gid)) {
+                        const gr = groups.get(gid);
+                        gr.members.forEach(pid => { const p = pieces[pid]; if (p && p.g) p.g.classList.remove('no-effects'); });
+                    }
                     // Avoid snapping if puzzle is already flattened or group no longer exists
                     if (!flattened && groups && groups.has(gid)) {
                         const snapped = trySnapGroup(gid);
@@ -1134,6 +1236,11 @@
             // Clear interactions on pointercancel (common during UA gestures) to avoid stuck states
             function onPointerCancel(e) {
                 pointers.delete(e.pointerId);
+                // Restore effects if a drag was in progress
+                if (dragging && groups && groups.has(dragging.groupId)) {
+                    const gr = groups.get(dragging.groupId);
+                    gr.members.forEach(pid => { const p = pieces[pid]; if (p && p.g) p.g.classList.remove('no-effects'); });
+                }
                 pinching = null; dragging = null; panning = null;
                 if (dragAnimId) { cancelAnimationFrame(dragAnimId); dragAnimId = 0; }
                 dragNext = null;
@@ -1161,59 +1268,68 @@
             }
 
             function updateNearSnapGlow(gid) {
-                if (!hintsLayer || flattened) return clearNearSnapGlow();
-                const grp = groups.get(gid); if (!grp) return clearNearSnapGlow();
-                const tol = (snapTol / scale) * 1.5; // a bit more lenient than snap
-                const frag = document.createDocumentFragment();
-                const seen = new Set();
-                grp.members.forEach(pid => {
-                    const p = pieces[pid];
-                    const rc = { r: p.r, c: p.c };
-                    const checks = [
-                        { side: 'top', nr: rc.r - 1, nc: rc.c },
-                        { side: 'right', nr: rc.r, nc: rc.c + 1 },
-                        { side: 'bottom', nr: rc.r + 1, nc: rc.c },
-                        { side: 'left', nr: rc.r, nc: rc.c - 1 },
-                    ];
-                    for (const ch of checks) {
-                        const inBounds = ch.nr >= 0 && ch.nr < rows && ch.nc >= 0 && ch.nc < cols;
-                        if (!inBounds) continue;
-                        const nid = ch.nr * cols + ch.nc;
-                        const q = pieces[nid]; if (!q) continue;
-                        if (q.groupId === p.groupId) continue; // same group -> internal seam
-                        const pGrp = groups.get(p.groupId); const qGrp = groups.get(q.groupId);
-                        if (!pGrp || !qGrp) continue;
-                        // world deltas
-                        const expected = { x: (q.c - p.c) * (imgW / cols), y: (q.r - p.r) * (imgH / rows) };
-                        const pw = { x: p.anchor.x + pGrp.x, y: p.anchor.y + pGrp.y };
-                        const qw = { x: q.anchor.x + qGrp.x, y: q.anchor.y + qGrp.y };
-                        const dx = (qw.x - pw.x) - expected.x;
-                        const dy = (qw.y - pw.y) - expected.y;
-                        if (Math.hypot(dx, dy) <= tol) {
-                            const key = `${p.id}:${ch.side}`;
-                            if (seen.has(key)) continue;
-                            seen.add(key);
-                            const d = buildSidePathD(p.r, p.c, ch.side);
-                            const wrap = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-                            wrap.setAttribute('transform', `translate(${pGrp.x},${pGrp.y})`);
-                            const glow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                            glow.setAttribute('d', d);
-                            glow.setAttribute('fill', 'none');
-                            glow.setAttribute('pointer-events', 'none');
-                            glow.setAttribute('vector-effect', 'non-scaling-stroke');
-                            glow.setAttribute('stroke-linecap', 'round');
-                            glow.setAttribute('stroke-linejoin', 'round');
-                            glow.setAttribute('stroke', 'rgba(255,255,0,0.9)');
-                            glow.setAttribute('stroke-width', '3');
-                            glow.style.filter = 'drop-shadow(0 0 6px rgba(255,255,0,0.7))';
-                            wrap.appendChild(glow);
-                            frag.appendChild(wrap);
+                // Throttle to one update per animation frame and reuse cached path data
+                glowDirtyGid = gid;
+                if (glowRAF) return;
+                glowRAF = requestAnimationFrame(() => {
+                    glowRAF = 0;
+                    const id = glowDirtyGid; glowDirtyGid = null;
+                    if (!hintsLayer || flattened) { clearNearSnapGlow(); return; }
+                    const grp = groups.get(id); if (!grp) { clearNearSnapGlow(); return; }
+                    const tol = (snapTol / scale) * 1.5;
+                    const frag = document.createDocumentFragment();
+                    const seen = new Set();
+                    grp.members.forEach(pid => {
+                        const p = pieces[pid];
+                        const rc = { r: p.r, c: p.c };
+                        const checks = [
+                            { side: 'top', nr: rc.r - 1, nc: rc.c },
+                            { side: 'right', nr: rc.r, nc: rc.c + 1 },
+                            { side: 'bottom', nr: rc.r + 1, nc: rc.c },
+                            { side: 'left', nr: rc.r, nc: rc.c - 1 },
+                        ];
+                        for (const ch of checks) {
+                            const inBounds = ch.nr >= 0 && ch.nr < rows && ch.nc >= 0 && ch.nc < cols;
+                            if (!inBounds) continue;
+                            const nid = ch.nr * cols + ch.nc;
+                            const q = pieces[nid]; if (!q) continue;
+                            if (q.groupId === p.groupId) continue;
+                            const pGrp = groups.get(p.groupId); const qGrp = groups.get(q.groupId);
+                            if (!pGrp || !qGrp) continue;
+                            const expected = { x: (q.c - p.c) * (imgW / cols), y: (q.r - p.r) * (imgH / rows) };
+                            const pw = { x: p.anchor.x + pGrp.x, y: p.anchor.y + pGrp.y };
+                            const qw = { x: q.anchor.x + qGrp.x, y: q.anchor.y + qGrp.y };
+                            const dx = (qw.x - pw.x) - expected.x;
+                            const dy = (qw.y - pw.y) - expected.y;
+                            if (Math.hypot(dx, dy) <= tol) {
+                                const key = `${p.id}:${ch.side}`;
+                                if (seen.has(key)) continue;
+                                seen.add(key);
+                                // reuse cached side path if available
+                                const cacheKey = `${p.id}:${ch.side}`;
+                                let d = sidePathCache.get(cacheKey);
+                                if (!d) { d = buildSidePathD(p.r, p.c, ch.side); sidePathCache.set(cacheKey, d); }
+                                const wrap = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                                wrap.setAttribute('transform', `translate(${pGrp.x},${pGrp.y})`);
+                                const glow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                                glow.setAttribute('d', d);
+                                glow.setAttribute('fill', 'none');
+                                glow.setAttribute('pointer-events', 'none');
+                                glow.setAttribute('vector-effect', 'non-scaling-stroke');
+                                glow.setAttribute('stroke-linecap', 'round');
+                                glow.setAttribute('stroke-linejoin', 'round');
+                                glow.setAttribute('stroke', 'rgba(255,255,0,0.9)');
+                                glow.setAttribute('stroke-width', '3');
+                                glow.style.filter = 'drop-shadow(0 0 6px rgba(255,255,0,0.7))';
+                                frag.appendChild(wrap);
+                                wrap.appendChild(glow);
+                            }
                         }
-                    }
+                    });
+                    while (hintsLayer.firstChild) hintsLayer.removeChild(hintsLayer.firstChild);
+                    hintsLayer.appendChild(frag);
+                    glowState = { gid: id };
                 });
-                while (hintsLayer.firstChild) hintsLayer.removeChild(hintsLayer.firstChild);
-                hintsLayer.appendChild(frag);
-                glowState = { gid };
             }
 
             // --- Haptics on snap ---
