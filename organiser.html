@@ -1389,6 +1389,7 @@
                         <input type="file" id="file-input" accept="application/json" style="display:none" />
                         <button class="btn" id="to-text-json">To Text</button>
                         <button class="btn" id="apply-json" disabled>Apply Text</button>
+                        <button class="btn teal" id="merge-new-po" title="Merge this data into the new organiser (safe and repeatable)">Merge into new organiser</button>
                         <button class="btn berry" id="erase-all">Erase All</button>
                     </div>
                     <div class="mono">Local only • No accounts • No uploads</div>
@@ -2168,6 +2169,8 @@
             const fileInput = gid('file-input');
             const jsonArea = gid('json-area');
             const toTextBtn = gid('to-text-json');
+            const mergeBtn = gid('merge-new-po');
+            const NEW_PO_KEY = 'po-data-v1';
             exportBtn.addEventListener('click', () => {
                 const data = JSON.stringify(state, null, 2);
                 jsonArea.value = data;
@@ -2508,6 +2511,118 @@
                     catch (e) { alert('Invalid JSON'); }
                 };
                 r.readAsText(f);
+            });
+            // Merge this organiser's data into the new organiser (po.html) structure in localStorage
+            function readNewPoState() {
+                try { const raw = localStorage.getItem(NEW_PO_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
+            }
+            function sanitizeNewPoState(raw) {
+                const def = {
+                    ui: { tab: 'notes', trackerMode: 'chart', cardsMode: 'practice', wheelMode: 'use', calendarSelected: null, notesSearch: { query: '' } },
+                    notes: [], tasks: [], events: {}, cards: [], shuffledCache: { enabled: false, order: [] }, cardsPractice: { idx: 0 }, wheel: { itemsText: '', lastHit: null }, tracker: { metrics: [], data: {}, chartType: 'stacked', selectedMetrics: [], chartRange: { start: null, end: null } }
+                };
+                const out = JSON.parse(JSON.stringify(def));
+                const isStr = v => typeof v === 'string'; const isBool = v => typeof v === 'boolean'; const isNum = v => typeof v === 'number' && Number.isFinite(v);
+                const isDateKey = k => /^\d{4}-\d{2}-\d{2}$/.test(k);
+                if (raw && typeof raw === 'object') {
+                    if (Array.isArray(raw.notes)) out.notes = raw.notes.map(n => ({ id: isStr(n?.id) ? n.id : Math.random().toString(36).slice(2, 10), title: isStr(n?.title) ? n.title : '', content: isStr(n?.content) ? n.content : '' }));
+                    if (Array.isArray(raw.tasks)) out.tasks = raw.tasks.map(t => ({ id: isStr(t?.id) ? t.id : Math.random().toString(36).slice(2, 10), text: isStr(t?.text) ? t.text : '', done: !!t?.done }));
+                    if (raw.events && typeof raw.events === 'object') { const ev = {}; Object.keys(raw.events).forEach(k => { if (isDateKey(k) && Array.isArray(raw.events[k])) ev[k] = raw.events[k].filter(isStr); }); out.events = ev; }
+                    if (Array.isArray(raw.cards)) out.cards = raw.cards.map(c => ({ id: isStr(c?.id) ? c.id : Math.random().toString(36).slice(2, 10), front: isStr(c?.front) ? c.front : '', back: isStr(c?.back) ? c.back : '' }));
+                    if (raw.shuffledCache && typeof raw.shuffledCache === 'object') { out.shuffledCache.enabled = !!raw.shuffledCache.enabled; out.shuffledCache.order = Array.isArray(raw.shuffledCache.order) ? raw.shuffledCache.order.filter(isStr) : []; }
+                    if (raw.cardsPractice && typeof raw.cardsPractice === 'object') { out.cardsPractice.idx = isNum(raw.cardsPractice.idx) ? Math.max(0, Math.floor(raw.cardsPractice.idx)) : 0; }
+                    if (raw.wheel && typeof raw.wheel === 'object') { out.wheel.itemsText = isStr(raw.wheel.itemsText) ? raw.wheel.itemsText : ''; out.wheel.lastHit = isStr(raw.wheel.lastHit) ? raw.wheel.lastHit : null; }
+                    if (raw.tracker && typeof raw.tracker === 'object') {
+                        if (Array.isArray(raw.tracker.metrics)) out.tracker.metrics = raw.tracker.metrics.map(m => ({ id: isStr(m?.id) ? m.id : Math.random().toString(36).slice(2, 10), name: isStr(m?.name) ? m.name : '' }));
+                        if (raw.tracker.data && typeof raw.tracker.data === 'object') { const td = {}; Object.keys(raw.tracker.data).forEach(dk => { if (isDateKey(dk) && raw.tracker.data[dk] && typeof raw.tracker.data[dk] === 'object') { const row = {}; Object.entries(raw.tracker.data[dk]).forEach(([k, v]) => { if (isStr(k) && (v === null || isNum(v))) row[k] = v; }); td[dk] = row; } }); out.tracker.data = td; }
+                    }
+                }
+                return out;
+            }
+            function readOldStateFromStorage() {
+                try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
+            }
+            function getOldState() {
+                // Prefer live in-memory state if present; else fallback to stored snapshot
+                if (typeof state === 'object' && state) return state;
+                return readOldStateFromStorage() || {};
+            }
+            function mergeById(targetArr, incomingArr, fields) {
+                const map = new Map(targetArr.map(o => [o.id, o]));
+                for (const it of incomingArr) {
+                    if (!it || typeof it !== 'object') continue;
+                    const id = it.id || Math.random().toString(36).slice(2, 10);
+                    if (map.has(id)) {
+                        const tgt = map.get(id);
+                        fields.forEach(f => { if (it[f] !== undefined) tgt[f] = it[f]; });
+                    } else {
+                        const obj = { id }; fields.forEach(f => obj[f] = it[f] !== undefined ? it[f] : (f === 'done' ? false : ''));
+                        targetArr.push(obj); map.set(id, obj);
+                    }
+                }
+            }
+            function mergeEvents(target, incoming) {
+                const isDateKey = k => /^\d{4}-\d{2}-\d{2}$/.test(k);
+                Object.keys(incoming || {}).forEach(d => {
+                    if (!isDateKey(d)) return;
+                    const arr = (incoming[d] || []).filter(s => typeof s === 'string');
+                    if (!arr.length) return;
+                    const dest = new Set((target[d] || []).filter(s => typeof s === 'string'));
+                    arr.forEach(s => dest.add(s));
+                    target[d] = Array.from(dest);
+                });
+            }
+            function mergeTracker(target, incoming) {
+                // metrics by id, update or add
+                mergeById(target.metrics, incoming.metrics || [], ['name']);
+                // data: union dates; per-date merge metric keys; prefer incoming values when present; allow nulls to overwrite
+                const isDateKey = k => /^\d{4}-\d{2}-\d{2}$/.test(k);
+                Object.keys(incoming.data || {}).forEach(d => {
+                    if (!isDateKey(d)) return; const rowIn = incoming.data[d] || {}; const rowT = target.data[d] || {};
+                    Object.keys(rowIn).forEach(k => { rowT[k] = rowIn[k]; });
+                    target.data[d] = rowT;
+                });
+            }
+            function currentAsNewPoShape() {
+                // Map old organiser state to new po.html structure
+                const old = getOldState();
+                return {
+                    ui: { tab: 'notes', trackerMode: old.ui?.trackerMode === 'chart' ? 'chart' : 'data', cardsMode: old.ui?.cardsMode === 'manage' ? 'manage' : 'practice', wheelMode: 'use', calendarSelected: null, notesSearch: { query: '' } },
+                    notes: (old.notes || []).map(n => ({ id: String(n.id || Math.random().toString(36).slice(2,10)), title: String(n.title || ''), content: String(n.content || '') })),
+                    tasks: (old.tasks || []).map(t => ({ id: String(t.id || Math.random().toString(36).slice(2,10)), text: String(t.text || ''), done: !!t.done })),
+                    events: Object.fromEntries(Object.entries(old.events || {}).map(([d, arr]) => [d, (arr || []).map(e => typeof e === 'string' ? e : (e && e.text ? String(e.text) : '')).filter(Boolean)])),
+                    cards: (old.cards || []).map(c => ({ id: String(c.id || Math.random().toString(36).slice(2,10)), front: String(c.front || ''), back: String(c.back || '') })),
+                    shuffledCache: { enabled: false, order: [] },
+                    cardsPractice: { idx: 0 },
+                    wheel: { itemsText: String(old.wheel?.itemsText || ''), lastHit: null },
+                    tracker: {
+                        metrics: (old.tracker?.metrics || []).map(m => ({ id: String(m.id || Math.random().toString(36).slice(2,10)), name: String(m.name || '') })),
+                        data: Object.fromEntries(Object.entries(old.tracker?.data || {}).map(([d, row]) => [d, Object.fromEntries(Object.entries(row || {}).map(([k, v]) => [k, (v === null || typeof v === 'number') ? v : Number(v) || 0]))])),
+                        chartType: 'stacked', selectedMetrics: [], chartRange: { start: null, end: null }
+                    }
+                };
+            }
+            function mergeIntoNewPo() {
+                const incoming = currentAsNewPoShape();
+                const existing = sanitizeNewPoState(readNewPoState());
+                // Merge arrays by id
+                mergeById(existing.notes, incoming.notes, ['title', 'content']);
+                mergeById(existing.tasks, incoming.tasks, ['text', 'done']);
+                mergeById(existing.cards, incoming.cards, ['front', 'back']);
+                // Merge simple objects
+                mergeEvents(existing.events, incoming.events);
+                // Wheel: keep union of itemsText lines (set union by line)
+                const lines = new Set([...(existing.wheel.itemsText || '').split(/\r?\n/).map(s=>s.trim()).filter(Boolean), ...(incoming.wheel.itemsText || '').split(/\r?\n/).map(s=>s.trim()).filter(Boolean)]);
+                existing.wheel.itemsText = Array.from(lines).join('\n');
+                if (existing.wheel.lastHit && !(Array.from(lines).includes(existing.wheel.lastHit))) existing.wheel.lastHit = null;
+                // Tracker
+                mergeTracker(existing.tracker, incoming.tracker);
+                try { localStorage.setItem(NEW_PO_KEY, JSON.stringify(existing)); } catch {}
+            }
+            mergeBtn?.addEventListener('click', () => {
+                try { mergeIntoNewPo(); alert('Merge completed! Open "Personal Organiser (Modern)" to see your data. You can run this merge again later; duplicates are avoided and items are updated.');
+                    if (confirm('Open the new organiser now?')) { window.location.href = 'po.html'; }
+                } catch (e) { alert('Merge failed: ' + (e?.message || String(e))); }
             });
             // Validate JSON as user types/pastes; do not import until Apply is pressed
             const applyBtn = gid('apply-json');
