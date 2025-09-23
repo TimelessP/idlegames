@@ -485,10 +485,6 @@
   }
 
   function stripHtml(html){
-          if(typeof c !== 'string'){
-            const stats = proxyStats.get(c.name) || {success:0, fail:0};
-            stats.fail += 1; proxyStats.set(c.name, stats);
-          }
     if(!html) return '';
     let s = String(html);
     // Drop potentially heavy/embedded blocks entirely before any parsing
@@ -1451,4 +1447,12 @@
   document.addEventListener('DOMContentLoaded', start);
   window.addEventListener('scroll', onScrollRender, { passive:true });
   window.addEventListener('resize', ()=>{ recalcLayout(); onScrollRender(); }, { passive:true });
+
+  // Build / diagnostics banner
+  const BUILD_VERSION = '2025-09-23a';
+  try {
+    const activeProxies = PROXIES.filter(p=>!p.disabled).map(p=>p.name).join(', ');
+    const disabledProxies = PROXIES.filter(p=>p.disabled).map(p=>p.name).join(', ');
+    console.log(`[FeedCycle] Build ${BUILD_VERSION}. Active proxies: ${activeProxies || 'none'}; Disabled: ${disabledProxies || 'none'}`);
+  } catch {}
 })();
