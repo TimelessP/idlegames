@@ -56,7 +56,7 @@
   // Public proxy candidates (best-effort). Order matters.
   const PROXIES = [
     { name: 'AllOrigins', kind: 'param-enc', base: 'https://api.allorigins.win/raw?url=' },
-    { name: 'AllOriginsJSON', kind: 'param-enc-json', base: 'https://api.allorigins.win/get?url=' },
+    { name: 'AllOriginsJSON', kind: 'param-enc-json', base: 'https://api.allorigins.win/get?url=', disabled: true }, // disabled (flaky + CORS)
     { name: 'CodeTabs', kind: 'param-enc', base: 'https://api.codetabs.com/v1/proxy?quest=' },
     { name: 'corsproxy.io', kind: 'param-enc', base: 'https://corsproxy.io/?' },
     // Disabled by default on GitHub Pages due to frequent CORS blocks (no ACAO) -> can be re-enabled manually if needed
@@ -64,6 +64,14 @@
     // Disabled: certificate issues / reliability (ERR_CERT_DATE_INVALID)
     { name: 'ThingProxy', kind: 'prefix-raw', base: 'https://thingproxy.freeboard.io/fetch/', disabled: true },
   ];
+
+  // Proxy performance statistics (ephemeral) for adaptive ordering
+  const proxyStats = new Map(); // name -> {success, fail}
+  function proxyScore(p){
+    if(typeof p === 'string') return 0; // manual override neutral
+    const s = proxyStats.get(p.name) || {success:0, fail:0};
+    return s.success - 2*s.fail; // penalize failures more heavily
+  }
 
   function buildProxiedUrl(targetUrl, proxySpec){
     // Manual override string
@@ -98,12 +106,13 @@
       // Exclude AllOrigins variants on file:// as they often block or error with QUIC
       const preferred = ['CodeTabs','corsproxy.io','IsomorphicGit','ThingProxy'];
       const built = preferred.map(name=> PROXIES.find(p=>p.name===name)).filter(Boolean);
-      return arr.concat(built.filter(p=>!p.disabled));
+      return arr.concat(built.filter(p=>!p.disabled).sort((a,b)=> proxyScore(b)-proxyScore(a)));
     } else {
       // Shallow shuffle of built-in proxies to spread load on http(s)
       const built = PROXIES.slice();
       for(let i=built.length-1;i>0;i--){ const j = Math.floor(Math.random()*(i+1)); [built[i], built[j]] = [built[j], built[i]]; }
-      return arr.concat(built.filter(p=>!p.disabled));
+      const active = built.filter(p=>!p.disabled).sort((a,b)=> proxyScore(b)-proxyScore(a));
+      return arr.concat(active);
     }
   }
 
@@ -344,7 +353,13 @@
       });
       throw lastErr || new Error('Failed to fetch feed');
     }
-    else { lastProxiesUsed.add(used); state.lastFetchUrl[feed.id] = usedUrl; }
+    else {
+      lastProxiesUsed.add(used); state.lastFetchUrl[feed.id] = usedUrl;
+      if(used !== 'Manual'){
+        const stats = proxyStats.get(used) || {success:0, fail:0};
+        stats.success += 1; proxyStats.set(used, stats);
+      }
+    }
     // Update feed metadata (title/site) from the fetched XML if available
     let metaChanged = false;
     try{
@@ -444,12 +459,16 @@
         const link = doc.querySelector('rss channel > link')?.textContent?.trim() || '';
         return { title, siteUrl: link };
       }
-    }catch{
+        }catch(e){
       return { title:'', siteUrl:'' };
     }
   }
 
   function stripHtml(html){
+          if(typeof c !== 'string'){
+            const stats = proxyStats.get(c.name) || {success:0, fail:0};
+            stats.fail += 1; proxyStats.set(c.name, stats);
+          }
     if(!html) return '';
     let s = String(html);
     // Drop potentially heavy/embedded blocks entirely before any parsing
@@ -507,7 +526,16 @@
       const li = el('li', {role:'treeitem', tabindex:0});
       const row = el('div', {class:'row'});
       const left = el('div', {class:'row-left'});
-  left.append(el('span', {class:'title', title: f.title||f.url}, f.title||f.url));
+      const titleSpan = el('span', {class:'title', title: f.title||f.url}, f.title||f.url);
+      // Feed error indicator (shows if fetch error recorded within last 30 minutes)
+      const errInfo = feedErrors.get(f.id);
+      if(errInfo && Date.now() - errInfo.ts < 30*60*1000){
+        const warn = el('span', {class:'feed-warn', title: `Last fetch error: ${errInfo.error}\nProxies tried: ${(errInfo.proxiesTried||[]).join(', ')}`}, '⚠');
+        warn.style.marginLeft = '4px';
+        warn.style.cursor = 'help';
+        titleSpan.appendChild(warn);
+      }
+      left.append(titleSpan);
       // Category chip as a button to assign/remove
   const chip = el('button', {class:'chip button', title:(f.category||'(no category)') + ' • Click to set', 'aria-label':'Set category for subscription'}, f.category||'(no category)');
       chip.onclick = (ev)=>{
