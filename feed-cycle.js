@@ -56,17 +56,19 @@
   // Public proxy candidates (best-effort). Order matters.
   const PROXIES = [
     { name: 'AllOrigins', kind: 'param-enc', base: 'https://api.allorigins.win/raw?url=' },
-    { name: 'AllOriginsJSON', kind: 'param-enc-json', base: 'https://api.allorigins.win/get?url=', disabled: true }, // disabled (flaky + CORS)
     { name: 'CodeTabs', kind: 'param-enc', base: 'https://api.codetabs.com/v1/proxy?quest=' },
     { name: 'corsproxy.io', kind: 'param-enc', base: 'https://corsproxy.io/?' },
-    // Disabled by default on GitHub Pages due to frequent CORS blocks (no ACAO) -> can be re-enabled manually if needed
     { name: 'IsomorphicGit', kind: 'prefix-raw', base: 'https://cors.isomorphic-git.org/', disabled: true },
-    // Disabled: certificate issues / reliability (ERR_CERT_DATE_INVALID)
     { name: 'ThingProxy', kind: 'prefix-raw', base: 'https://thingproxy.freeboard.io/fetch/', disabled: true },
   ];
 
   // Proxy performance statistics (ephemeral) for adaptive ordering
   const proxyStats = new Map(); // name -> {success, fail}
+  const proxyFailWindow = new Map(); // name -> { count, firstTs }
+  const proxyTempDisabledUntil = new Map(); // name -> timestamp
+  const PROXY_FAIL_THRESHOLD = 3; // consecutive within window
+  const PROXY_FAIL_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+  const PROXY_DISABLE_MS = 10 * 60 * 1000; // disable period
   function proxyScore(p){
     if(typeof p === 'string') return 0; // manual override neutral
     const s = proxyStats.get(p.name) || {success:0, fail:0};
@@ -111,7 +113,8 @@
       // Shallow shuffle of built-in proxies to spread load on http(s)
       const built = PROXIES.slice();
       for(let i=built.length-1;i>0;i--){ const j = Math.floor(Math.random()*(i+1)); [built[i], built[j]] = [built[j], built[i]]; }
-      const active = built.filter(p=>!p.disabled).sort((a,b)=> proxyScore(b)-proxyScore(a));
+      const now = Date.now();
+      const active = built.filter(p=>!p.disabled && !(proxyTempDisabledUntil.get(p.name)>now)).sort((a,b)=> proxyScore(b)-proxyScore(a));
       return arr.concat(active);
     }
   }
@@ -335,6 +338,23 @@
           // On 429 or 5xx, cool down this proxy
           if(typeof c !== 'string' && e && (e._status === 429 || (e._status>=500 && e._status<600))){
             proxyCooldown.set(c.name, Date.now() + PROXY_COOLDOWN_MS);
+          }
+          if(typeof c !== 'string'){
+            const stats = proxyStats.get(c.name) || {success:0, fail:0};
+            stats.fail += 1; proxyStats.set(c.name, stats);
+            // dynamic failure suppression (counts any exception including network/CORS/QUIC)
+            const now = Date.now();
+            const fw = proxyFailWindow.get(c.name) || { count:0, firstTs: now };
+            if(now - fw.firstTs > PROXY_FAIL_WINDOW_MS){
+              fw.count = 1; fw.firstTs = now;
+            } else {
+              fw.count += 1;
+            }
+            proxyFailWindow.set(c.name, fw);
+            if(fw.count >= PROXY_FAIL_THRESHOLD){
+              proxyTempDisabledUntil.set(c.name, now + PROXY_DISABLE_MS);
+              fw.count = 0; fw.firstTs = now; // reset after disabling
+            }
           }
         }
       }
