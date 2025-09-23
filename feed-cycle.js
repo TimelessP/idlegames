@@ -59,8 +59,10 @@
     { name: 'AllOriginsJSON', kind: 'param-enc-json', base: 'https://api.allorigins.win/get?url=' },
     { name: 'CodeTabs', kind: 'param-enc', base: 'https://api.codetabs.com/v1/proxy?quest=' },
     { name: 'corsproxy.io', kind: 'param-enc', base: 'https://corsproxy.io/?' },
-    { name: 'IsomorphicGit', kind: 'prefix-raw', base: 'https://cors.isomorphic-git.org/' },
-    { name: 'ThingProxy', kind: 'prefix-raw', base: 'https://thingproxy.freeboard.io/fetch/' },
+    // Disabled by default on GitHub Pages due to frequent CORS blocks (no ACAO) -> can be re-enabled manually if needed
+    { name: 'IsomorphicGit', kind: 'prefix-raw', base: 'https://cors.isomorphic-git.org/', disabled: true },
+    // Disabled: certificate issues / reliability (ERR_CERT_DATE_INVALID)
+    { name: 'ThingProxy', kind: 'prefix-raw', base: 'https://thingproxy.freeboard.io/fetch/', disabled: true },
   ];
 
   function buildProxiedUrl(targetUrl, proxySpec){
@@ -96,14 +98,17 @@
       // Exclude AllOrigins variants on file:// as they often block or error with QUIC
       const preferred = ['CodeTabs','corsproxy.io','IsomorphicGit','ThingProxy'];
       const built = preferred.map(name=> PROXIES.find(p=>p.name===name)).filter(Boolean);
-      return arr.concat(built);
+      return arr.concat(built.filter(p=>!p.disabled));
     } else {
       // Shallow shuffle of built-in proxies to spread load on http(s)
       const built = PROXIES.slice();
       for(let i=built.length-1;i>0;i--){ const j = Math.floor(Math.random()*(i+1)); [built[i], built[j]] = [built[j], built[i]]; }
-      return arr.concat(built);
+      return arr.concat(built.filter(p=>!p.disabled));
     }
   }
+
+  // Ephemeral map of recent feed fetch errors (not persisted)
+  const feedErrors = new Map();
 
   // --------- State ---------
   let state = loadState();
@@ -331,7 +336,14 @@
       try{ xml = await fetchWithCache(feed.url); if(xmlHasParserError(xml)) throw new Error('XML parse error'); used = 'Direct'; usedUrl = feed.url; }
       catch(e){ lastErr = e; }
     }
-    if(!used) throw lastErr || new Error('Failed to fetch feed');
+    if(!used){
+      feedErrors.set(feed.id, {
+        ts: Date.now(),
+        error: (lastErr && (lastErr.message||String(lastErr))) || 'Unknown fetch error',
+        proxiesTried: candidates.map(c=> typeof c==='string' ? 'Manual' : c.name)
+      });
+      throw lastErr || new Error('Failed to fetch feed');
+    }
     else { lastProxiesUsed.add(used); state.lastFetchUrl[feed.id] = usedUrl; }
     // Update feed metadata (title/site) from the fetched XML if available
     let metaChanged = false;
