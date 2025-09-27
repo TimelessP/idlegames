@@ -48,6 +48,11 @@
   const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{} }; // posts ephemeral + tags mapping postId -> [tag]
   let state = loadState();
   let posts = {}; // id -> post (ephemeral)
+  let lastFilteredPosts = [];
+  let lastRenderedCount = 0;
+  let pendingListRefresh = false;
+  const INITIAL_RENDER_COUNT = 120;
+  const CHUNK_SIZE = 120;
 
   // ---------- Proxy & Caching (ported/minimal from v1) ----------
   const PROXIES = [
@@ -132,6 +137,16 @@
   const $ = sel=> document.querySelector(sel);
   const byId = id=> document.getElementById(id);
   const el = (tag, props={}, ...kids)=>{ const n=document.createElement(tag); for(const [k,v] of Object.entries(props)){ if(k==='class') n.className=v; else if(k==='html') n.innerHTML=v; else if(k.startsWith('on')&&typeof v==='function') n.addEventListener(k.substring(2),v); else if(v===true) n.setAttribute(k,''); else if(v!==false && v!=null) n.setAttribute(k,v);} for(const k of kids){ if(k==null) continue; if(Array.isArray(k)) n.append(...k); else if(k.nodeType) n.append(k); else n.append(String(k)); } return n; };
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function svgIcon(useHref){
+    const svg = document.createElementNS(SVG_NS,'svg');
+    svg.setAttribute('class','icon');
+    svg.setAttribute('aria-hidden','true');
+    const use = document.createElementNS(SVG_NS,'use');
+    use.setAttribute('href', useHref);
+    svg.appendChild(use);
+    return svg;
+  }
   const hashId = s=>{ let h=2166136261>>>0; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619);} return (h>>>0).toString(36); };
   const clamp = (n,a,b)=> Math.max(a, Math.min(b,n));
 
@@ -186,9 +201,23 @@
       if(top && top!==prev.el) top.remove();
       prev.el.style.visibility='';
       prev.el.removeAttribute('aria-hidden');
-      const body = prev.el.querySelector('.panel-body'); if(body) body.scrollTop = prev.scroll||0;
+      let body = prev.el.querySelector('.panel-body');
+      const restoreScroll = ()=>{ if(body) body.scrollTop = prev.scroll||0; };
+      if(prev.id==='articlesInfiniteScrollable'){
+        suspendListRenders=false;
+        if(pendingListRefresh){
+          pendingListRefresh=false;
+          const desiredScroll = prev.scroll||0;
+          renderArticles();
+          body = prev.el.querySelector('.panel-body');
+          if(body) body.scrollTop = desiredScroll;
+        } else {
+          restoreScroll();
+        }
+      } else {
+        restoreScroll();
+      }
       focusPanel(prev.id);
-      if(prev.id==='articlesInfiniteScrollable'){ suspendListRenders=false; }
     } else {
       while(stackEl.firstChild){ stackEl.removeChild(stackEl.firstChild); }
       renderPanel(prev.id);
@@ -266,10 +295,23 @@
       form.querySelector('[data-action="back"]').addEventListener('click', back, { once:true });
     }
     if(id==='filterAndSortSettings'){
-      const search = root.querySelector('#searchBox'); if(search){ search.addEventListener('input', debounce(()=>{ currentFilters.q = search.value.trim(); renderArticles(); }, 300)); }
-      root.querySelector('#chk-unread')?.addEventListener('change', e=>{ currentFilters.unread = e.target.checked; renderArticles(); });
-      root.querySelector('#chk-fav')?.addEventListener('change', e=>{ currentFilters.fav = e.target.checked; renderArticles(); });
-      populateFilters(root);
+      const form = root.querySelector('#filterForm');
+      populateFilters(form);
+      form?.addEventListener('submit', e=>{
+        e.preventDefault();
+        applyFilterForm(form);
+        renderArticles();
+        if(backStack.length){ history.back(); } else back();
+      });
+      form?.querySelector('[data-action="reset"]')?.addEventListener('click', ()=>{
+        Object.assign(currentFilters, { ...FILTER_DEFAULTS, tagList: [] });
+        populateFilters(form);
+        renderArticles();
+      });
+      form?.querySelector('[data-action="cancel"]')?.addEventListener('click', ()=>{
+        populateFilters(form); // revert any unsaved edits
+        if(backStack.length){ history.back(); } else back();
+      });
     }
     if(id==='articlesInfiniteScrollable'){
       renderArticles();
@@ -282,42 +324,176 @@
   }
 
   // ---------- Filters ----------
-  const currentFilters = { q:'', subscription:'', category:'', tag:'', unread:false, fav:false, readState:'' }; // readState: '' | 'read' | 'unread'
-  function populateFilters(panel){
-    const selSub = panel.querySelector('#sel-subscription');
-    const selCat = panel.querySelector('#sel-category');
-    if(selSub){ selSub.innerHTML = '<option value="">All Subscriptions</option>' + state.feeds.map(f=> `<option value="${f.id}">${esc(f.title||f.url)}</option>`).join(''); selSub.value = currentFilters.subscription; selSub.onchange = e=>{ currentFilters.subscription = e.target.value; renderArticles(); }; }
-    const cats = Array.from(new Set(state.feeds.map(f=> f.category).filter(Boolean)));
-    if(selCat){ selCat.innerHTML = '<option value="">All Categories</option>' + cats.map(c=> `<option>${esc(c)}</option>`).join(''); selCat.value = currentFilters.category; selCat.onchange = e=>{ currentFilters.category = e.target.value; renderArticles(); }; }
-    // Tag selector (create if not present)
-    let selTag = panel.querySelector('#sel-tag');
-    if(selTag){
-      const allTags = Array.from(new Set(Object.values(state.tags||{}).flat())).sort((a,b)=> a.localeCompare(b));
-      selTag.innerHTML = '<option value="">All Tags</option>' + allTags.map(t=> `<option>${esc(t)}</option>`).join('');
-      selTag.value = currentFilters.tag;
-      selTag.onchange = e=>{ currentFilters.tag = e.target.value; renderArticles(); };
+  const FILTER_DEFAULTS = Object.freeze({ q:'', subscription:'', category:'', tag:'', tagList:[], unread:false, fav:false, readState:'', dateFrom:'', dateTo:'' });
+  const currentFilters = { ...FILTER_DEFAULTS, tagList: [] }; // mutable runtime copy
+  function populateFilters(form){
+    if(!form) return;
+    const selSub = form.querySelector('#filterSubscription');
+    const selCat = form.querySelector('#filterCategory');
+  const tagWrap = form.querySelector('#filterTagsWrap');
+    const feeds = state.feeds.slice().sort((a,b)=> (a.title||a.url||'').localeCompare(b.title||b.url||''));
+    if(selSub){
+      selSub.innerHTML = '<option value="">All subscriptions</option>' + feeds.map(f=> `<option value="${f.id}">${esc(f.title||f.url)}</option>`).join('');
+      selSub.value = currentFilters.subscription || '';
     }
+    const cats = Array.from(new Set(state.feeds.map(f=> f.category).filter(Boolean))).sort((a,b)=> a.localeCompare(b));
+    if(selCat){
+      selCat.innerHTML = '<option value="">All categories</option>' + cats.map(c=> `<option>${esc(c)}</option>`).join('');
+      selCat.value = currentFilters.category || '';
+    }
+    if(tagWrap){
+      const allTags = Array.from(new Set(Object.values(state.tags||{}).flat())).sort((a,b)=> a.localeCompare(b));
+      tagWrap.innerHTML='';
+      const selected = new Set(currentFilters.tagList && currentFilters.tagList.length ? currentFilters.tagList : (currentFilters.tag? [currentFilters.tag]:[]));
+      if(!allTags.length){
+        tagWrap.append(el('span',{class:'muted'},'No tags yet.'));
+      } else {
+        allTags.forEach(t=>{
+          const isSelected = selected.has(t);
+          const btn = el('button',{type:'button',class:'tag-toggle'+(isSelected?' is-selected':''), 'data-tag':t, 'aria-pressed':isSelected?'true':'false'}, t);
+          btn.addEventListener('click',()=>{
+            const active = !btn.classList.contains('is-selected');
+            btn.classList.toggle('is-selected', active);
+            btn.setAttribute('aria-pressed', active?'true':'false');
+          });
+          tagWrap.append(btn);
+        });
+      }
+    }
+    const searchInput = form.querySelector('#filterSearch'); if(searchInput) searchInput.value = currentFilters.q || '';
+    const favOnly = form.querySelector('input[name="favOnly"]'); if(favOnly) favOnly.checked = !!currentFilters.fav;
+    const readStateInputs = form.querySelectorAll('input[name="readState"]');
+    const desired = currentFilters.readState ? currentFilters.readState : (currentFilters.unread? 'unread':'all');
+    readStateInputs.forEach(r=>{ r.checked = (r.value === (desired||'all')); });
+    const fromInput = form.querySelector('#filterDateFrom'); if(fromInput) fromInput.value = currentFilters.dateFrom || '';
+    const toInput = form.querySelector('#filterDateTo'); if(toInput) toInput.value = currentFilters.dateTo || '';
+  }
+  function applyFilterForm(form){
+    if(!form) return;
+    const data = new FormData(form);
+    const q = (data.get('q')||'').toString().trim();
+    const subscription = (data.get('subscription')||'').toString();
+    const category = (data.get('category')||'').toString();
+    const favOnlyInput = form.querySelector('input[name="favOnly"]');
+    const fav = !!(favOnlyInput && favOnlyInput.checked);
+    const readStateRaw = (data.get('readState')||'all').toString();
+    const readState = readStateRaw==='all'? '' : readStateRaw;
+    const unread = readState==='unread';
+  const tagWrap = form.querySelector('#filterTagsWrap');
+  const tagList = tagWrap ? [...tagWrap.querySelectorAll('.tag-toggle.is-selected')].map(btn=> btn.dataset.tag).filter(Boolean) : [];
+    const dateFrom = (data.get('dateFrom')||'').toString();
+    const dateTo = (data.get('dateTo')||'').toString();
+    currentFilters.q = q;
+    currentFilters.subscription = subscription;
+    currentFilters.category = category;
+    currentFilters.fav = fav;
+    currentFilters.readState = readState;
+    currentFilters.unread = unread;
+    currentFilters.tagList = tagList;
+    currentFilters.tag = tagList.length===1 ? tagList[0] : '';
+    currentFilters.dateFrom = dateFrom;
+    currentFilters.dateTo = dateTo;
+  }
+  function getFilteredPosts(){
+    let arr = Object.values(posts);
+    if(currentFilters.subscription){
+      arr = arr.filter(p=> p.feedId === currentFilters.subscription);
+    }
+    if(currentFilters.category){
+      const feedMap = new Map(state.feeds.map(f=> [f.id,f]));
+      arr = arr.filter(p=> (feedMap.get(p.feedId)?.category||'') === currentFilters.category);
+    }
+    if(currentFilters.unread){
+      arr = arr.filter(p=> !p.read);
+    }
+    if(currentFilters.fav){
+      arr = arr.filter(p=> p.favorite);
+    }
+    if(currentFilters.readState === 'read'){
+      arr = arr.filter(p=> p.read);
+    }
+    if(currentFilters.readState === 'unread'){
+      arr = arr.filter(p=> !p.read);
+    }
+    const tagList = (currentFilters.tagList&&currentFilters.tagList.length)? currentFilters.tagList : [];
+    if(tagList.length){
+      arr = arr.filter(p=>{
+        const tags = state.tags[p.id]||[];
+        return tagList.some(t=> tags.includes(t));
+      });
+    } else if(currentFilters.tag){
+      arr = arr.filter(p=> (state.tags[p.id]||[]).includes(currentFilters.tag));
+    }
+    const fromTime = currentFilters.dateFrom ? new Date(currentFilters.dateFrom).getTime() : NaN;
+    const toTime = currentFilters.dateTo ? new Date(currentFilters.dateTo).getTime() : NaN;
+    if(!isNaN(fromTime)){
+      arr = arr.filter(p=>{
+        const tp = new Date(p.published||p.updated||0).getTime();
+        return !isNaN(tp) && tp >= fromTime;
+      });
+    }
+    if(!isNaN(toTime)){
+      const inclusiveTo = toTime + 24*60*60*1000 - 1;
+      arr = arr.filter(p=>{
+        const tp = new Date(p.published||p.updated||0).getTime();
+        return !isNaN(tp) && tp <= inclusiveTo;
+      });
+    }
+    if(currentFilters.q){
+      const q = currentFilters.q.toLowerCase();
+      arr = arr.filter(p=> (p.title||'').toLowerCase().includes(q) || (p.summary||'').toLowerCase().includes(q));
+    }
+    arr = arr.sort((a,b)=> new Date(b.published||0) - new Date(a.published||0));
+    return arr;
   }
 
   // ---------- Articles List ----------
   function renderArticles(){
-    if(suspendListRenders) return; // preserve scroll + DOM while article open
     const panel = stackEl.querySelector('[data-panel="articlesInfiniteScrollable"]'); if(!panel) return;
     const list = panel.querySelector('#articlesList'); if(!list) return;
-    const all = Object.values(posts);
-    let arr = all;
-    if(currentFilters.subscription) arr = arr.filter(p=> p.feedId===currentFilters.subscription);
-    if(currentFilters.category){ const feedMap = new Map(state.feeds.map(f=> [f.id,f])); arr = arr.filter(p=> (feedMap.get(p.feedId)?.category||'')===currentFilters.category); }
-  if(currentFilters.unread) arr = arr.filter(p=> !p.read);
-  if(currentFilters.fav) arr = arr.filter(p=> p.favorite);
-  if(currentFilters.readState==='read') arr = arr.filter(p=> p.read);
-  if(currentFilters.readState==='unread') arr = arr.filter(p=> !p.read);
-  if(currentFilters.tag){ arr = arr.filter(p=> (state.tags[p.id]||[]).includes(currentFilters.tag)); }
-    if(currentFilters.q){ const q = currentFilters.q.toLowerCase(); arr = arr.filter(p=> (p.title||'').toLowerCase().includes(q) || (p.summary||'').toLowerCase().includes(q)); }
-    arr = arr.sort((a,b)=> new Date(b.published||0) - new Date(a.published||0));
+    const filtered = getFilteredPosts();
+    lastFilteredPosts = filtered;
+    const total = filtered.length;
+    if(suspendListRenders){
+      pendingListRefresh = true;
+      lastRenderedCount = Math.min(lastRenderedCount, total);
+      if(total===0){
+        if(!list.querySelector('.empty')){
+          list.innerHTML='';
+          list.append(el('div',{class:'empty'},'No articles match these filters.'));
+        }
+      }
+      return;
+    }
+    pendingListRefresh = false;
     list.innerHTML='';
-    if(!arr.length){ list.append(el('div',{class:'empty'},'No articles.')); return; }
-    for(const p of arr.slice(0,500)){ list.append(articleCard(p)); }
+    if(!total){
+      list.append(el('div',{class:'empty'},'No articles match these filters.'));
+      lastRenderedCount = 0;
+      return;
+    }
+    lastRenderedCount = 0;
+    renderNextArticleChunk(list, INITIAL_RENDER_COUNT);
+    ensureArticleListFilled(list);
+  }
+  function renderNextArticleChunk(list, count=CHUNK_SIZE){
+    if(!lastFilteredPosts.length) return 0;
+    const start = lastRenderedCount;
+    const end = Math.min(lastFilteredPosts.length, start + count);
+    for(let i=start; i<end; i++){
+      list.append(articleCard(lastFilteredPosts[i]));
+    }
+    lastRenderedCount = end;
+    return end - start;
+  }
+  function ensureArticleListFilled(list){
+    const frame = list._scrollFrame;
+    if(!frame) return;
+    const threshold = frame.clientHeight + 400;
+    let guard = 16;
+    while(lastRenderedCount < lastFilteredPosts.length && frame.scrollHeight <= threshold && guard-- > 0){
+      if(!renderNextArticleChunk(list)) break;
+    }
   }
   function articleCard(p){
     const c = el('div',{class:'card'+(p.read?' read':' unread'), role:'article', tabindex:0, 'data-post-id':p.id, 'aria-label': (p.title||'Article') + (p.read? ' (read)':' (unread)')});
@@ -340,7 +516,9 @@
     }
     c.append(el('h3',{}, p.title||'(untitled)'));
     const chips = el('div',{class:'chips'});
-    const feed = state.feeds.find(f=> f.id===p.feedId);
+  p.read = true;
+  state.read[p.id]=true;
+  const feed = state.feeds.find(f=> f.id===p.feedId);
     if(feed){
       const feedChip = el('button',{class:'chip feed-chip', title:'Filter by subscription','aria-label':'Filter by '+(feed.title||feed.url), onclick:(e)=>{ e.stopPropagation(); currentFilters.subscription=feed.id; renderArticles(); }}, feed.title||feed.url);
       chips.append(feedChip);
@@ -349,7 +527,7 @@
     // Tag chips (existing)
     const tagList = state.tags[p.id]||[];
     if(tagList.length){
-      tagList.forEach(t=> chips.append(el('button',{class:'chip tag-chip', title:'Filter by tag','aria-label':'Filter by tag '+t, onclick:(e)=>{ e.stopPropagation(); currentFilters.tag=t; renderArticles(); }}, t)));
+      tagList.forEach(t=> chips.append(el('button',{class:'chip tag-chip', title:'Filter by tag','aria-label':'Filter by tag '+t, onclick:(e)=>{ e.stopPropagation(); currentFilters.tag=t; currentFilters.tagList=[t]; renderArticles(); }}, t)));
     }
     // Read state chip
     const readChip = el('button',{class:'chip read-chip', title:'Quick filter by read state', 'aria-label': p.read? 'Filter unread':'Filter read', onclick:(e)=>{ e.stopPropagation(); currentFilters.readState = p.read? 'unread':'read'; renderArticles(); }}, p.read? 'Read':'Unread');
@@ -394,20 +572,247 @@
     body.append(list);
   }
   function renderArticleViewer(p){
-    const body = byId('articleBody'); if(!body) return; body.innerHTML='';
-    const topBar = el('div',{class:'meta'}, [fmtDate(p.published), ' • ', safeHost(p.link||' '), ' • ', el('a',{href:p.link||'#', target:'_blank', rel:'noopener noreferrer'}, 'Open Original')]);
-    body.append(el('h2',{}, p.title||'(untitled)'));
-    body.append(topBar);
-    const content = el('div',{class:'content', html: sanitizeHtml(p.content||'')});
+    const body = byId('articleBody'); if(!body) return;
+    body.innerHTML='';
+    body.classList.add('article-viewer');
+    const feed = state.feeds.find(f=> f.id===p.feedId);
+    const heroUrl = pickImage(p);
+    const host = safeHost(p.link||'');
+    const published = fmtDate(p.published);
+    const publishedIso = (()=>{
+      const ts = Date.parse(p.published||'');
+      return isNaN(ts)? null : new Date(ts).toISOString();
+    })();
+    const readingStats = computeReadingStats(p);
+
+    const contextChips = el('div',{class:'chips article-context'}, []);
+    if(feed){
+      const feedChip = el('button',{class:'chip feed-chip', title:'Filter by subscription','aria-label':'Filter by '+(feed.title||feed.url), onclick:(e)=>{ e.stopPropagation(); currentFilters.subscription=feed.id; renderArticles(); }}, feed.title||feed.url);
+      contextChips.append(feedChip);
+      if(feed.category){
+        contextChips.append(el('button',{class:'chip cat-chip', title:'Filter by category','aria-label':'Filter by category '+feed.category, onclick:(e)=>{ e.stopPropagation(); currentFilters.category=feed.category; renderArticles(); }}, feed.category));
+      }
+    }
+
+    const readStateChip = el('button',{class:'chip read-chip', title:'Quick filter by read state','aria-label': p.read? 'Filter unread':'Filter read', onclick:(e)=>{ e.stopPropagation(); currentFilters.readState = p.read? 'unread':'read'; renderArticles(); }}, p.read? 'Read':'Unread');
+  contextChips.append(readStateChip);
+
+    const header = el('header',{class:'article-head'},[
+      contextChips,
+      el('h1',{class:'article-title', id:'articleViewerTitle'}, p.title||'(untitled)'),
+      el('div',{class:'article-meta'},[
+        published? el('span',{class:'meta-item'}, ['Published ', publishedIso? el('time',{datetime:publishedIso}, published) : published]) : null,
+        host? el('span',{class:'meta-item'}, ['Source ', host]) : null,
+        readingStats.minutes? el('span',{class:'meta-item'}, [`${readingStats.minutes} min read`, readingStats.words? ` • ${readingStats.words} words`:'' ]) : null
+      ].filter(Boolean)),
+      el('div',{class:'article-actions'},[
+        el('a',{href:p.link||'#', target:'_blank', rel:'noopener noreferrer', class:'action-btn primary', title:'Open original article'}, 'Open original')
+      ])
+    ]);
+    body.append(header);
+
+    if(heroUrl){
+      const hero = el('figure',{class:'article-hero'},[
+        el('img',{src:heroUrl, alt:'', loading:'lazy'}),
+        p.title? el('figcaption',{class:'visually-hidden'}, p.title):null
+      ].filter(Boolean));
+      body.append(hero);
+    }
+
+    const playableMedia = Array.isArray(p.media) ? p.media.filter(m=> m && (m.kind==='audio' || m.kind==='video')) : [];
+    if(playableMedia.length){
+      const mediaSection = el('section',{class:'article-media'},[
+        el('div',{class:'article-media-head'},[
+          el('h3',{class:'article-media-title'},'Media'),
+          el('span',{class:'article-media-count muted'}, playableMedia.length>1? `${playableMedia.length} attachments` : '1 attachment')
+        ])
+      ]);
+      playableMedia.forEach((mediaItem, idx)=>{
+        const entry = createArticleMediaEntry(p, mediaItem, idx);
+        if(entry) mediaSection.append(entry);
+      });
+      body.append(mediaSection);
+    }
+
+    const content = el('section',{class:'article-content', html: sanitizeHtml(p.content||p.summary||'')});
     body.append(content);
-    // Tags management UI
-    const tagSection = el('div',{class:'tag-manage'});
-    const existing = el('div',{class:'chips'});
-    (state.tags[p.id]||[]).forEach(t=> existing.append(el('button',{class:'chip tag-chip', title:'Filter by tag', onclick:()=>{ currentFilters.tag=t; renderArticles(); }}, t)));
-  const addForm = el('form',{class:'tag-add-form', onsubmit:(e)=>{ e.preventDefault(); const inp = addForm.querySelector('input'); const v = (inp.value||'').trim(); if(!v) return; const arr = state.tags[p.id] = (state.tags[p.id]||[]); if(!arr.includes(v)){ arr.push(v); saveState(); existing.append(el('button',{class:'chip tag-chip', title:'Filter by tag', onclick:()=>{ currentFilters.tag=v; renderArticles(); }}, v)); updateCardTags(p.id); } inp.value=''; }}, [el('input',{type:'text', placeholder:'Add tag', maxlength:40}), el('button',{type:'submit', class:'chip'}, '＋ Tag')]);
-    tagSection.append(existing, addForm);
+
+    const tagPills = el('div',{class:'tag-pills'});
+    (state.tags[p.id]||[]).forEach(t=> tagPills.append(createArticleTagPill(p.id, t)));
+    if(!tagPills.children.length){ tagPills.append(el('span',{class:'muted empty-placeholder'},'No tags yet.')); }
+    const tagSection = el('section',{class:'article-tags'},[
+      el('div',{class:'tag-manage-header'},[
+        el('h3',{},'Tags')
+      ]),
+      tagPills
+    ]);
+    const addForm = el('form',{class:'tag-add-form', onsubmit:(e)=>{
+      e.preventDefault();
+      const inp = addForm.querySelector('input');
+      const v = (inp.value||'').trim();
+      if(!v) return;
+      const arr = state.tags[p.id] = (state.tags[p.id]||[]);
+      if(!arr.includes(v)){
+        arr.push(v);
+        saveState();
+        const wrap = tagSection.querySelector('.tag-pills');
+        wrap.querySelector('.empty-placeholder')?.remove();
+        wrap.append(createArticleTagPill(p.id, v));
+        updateCardTags(p.id);
+        renderArticles();
+      }
+      inp.value='';
+    }},[
+      el('input',{type:'text', placeholder:'Add tag and press Enter', maxlength:40}),
+      el('button',{type:'submit', class:'chip'}, '＋ Tag')
+    ]);
+    tagSection.append(addForm);
     body.append(tagSection);
-    p.read = true; state.read[p.id]=true; saveState(); updateCardTags(p.id); // mark read persistently & sync list card
+
+    saveState();
+    updateCardTags(p.id); // mark read persistently & sync list card
+    updateCardReadState(p.id, true);
+  }
+  function createArticleMediaEntry(post, media, index){
+    if(!media || !media.url) return null;
+    const title = deriveMediaTitle(media);
+    const meta = formatMediaMeta(media);
+    const host = safeHost(media.url);
+    const badgeLabel = media.kind==='video'? 'Video' : media.kind==='audio'? 'Audio' : 'Media';
+    const badge = el('span',{class:'media-entry-kind'}, badgeLabel);
+    const info = el('div',{class:'media-entry-info'},[
+      el('div',{class:'media-entry-top'},[
+        badge,
+        el('h4',{class:'media-entry-title'}, title)
+      ]),
+      meta? el('p',{class:'media-entry-meta muted'}, meta):null,
+      host? el('p',{class:'media-entry-host muted'}, `Source ${host}`):null
+    ].filter(Boolean));
+    const actions = el('div',{class:'media-entry-actions'});
+    if(media.kind==='audio'){
+      const playBtn = el('button',{type:'button',class:'action-btn primary', 'aria-label':`Play ${title}`, onclick:()=>{ playMediaFromArticle(post, media); }}, [svgIcon('#i-play'), ' Play']);
+      actions.append(playBtn);
+    } else if(media.kind==='video'){
+      const watchBtn = el('button',{type:'button',class:'action-btn primary', 'aria-label':`Open video ${title}`, onclick:()=>{ openVideoMedia(post, index); }}, [svgIcon('#i-play'), ' Watch']);
+      actions.append(watchBtn);
+    }
+    const downloadBtn = el('a',{class:'action-btn', href:media.url, target:'_blank', rel:'noopener noreferrer', download:'', 'aria-label':`Download ${title}`}, [svgIcon('#i-download'), ' Download']);
+    actions.append(downloadBtn);
+    return el('div',{class:`media-entry media-${media.kind}`},[
+      info,
+      actions
+    ]);
+  }
+  function openVideoMedia(post, mediaIndex){
+    showPanel('videoViewer', { data:{ postId: post.id, mediaIndex } });
+  }
+  function createArticleTagPill(postId, tag){
+    const pill = el('div',{class:'tag-pill','data-tag':tag});
+    const labelBtn = el('button',{type:'button',class:'tag-pill-label', title:'Filter by tag','aria-label':'Filter by tag '+tag, onclick:()=>{ currentFilters.tag=tag; currentFilters.tagList=[tag]; renderArticles(); }}, tag);
+    const removeBtn = el('button',{type:'button',class:'tag-pill-remove', title:'Remove tag','aria-label':'Remove tag '+tag}, '×');
+    removeBtn.addEventListener('click',(e)=>{
+      e.stopPropagation();
+      removeTagFromPost(postId, tag);
+      pill.remove();
+      const wrap = pill.parentElement;
+      if(wrap && !wrap.querySelector('.tag-pill')){
+        wrap.innerHTML='';
+        wrap.append(el('span',{class:'muted empty-placeholder'},'No tags yet.'));
+      }
+    });
+    pill.append(labelBtn, removeBtn);
+    return pill;
+  }
+  function deriveMediaTitle(media){
+    if(media?.title){ const t = media.title.trim(); if(t) return t; }
+    try{
+      const u = new URL(media.url);
+      const parts = u.pathname.split('/').filter(Boolean);
+      if(parts.length){
+        const last = decodeURIComponent(parts[parts.length-1]);
+        if(last) return last;
+      }
+      return u.hostname;
+    }catch{ return media.url; }
+  }
+  function formatMediaMeta(media){
+    if(!media) return '';
+    const bits = [];
+    if(media.type) bits.push(media.type);
+    if(media.length){ const bytes = formatBytes(media.length); if(bytes) bits.push(bytes); }
+    if(media.duration){ const dur = formatDuration(media.duration); if(dur) bits.push(dur); }
+    return bits.join(' • ');
+  }
+  function formatBytes(bytes){
+    if(!(bytes>0)) return '';
+    const units = ['B','KB','MB','GB','TB'];
+    let value = bytes;
+    let unitIdx = 0;
+    while(value>=1024 && unitIdx < units.length-1){ value/=1024; unitIdx++; }
+    let str;
+    if(unitIdx===0){ str = Math.round(value).toString(); }
+    else if(value>=100){ str = value.toFixed(0); }
+    else if(value>=10){ str = value.toFixed(1); }
+    else { str = value.toFixed(2); }
+    return str+' '+units[unitIdx];
+  }
+  function formatDuration(seconds){
+    if(!(seconds>0)) return '';
+    const total = Math.round(seconds);
+    const h = Math.floor(total/3600);
+    const m = Math.floor((total%3600)/60);
+    const s = total%60;
+    if(h>0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    return `${m}:${String(s).padStart(2,'0')}`;
+  }
+  function playMediaFromArticle(post, media){
+    queueMediaPlayback(post.id, media);
+  }
+  function queueMediaPlayback(postId, media){
+    if(!media || media.kind!=='audio') return;
+    const post = posts[postId] || null;
+    const title = deriveMediaTitle(media);
+    const host = safeHost(media.url);
+    const current = mp.current;
+    mp.current = { postId, media, post, title, host };
+    if(mp.elements.playBtn){
+      mp.elements.playBtn.disabled = false;
+      mp.elements.pauseBtn.disabled = true;
+    }
+    mp.updateToolbar?.();
+    const audio = mp.audio;
+    const sameTrack = current && current.media?.url === media.url;
+    if(sameTrack){
+      if(audio.paused){
+        audio.play().catch(err=> console.warn('Playback start blocked', err));
+      } else {
+        audio.currentTime = 0;
+      }
+      return;
+    }
+    try{ audio.pause(); }catch{}
+  audio.src = media.url;
+  audio.currentTime = 0;
+    audio.load();
+    const playPromise = audio.play();
+    if(playPromise && playPromise.catch){
+      playPromise.catch(err=> console.warn('Playback start blocked', err));
+    }
+  }
+  function removeTagFromPost(postId, tag){
+    const arr = state.tags[postId];
+    if(!arr) return;
+    const idx = arr.indexOf(tag);
+    if(idx===-1) return;
+    arr.splice(idx,1);
+    if(!arr.length){ delete state.tags[postId]; }
+    saveState();
+    updateCardTags(postId);
+    if(currentFilters.tag===tag){ currentFilters.tag=''; }
+    if(Array.isArray(currentFilters.tagList) && currentFilters.tagList.length){
+      currentFilters.tagList = currentFilters.tagList.filter(t=> t!==tag);
+    }
+    renderArticles();
   }
   function updateCardTags(postId){
     const card = document.querySelector(`.card[data-post-id='${postId}']`); if(!card) return;
@@ -416,11 +821,74 @@
     const postTags = state.tags[postId]||[];
     const readChip = chips.querySelector('.read-chip');
     postTags.forEach(t=>{
-      const chip = el('button',{class:'chip tag-chip', title:'Filter by tag','aria-label':'Filter by tag '+t, onclick:(e)=>{ e.stopPropagation(); currentFilters.tag=t; renderArticles(); }}, t);
+  const chip = el('button',{class:'chip tag-chip', title:'Filter by tag','aria-label':'Filter by tag '+t, onclick:(e)=>{ e.stopPropagation(); currentFilters.tag=t; currentFilters.tagList=[t]; renderArticles(); }}, t);
       if(readChip) chips.insertBefore(chip, readChip); else chips.append(chip);
     });
   }
-  function renderVideoViewer(p){ const v = byId('videoBody'); if(!v) return; v.innerHTML='(video TBD)'; }
+  function updateCardReadState(postId, isRead){
+    const card = document.querySelector(`.card[data-post-id='${postId}']`); if(!card) return;
+    const read = !!isRead;
+    card.classList.toggle('read', read);
+    card.classList.toggle('unread', !read);
+    const titleText = card.querySelector('h3')?.textContent?.trim() || 'Article';
+    card.setAttribute('aria-label', `${titleText}${read ? ' (read)' : ' (unread)'}`);
+    const readChip = card.querySelector('.read-chip');
+    if(readChip){
+      readChip.textContent = read ? 'Read' : 'Unread';
+      readChip.setAttribute('aria-label', read ? 'Filter unread' : 'Filter read');
+    }
+  }
+  function toggleFavorite(postId){
+    const wasFav = !!state.favorites[postId];
+    if(wasFav){ delete state.favorites[postId]; }
+    else { state.favorites[postId] = true; }
+    if(posts[postId]) posts[postId].favorite = !wasFav;
+    saveState();
+    mp.updateFavorite?.();
+    renderArticles();
+  }
+  function renderVideoViewer(payload){
+    const wrap = byId('videoBody'); if(!wrap) return;
+    wrap.innerHTML='';
+    const postId = payload?.postId;
+    const mediaIndex = typeof payload?.mediaIndex === 'number' ? payload.mediaIndex : 0;
+    const explicitMedia = payload?.media;
+    const post = explicitMedia?.post || (postId ? posts[postId] : null);
+    const mediaList = explicitMedia ? [explicitMedia] : (post?.media||[]);
+    let media = explicitMedia || mediaList[mediaIndex];
+    if(!media){ media = mediaList.find(m=> m.kind==='video') || null; }
+    if(!media || media.kind!=='video'){
+      wrap.append(el('div',{class:'empty'},'Video not available for this article.'));
+      return;
+    }
+    const title = deriveMediaTitle(media);
+    const meta = formatMediaMeta(media);
+    const host = safeHost(media.url);
+    const header = el('div',{class:'video-viewer-head'},[
+      el('h3',{class:'video-viewer-title'}, title),
+      meta? el('p',{class:'video-viewer-meta muted'}, meta):null,
+      host? el('p',{class:'video-viewer-host muted'}, `Source ${host}`):null
+    ].filter(Boolean));
+    const video = document.createElement('video');
+    video.setAttribute('controls','');
+    video.setAttribute('playsinline','');
+    video.setAttribute('preload','metadata');
+    video.className = 'video-player';
+    const source = document.createElement('source');
+    source.src = media.url;
+    if(media.type) source.type = media.type;
+    video.appendChild(source);
+    const figure = el('figure',{class:'video-frame'},[video]);
+    const actions = el('div',{class:'video-actions'},[
+      el('a',{class:'action-btn primary', href:media.url, target:'_blank', rel:'noopener noreferrer', 'aria-label':`Open ${title} in new tab`}, [svgIcon('#i-play'), ' Open media']),
+      el('a',{class:'action-btn', href:media.url, download:'', target:'_blank', rel:'noopener noreferrer', 'aria-label':`Download ${title}`}, [svgIcon('#i-download'), ' Download'])
+    ]);
+    if(post?.link){
+      actions.append(el('a',{class:'action-btn', href:post.link, target:'_blank', rel:'noopener noreferrer'}, 'Open original article'));
+    }
+    wrap.append(header, figure, actions);
+    video.focus?.();
+  }
 
   function renderSubscriptionEdit(feedId){
     const feed = state.feeds.find(f=> f.id===feedId); if(!feed){ const b=byId('subEditBody'); if(b) b.innerHTML='<div class="empty">Not found.</div>'; return; }
@@ -431,7 +899,14 @@
     const refreshInput = byId('subEditRefreshInput');
     const statusEl = byId('subEditStatus');
     // Populate datalist of categories
-    const dl = byId('categoryOptions'); if(dl){ dl.innerHTML = Array.from(new Set(state.feeds.map(f=> f.category).filter(Boolean))).map(c=>`<option value="${esc(c)}">`).join(''); }
+    const dl = byId('categoryOptions');
+    if(dl){
+      const catSet = new Set([...(state.categories||[])].filter(Boolean));
+      state.feeds.forEach(f=>{ if(f.category) catSet.add(f.category); });
+      if(feed.category) catSet.add(feed.category);
+      const options = Array.from(catSet).sort((a,b)=> a.localeCompare(b, undefined, { sensitivity:'base' }));
+      dl.innerHTML = options.map(c=>`<option value="${esc(c)}">`).join('');
+    }
     // Fill values
     titleInput.value = feed.title||feed.url;
     urlInput.value = feed.url;
@@ -484,6 +959,13 @@
   // ---------- Time / formatting helpers ----------
   function fmtDate(d){ if(!d) return ''; try{ return new Date(d).toLocaleString(); }catch{return '';} }
   function stripHtml(html){ return (html||'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim(); }
+  function computeReadingStats(post){
+    const raw = stripHtml(post.content || post.summary || '');
+    if(!raw){ return { words:0, minutes:0 }; }
+    const words = raw.split(/\s+/).filter(Boolean).length;
+    const minutes = words ? Math.max(1, Math.round(words/220)) : 0;
+    return { words, minutes };
+  }
   function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&apos;'}[c])); }
   function safeHost(u){ try{ return new URL(u, location.href).hostname; }catch{ return ''; } }
 
@@ -544,6 +1026,131 @@
     }catch{return ''}
   }
 
+  // ---------- Media extraction helpers ----------
+  function safeMediaUrl(src){
+    try{
+      if(!src) return null;
+      const u = new URL(src, location.href);
+      const prot = (u.protocol||'').toLowerCase();
+      if(prot!=='http:' && prot!=='https:' && prot!=='data:' && prot!=='blob:') return null;
+      if((prot==='http:'||prot==='https:') && isPrivateHost(u.hostname)) return null;
+      return u.href;
+    }catch{ return null; }
+  }
+  const AUDIO_EXTS = ['mp3','m4a','aac','ogg','oga','opus','wav','flac','mka','mpga'];
+  const VIDEO_EXTS = ['mp4','m4v','mov','webm','mkv','avi','wmv','ogv'];
+  const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','svg'];
+  function classifyMediaKind(type, url, medium){
+    const t = (type||'').split(';')[0].trim().toLowerCase();
+    let kind = '';
+    if(t.startsWith('audio/')) kind='audio';
+    else if(t.startsWith('video/')) kind='video';
+    else if(t.startsWith('image/')) kind='image';
+    else if(medium){
+      const m = medium.toLowerCase();
+      if(m.includes('audio')) kind='audio';
+      else if(m.includes('video')) kind='video';
+      else if(m.includes('image')) kind='image';
+    }
+    if(!kind && url){
+      const cleanUrl = url.split('#')[0].split('?')[0];
+      const extMatch = /\.([a-z0-9]+)$/i.exec(cleanUrl);
+      const ext = extMatch? extMatch[1].toLowerCase() : '';
+      if(AUDIO_EXTS.includes(ext)) kind='audio';
+      else if(VIDEO_EXTS.includes(ext)) kind='video';
+      else if(IMAGE_EXTS.includes(ext)) kind='image';
+    }
+    if(!kind) kind='file';
+    const resolvedType = t || (kind==='audio'? 'audio/mpeg' : kind==='video'? 'video/mp4' : kind==='image'? 'image/jpeg' : '');
+    return { kind, type: resolvedType };
+  }
+  function normalizeMediaEntry(raw){
+    const url = safeMediaUrl(raw.url);
+    if(!url) return null;
+    const { kind, type } = classifyMediaKind(raw.type, url, raw.medium);
+    const length = raw.length && /^[0-9]+$/.test(raw.length) ? parseInt(raw.length,10) : null;
+    const duration = raw.duration && /^[0-9]+$/.test(raw.duration) ? parseInt(raw.duration,10) : null;
+    return {
+      url,
+      type: (raw.type||'').split(';')[0].trim().toLowerCase() || type,
+      kind,
+      length,
+      duration,
+      title: raw.title||raw.label||'',
+      medium: raw.medium||''
+    };
+  }
+  function extractMediaEntries(item){
+    const entries = [];
+    const seen = new Set();
+    const push = raw=>{
+      const normal = normalizeMediaEntry(raw);
+      if(!normal) return;
+      if(seen.has(normal.url)) return;
+      seen.add(normal.url);
+      entries.push(normal);
+    };
+    item.querySelectorAll('enclosure').forEach(en=>{
+      push({
+        url: en.getAttribute('url'),
+        type: en.getAttribute('type'),
+        length: en.getAttribute('length'),
+        title: en.getAttribute('title')||en.getAttribute('label'),
+        medium: en.getAttribute('medium')
+      });
+    });
+    item.querySelectorAll('link[rel="enclosure"]').forEach(link=>{
+      push({
+        url: link.getAttribute('href'),
+        type: link.getAttribute('type'),
+        length: link.getAttribute('length'),
+        title: link.getAttribute('title')||link.getAttribute('label'),
+        medium: link.getAttribute('medium')
+      });
+    });
+    item.querySelectorAll('media\\:content, media\\:group > media\\:content, content').forEach(node=>{
+      const url = node.getAttribute('url') || node.getAttribute('href') || node.getAttribute('src');
+      if(!url) return;
+      push({
+        url,
+        type: node.getAttribute('type'),
+        length: node.getAttribute('fileSize')||node.getAttribute('length'),
+        duration: node.getAttribute('duration'),
+        title: node.getAttribute('label')||node.getAttribute('title'),
+        medium: node.getAttribute('medium')
+      });
+    });
+    item.querySelectorAll('audio, video').forEach(node=>{
+      const url = node.getAttribute('src');
+      if(!url) return;
+      push({ url, type: node.getAttribute('type'), medium: node.tagName.toLowerCase(), title: node.getAttribute('title') });
+    });
+    return entries;
+  }
+  function parseFeedDocument(doc, feed){
+    const isAtom = !!doc.querySelector('feed > entry');
+    const items = isAtom? [...doc.querySelectorAll('feed > entry')] : [...doc.querySelectorAll('rss channel item')];
+    return items.map(it=>{
+      const title = (it.querySelector('title')?.textContent||'').trim();
+      const link = isAtom ? (it.querySelector('link[rel="alternate"]')?.getAttribute('href') || it.querySelector('link')?.getAttribute('href') || '') : (it.querySelector('link')?.textContent||'');
+      const content = isAtom ? (it.querySelector('content')?.textContent || it.querySelector('summary')?.textContent || '') : (it.querySelector('description')?.textContent||'');
+      const guidSrc = isAtom ? (it.querySelector('id')?.textContent || link || title) : (it.querySelector('guid')?.textContent || link || title);
+      const id = hashId((feed.id||'')+'|'+guidSrc);
+      const published = it.querySelector('pubDate, updated, published')?.textContent||'';
+      const media = extractMediaEntries(it);
+      return {
+        id,
+        feedId: feed.id,
+        title,
+        link,
+        content,
+        summary: stripHtml(content).slice(0,400),
+        published,
+        media
+      };
+    });
+  }
+
   // ---------- Basic Feed Refresh (placeholder) ----------
   async function refreshAll(force=false){
     const usedProxies = new Set();
@@ -587,15 +1194,10 @@
     state.lastFetchUrl[feed.id] = usedUrl;
     // Parse & merge posts
     const doc = new DOMParser().parseFromString(xml,'text/xml');
-    const isAtom = !!doc.querySelector('feed > entry');
-    const items = isAtom? [...doc.querySelectorAll('feed > entry')] : [...doc.querySelectorAll('rss channel item')];
-    for(const it of items){
-      const title = (it.querySelector('title')?.textContent||'').trim();
-      const link = isAtom ? (it.querySelector('link[rel="alternate"]')?.getAttribute('href') || it.querySelector('link')?.getAttribute('href') || '') : (it.querySelector('link')?.textContent||'');
-      const content = isAtom ? (it.querySelector('content')?.textContent || it.querySelector('summary')?.textContent || '') : (it.querySelector('description')?.textContent||'');
-      const guidSrc = isAtom ? (it.querySelector('id')?.textContent || link || title) : (it.querySelector('guid')?.textContent || link || title);
-      const id = hashId(feed.id+'|'+guidSrc);
-      posts[id] = Object.assign(posts[id]||{}, { id, feedId:feed.id, title, link, content, summary: stripHtml(content).slice(0,400), published: it.querySelector('pubDate, updated, published')?.textContent||'', read: !!state.read[id], favorite: !!state.favorites[id] });
+    const parsedPosts = parseFeedDocument(doc, feed);
+    for(const post of parsedPosts){
+      const id = post.id;
+      posts[id] = Object.assign(posts[id]||{}, post, { read: !!state.read[id], favorite: !!state.favorites[id] });
     }
   }
 
@@ -633,15 +1235,10 @@
         if(xmlHasParserError(text)){ const extracted = maybeExtractXmlFromJson(text); if(extracted) text = extracted; }
         if(xmlHasParserError(text)) continue;
         const doc = new DOMParser().parseFromString(text,'text/xml');
-        const isAtom = !!doc.querySelector('feed > entry');
-        const items = isAtom? [...doc.querySelectorAll('feed > entry')] : [...doc.querySelectorAll('rss channel item')];
-        for(const it of items){
-          const title = (it.querySelector('title')?.textContent||'').trim();
-          const link = isAtom ? (it.querySelector('link[rel="alternate"]')?.getAttribute('href') || it.querySelector('link')?.getAttribute('href') || '') : (it.querySelector('link')?.textContent||'');
-          const content = isAtom ? (it.querySelector('content')?.textContent || it.querySelector('summary')?.textContent || '') : (it.querySelector('description')?.textContent||'');
-          const guidSrc = isAtom ? (it.querySelector('id')?.textContent || link || title) : (it.querySelector('guid')?.textContent || link || title);
-          const id = hashId(f.id+'|'+guidSrc);
-          posts[id] = Object.assign(posts[id]||{}, { id, feedId:f.id, title, link, content, summary: stripHtml(content).slice(0,400), published: it.querySelector('pubDate, updated, published')?.textContent||'', read: !!state.read[id], favorite: !!state.favorites[id] });
+        const parsedPosts = parseFeedDocument(doc, f);
+        for(const post of parsedPosts){
+          const id = post.id;
+          posts[id] = Object.assign(posts[id]||{}, post, { read: !!state.read[id], favorite: !!state.favorites[id] });
         }
       }
     }catch(e){ console.warn('Hydrate from cache failed', e); }
@@ -678,44 +1275,89 @@
   function sanitizeHtml(html){ const t=document.createElement('div'); t.innerHTML=html||''; t.querySelectorAll('script,style,iframe,object,embed').forEach(n=>n.remove()); t.querySelectorAll('*').forEach(n=>{ [...n.attributes].forEach(a=>{ if(!['href','src','alt','title'].includes(a.name)) n.removeAttribute(a.name); }); if(n.nodeName==='A'){ n.setAttribute('target','_blank'); n.setAttribute('rel','noopener noreferrer'); } }); return t.innerHTML; }
 
   // ---------- Infinite Scroll (basic incremental) ----------
-  let infScrollHandler = null;
   function setupInfiniteScroll(panel){
     const list = panel.querySelector('#articlesList'); if(!list) return;
     const scrollFrame = panel.querySelector('.panel-body') || panel; // use panel-body if present
-    if(infScrollHandler && scrollFrame._infAttached){ scrollFrame.removeEventListener('scroll', infScrollHandler); }
-    let rendered = 0; const CHUNK = 120; let sorted = [];
+    list._scrollFrame = scrollFrame;
+    if(scrollFrame._infHandler){ scrollFrame.removeEventListener('scroll', scrollFrame._infHandler); }
     function ensure(){
-      if(!sorted.length) sorted = Object.values(posts).sort((a,b)=> new Date(b.published||0)-new Date(a.published||0));
-      const bottom = scrollFrame.scrollTop + scrollFrame.clientHeight;
-      const thresholdPx = bottom + 600; // start preloading earlier
-      // Approximate per-card height (fallback 300)
-      const avgHeight = 300; // could refine later
-      const thresholdCount = Math.ceil(thresholdPx / avgHeight * 3); // inflate a bit
-      while(rendered < sorted.length && rendered < thresholdCount){
-        const nextSlice = sorted.slice(rendered, rendered+CHUNK);
-        nextSlice.forEach(p=> list.append(articleCard(p)));
-        rendered += nextSlice.length;
+      if(!lastFilteredPosts.length) return;
+      let guard = 6;
+      while(guard-- > 0){
+        const viewportBottom = scrollFrame.scrollTop + scrollFrame.clientHeight + 480;
+        if(viewportBottom < scrollFrame.scrollHeight) break;
+        if(!renderNextArticleChunk(list, CHUNK_SIZE)) break;
       }
     }
-    infScrollHandler = ensure;
-    scrollFrame.addEventListener('scroll', infScrollHandler, { passive:true });
-    scrollFrame._infAttached = true;
-    ensure();
+    scrollFrame._infHandler = ensure;
+    scrollFrame.addEventListener('scroll', ensure, { passive:true });
+    ensureArticleListFilled(list);
   }
 
   // ---------- Media Player (variable skip cue) ----------
-  const mp = { audio: new Audio(), cue:{ dragging:false, lastSkip:0, pendingInterval:null } };
+  const mp = { audio: new Audio(), cue:{ dragging:false, lastSkip:0, pendingInterval:null }, current:null, elements:{} };
+  mp.audio.preload = 'metadata';
   function initMediaPlayer(){
-    const a = mp.audio; const playBtn=byId('mp-play'), pauseBtn=byId('mp-pause');
-    const prog=byId('mp-progress'); const timeEl=byId('mp-time');
-  const cueBtn = byId('cueBtn'); const cueTrack = byId('cueTrack');
+    const a = mp.audio;
+    const mpEl = byId('media-player');
+    const playBtn = byId('mp-play');
+    const pauseBtn = byId('mp-pause');
+    const downloadBtn = byId('mp-download');
+    const favBtn = byId('mp-fav');
+    const prog = byId('mp-progress');
+    const timeEl = byId('mp-time');
+    const cueBtn = byId('cueBtn');
+    const cueTrack = byId('cueTrack');
+    let trackLabel = byId('mp-track');
+    if(!trackLabel){
+      trackLabel = el('div',{id:'mp-track', class:'mp-track muted', 'aria-live':'polite'},'No track selected');
+      if(mpEl.firstChild) mpEl.insertBefore(trackLabel, mpEl.firstChild); else mpEl.append(trackLabel);
+    }
+    Object.assign(mp.elements, { playBtn, pauseBtn, downloadBtn, favBtn, progress:prog, time:timeEl, trackLabel, toolbar: mpEl });
+    playBtn.disabled = true;
+    pauseBtn.disabled = true;
+    downloadBtn.disabled = true;
+    favBtn.disabled = true;
+    const favUse = byId('favIconUse');
     function fmtTime(sec){ if(!isFinite(sec)) return '0:00'; const m=Math.floor(sec/60); const s=Math.floor(sec%60); return m+':' + String(s).padStart(2,'0'); }
-    playBtn.onclick = ()=> a.play();
-    pauseBtn.onclick = ()=> a.pause();
-    a.addEventListener('play', ()=>{ playBtn.disabled=true; pauseBtn.disabled=false; });
-    a.addEventListener('pause', ()=>{ playBtn.disabled=false; pauseBtn.disabled=true; });
-    a.addEventListener('timeupdate', ()=>{ const r=a.currentTime/(a.duration||1); prog.value=r; timeEl.textContent = fmtTime(a.currentTime); });
-    a.addEventListener('loadedmetadata', ()=>{ prog.max=1; timeEl.textContent = fmtTime(0); });
+    playBtn.addEventListener('click', ()=>{
+      if(!mp.current) return;
+      a.play().catch(err=> console.warn('Playback resume blocked', err));
+    });
+    pauseBtn.addEventListener('click', ()=>{ a.pause(); });
+    downloadBtn.addEventListener('click', ()=>{
+      if(!mp.current) return;
+      window.open(mp.current.media.url, '_blank', 'noopener');
+    });
+    favBtn.addEventListener('click', ()=>{
+      if(!mp.current) return;
+      toggleFavorite(mp.current.postId);
+      updateMediaFavoriteState();
+    });
+    a.addEventListener('play', ()=>{
+      if(mp.current){ playBtn.disabled=true; pauseBtn.disabled=false; }
+    });
+    a.addEventListener('pause', ()=>{
+      if(mp.current){ playBtn.disabled=false; pauseBtn.disabled=true; }
+    });
+    a.addEventListener('ended', ()=>{
+      if(mp.current){ playBtn.disabled=false; pauseBtn.disabled=true; }
+    });
+    a.addEventListener('timeupdate', ()=>{
+      if(!prog) return;
+      const ratio = a.duration ? (a.currentTime/a.duration) : 0;
+      prog.value = clamp(ratio, 0, 1);
+      timeEl.textContent = fmtTime(a.currentTime);
+    });
+    a.addEventListener('loadedmetadata', ()=>{
+      if(prog) prog.max=1;
+      timeEl.textContent = fmtTime(0);
+      updateMediaToolbar();
+    });
+    a.addEventListener('emptied', ()=>{
+      prog.value = 0;
+      timeEl.textContent = fmtTime(0);
+    });
     // Variable skip logic
     let originX=0;
     function computeSkip(pxDist){
@@ -788,6 +1430,37 @@
       if(e.key==='Escape'){ resetCue(); }
       if(e.key==='Enter' || e.key===' '){ e.preventDefault(); if(a.paused) a.play(); else a.pause(); }
     });
+    function updateMediaToolbar(){
+      const hasTrack = !!mp.current;
+      if(!hasTrack){
+        trackLabel.textContent = 'No track selected';
+        downloadBtn.disabled = true;
+        favBtn.disabled = true;
+        if(favUse) favUse.setAttribute('href', '#i-star');
+        return;
+      }
+      const { media, title, host } = mp.current;
+      trackLabel.textContent = host ? `${title} • ${host}` : title;
+      downloadBtn.disabled = false;
+      downloadBtn.title = `Download ${title}`;
+      downloadBtn.setAttribute('aria-label', `Download ${title}`);
+      favBtn.disabled = false;
+      updateMediaFavoriteState();
+    }
+    function updateMediaFavoriteState(){
+      if(!mp.current){
+        favBtn.setAttribute('aria-pressed','false');
+        if(favUse) favUse.setAttribute('href','#i-star');
+        return;
+      }
+      const isFav = !!state.favorites[mp.current.postId];
+      favBtn.setAttribute('aria-pressed', String(isFav));
+      favBtn.title = isFav? 'Unfavourite media' : 'Favourite media';
+      favBtn.setAttribute('aria-label', favBtn.title);
+      if(favUse) favUse.setAttribute('href', isFav? '#i-star-fill' : '#i-star');
+    }
+    mp.updateToolbar = updateMediaToolbar;
+    mp.updateFavorite = updateMediaFavoriteState;
   }
 
   // ---------- Misc ----------
@@ -834,7 +1507,6 @@
     }
     // Settings button brings up settings main panel (push stack)
     byId('btn-settings').onclick = ()=> showPanel('settingsMain');
-    byId('btn-filterpanel').onclick = ()=> showPanel('filterAndSortSettings');
     // Scheduled refresh loop
     setInterval(()=>{
       const now = Date.now();
