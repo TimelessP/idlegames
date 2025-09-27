@@ -511,7 +511,17 @@
     }
   }
   function articleCard(p){
-    const c = el('div',{class:'card'+(p.read?' read':' unread'), role:'article', tabindex:0, 'data-post-id':p.id, 'aria-label': (p.title||'Article') + (p.read? ' (read)':' (unread)')});
+    const isFav = !!p.favorite;
+    const classes = ['card', p.read? 'read':'unread'];
+    if(isFav) classes.push('favorite');
+    const c = el('div',{class:classes.join(' '), role:'article', tabindex:0, 'data-post-id':p.id, 'aria-label': (p.title||'Article') + (p.read? ' (read)':' (unread)')});
+    const favBtn = el('button',{class:'fav', type:'button', title: isFav? 'Remove favourite':'Add favourite', 'aria-label': isFav? 'Remove favourite':'Add favourite', 'aria-pressed': String(isFav)}, isFav? '★':'☆');
+    favBtn.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      toggleFavorite(p.id);
+      syncArticleViewerFavoriteState(p.id);
+    });
+    c.append(favBtn);
     const realImg = pickImage(p);
     if(realImg){
       const mw = el('div',{class:'card-media'});
@@ -590,6 +600,7 @@
     const body = byId('articleBody'); if(!body) return;
     body.innerHTML='';
     body.classList.add('article-viewer');
+    body.dataset.postId = p.id;
     const feed = state.feeds.find(f=> f.id===p.feedId);
     const heroUrl = pickImage(p);
     const host = safeHost(p.link||'');
@@ -620,9 +631,21 @@
         host? el('span',{class:'meta-item'}, ['Source ', host]) : null,
         readingStats.minutes? el('span',{class:'meta-item'}, [`${readingStats.minutes} min read`, readingStats.words? ` • ${readingStats.words} words`:'' ]) : null
       ].filter(Boolean)),
-      el('div',{class:'article-actions'},[
-        el('a',{href:p.link||'#', target:'_blank', rel:'noopener noreferrer', class:'action-btn primary', title:'Open original article'}, 'Open original')
-      ])
+      (function(){
+        const actions = el('div',{class:'article-actions'});
+        const favBtn = el('button',{type:'button', class:'action-btn favorite-toggle', 'aria-pressed':'false', 'aria-label':'Add favourite', 'data-post-id':p.id});
+        const favIcon = svgIcon('#i-star');
+        const favUse = favIcon.querySelector('use');
+        const favLabel = el('span',{class:'favorite-toggle-label'},' Favourite');
+        favBtn.append(favIcon, favLabel);
+        favBtn.addEventListener('click', ()=>{
+          toggleFavorite(p.id);
+          syncArticleViewerFavoriteState(p.id);
+        });
+        actions.append(favBtn);
+        actions.append(el('a',{href:p.link||'#', target:'_blank', rel:'noopener noreferrer', class:'action-btn primary', title:'Open original article'}, 'Open original'));
+        return actions;
+      })()
     ]);
     body.append(header);
 
@@ -861,6 +884,19 @@
       readChip.setAttribute('aria-label', read ? 'Filter unread' : 'Filter read');
     }
   }
+
+  function syncArticleViewerFavoriteState(postId){
+    const body = byId('articleBody'); if(!body) return;
+    const favBtn = body.querySelector('.favorite-toggle'); if(!favBtn) return;
+    const isFav = !!state.favorites[postId];
+    favBtn.classList.toggle('is-favorite', isFav);
+    favBtn.setAttribute('aria-pressed', isFav ? 'true' : 'false');
+    favBtn.setAttribute('aria-label', isFav ? 'Remove from favourites' : 'Add favourite');
+    const iconUse = favBtn.querySelector('use');
+    if(iconUse){ iconUse.setAttribute('href', isFav ? '#i-star-filled' : '#i-star'); }
+    const label = favBtn.querySelector('.favorite-toggle-label');
+    if(label){ label.textContent = isFav ? ' Favourited' : ' Favourite'; }
+  }
   function toggleFavorite(postId){
     const wasFav = !!state.favorites[postId];
     if(wasFav){ delete state.favorites[postId]; }
@@ -928,6 +964,7 @@
     }
     wrap.append(header, figure, actions);
     video.focus?.();
+    syncArticleViewerFavoriteState(p.id || postId);
   }
 
   function cleanupActiveVideo(){
@@ -1374,11 +1411,35 @@
     const cueBtn = byId('cueBtn');
     const cueTrack = byId('cueTrack');
     let trackLabel = byId('mp-track');
+    let trackArticleBtn;
+    let trackTitleSpan;
     if(!trackLabel){
-      trackLabel = el('div',{id:'mp-track', class:'mp-track muted', 'aria-live':'polite'},'No track selected');
+      trackArticleBtn = el('button',{id:'mp-track-article', class:'chip mp-track-article', type:'button', hidden:true},'View article');
+      trackTitleSpan = el('span',{class:'mp-track-title'},'No track selected');
+      trackLabel = el('div',{id:'mp-track', class:'mp-track muted', 'aria-live':'polite'},[trackArticleBtn, trackTitleSpan]);
       if(mpEl.firstChild) mpEl.insertBefore(trackLabel, mpEl.firstChild); else mpEl.append(trackLabel);
+    } else {
+      trackArticleBtn = trackLabel.querySelector('#mp-track-article');
+      if(!trackArticleBtn){
+        trackArticleBtn = el('button',{id:'mp-track-article', class:'chip mp-track-article', type:'button', hidden:true},'View article');
+        trackLabel.prepend(trackArticleBtn);
+      }
+      trackTitleSpan = trackLabel.querySelector('.mp-track-title');
+      if(!trackTitleSpan){
+        trackTitleSpan = el('span',{class:'mp-track-title'}, trackLabel.textContent || 'No track selected');
+        trackLabel.append(trackTitleSpan);
+      }
     }
-    Object.assign(mp.elements, { playBtn, pauseBtn, downloadBtn, favBtn, progress:prog, time:timeEl, trackLabel, toolbar: mpEl });
+    const openCurrentArticle = ()=>{
+      const current = mp.current;
+      if(!current) return;
+      const post = current.post || (current.postId ? posts[current.postId] : null);
+      if(post){
+        showPanel('articleViewer', { data: post });
+      }
+    };
+    trackArticleBtn.addEventListener('click', openCurrentArticle);
+    Object.assign(mp.elements, { playBtn, pauseBtn, downloadBtn, favBtn, progress:prog, time:timeEl, trackLabel, trackArticleBtn, trackTitleSpan, toolbar: mpEl });
     playBtn.disabled = true;
     pauseBtn.disabled = true;
     downloadBtn.disabled = true;
@@ -1544,15 +1605,23 @@
     function updateMediaToolbar(){
       const hasTrack = !!mp.current;
       if(!hasTrack){
-        trackLabel.textContent = 'No track selected';
+        trackTitleSpan.textContent = 'No track selected';
+        trackArticleBtn.hidden = true;
         downloadBtn.disabled = true;
         favBtn.disabled = true;
         if(favUse) favUse.setAttribute('href', '#i-star');
         syncPlaybackButtons();
         return;
       }
-      const { media, title, host } = mp.current;
-      trackLabel.textContent = host ? `${title} • ${host}` : title;
+      const { media, title, host, post, postId } = mp.current;
+      trackTitleSpan.textContent = host ? `${title} • ${host}` : title;
+      const postRef = post || (postId ? posts[postId] : null);
+      if(postRef){
+        trackArticleBtn.hidden = false;
+        trackArticleBtn.textContent = postRef.title ? `View “${postRef.title}”` : 'View article';
+      } else {
+        trackArticleBtn.hidden = true;
+      }
       downloadBtn.disabled = false;
       downloadBtn.title = `Download ${title}`;
       downloadBtn.setAttribute('aria-label', `Download ${title}`);
