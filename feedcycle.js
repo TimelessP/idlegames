@@ -873,12 +873,37 @@
       candidates.push(clean);
     };
     const isHttp = /^http:\/\//i.test(original);
+    const isHttps = /^https:\/\//i.test(original);
     if(isHttp){ add('https://'+original.slice(7)); }
     add(original);
-    if(typeof location !== 'undefined' && location.protocol==='https:' && isHttp){
-      add(`https://corsproxy.io/?${encodeURIComponent(original)}`);
-      add(`https://api.allorigins.win/raw?url=${encodeURIComponent(original)}`);
-      add(`https://r.jina.ai/http://${original.slice(7)}`);
+    if(typeof location !== 'undefined' && location.protocol === 'https:'){
+      const manual = state?.settings?.corsProxy?.trim();
+      if(manual){
+        try{ add(buildProxiedUrl(original, manual)); }
+        catch{ /* ignore malformed manual proxy */ }
+      }
+      const mediaProxyBuilders = [];
+      if(isHttp){
+        mediaProxyBuilders.push(u=>`https://cors.isomorphic-git.org/${u}`);
+        mediaProxyBuilders.push(u=>`https://thingproxy.freeboard.io/fetch/${u}`);
+      }
+      mediaProxyBuilders.push(u=>`https://corsproxy.io/?${encodeURIComponent(u)}`);
+      mediaProxyBuilders.push(u=>`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`);
+      if(isHttp){ mediaProxyBuilders.push(u=>`https://r.jina.ai/http://${u.slice(7)}`); }
+      const sharedProxySpecs = PROXIES || [];
+      for(const builder of mediaProxyBuilders){
+        try{ add(builder(original)); }
+        catch{ /* skip unsupported builder */ }
+      }
+      for(const spec of sharedProxySpecs){
+        if(!spec) continue;
+        try{ add(buildProxiedUrl(original, spec)); }
+        catch{ /* ignore */ }
+      }
+      if(isHttps){
+        try{ add(`https://cors.isomorphic-git.org/${original}`); }
+        catch{}
+      }
     }
     return candidates;
   }
@@ -886,8 +911,14 @@
     const candidates = buildMediaSourceCandidates(media);
     if(!candidates.length) return null;
     mediaFallbacks.set(el, { candidates, index:0, original: media?.url||'' });
-    el.src = candidates[0];
-    try{ el.load?.(); }catch{}
+    if(el && typeof el.setAttribute === 'function'){
+      const first = candidates[0]||'';
+      if(/^https?:/i.test(first)){ el.crossOrigin = 'anonymous'; }
+    }
+    if(el?.src !== candidates[0]){
+      el.src = candidates[0];
+      try{ el.load?.(); }catch{}
+    }
     return candidates;
   }
   function advanceMediaFallback(el){
@@ -898,6 +929,9 @@
     info.index += 1;
     mediaFallbacks.set(el, info);
     const next = candidates[info.index];
+    if(el && typeof el.setAttribute === 'function' && /^https?:/i.test(next||'')){
+      el.crossOrigin = 'anonymous';
+    }
     el.src = next;
     try{ el.load?.(); }catch{}
     return true;
