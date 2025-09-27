@@ -980,12 +980,36 @@
         if(success) return;
       const info = mediaFallbacks.get(el);
       console.warn('[FeedCycle v2] Media fallback exhausted for', info?.original || 'unknown media');
+        try{
+          const evt = new CustomEvent('feedcycle:media-fallback-exhausted',{detail:{url:info?.original||'', element:el}});
+          window.dispatchEvent(evt);
+        }catch{}
       });
       return;      
     }
     const resume = el.play?.();
     if(resume?.catch){ resume.catch(err=> console.warn('Playback fallback blocked', err)); }
   }
+
+  // One-time UI helper when media fails due to hard CORS blocks
+  let mediaHelpShown = false;
+  function showMediaFailureHelp(detail){
+    if(mediaHelpShown) return; mediaHelpShown = true;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;left:50%;bottom:12px;transform:translateX(-50%);background:#222;color:#fff;padding:12px 16px;border-radius:8px;z-index:9999;font:12px system-ui, sans-serif;max-width:520px;box-shadow:0 4px 14px -2px rgba(0,0,0,0.4);line-height:1.4';
+    wrap.setAttribute('role','alert');
+    const close = document.createElement('button');
+    close.textContent = '×';
+    close.setAttribute('aria-label','Dismiss');
+    close.style.cssText='position:absolute;top:4px;right:6px;background:transparent;border:0;color:#fff;font-size:16px;cursor:pointer;font-weight:600';
+    close.onclick = ()=>{ wrap.remove(); };
+    const msg = document.createElement('div');
+    msg.innerHTML = '<strong>Media could not be played (CORS).</strong><br>Some podcast/CDN endpoints (e.g. BBC) block direct browser playback without their own pages. You can try configuring a proxy in Settings → Network (e.g. a personal Cloudflare Worker) that adds permissive CORS headers.<br><br><code style="font-size:11px;user-select:all;display:inline-block;padding:2px 4px;background:#333;border-radius:4px;">https://your-worker.example.workers.dev/?url=%s</code>';
+    wrap.append(close, msg);
+    document.body.appendChild(wrap);
+    setTimeout(()=>{ try{ wrap.style.transition='opacity .6s'; wrap.style.opacity='0'; setTimeout(()=>wrap.remove(), 700); }catch{} }, 20000);
+  }
+  window.addEventListener('feedcycle:media-fallback-exhausted', e=>{ showMediaFailureHelp(e.detail||{}); });
   function openVideoMedia(post, mediaIndex){
     showPanel('videoViewer', { data:{ postId: post.id, mediaIndex } });
   }
