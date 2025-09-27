@@ -45,7 +45,7 @@
 
   const VERSION = '2.0.0';
   const LS_KEY = 'feedcycle-v2';
-  const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{} }; // posts ephemeral + tags mapping postId -> [tag]
+  const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{}, proxyScores:{} }; // posts ephemeral + tags mapping postId -> [tag]
   const migrationResult = (typeof window !== 'undefined' && window.feedcycleMigrateV1toV2 && typeof window.feedcycleMigrateV1toV2.run === 'function') ? window.feedcycleMigrateV1toV2.run() : null;
   if(migrationResult){ console.info('[FeedCycle v2] Migrated feeds from v1', migrationResult); }
   let state = loadState();
@@ -63,7 +63,7 @@
     { name: 'CodeTabs', kind: 'param-enc', base: 'https://api.codetabs.com/v1/proxy?quest=' },
     { name: 'JinaMirror', kind: 'prefix', base: 'https://r.jina.ai/' }
   ];
-  const proxyStats = new Map(); // name -> {success, fail}
+  const proxyStats = new Map(); // name -> {success, fail, lastSuccess, lastFail, score}
   const proxyTempDisabledUntil = new Map(); // name -> ts
   const PROXY_DISABLE_MS = 10*60*1000;
   const FETCH_TIMEOUT_MS = 12000;
@@ -72,7 +72,33 @@
   const RATE_LIMIT_BACKOFF_MAX_MS = 30*60*1000;
   const feedRateLimit = new Map(); // feedId -> { attempt, until, delay }
 
-  function proxyScore(p){ const s = proxyStats.get(p.name)||{success:0,fail:0}; return s.success - 2*s.fail; }
+  // Enhanced proxy scoring with decay and weighted penalties
+  const PROXY_FAIL_WEIGHT = 3;
+  const PROXY_SUCCESS_WEIGHT = 1;
+  const PROXY_DECAY_MS = 30*60*1000; // 30 minutes
+  const PROXY_MIN_SAMPLE = 2; // dampen volatility for very small sample sizes
+  function recalcProxyScore(name){
+    const now = Date.now();
+    const s = proxyStats.get(name) || {success:0, fail:0, lastSuccess:0, lastFail:0, score:0};
+    const decay = (t)=> t? Math.exp(- (now - t) / PROXY_DECAY_MS) : 1;
+    const successW = s.success * decay(s.lastSuccess);
+    const failW = s.fail * decay(s.lastFail);
+    const raw = (successW * PROXY_SUCCESS_WEIGHT) - (failW * PROXY_FAIL_WEIGHT);
+    const attempts = s.success + s.fail;
+    const confidence = attempts < PROXY_MIN_SAMPLE ? 0.25 : 1;
+    s.score = raw * confidence;
+    proxyStats.set(name, s);
+    return s.score;
+  }
+  function recordProxyResult(name, ok){
+    if(!name) return;
+    const s = proxyStats.get(name) || {success:0, fail:0, lastSuccess:0, lastFail:0, score:0};
+    if(ok){ s.success += 1; s.lastSuccess = Date.now(); }
+    else { s.fail += 1; s.lastFail = Date.now(); }
+    proxyStats.set(name, s);
+    recalcProxyScore(name);
+  }
+  function proxyScore(p){ const s = proxyStats.get(p.name); return s? s.score||0 : 0; }
   function buildProxiedUrl(targetUrl, proxySpec){
     if(typeof proxySpec === 'string'){
       const p = proxySpec.trim();
@@ -101,6 +127,8 @@
     const manual = state.settings.corsProxy?.trim(); if(manual) arr.push(manual);
     const now = Date.now();
     const active = PROXIES.filter(p=> !(proxyTempDisabledUntil.get(p.name)>now));
+    // Ensure each has an initialized score object (prevents NaN sorting jitter)
+    for(const p of active){ if(!proxyStats.has(p.name)) proxyStats.set(p.name, {success:0,fail:0,lastSuccess:0,lastFail:0,score:0}); }
     // Order by score (descending)
     active.sort((a,b)=> proxyScore(b)-proxyScore(a));
     return arr.concat(active);
@@ -187,8 +215,30 @@
   const hashId = s=>{ let h=2166136261>>>0; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619);} return (h>>>0).toString(36); };
   const clamp = (n,a,b)=> Math.max(a, Math.min(b,n));
 
-  function saveState(){ try{ const { } = state; localStorage.setItem(LS_KEY, JSON.stringify(state)); }catch(e){ console.warn('Save failed', e);} }
-  function loadState(){ try{ return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(LS_KEY)||'{}')); }catch{ return {...DEFAULTS}; } }
+  function saveState(){
+    try{
+      // Serialize proxyStats lightweight: only keep scalar fields
+      if(proxyStats && typeof proxyStats.forEach==='function'){
+        const out = {};
+        proxyStats.forEach((v,k)=>{ out[k] = { success:v.success||0, fail:v.fail||0, lastSuccess:v.lastSuccess||0, lastFail:v.lastFail||0, score:v.score||0 }; });
+        state.proxyScores = out;
+      }
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+    }catch(e){ console.warn('Save failed', e);} }
+  function loadState(){
+    try{
+      const raw = JSON.parse(localStorage.getItem(LS_KEY)||'{}');
+      const merged = Object.assign({}, DEFAULTS, raw);
+      // hydrate proxyStats
+      if(merged.proxyScores){
+        Object.entries(merged.proxyScores).forEach(([name, s])=>{
+          if(!s || typeof s !== 'object') return;
+          proxyStats.set(name, { success:s.success||0, fail:s.fail||0, lastSuccess:s.lastSuccess||0, lastFail:s.lastFail||0, score:s.score||0 });
+        });
+      }
+      return merged;
+    }catch{ return {...DEFAULTS}; }
+  }
   function applyTheme(){
     document.documentElement.setAttribute('data-theme', state.theme||'system');
     const btn = byId('btn-theme');
@@ -1708,12 +1758,10 @@
         }catch(e){
           lastErr = e;
           if(typeof c !== 'string'){
-            const stats = proxyStats.get(c.name)||{success:0,fail:0};
-            stats.fail++;
-            proxyStats.set(c.name, stats);
+            recordProxyResult(c.name, false);
             const msg = String(e && e.message || e || '');
-            if(/HTTP 429|HTTP 5\d\d/.test(msg) || /Failed to fetch|TypeError|NetworkError/i.test(msg)){
-              proxyTempDisabledUntil.set(c.name, Date.now()+PROXY_DISABLE_MS);
+            if(/HTTP 429|HTTP 5\d\d/.test(msg) || /Failed to fetch|TypeError|NetworkError|ERR_/i.test(msg)){
+              proxyTempDisabledUntil.set(c.name, Date.now()+PROXY_DISABLE_MS/2); // shorter initial cooldown
             }
           }
         }
@@ -1734,7 +1782,7 @@
       }
       throw lastErr || new Error('Failed to fetch feed');
     }
-    if(used && used!=='Manual' && used!=='Direct'){ const s=proxyStats.get(used)||{success:0,fail:0}; s.success++; proxyStats.set(used,s); }
+  if(used && used!=='Manual' && used!=='Direct'){ recordProxyResult(used, true); }
     if(used) usedProxies.add(used);
     state.lastFetchUrl[feed.id] = usedUrl;
   clearFeedRateLimit(feed.id);
