@@ -45,7 +45,7 @@
 
   const VERSION = '2.0.0';
   const LS_KEY = 'feedcycle-v2';
-  const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{} }; // posts ephemeral + tags mapping postId -> [tag]
+  const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{} }; // posts ephemeral + tags mapping postId -> [tag]
   let state = loadState();
   let posts = {}; // id -> post (ephemeral)
   let lastFilteredPosts = [];
@@ -341,6 +341,7 @@
   // ---------- Filters ----------
   const SORT_DEFAULT = 'published-desc';
   const SORT_OPTIONS = new Set(['published-desc','published-asc','title-asc','title-desc','feed-asc','feed-desc','host-asc','host-desc','favorite','unread']);
+  const MEDIA_AUTO_TAGS = ['audio','video'];
   const FILTER_DEFAULTS = Object.freeze({ q:'', subscription:'', category:'', tag:'', tagList:[], unread:false, fav:false, readState:'', dateFrom:'', dateTo:'', sort: SORT_DEFAULT });
   const currentFilters = { ...FILTER_DEFAULTS, tagList: [] }; // mutable runtime copy
   function populateFilters(form){
@@ -631,7 +632,7 @@
     // Tag chips (existing)
     const tagList = state.tags[p.id]||[];
     if(tagList.length){
-      tagList.forEach(t=> chips.append(el('button',{class:'chip tag-chip', title:'Filter by tag','aria-label':'Filter by tag '+t, onclick:(e)=>{ e.stopPropagation(); currentFilters.tag=t; currentFilters.tagList=[t]; renderArticles(); }}, t)));
+      tagList.forEach(t=> chips.append(createTagFilterChip(t)));
     }
     // Read state chip
     const readChip = el('button',{class:'chip read-chip', title:'Quick filter by read state', 'aria-label': p.read? 'Filter unread':'Filter read', onclick:(e)=>{ e.stopPropagation(); currentFilters.readState = p.read? 'unread':'read'; renderArticles(); }}, p.read? 'Read':'Unread');
@@ -931,6 +932,14 @@
     if(idx===-1) return;
     arr.splice(idx,1);
     if(!arr.length){ delete state.tags[postId]; }
+    if(state.autoTags && state.autoTags[postId]){
+      const autoArr = state.autoTags[postId];
+      const autoIdx = autoArr.indexOf(tag);
+      if(autoIdx!==-1){
+        autoArr.splice(autoIdx,1);
+        if(!autoArr.length){ delete state.autoTags[postId]; }
+      }
+    }
     saveState();
     updateCardTags(postId);
     if(currentFilters.tag===tag){ currentFilters.tag=''; }
@@ -939,16 +948,99 @@
     }
     renderArticles();
   }
+  function createTagFilterChip(tag){
+    return el('button',{
+      class:'chip tag-chip',
+      title:'Filter by tag',
+      'aria-label':'Filter by tag '+tag,
+      onclick:(e)=>{
+        e.stopPropagation();
+        currentFilters.tag = tag;
+        currentFilters.tagList = [tag];
+        renderArticles();
+      }
+    }, tag);
+  }
+
   function updateCardTags(postId){
-    const card = document.querySelector(`.card[data-post-id='${postId}']`); if(!card) return;
-    const chips = card.querySelector('.chips'); if(!chips) return;
-    chips.querySelectorAll('.tag-chip').forEach(n=> n.remove());
-    const postTags = state.tags[postId]||[];
-    const readChip = chips.querySelector('.read-chip');
-    postTags.forEach(t=>{
-  const chip = el('button',{class:'chip tag-chip', title:'Filter by tag','aria-label':'Filter by tag '+t, onclick:(e)=>{ e.stopPropagation(); currentFilters.tag=t; currentFilters.tagList=[t]; renderArticles(); }}, t);
-      if(readChip) chips.insertBefore(chip, readChip); else chips.append(chip);
+    const card = document.querySelector(`.card[data-post-id='${postId}']`);
+    if(card){
+      const chips = card.querySelector('.chips');
+      if(chips){
+        chips.querySelectorAll('.tag-chip').forEach(n=> n.remove());
+        const postTags = state.tags[postId]||[];
+        const readChip = chips.querySelector('.read-chip');
+        postTags.forEach(t=>{
+          const chip = createTagFilterChip(t);
+          if(readChip) chips.insertBefore(chip, readChip); else chips.append(chip);
+        });
+      }
+    }
+    refreshArticleViewerTags(postId);
+  }
+
+  function refreshArticleViewerTags(postId){
+    const body = byId('articleBody');
+    if(!body) return;
+    if(String(body.dataset.postId||'') !== String(postId||'')) return;
+    const tags = state.tags[postId]||[];
+
+    const contextChips = body.querySelector('.article-context');
+    if(contextChips){
+      contextChips.querySelectorAll('.tag-chip').forEach(n=> n.remove());
+      const readChip = contextChips.querySelector('.read-chip');
+      tags.forEach(tag=>{
+        const chip = createTagFilterChip(tag);
+        if(readChip) contextChips.insertBefore(chip, readChip); else contextChips.append(chip);
+      });
+    }
+
+    const pillWrap = body.querySelector('.tag-pills');
+    if(pillWrap){
+      pillWrap.querySelectorAll('.tag-pill').forEach(n=> n.remove());
+      pillWrap.querySelector('.empty-placeholder')?.remove();
+      tags.forEach(tag=> pillWrap.append(createArticleTagPill(postId, tag)));
+      if(!pillWrap.querySelector('.tag-pill')){
+        pillWrap.append(el('span',{class:'muted empty-placeholder'},'No tags yet.'));
+      }
+    }
+  }
+
+  function applyMediaAutoTags(post){
+    if(!post || !post.id) return false;
+    if(!state.autoTags) state.autoTags = {};
+    const existing = Array.isArray(state.tags[post.id]) ? [...state.tags[post.id]] : [];
+    const tagsSet = new Set(existing);
+    const prevAuto = new Set(Array.isArray(state.autoTags[post.id]) ? state.autoTags[post.id] : []);
+  const desired = new Set();
+  const mediaList = Array.isArray(post.media) ? post.media : [];
+  const hasAudio = mediaList.some(m=> m?.kind==='audio');
+  const hasVideo = mediaList.some(m=> m?.kind==='video');
+  if(hasAudio && MEDIA_AUTO_TAGS.includes('audio')) desired.add('audio');
+  if(hasVideo && MEDIA_AUTO_TAGS.includes('video')) desired.add('video');
+
+    let changed = false;
+    desired.forEach(tag=>{
+      if(!tagsSet.has(tag)){
+        tagsSet.add(tag);
+        changed = true;
+      }
     });
+    prevAuto.forEach(tag=>{
+      if(!desired.has(tag) && tagsSet.has(tag)){
+        tagsSet.delete(tag);
+        changed = true;
+      }
+    });
+
+    const finalTags = [...tagsSet].filter(Boolean);
+    if(finalTags.length){ state.tags[post.id] = finalTags; }
+    else { delete state.tags[post.id]; }
+
+    if(desired.size){ state.autoTags[post.id] = [...desired]; }
+    else { delete state.autoTags[post.id]; }
+
+    return changed;
   }
   function updateCardReadState(postId, isRead){
     const card = document.querySelector(`.card[data-post-id='${postId}']`); if(!card) return;
@@ -1140,7 +1232,7 @@
     state.feeds = state.feeds.filter(f=> f.id!==feedId);
     // Purge posts for this feed
     for(const [pid,p] of Object.entries(posts)){
-      if(p.feedId === feedId){ delete posts[pid]; delete state.read[pid]; delete state.favorites[pid]; }
+      if(p.feedId === feedId){ delete posts[pid]; delete state.read[pid]; delete state.favorites[pid]; if(state.autoTags) delete state.autoTags[pid]; }
     }
     delete state.lastFetch[feedId];
     const lastUrl = state.lastFetchUrl?.[feedId];
@@ -1413,7 +1505,10 @@
     const parsedPosts = parseFeedDocument(doc, feed);
     for(const post of parsedPosts){
       const id = post.id;
-      posts[id] = Object.assign(posts[id]||{}, post, { read: !!state.read[id], favorite: !!state.favorites[id] });
+      const merged = posts[id] = Object.assign(posts[id]||{}, post, { read: !!state.read[id], favorite: !!state.favorites[id] });
+      if(applyMediaAutoTags(merged)){
+        updateCardTags(id);
+      }
     }
     if(feedTitleChanged){
       renderSubscriptionsList();
@@ -1463,7 +1558,10 @@
         const parsedPosts = parseFeedDocument(doc, f);
         for(const post of parsedPosts){
           const id = post.id;
-          posts[id] = Object.assign(posts[id]||{}, post, { read: !!state.read[id], favorite: !!state.favorites[id] });
+          const merged = posts[id] = Object.assign(posts[id]||{}, post, { read: !!state.read[id], favorite: !!state.favorites[id] });
+          if(applyMediaAutoTags(merged)){
+            updateCardTags(id);
+          }
         }
       }
       if(updatedAnyTitle){
