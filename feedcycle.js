@@ -858,6 +858,62 @@
       actions
     ]);
   }
+
+  const mediaFallbacks = new WeakMap();
+  function buildMediaSourceCandidates(media){
+    const original = (media?.url||'').trim();
+    if(!original) return [];
+    const candidates = [];
+    const seen = new Set();
+    const add = url=>{
+      if(!url) return;
+      const clean = String(url).trim();
+      if(!clean || seen.has(clean)) return;
+      seen.add(clean);
+      candidates.push(clean);
+    };
+    const isHttp = /^http:\/\//i.test(original);
+    if(isHttp){ add('https://'+original.slice(7)); }
+    add(original);
+    if(typeof location !== 'undefined' && location.protocol==='https:' && isHttp){
+      add(`https://corsproxy.io/?${encodeURIComponent(original)}`);
+      add(`https://api.allorigins.win/raw?url=${encodeURIComponent(original)}`);
+      add(`https://r.jina.ai/http://${original.slice(7)}`);
+    }
+    return candidates;
+  }
+  function prepareMediaElementSource(el, media){
+    const candidates = buildMediaSourceCandidates(media);
+    if(!candidates.length) return null;
+    mediaFallbacks.set(el, { candidates, index:0, original: media?.url||'' });
+    el.src = candidates[0];
+    try{ el.load?.(); }catch{}
+    return candidates;
+  }
+  function advanceMediaFallback(el){
+    const info = mediaFallbacks.get(el);
+    if(!info) return false;
+    const { candidates } = info;
+    if(!Array.isArray(candidates) || info.index >= candidates.length-1) return false;
+    info.index += 1;
+    mediaFallbacks.set(el, info);
+    const next = candidates[info.index];
+    el.src = next;
+    try{ el.load?.(); }catch{}
+    return true;
+  }
+  function handleMediaErrorEvent(e){
+    const el = e?.target;
+    if(!el) return;
+    const switched = advanceMediaFallback(el);
+    if(!switched){
+      const info = mediaFallbacks.get(el);
+      console.warn('[FeedCycle v2] Media fallback exhausted for', info?.original || 'unknown media');
+      return;
+    }
+    const resume = el.play?.();
+    if(resume?.catch){ resume.catch(err=> console.warn('Playback fallback blocked', err)); }
+  }
   function openVideoMedia(post, mediaIndex){
     showPanel('videoViewer', { data:{ postId: post.id, mediaIndex } });
   }
@@ -953,10 +1009,10 @@
     mp.updateFavorite?.();
     mp.syncPlaybackButtons?.();
     mp.lastAudioState = { ...mp.current, position: 0, wasPlaying: true };
-    try{ audio.pause(); }catch{}
-    audio.src = media.url;
-    audio.currentTime = 0;
-    audio.load();
+  try{ audio.pause(); }catch{}
+  const candidates = prepareMediaElementSource(audio, media) || [media.url];
+  mp.current.sourceCandidates = candidates;
+  audio.currentTime = 0;
     const playPromise = audio.play();
     if(playPromise && playPromise.catch){
       playPromise.catch(err=> console.warn('Playback start blocked', err));
@@ -1157,15 +1213,14 @@
       meta? el('p',{class:'video-viewer-meta muted'}, meta):null,
       host? el('p',{class:'video-viewer-host muted'}, `Source ${host}`):null
     ].filter(Boolean));
-    const video = document.createElement('video');
-    video.setAttribute('controls','');
-    video.setAttribute('playsinline','');
-    video.setAttribute('preload','metadata');
-    video.className = 'video-player';
-    const source = document.createElement('source');
-    source.src = media.url;
-    if(media.type) source.type = media.type;
-    video.appendChild(source);
+  const video = document.createElement('video');
+  video.setAttribute('controls','');
+  video.setAttribute('playsinline','');
+  video.setAttribute('preload','metadata');
+  video.className = 'video-player';
+  video.crossOrigin = 'anonymous';
+  prepareMediaElementSource(video, media);
+  video.addEventListener('error', handleMediaErrorEvent);
     const figure = el('figure',{class:'video-frame'},[video]);
     function tagOrientation(width, height){
       if(!(width>0 && height>0)) return;
@@ -1825,6 +1880,8 @@
     bindMediaElement(mp.audio);
     mp.bindMediaElement = bindMediaElement;
     mp.syncPlaybackButtons = syncPlaybackButtons;
+  mp.audio.crossOrigin = 'anonymous';
+  mp.audio.addEventListener('error', handleMediaErrorEvent);
     playBtn.addEventListener('click', ()=>{
       const media = getMedia();
       if(!mp.current || !media) return;
