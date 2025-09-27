@@ -58,7 +58,8 @@
   const PROXIES = [
     { name: 'AllOrigins', kind: 'param-enc', base: 'https://api.allorigins.win/raw?url=' },
     { name: 'corsproxy.io', kind: 'param-enc', base: 'https://corsproxy.io/?' },
-    { name: 'CodeTabs', kind: 'param-enc', base: 'https://api.codetabs.com/v1/proxy?quest=' }
+    { name: 'CodeTabs', kind: 'param-enc', base: 'https://api.codetabs.com/v1/proxy?quest=' },
+    { name: 'JinaMirror', kind: 'prefix', base: 'https://r.jina.ai/' }
   ];
   const proxyStats = new Map(); // name -> {success, fail}
   const proxyTempDisabledUntil = new Map(); // name -> ts
@@ -83,6 +84,13 @@
       let u = base + encodeURIComponent(targetUrl);
       if(name==='AllOrigins') u += `&cache=${Date.now()}`; // bust any stale caching quirks
       return u;
+    }
+    if(kind==='prefix'){
+      let clean = targetUrl;
+      if(!/^https?:/i.test(clean)){
+        try{ clean = new URL(clean, location.href).href; }catch{}
+      }
+      return base + clean.replace(/^https?:\/\//i, (match)=> match.toLowerCase() );
     }
     return targetUrl;
   }
@@ -1521,7 +1529,18 @@
           }
           if(xmlHasParserError(text)) throw new Error('XML parse error');
           xml = text; used = (typeof c==='string')?'Manual':c.name; usedUrl=url; break;
-        }catch(e){ lastErr=e; if(typeof c!=='string'){ const stats=proxyStats.get(c.name)||{success:0,fail:0}; stats.fail++; proxyStats.set(c.name, stats); if(/HTTP 429|HTTP 5\d\d/.test(e.message)) proxyTempDisabledUntil.set(c.name, Date.now()+PROXY_DISABLE_MS); } }
+        }catch(e){
+          lastErr = e;
+          if(typeof c !== 'string'){
+            const stats = proxyStats.get(c.name)||{success:0,fail:0};
+            stats.fail++;
+            proxyStats.set(c.name, stats);
+            const msg = String(e && e.message || e || '');
+            if(/HTTP 429|HTTP 5\d\d/.test(msg) || /Failed to fetch|TypeError|NetworkError/i.test(msg)){
+              proxyTempDisabledUntil.set(c.name, Date.now()+PROXY_DISABLE_MS);
+            }
+          }
+        }
       }
       if(used) break;
     }
