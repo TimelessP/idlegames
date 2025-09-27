@@ -947,7 +947,7 @@
     mediaFallbacks.set(el, { candidates, index:0, original: media?.url||'' });
     if(el && typeof el.setAttribute === 'function'){
       const first = candidates[0]||'';
-      if(/^https?:/i.test(first)){ el.crossOrigin = 'anonymous'; }
+      if(shouldUseCrossOrigin(first)) el.crossOrigin = 'anonymous'; else try{ delete el.crossOrigin; }catch{}
     }
     if(el?.src !== candidates[0]){
       el.src = candidates[0];
@@ -963,8 +963,8 @@
     info.index += 1;
     mediaFallbacks.set(el, info);
     const next = candidates[info.index];
-    if(el && typeof el.setAttribute === 'function' && /^https?:/i.test(next||'')){
-      el.crossOrigin = 'anonymous';
+    if(el && typeof el.setAttribute === 'function'){
+      if(shouldUseCrossOrigin(next)) el.crossOrigin = 'anonymous'; else try{ delete el.crossOrigin; }catch{}
     }
     el.src = next;
     try{ el.load?.(); }catch{}
@@ -989,6 +989,29 @@
     }
     const resume = el.play?.();
     if(resume?.catch){ resume.catch(err=> console.warn('Playback fallback blocked', err)); }
+  }
+  function shouldUseCrossOrigin(url){
+    if(!url) return false;
+    try{
+      const u = new URL(url, location.href);
+      const host = u.hostname.toLowerCase();
+      const manual = (state?.settings?.corsProxy||'').trim();
+      const proxyIndicators = [
+        'corsproxy.io',
+        'allorigins.win',
+        'isomorphic-git.org',
+        'thingproxy.freeboard.io',
+        'r.jina.ai'
+      ];
+      if(manual){
+        try{
+          const mu = new URL(manual.replace('%s','https://example.com'), location.href);
+          proxyIndicators.push(mu.hostname.toLowerCase());
+        }catch{}
+      }
+      // Only set crossOrigin if clearly a proxy/transforming host
+      return proxyIndicators.some(p=> host.endsWith(p));
+    }catch{ return false; }
   }
 
   // One-time UI helper when media fails due to hard CORS blocks
@@ -1314,7 +1337,7 @@
   video.setAttribute('playsinline','');
   video.setAttribute('preload','metadata');
   video.className = 'video-player';
-  video.crossOrigin = 'anonymous';
+  if(shouldUseCrossOrigin(media.url)) video.crossOrigin='anonymous';
   prepareMediaElementSource(video, media);
   video.addEventListener('error', handleMediaErrorEvent);
     const figure = el('figure',{class:'video-frame'},[video]);
@@ -1976,7 +1999,7 @@
     bindMediaElement(mp.audio);
     mp.bindMediaElement = bindMediaElement;
     mp.syncPlaybackButtons = syncPlaybackButtons;
-  mp.audio.crossOrigin = 'anonymous';
+  if(shouldUseCrossOrigin(mp.audio?.src)) mp.audio.crossOrigin='anonymous';
   mp.audio.addEventListener('error', handleMediaErrorEvent);
     playBtn.addEventListener('click', ()=>{
       const media = getMedia();
