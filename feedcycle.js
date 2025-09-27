@@ -46,6 +46,8 @@
   const VERSION = '2.0.0';
   const LS_KEY = 'feedcycle-v2';
   const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{} }; // posts ephemeral + tags mapping postId -> [tag]
+  const migrationResult = (typeof window !== 'undefined' && window.feedcycleMigrateV1toV2 && typeof window.feedcycleMigrateV1toV2.run === 'function') ? window.feedcycleMigrateV1toV2.run() : null;
+  if(migrationResult){ console.info('[FeedCycle v2] Migrated feeds from v1', migrationResult); }
   let state = loadState();
   let posts = {}; // id -> post (ephemeral)
   let lastFilteredPosts = [];
