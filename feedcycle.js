@@ -907,6 +907,40 @@
     }
     return candidates;
   }
+  async function fetchMediaToBlob(url){
+    try{
+      const controller = new AbortController();
+      const to = setTimeout(()=>controller.abort(), 15000);
+      const res = await fetch(url, { signal: controller.signal, mode:'cors' });
+      clearTimeout(to);
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      const ct = res.headers.get('content-type')||'';
+      if(!/audio|video|application\/(octet-stream|mpegurl|x-mpegURL)/i.test(ct)){
+        // Still accept but note
+        console.info('[FeedCycle v2] Fetch media content-type', ct);
+      }
+      const blob = await res.blob();
+      return URL.createObjectURL(blob);
+    }catch(e){
+      throw e;
+    }
+  }
+  async function attemptBlobFallback(el){
+    const info = mediaFallbacks.get(el);
+    if(!info || !info.original) return false;
+    // Only attempt once per element
+    if(info.blobTried) return false;
+    info.blobTried = true; mediaFallbacks.set(el, info);
+    try{
+      const blobUrl = await fetchMediaToBlob(info.original);
+      if(blobUrl){
+        el.src = blobUrl;
+        try{ el.load?.(); el.play?.().catch(()=>{}); }catch{}
+        return true;
+      }
+    }catch(err){ console.warn('[FeedCycle v2] Blob fallback failed', err); }
+    return false;
+  }
   function prepareMediaElementSource(el, media){
     const candidates = buildMediaSourceCandidates(media);
     if(!candidates.length) return null;
@@ -941,9 +975,13 @@
     if(!el) return;
     const switched = advanceMediaFallback(el);
     if(!switched){
+      // As a last resort, try to fetch original to blob (if same-origin or CORS allows)
+      attemptBlobFallback(el).then(success=>{
+        if(success) return;
       const info = mediaFallbacks.get(el);
       console.warn('[FeedCycle v2] Media fallback exhausted for', info?.original || 'unknown media');
-      return;
+      });
+      return;      
     }
     const resume = el.play?.();
     if(resume?.catch){ resume.catch(err=> console.warn('Playback fallback blocked', err)); }
