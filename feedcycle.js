@@ -339,7 +339,9 @@
   }
 
   // ---------- Filters ----------
-  const FILTER_DEFAULTS = Object.freeze({ q:'', subscription:'', category:'', tag:'', tagList:[], unread:false, fav:false, readState:'', dateFrom:'', dateTo:'' });
+  const SORT_DEFAULT = 'published-desc';
+  const SORT_OPTIONS = new Set(['published-desc','published-asc','title-asc','title-desc','feed-asc','feed-desc','host-asc','host-desc','favorite','unread']);
+  const FILTER_DEFAULTS = Object.freeze({ q:'', subscription:'', category:'', tag:'', tagList:[], unread:false, fav:false, readState:'', dateFrom:'', dateTo:'', sort: SORT_DEFAULT });
   const currentFilters = { ...FILTER_DEFAULTS, tagList: [] }; // mutable runtime copy
   function populateFilters(form){
     if(!form) return;
@@ -357,9 +359,13 @@
       selCat.value = currentFilters.category || '';
     }
     if(tagWrap){
-      const allTags = Array.from(new Set(Object.values(state.tags||{}).flat())).sort((a,b)=> a.localeCompare(b));
+      const allTags = Array.from(new Set(Object.values(state.tags||{}).flat()))
+        .map(t=> (t||'').trim())
+        .filter(Boolean)
+        .sort((a,b)=> a.localeCompare(b));
       tagWrap.innerHTML='';
-      const selected = new Set(currentFilters.tagList && currentFilters.tagList.length ? currentFilters.tagList : (currentFilters.tag? [currentFilters.tag]:[]));
+      const baseSelections = Array.isArray(currentFilters.tagList) && currentFilters.tagList.length ? currentFilters.tagList : (currentFilters.tag? [currentFilters.tag]:[]);
+      const selected = new Set(baseSelections.map(t=> (t||'').trim()).filter(Boolean));
       if(!allTags.length){
         tagWrap.append(el('span',{class:'muted'},'No tags yet.'));
       } else {
@@ -374,6 +380,11 @@
           tagWrap.append(btn);
         });
       }
+    }
+    const sortSelect = form.querySelector('#filterSort');
+    if(sortSelect){
+      const value = SORT_OPTIONS.has(currentFilters.sort) ? currentFilters.sort : SORT_DEFAULT;
+      sortSelect.value = value;
     }
     const searchInput = form.querySelector('#filterSearch'); if(searchInput) searchInput.value = currentFilters.q || '';
     const favOnly = form.querySelector('input[name="favOnly"]'); if(favOnly) favOnly.checked = !!currentFilters.fav;
@@ -395,9 +406,12 @@
     const readState = readStateRaw==='all'? '' : readStateRaw;
     const unread = readState==='unread';
   const tagWrap = form.querySelector('#filterTagsWrap');
-  const tagList = tagWrap ? [...tagWrap.querySelectorAll('.tag-toggle.is-selected')].map(btn=> btn.dataset.tag).filter(Boolean) : [];
+  const tagSelection = tagWrap ? [...tagWrap.querySelectorAll('.tag-toggle.is-selected')].map(btn=> (btn.dataset.tag||'').trim()).filter(Boolean) : [];
+    const tagList = Array.from(new Set(tagSelection));
     const dateFrom = (data.get('dateFrom')||'').toString();
     const dateTo = (data.get('dateTo')||'').toString();
+    const sortRaw = (data.get('sort')||SORT_DEFAULT).toString();
+    const sort = SORT_OPTIONS.has(sortRaw)? sortRaw : SORT_DEFAULT;
     currentFilters.q = q;
     currentFilters.subscription = subscription;
     currentFilters.category = category;
@@ -408,14 +422,37 @@
     currentFilters.tag = tagList.length===1 ? tagList[0] : '';
     currentFilters.dateFrom = dateFrom;
     currentFilters.dateTo = dateTo;
+    currentFilters.sort = sort;
   }
   function getFilteredPosts(){
+    const feedMap = new Map(state.feeds.map(f=> [f.id,f]));
+    const hostCache = new Map();
+    const getHost = (post)=>{
+      if(hostCache.has(post.id)) return hostCache.get(post.id);
+      const host = safeHost(post.link||'') || '';
+      hostCache.set(post.id, host);
+      return host;
+    };
+    const getFeedTitle = (feedId)=>{
+      const feed = feedMap.get(feedId);
+      return (feed?.title || feed?.url || '').trim();
+    };
+    const getPublishedTime = (post)=>{
+      const ts = new Date(post.published||post.updated||0).getTime();
+      return isNaN(ts)? 0 : ts;
+    };
+    const fallbackCompare = (a,b)=>{
+      const diff = getPublishedTime(b) - getPublishedTime(a);
+      if(diff) return diff;
+      const titleDiff = (a.title||'').localeCompare(b.title||'', undefined, { sensitivity:'base', numeric:true });
+      if(titleDiff) return titleDiff;
+      return (a.id||'').localeCompare(b.id||'');
+    };
     let arr = Object.values(posts);
     if(currentFilters.subscription){
       arr = arr.filter(p=> p.feedId === currentFilters.subscription);
     }
     if(currentFilters.category){
-      const feedMap = new Map(state.feeds.map(f=> [f.id,f]));
       arr = arr.filter(p=> (feedMap.get(p.feedId)?.category||'') === currentFilters.category);
     }
     if(currentFilters.unread){
@@ -458,7 +495,50 @@
       const q = currentFilters.q.toLowerCase();
       arr = arr.filter(p=> (p.title||'').toLowerCase().includes(q) || (p.summary||'').toLowerCase().includes(q));
     }
-    arr = arr.sort((a,b)=> new Date(b.published||0) - new Date(a.published||0));
+    const sortKey = SORT_OPTIONS.has(currentFilters.sort) ? currentFilters.sort : SORT_DEFAULT;
+    arr.sort((a,b)=>{
+      switch(sortKey){
+        case 'published-asc':{
+          const diff = getPublishedTime(a) - getPublishedTime(b);
+          if(diff) return diff;
+          break;
+        }
+        case 'title-asc':
+        case 'title-desc':{
+          const dir = sortKey==='title-asc'? 1 : -1;
+          const diff = (a.title||'').localeCompare(b.title||'', undefined, { sensitivity:'base', numeric:true });
+          if(diff) return dir * diff;
+          break;
+        }
+        case 'feed-asc':
+        case 'feed-desc':{
+          const dir = sortKey==='feed-asc'? 1 : -1;
+          const diff = getFeedTitle(a.feedId).localeCompare(getFeedTitle(b.feedId), undefined, { sensitivity:'base', numeric:true });
+          if(diff) return dir * diff;
+          break;
+        }
+        case 'host-asc':
+        case 'host-desc':{
+          const dir = sortKey==='host-asc'? 1 : -1;
+          const diff = getHost(a).localeCompare(getHost(b), undefined, { sensitivity:'base', numeric:true });
+          if(diff) return dir * diff;
+          break;
+        }
+        case 'favorite':{
+          const diff = Number(b.favorite) - Number(a.favorite);
+          if(diff) return diff;
+          break;
+        }
+        case 'unread':{
+          if(a.read !== b.read) return a.read ? 1 : -1;
+          break;
+        }
+        case 'published-desc':
+        default:
+          break;
+      }
+      return fallbackCompare(a,b);
+    });
     return arr;
   }
 
@@ -515,11 +595,10 @@
     const classes = ['card', p.read? 'read':'unread'];
     if(isFav) classes.push('favorite');
     const c = el('div',{class:classes.join(' '), role:'article', tabindex:0, 'data-post-id':p.id, 'aria-label': (p.title||'Article') + (p.read? ' (read)':' (unread)')});
-    const favBtn = el('button',{class:'fav', type:'button', title: isFav? 'Remove favourite':'Add favourite', 'aria-label': isFav? 'Remove favourite':'Add favourite', 'aria-pressed': String(isFav)}, isFav? '★':'☆');
+    const favBtn = el('button',{class:'fav', type:'button', title: isFav? 'Remove favourite':'Add favourite', 'aria-label': isFav? 'Remove favourite':'Add favourite', 'aria-pressed': String(isFav), 'data-post-id': p.id}, isFav? '★':'☆');
     favBtn.addEventListener('click', (e)=>{
       e.stopPropagation();
       toggleFavorite(p.id);
-      syncArticleViewerFavoriteState(p.id);
     });
     c.append(favBtn);
     const realImg = pickImage(p);
@@ -635,7 +714,6 @@
         const actions = el('div',{class:'article-actions'});
         const favBtn = el('button',{type:'button', class:'action-btn favorite-toggle', 'aria-pressed':'false', 'aria-label':'Add favourite', 'data-post-id':p.id});
         const favIcon = svgIcon('#i-star');
-        const favUse = favIcon.querySelector('use');
         const favLabel = el('span',{class:'favorite-toggle-label'},' Favourite');
         favBtn.append(favIcon, favLabel);
         favBtn.addEventListener('click', ()=>{
@@ -648,6 +726,7 @@
       })()
     ]);
     body.append(header);
+    syncArticleViewerFavoriteState(p.id);
 
     if(heroUrl){
       const hero = el('figure',{class:'article-hero'},[
@@ -885,6 +964,19 @@
     }
   }
 
+  function updateCardFavoriteState(postId, isFav){
+    const card = document.querySelector(`.card[data-post-id='${postId}']`); if(!card) return;
+    card.classList.toggle('favorite', !!isFav);
+    const favBtn = card.querySelector('.fav');
+    if(favBtn){
+      const label = isFav ? 'Remove favourite' : 'Add favourite';
+      favBtn.textContent = isFav ? '★' : '☆';
+      favBtn.setAttribute('aria-pressed', String(!!isFav));
+      favBtn.setAttribute('title', label);
+      favBtn.setAttribute('aria-label', label);
+    }
+  }
+
   function syncArticleViewerFavoriteState(postId){
     const body = byId('articleBody'); if(!body) return;
     const favBtn = body.querySelector('.favorite-toggle'); if(!favBtn) return;
@@ -892,17 +984,25 @@
     favBtn.classList.toggle('is-favorite', isFav);
     favBtn.setAttribute('aria-pressed', isFav ? 'true' : 'false');
     favBtn.setAttribute('aria-label', isFav ? 'Remove from favourites' : 'Add favourite');
+    favBtn.setAttribute('title', isFav ? 'Remove from favourites' : 'Add favourite');
     const iconUse = favBtn.querySelector('use');
-    if(iconUse){ iconUse.setAttribute('href', isFav ? '#i-star-filled' : '#i-star'); }
+    if(iconUse){ iconUse.setAttribute('href', isFav ? '#i-star-fill' : '#i-star'); }
     const label = favBtn.querySelector('.favorite-toggle-label');
     if(label){ label.textContent = isFav ? ' Favourited' : ' Favourite'; }
   }
   function toggleFavorite(postId){
+    if(!postId) return;
     const wasFav = !!state.favorites[postId];
     if(wasFav){ delete state.favorites[postId]; }
     else { state.favorites[postId] = true; }
-    if(posts[postId]) posts[postId].favorite = !wasFav;
+    const nowFav = !wasFav;
+    if(posts[postId]) posts[postId].favorite = nowFav;
+    if(mp.current?.postId === postId){
+      if(mp.current.post) mp.current.post.favorite = nowFav;
+    }
     saveState();
+    updateCardFavoriteState(postId, nowFav);
+    syncArticleViewerFavoriteState(postId);
     mp.updateFavorite?.();
     renderArticles();
   }
@@ -1254,6 +1354,13 @@
     });
   }
 
+  function extractFeedTitle(doc){
+    const node = doc.querySelector('feed > title') || doc.querySelector('channel > title');
+    if(!node) return '';
+    const text = node.textContent||'';
+    return text.replace(/\s+/g,' ').trim();
+  }
+
   // ---------- Basic Feed Refresh (placeholder) ----------
   async function refreshAll(force=false){
     const usedProxies = new Set();
@@ -1297,10 +1404,19 @@
     state.lastFetchUrl[feed.id] = usedUrl;
     // Parse & merge posts
     const doc = new DOMParser().parseFromString(xml,'text/xml');
+    const updatedTitle = extractFeedTitle(doc);
+    let feedTitleChanged = false;
+    if(updatedTitle && updatedTitle !== feed.title){
+      feed.title = updatedTitle;
+      feedTitleChanged = true;
+    }
     const parsedPosts = parseFeedDocument(doc, feed);
     for(const post of parsedPosts){
       const id = post.id;
       posts[id] = Object.assign(posts[id]||{}, post, { read: !!state.read[id], favorite: !!state.favorites[id] });
+    }
+    if(feedTitleChanged){
+      renderSubscriptionsList();
     }
   }
 
@@ -1329,6 +1445,7 @@
     if(typeof caches === 'undefined') return;
     try{
       const cache = await caches.open('feedcycle-cache-v2');
+      let updatedAnyTitle = false;
       for(const f of state.feeds){
         const url = state.lastFetchUrl?.[f.id] || f.url;
         if(!url) continue;
@@ -1338,11 +1455,19 @@
         if(xmlHasParserError(text)){ const extracted = maybeExtractXmlFromJson(text); if(extracted) text = extracted; }
         if(xmlHasParserError(text)) continue;
         const doc = new DOMParser().parseFromString(text,'text/xml');
+        const title = extractFeedTitle(doc);
+        if(title && title !== f.title){
+          f.title = title;
+          updatedAnyTitle = true;
+        }
         const parsedPosts = parseFeedDocument(doc, f);
         for(const post of parsedPosts){
           const id = post.id;
           posts[id] = Object.assign(posts[id]||{}, post, { read: !!state.read[id], favorite: !!state.favorites[id] });
         }
+      }
+      if(updatedAnyTitle){
+        renderSubscriptionsList();
       }
     }catch(e){ console.warn('Hydrate from cache failed', e); }
   }
@@ -1433,7 +1558,26 @@
     const openCurrentArticle = ()=>{
       const current = mp.current;
       if(!current) return;
-      const post = current.post || (current.postId ? posts[current.postId] : null);
+      const postId = current.postId || current.post?.id;
+      let post = current.post || (postId ? posts[postId] : null);
+      if(!post && postId && posts[postId]){
+        post = posts[postId];
+      }
+      const top = stackEl.lastElementChild;
+      if(top?.dataset.panel === 'articleViewer'){
+        const panelBody = top.querySelector('.panel-body');
+        const articleBody = top.querySelector('#articleBody');
+        if(articleBody && articleBody.dataset.postId === String(postId||'')){
+          if(!articleBody.children.length && post){
+            renderArticleViewer(post);
+          }
+          if(panelBody?.scrollTo){ panelBody.scrollTo({ top:0, behavior:'smooth' }); }
+          else if(panelBody){ panelBody.scrollTop = 0; }
+          const heading = top.querySelector('.article-title');
+          heading?.focus?.();
+          return;
+        }
+      }
       if(post){
         showPanel('articleViewer', { data: post });
       }
