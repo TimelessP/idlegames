@@ -65,6 +65,9 @@
   const PROXY_DISABLE_MS = 10*60*1000;
   const FETCH_TIMEOUT_MS = 12000;
   const CACHE_NAME = 'feedcycle-cache-v2';
+  const RATE_LIMIT_BACKOFF_BASE_MS = 60*1000;
+  const RATE_LIMIT_BACKOFF_MAX_MS = 30*60*1000;
+  const feedRateLimit = new Map(); // feedId -> { attempt, until, delay }
 
   function proxyScore(p){ const s = proxyStats.get(p.name)||{success:0,fail:0}; return s.success - 2*s.fail; }
   function buildProxiedUrl(targetUrl, proxySpec){
@@ -132,6 +135,30 @@
     return null;
   }
   function addCacheBuster(u){ try{ return u + (u.includes('?')?'&':'?') + 't=' + Date.now(); }catch{ return u; } }
+
+  function getFeedRateLimit(feedId){
+    if(!feedId) return null;
+    const entry = feedRateLimit.get(feedId);
+    if(!entry) return null;
+    if(entry.until <= Date.now()){
+      feedRateLimit.delete(feedId);
+      return null;
+    }
+    return { ...entry, retryIn: Math.max(0, entry.until - Date.now()) };
+  }
+  function applyFeedRateLimit(feedId){
+    if(!feedId) return null;
+    const now = Date.now();
+    const existing = feedRateLimit.get(feedId);
+    let attempt = existing? existing.attempt : 0;
+    if(existing && existing.until <= now){ attempt = 0; }
+    attempt += 1;
+    const delay = Math.min(RATE_LIMIT_BACKOFF_BASE_MS * (2 ** (attempt - 1)), RATE_LIMIT_BACKOFF_MAX_MS);
+    const entry = { attempt, until: now + delay, delay };
+    feedRateLimit.set(feedId, entry);
+    return { ...entry, retryIn: delay };
+  }
+  function clearFeedRateLimit(feedId){ if(feedId) feedRateLimit.delete(feedId); }
 
   // ---------- Utilities ----------
   const $ = sel=> document.querySelector(sel);
@@ -1156,7 +1183,7 @@
     }
     wrap.append(header, figure, actions);
     video.focus?.();
-    syncArticleViewerFavoriteState(p.id || postId);
+    syncArticleViewerFavoriteState(post?.id || postId);
   }
 
   function cleanupActiveVideo(){
@@ -1457,6 +1484,11 @@
   async function refreshAll(force=false){
     const usedProxies = new Set();
     for(const f of state.feeds){
+      const rateLimit = getFeedRateLimit(f.id);
+      if(rateLimit){
+        console.info('Feed refresh skipped due to backoff', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
+        continue;
+      }
       try{
         await refreshFeed(f, { force, usedProxies });
         state.lastFetch[f.id]=Date.now();
@@ -1466,6 +1498,13 @@
     if(usedProxies.size){ console.log('[FeedCycle v2] Proxies used:', [...usedProxies].join(', ')); }
   }
   async function refreshFeed(feed, { force=false, usedProxies=new Set() }={}){
+    const activeRateLimit = getFeedRateLimit(feed.id);
+    if(activeRateLimit){
+      const err = new Error('Rate limit active');
+      err.code = 'RATE_LIMIT';
+      err.retryIn = activeRateLimit.retryIn;
+      throw err;
+    }
     const candidates = getProxyCandidates();
     let xml=''; let lastErr=null; let used=null; let usedUrl=null;
     for(const c of candidates){
@@ -1490,10 +1529,20 @@
       try{ xml = await fetchWithCache(feed.url); if(xmlHasParserError(xml)) throw new Error('XML parse error'); used='Direct'; usedUrl=feed.url; }
       catch(e){ lastErr=e; }
     }
-    if(!used){ throw lastErr || new Error('Failed to fetch feed'); }
+    if(!used){
+      if(lastErr && /HTTP 429/.test(lastErr.message||'')){
+        const penalty = applyFeedRateLimit(feed.id);
+        const err = new Error(`HTTP 429 (retry in ${penalty? Math.ceil(penalty.delay/1000)+'s' : 'later'})`);
+        err.code = 'RATE_LIMIT';
+        err.retryIn = penalty?.delay || RATE_LIMIT_BACKOFF_BASE_MS;
+        throw err;
+      }
+      throw lastErr || new Error('Failed to fetch feed');
+    }
     if(used && used!=='Manual' && used!=='Direct'){ const s=proxyStats.get(used)||{success:0,fail:0}; s.success++; proxyStats.set(used,s); }
     if(used) usedProxies.add(used);
     state.lastFetchUrl[feed.id] = usedUrl;
+  clearFeedRateLimit(feed.id);
     // Parse & merge posts
     const doc = new DOMParser().parseFromString(xml,'text/xml');
     const updatedTitle = extractFeedTitle(doc);
@@ -1529,6 +1578,11 @@
     });
     if(!stale.length) return; // all fresh
     for(const f of stale){
+      const rateLimit = getFeedRateLimit(f.id);
+      if(rateLimit){
+        console.info('Initial refresh skipped (rate limit)', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
+        continue;
+      }
       try{ await refreshFeed(f, { usedProxies:new Set() }); state.lastFetch[f.id]=Date.now(); }
       catch(e){ console.warn('Initial selective refresh failed', f.url, e); }
     }
@@ -1938,7 +1992,13 @@
       state.feeds.forEach(f=>{
         const last = state.lastFetch[f.id]||0;
         const interval = (f.refreshMinutes||state.settings.refreshMinutes||30)*60*1000;
-        if(now - last >= interval){ refreshFeed(f).then(()=>{ state.lastFetch[f.id]=Date.now(); saveState(); renderArticles(); }).catch(e=> console.warn('Scheduled refresh fail', f.url, e)); }
+        if(now - last >= interval){
+          const rateLimit = getFeedRateLimit(f.id);
+          if(rateLimit){
+            return;
+          }
+          refreshFeed(f).then(()=>{ state.lastFetch[f.id]=Date.now(); saveState(); renderArticles(); }).catch(e=> console.warn('Scheduled refresh fail', f.url, e));
+        }
       });
     }, 60*1000); // check every minute
   }
