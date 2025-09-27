@@ -48,35 +48,8 @@
   const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{}, proxyScores:{}, proxyScoresResetAt:0 }; // posts ephemeral + tags mapping postId -> [tag]
   const migrationResult = (typeof window !== 'undefined' && window.feedcycleMigrateV1toV2 && typeof window.feedcycleMigrateV1toV2.run === 'function') ? window.feedcycleMigrateV1toV2.run() : null;
   if(migrationResult){ console.info('[FeedCycle v2] Migrated feeds from v1', migrationResult); }
-  let state = loadState();
-  // Monthly proxy score normalization (rebase) to prevent ancient history dominance
-  (function maybeRebaseProxyScores(){
-    try{
-      const NOW = Date.now();
-      const ONE_MONTH_MS = 30*24*60*60*1000; // approximate month
-      const last = state.proxyScoresResetAt || 0;
-      if(NOW - last < ONE_MONTH_MS) return; // not yet time
-      // Collect proxy names we care about
-      const names = PROXIES.map(p=>p.name);
-      // Ensure stats objects exist & scores recalculated
-      names.forEach(n=>{ if(!proxyStats.has(n)) proxyStats.set(n,{success:0,fail:0,lastSuccess:0,lastFail:0,score:0}); recalcProxyScore(n); });
-      // Sort by current score descending (stable)
-      const ordered = names.map(n=>({name:n, s: proxyStats.get(n)||{}})).sort((a,b)=> (b.s.score||0) - (a.s.score||0));
-      const m = ordered.length || 1;
-      const now = Date.now();
-      // Reassign compact synthetic stats preserving order: higher rank => slightly larger success count
-      ordered.forEach((entry, idx)=>{
-        // We want at least 2 attempts to avoid low-sample damping
-        const syntheticSuccess = (m - idx) + 1; // ensures >=2 if m>=1
-        const stats = { success: syntheticSuccess, fail:0, lastSuccess: now, lastFail:0, score:0 };
-        proxyStats.set(entry.name, stats);
-        recalcProxyScore(entry.name); // recompute score using new counts
-      });
-      state.proxyScoresResetAt = NOW;
-      saveState(); // persist rebased values
-      console.info('[FeedCycle v2] Proxy scores rebased (monthly normalization)');
-    }catch(e){ console.warn('Proxy score rebase skipped', e); }
-  })();
+  // state will be loaded after proxy scoring utilities are defined
+  let state; // defer assignment
   let posts = {}; // id -> post (ephemeral)
   let lastFilteredPosts = [];
   let lastRenderedCount = 0;
@@ -127,6 +100,32 @@
     recalcProxyScore(name);
   }
   function proxyScore(p){ const s = proxyStats.get(p.name); return s? s.score||0 : 0; }
+
+  // Now that proxy machinery exists, load state (hydrating proxy stats) and maybe rebase
+  state = loadState();
+  function maybeRebaseProxyScores(){
+    try{
+      const NOW = Date.now();
+      const ONE_MONTH_MS = 30*24*60*60*1000; // approximate month
+      const last = state.proxyScoresResetAt || 0;
+      if(NOW - last < ONE_MONTH_MS) return; // not yet time
+      const names = PROXIES.map(p=>p.name);
+      names.forEach(n=>{ if(!proxyStats.has(n)) proxyStats.set(n,{success:0,fail:0,lastSuccess:0,lastFail:0,score:0}); recalcProxyScore(n); });
+      const ordered = names.map(n=>({name:n, s: proxyStats.get(n)||{}})).sort((a,b)=> (b.s.score||0) - (a.s.score||0));
+      const m = ordered.length || 1;
+      const now = Date.now();
+      ordered.forEach((entry, idx)=>{
+        const syntheticSuccess = (m - idx) + 1; // ensures descending, >=2 successes for top
+        const stats = { success: syntheticSuccess, fail:0, lastSuccess: now, lastFail:0, score:0 };
+        proxyStats.set(entry.name, stats);
+        recalcProxyScore(entry.name);
+      });
+      state.proxyScoresResetAt = NOW;
+      saveState();
+      console.info('[FeedCycle v2] Proxy scores rebased (monthly normalization)');
+    }catch(e){ console.warn('Proxy score rebase skipped', e); }
+  }
+  maybeRebaseProxyScores();
   function buildProxiedUrl(targetUrl, proxySpec){
     if(typeof proxySpec === 'string'){
       const p = proxySpec.trim();
