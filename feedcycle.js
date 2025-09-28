@@ -2256,6 +2256,22 @@
     }
     // Settings button brings up settings main panel (push stack)
     byId('btn-settings').onclick = ()=> showPanel('settingsMain');
+    // Clicking the app title resets filters/search/sort and returns to the main articles list
+    const appTitleEl = document.querySelector('.app-title');
+    if(appTitleEl){
+      appTitleEl.style.cursor = 'pointer';
+      appTitleEl.addEventListener('click', ()=>{
+        // reset runtime filters
+        Object.assign(currentFilters, { ...FILTER_DEFAULTS, tagList: [] });
+        // if filter panel is open, repopulate its form if present
+        const filterPanel = stackEl.querySelector('[data-panel="filterAndSortSettings"]');
+        const form = filterPanel?.querySelector('#filterForm') || document.querySelector('#filterForm');
+        if(form) populateFilters(form);
+        // navigate to default panel and reset history fragment
+        try{ history.replaceState({ panel:'articlesInfiniteScrollable', ts:Date.now() }, '', '#articles'); }catch{}
+        showPanel('articlesInfiniteScrollable');
+      });
+    }
     // Scheduled refresh loop
     setInterval(()=>{
       const now = Date.now();
