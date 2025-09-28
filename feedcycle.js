@@ -836,7 +836,25 @@
           syncArticleViewerFavoriteState(p.id);
         });
         actions.append(favBtn);
-        actions.append(el('a',{href:p.link||'#', target:'_blank', rel:'noopener noreferrer', class:'action-btn primary', title:'Open original article'}, 'Open original'));
+          // compute a sensible original-article URL:
+          (function(){
+            let href = p.link || '';
+            // if no link or link is just a hash/empty, attempt to extract first anchor from content
+            try{
+              if(!href || href.trim()==='#' || href.trim()===''){
+                const dp = new DOMParser();
+                const doc = dp.parseFromString(p.content||'', 'text/html');
+                const a = doc.querySelector('a[href]');
+                if(a){ href = a.getAttribute('href') || href; }
+              }
+              // If href is relative and we have a feed.url, resolve against feed.url
+              if(href && feed && feed.url){
+                try{ href = (new URL(href, feed.url)).toString(); }catch(e){}
+              }
+            }catch(e){ /* ignore and fallback to existing href */ }
+            if(!href || href.trim()==='#') href = (feed && feed.url) ? feed.url : '#';
+            actions.append(el('a',{href:href, target:'_blank', rel:'noopener noreferrer', class:'action-btn primary', title:'Open original article'}, 'Open original'));
+          })();
         return actions;
       })()
     ]);
@@ -1715,8 +1733,23 @@
     const items = isAtom? [...doc.querySelectorAll('feed > entry')] : [...doc.querySelectorAll('rss channel item')];
     return items.map(it=>{
       const title = (it.querySelector('title')?.textContent||'').trim();
-      const link = isAtom ? (it.querySelector('link[rel="alternate"]')?.getAttribute('href') || it.querySelector('link')?.getAttribute('href') || '') : (it.querySelector('link')?.textContent||'');
+      // canonical link from RSS/Atom
+      let link = isAtom ? (it.querySelector('link[rel="alternate"]')?.getAttribute('href') || it.querySelector('link')?.getAttribute('href') || '') : (it.querySelector('link')?.textContent||'');
       const content = isAtom ? (it.querySelector('content')?.textContent || it.querySelector('summary')?.textContent || '') : (it.querySelector('description')?.textContent||'');
+      // If link is missing or looks like it merely points to the feed/site, try to find an <a href="..."> inside the content/description
+      try{
+        const contentHtml = content || '';
+        if(!link || (feed && feed.url && safeHost(link) === safeHost(feed.url))){
+          // Create a DOMParser to look for the first anchor in the HTML fragment
+          const dp = new DOMParser();
+          const doc = dp.parseFromString(contentHtml, 'text/html');
+          const a = doc.querySelector('a[href]');
+          if(a){
+            const href = a.getAttribute('href') || '';
+            if(href && href.trim()) link = href.trim();
+          }
+        }
+      }catch(e){ /* ignore parse failures and keep existing link */ }
       const guidSrc = isAtom ? (it.querySelector('id')?.textContent || link || title) : (it.querySelector('guid')?.textContent || link || title);
       const id = hashId((feed.id||'')+'|'+guidSrc);
       const published = it.querySelector('pubDate, updated, published')?.textContent||'';
