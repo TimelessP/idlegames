@@ -1957,26 +1957,7 @@
     const timeEl = byId('mp-time');
     const cueBtn = byId('cueBtn');
     const cueTrack = byId('cueTrack');
-    let trackLabel = byId('mp-track');
-    let trackArticleBtn;
-    let trackTitleSpan;
-    if(!trackLabel){
-      trackArticleBtn = el('button',{id:'mp-track-article', class:'chip mp-track-article', type:'button', hidden:true},'View article');
-      trackTitleSpan = el('span',{class:'mp-track-title'},'No track selected');
-      trackLabel = el('div',{id:'mp-track', class:'mp-track muted', 'aria-live':'polite'},[trackArticleBtn, trackTitleSpan]);
-      if(mpEl.firstChild) mpEl.insertBefore(trackLabel, mpEl.firstChild); else mpEl.append(trackLabel);
-    } else {
-      trackArticleBtn = trackLabel.querySelector('#mp-track-article');
-      if(!trackArticleBtn){
-        trackArticleBtn = el('button',{id:'mp-track-article', class:'chip mp-track-article', type:'button', hidden:true},'View article');
-        trackLabel.prepend(trackArticleBtn);
-      }
-      trackTitleSpan = trackLabel.querySelector('.mp-track-title');
-      if(!trackTitleSpan){
-        trackTitleSpan = el('span',{class:'mp-track-title'}, trackLabel.textContent || 'No track selected');
-        trackLabel.append(trackTitleSpan);
-      }
-    }
+    // No inline track label — keep top controls compact. We'll repurpose favBtn as "View article" when media is active.
     const openCurrentArticle = ()=>{
       const current = mp.current;
       if(!current) return;
@@ -2004,8 +1985,9 @@
         showPanel('articleViewer', { data: post });
       }
     };
-    trackArticleBtn.addEventListener('click', openCurrentArticle);
-    Object.assign(mp.elements, { playBtn, pauseBtn, downloadBtn, favBtn, progress:prog, time:timeEl, trackLabel, trackArticleBtn, trackTitleSpan, toolbar: mpEl });
+  // repurpose favBtn (now a view-article button)
+  favBtn.addEventListener('click', openCurrentArticle);
+  Object.assign(mp.elements, { playBtn, pauseBtn, downloadBtn, favBtn, progress:prog, time:timeEl, toolbar: mpEl });
     playBtn.disabled = true;
     pauseBtn.disabled = true;
     downloadBtn.disabled = true;
@@ -2173,41 +2155,25 @@
     function updateMediaToolbar(){
       const hasTrack = !!mp.current;
       if(!hasTrack){
-        trackTitleSpan.textContent = 'No track selected';
-        trackArticleBtn.hidden = true;
+        // compact state when nothing playing
         downloadBtn.disabled = true;
-        favBtn.disabled = true;
-        if(favUse) favUse.setAttribute('href', '#i-star');
+        favBtn.disabled = true; // view-article disabled
         syncPlaybackButtons();
         return;
       }
       const { media, title, host, post, postId } = mp.current;
-      trackTitleSpan.textContent = host ? `${title} • ${host}` : title;
       const postRef = post || (postId ? posts[postId] : null);
-      if(postRef){
-        trackArticleBtn.hidden = false;
-        trackArticleBtn.textContent = postRef.title ? `View “${postRef.title}”` : 'View article';
-      } else {
-        trackArticleBtn.hidden = true;
-      }
       downloadBtn.disabled = false;
       downloadBtn.title = `Download ${title}`;
       downloadBtn.setAttribute('aria-label', `Download ${title}`);
-      favBtn.disabled = false;
-      updateMediaFavoriteState();
+      // enable view-article button only when we have a post reference
+      favBtn.disabled = !postRef;
+      if(postRef){ favBtn.title = postRef.title ? `View “${postRef.title}”` : 'View article'; favBtn.setAttribute('aria-label', favBtn.title); }
       syncPlaybackButtons();
     }
     function updateMediaFavoriteState(){
-      if(!mp.current){
-        favBtn.setAttribute('aria-pressed','false');
-        if(favUse) favUse.setAttribute('href','#i-star');
-        return;
-      }
-      const isFav = !!state.favorites[mp.current.postId];
-      favBtn.setAttribute('aria-pressed', String(isFav));
-      favBtn.title = isFav? 'Unfavourite media' : 'Favourite media';
-      favBtn.setAttribute('aria-label', favBtn.title);
-      if(favUse) favUse.setAttribute('href', isFav? '#i-star-fill' : '#i-star');
+      // retained API but now a no-op (favourites handled in article UI)
+      return;
     }
     mp.updateToolbar = updateMediaToolbar;
     mp.updateFavorite = updateMediaFavoriteState;
