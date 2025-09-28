@@ -1403,6 +1403,8 @@
     <outline text="NASA Image of the Day" type="rss" xmlUrl="https://www.nasa.gov/rss/dyn/lg_image_of_the_day.rss" category="Space"/>
     <outline text="Hacker News" type="rss" xmlUrl="https://news.ycombinator.com/rss" category="Tech"/>
     <outline text="The Verge" type="rss" xmlUrl="https://www.theverge.com/rss/index.xml" category="Tech"/>
+    <outline text="David Bombal Tech" type="rss" xmlUrl="https://www.youtube.com/feeds/videos.xml?channel_id=UCZTIRrENWr_rjVoA7BcUE_A" category="Tech"/>
+    <outline text="3Blue1Brown" type="rss" xmlUrl="https://www.youtube.com/feeds/videos.xml?channel_id=UCYO_jab_esuFRV4b17AJtAw" category="Tech"/>
     <outline text="Syntax FM" type="rss" xmlUrl="https://feed.syntax.fm/rss" category="Podcasts"/>
     <outline text="Darknet Diaries" type="rss" xmlUrl="https://podcast.darknetdiaries.com/" category="Podcasts"/>
     <outline text="Risky Business" type="rss" xmlUrl="https://risky.biz/feeds/risky-business" category="Podcasts"/>
