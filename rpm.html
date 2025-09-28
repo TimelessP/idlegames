@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>RPM Disc Encoder</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root { color-scheme: light dark; --bg:#111; --fg:#eee; --accent:#ff4d4d; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; }
+  body { margin:0; background:var(--bg); color:var(--fg); display:flex; flex-direction:column; min-height:100vh; }
+  header { padding:1rem 1.25rem; font-size:1.25rem; font-weight:600; letter-spacing:.5px; background:#1b1b1b; box-shadow:0 2px 4px -2px #0008; display:flex; align-items:center; gap:1rem; }
+  .mode-toggle { margin-left:auto; }
+  body.simple .advanced { display:none !important; }
+  #btnSimpleExportDisc { display:none; }
+  body.simple #btnSimpleExportDisc { display:inline-flex; }
+  main { padding:1rem 1.25rem 4rem; max-width:1100px; width:100%; margin:0 auto; display:grid; gap:1.25rem; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+  section { background:#1c1c1f; border:1px solid #2a2a2d; border-radius:12px; padding:1rem 1rem 1.25rem; display:flex; flex-direction:column; gap:.75rem; position:relative; }
+  h2 { margin:.2rem 0 .25rem; font-size:1.05rem; letter-spacing:.5px; font-weight:600; }
+  p { line-height:1.4; margin:.25rem 0 .5rem; font-size:.85rem; opacity:.9; }
+  button,label.btn { cursor:pointer; border:none; border-radius:8px; background:linear-gradient(#2b2b31,#202024); color:var(--fg); font:600 .8rem system-ui; padding:.6rem .9rem; display:inline-flex; align-items:center; gap:.5rem; letter-spacing:.3px; box-shadow:0 2px 3px -1px #000a,0 0 0 1px #2a2a30; position:relative; }
+  button:hover,label.btn:hover { background:#34343a; }
+  button:active,label.btn:active { transform:translateY(1px); }
+  input[type=file] { display:none; }
+  .row { display:flex; flex-wrap:wrap; gap:.5rem; }
+  canvas { max-width:100%; background:#000; image-rendering:pixelated; border-radius:8px; box-shadow:0 0 0 1px #2a2a30,0 4px 18px -6px #000c; }
+  small.code { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; background:#242428; padding:2px 6px; border-radius:4px; font-size:.65rem; letter-spacing:.5px; color:#ccc; }
+  .log { font:12px/1.3 ui-monospace,monospace; background:#101014; padding:.6rem .7rem; border-radius:8px; min-height:3rem; max-height:180px; overflow:auto; box-shadow:0 0 0 1px #222; }
+  .disc-preview-wrap { display:flex; flex-direction:column; gap:.5rem; align-items:flex-start; }
+  footer { position:fixed; bottom:0; left:0; right:0; background:#1b1b1f; display:flex; gap:.75rem; padding:.55rem .9rem; font-size:.65rem; letter-spacing:.4px; color:#888; backdrop-filter:blur(6px); border-top:1px solid #26262a; }
+  footer a { color:#bbb; text-decoration:none; } footer a:hover { color:#fff; }
+  .progress { height:5px; background:#242424; border-radius:3px; overflow:hidden; margin:.35rem 0; }
+  .progress div { height:100%; background:linear-gradient(90deg,var(--accent),#ffb347); width:0%; transition:width .15s linear; }
+  .warning { color:#ffb347; font-size:.7rem; font-weight:600; letter-spacing:.5px; }
+  .success { color:#38d17c; font-size:.7rem; font-weight:600; letter-spacing:.5px; }
+</style>
+</head>
+<body>
+  <header>RPM Disc Encoder / Decoder <small style="font-size:.55em;font-weight:400;opacity:.6;margin-left:.5rem;">Prototype – extremely lossy voice-range transform</small>
+    <button id="btnMode" class="mode-toggle">Simple Mode</button>
+  </header>
+  <main>
+    <section>
+      <h2>1. Input Audio</h2>
+      <p>Load or record an audio clip (mono/stereo) – we downmix to mono, extract a sparse voice-band spectrogram and encode to a circular disc PNG.</p>
+      <div class="row">
+        <label class="btn"><input id="fileIn" type="file" accept="audio/*">Import Audio</label>
+        <button id="btnRecord">Start Recording</button>
+        <button id="btnStopRec" disabled>Stop</button>
+        <button id="btnExportSrc" disabled>Download Source WAV</button>
+        <button id="btnSimpleExportDisc" disabled>Export Disc PNG</button>
+  <label class="btn"><input id="labelIn" type="file" accept="image/*">Import Label Image</label>
+      </div>
+      <div style="display:flex;gap:.5rem;align-items:center;margin-top:.4rem;">
+        <div id="labelPreviewWrap" style="width:64px;height:64px;display:flex;align-items:center;justify-content:center;background:#0d0d0d;border-radius:8px;overflow:hidden;border:1px solid #222;">
+          <img id="labelPreview" src="" alt="" style="max-width:100%;max-height:100%;display:none" />
+        </div>
+        <canvas id="labelDebugCanvas" width="64" height="64" style="width:64px;height:64px;border-radius:6px;background:#080808;display:block;" ></canvas>
+        <div style="font-size:.75rem;opacity:.85;">Label preview — shows the imported image. If empty, import failed.</div>
+      </div>
+      <div class="progress" aria-label="Processing progress"><div id="progBar"></div></div>
+      <audio id="audioSrc" controls style="width:100%;margin-top:.5rem;display:none"></audio>
+      <div id="recStatus" class="warning"></div>
+    </section>
+
+    <section class="advanced">
+      <h2>2. Encode ➜ Disc</h2>
+      <p>Convert the clip into 6 quantized voice bands (80–4000 Hz) per frame. Each frame becomes 3 bytes packed into angular/radial pixel cells of a disc. Outside the disc is transparent.</p>
+      <div class="row">
+        <button id="btnEncode" disabled>Encode Disc</button>
+        <button id="btnDownloadDisc" disabled>Download Disc PNG</button>
+        <button id="btnDownloadDebug" disabled>Debug Strip PNG</button>
+      </div>
+      <details style="border:1px solid #2a2a2d;border-radius:8px;padding:.6rem .7rem;">
+        <summary style="cursor:pointer;font-size:.75rem;letter-spacing:.6px;font-weight:600;opacity:.9;">Encoding Parameters</summary>
+        <div style="display:grid;gap:.45rem;margin-top:.6rem;font-size:.65rem;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));">
+          <label>Hub Radius (px)
+            <input id="paramHub" type="number" min="0" max="200" value="50" style="width:100%;background:#222;color:#ddd;border:1px solid #333;border-radius:4px;padding:2px 4px;font-size:.7rem;">
+          </label>
+          <label>Bits Pattern (CSV)
+            <input id="paramBits" type="text" value="3,3,2" style="width:100%;background:#222;color:#ddd;border:1px solid #333;border-radius:4px;padding:2px 4px;font-size:.7rem;">
+          </label>
+          <label>Pixels / Frame
+            <input id="paramPPF" type="number" min="1" max="255" value="32" style="width:100%;background:#222;color:#ddd;border:1px solid #333;border-radius:4px;padding:2px 4px;font-size:.7rem;" />
+          </label>
+          <label>Gamma (Encode)
+            <input id="paramGamma" type="number" step="0.05" min="0.1" max="3" value="0.65" style="width:100%;background:#222;color:#ddd;border:1px solid #333;border-radius:4px;padding:2px 4px;font-size:.7rem;">
+          </label>
+          <label>Min Freq (Hz)
+            <input id="paramMinF" type="number" min="10" max="2000" value="80" style="width:100%;background:#222;color:#ddd;border:1px solid #333;border-radius:4px;padding:2px 4px;font-size:.7rem;">
+          </label>
+          <label>Max Freq (Hz)
+            <input id="paramMaxF" type="number" min="200" max="12000" value="4000" style="width:100%;background:#222;color:#ddd;border:1px solid #333;border-radius:4px;padding:2px 4px;font-size:.7rem;">
+          </label>
+          <div style="display:flex;flex-direction:column;justify-content:flex-end;font-size:.6rem;line-height:1.2;opacity:.85;">
+            <div><strong id="paramBandCount">Bands:? </strong></div>
+            <div id="paramBitsPerFrame">Bits/Frame:? </div>
+          </div>
+        </div>
+      </details>
+      <div class="disc-preview-wrap">
+        <canvas id="discCanvas" width="0" height="0" hidden></canvas>
+        <canvas id="debugCanvas" width="0" height="0" hidden></canvas>
+      </div>
+      <div id="encodeStatus" class="log"></div>
+    </section>
+
+    <section class="advanced">
+      <h2>Debug Pipeline</h2>
+      <p>Play audio reconstructed from different intermediate stages to isolate loss sources.</p>
+      <div class="row">
+        <button id="btnPlayFloat" disabled>Play Pre-Quant Bands</button>
+        <button id="btnPlayQuant" disabled>Play Quantized Bands</button>
+        <button id="btnPlayPacked" disabled>Play Packed Frame Decode</button>
+      </div>
+      <audio id="debugAudio" controls style="width:100%;display:none;margin-top:.5rem"></audio>
+      <div id="debugStatus" class="log"></div>
+    </section>
+
+    <section>
+  <h2>2. Import Disc ➜ Decode</h2>
+      <p>Load a previously exported disc PNG; we reconstruct the spectrogram & synthesize back an approximation of the audio (additive band-limited synthesis).</p>
+      <div class="row">
+        <label class="btn"><input id="discIn" type="file" accept="image/png">Import Disc PNG</label>
+        <div id="discPreviewWrap" style="display:flex;align-items:center;gap:.5rem;margin-left:.5rem;">
+          <img id="discPreview" src="" alt="Disc preview" style="width:64px;height:64px;border-radius:8px;display:none;object-fit:contain;cursor:pointer;border:1px solid #222;" />
+        </div>
+        <button id="btnImportFromEncode" disabled>From Encoding</button>
+        <button id="btnDecode" disabled>Decode & Rebuild Audio</button>
+        <button id="btnDownloadWav" disabled>Export WAV</button>
+      </div>
+      <audio id="decodedAudio" controls style="width:100%;display:none;margin-top:.5rem"></audio>
+      <div id="decodeStatus" class="log"></div>
+    </section>
+
+    <section class="advanced">
+      <h2>Notes</h2>
+      <p>This is a deliberately esoteric, <em>very</em> lossy encoding. It packs only six coarse energy bands (4-bit each) per time frame -> 24 bits/frame (3 bytes). Frames are arranged radially with angular indexing. Reconstruction invents phases and sums band-limited sines.</p>
+      <p>Intended for experimentation & curiosity – not archival fidelity.</p>
+      <p><strong>Packing Layout</strong><br><small class="code">Byte0: B0(hi4) B1(lo4) | Byte1: B2 B3 | Byte2: B4 B5</small></p>
+      <p><strong>Metadata</strong>: Center pixel 0,0 (relative to center) stores frame count (24-bit). The pixel to the right stores sample rate (16-bit) + bandCount (low 8 as band count). Alpha=255 inside disc, 0 outside.</p>
+    </section>
+  </main>
+  <footer>
+    <span>Local prototype · No upload</span>
+    <span style="margin-left:auto;">© <span id="year"></span> RPM Disc Concept</span>
+  </footer>
+<script>
+(() => {
+  const fileIn = document.getElementById('fileIn');
+  const discIn = document.getElementById('discIn');
+  const audioSrc = document.getElementById('audioSrc');
+  const decodedAudio = document.getElementById('decodedAudio');
+  const btnEncode = document.getElementById('btnEncode');
+  const btnDownloadDisc = document.getElementById('btnDownloadDisc');
+  const btnDownloadDebug = document.getElementById('btnDownloadDebug');
+  const btnDecode = document.getElementById('btnDecode');
+  const btnDownloadWav = document.getElementById('btnDownloadWav');
+  const btnImportFromEncode = document.getElementById('btnImportFromEncode');
+  const labelIn = document.getElementById('labelIn');
+  const btnReapplyLabel = document.getElementById('btnReapplyLabel');
+  const labelPreview = document.getElementById('labelPreview');
+  const labelPreviewWrap = document.getElementById('labelPreviewWrap');
+  const btnRecord = document.getElementById('btnRecord');
+  const btnStopRec = document.getElementById('btnStopRec');
+  const btnMode = document.getElementById('btnMode');
+  const btnExportSrc = document.getElementById('btnExportSrc');
+  const btnSimpleExportDisc = document.getElementById('btnSimpleExportDisc');
+  const btnPlayFloat = document.getElementById('btnPlayFloat');
+  const btnPlayQuant = document.getElementById('btnPlayQuant');
+  const btnPlayPacked = document.getElementById('btnPlayPacked');
+  const debugAudio = document.getElementById('debugAudio');
+  const debugStatus = document.getElementById('debugStatus');
+  const recStatus = document.getElementById('recStatus');
+  const discCanvas = document.getElementById('discCanvas');
+  const debugCanvas = document.getElementById('debugCanvas');
+  const encodeStatus = document.getElementById('encodeStatus');
+  const decodeStatus = document.getElementById('decodeStatus');
+  const progBar = document.getElementById('progBar');
+  document.getElementById('year').textContent = new Date().getFullYear();
+  document.body.classList.add('simple'); // default simple
+  let discDirty = true;
+  btnMode.addEventListener('click', ()=>{
+    const simple = document.body.classList.toggle('simple');
+    btnMode.textContent = simple ? 'Simple Mode' : 'Advanced Mode';
+  });
+
+  // Parameter element refs
+  const ui = {
+    hub: document.getElementById('paramHub'),
+    bits: document.getElementById('paramBits'),
+    ppf: document.getElementById('paramPPF'),
+    gamma: document.getElementById('paramGamma'),
+    minF: document.getElementById('paramMinF'),
+    maxF: document.getElementById('paramMaxF'),
+    legacy: document.getElementById('paramLegacy'),
+    bandCount: document.getElementById('paramBandCount'),
+    bitsPerFrame: document.getElementById('paramBitsPerFrame'),
+  };
+
+  const params = {
+    hubRadius: 50,
+    bitPattern: [3,3,2], // per colour channel bits (R,G,B) aggregated per pixel column half
+    pixelsPerFrame: 32,    // spread a column over N pixels for more bands
+    encodeGamma: 0.65,
+    minFreq: 80,
+    maxFreq: 4000,
+    // legacy mode removed; always dynamic
+  };
+
+  function recalcDerived(){
+    const bitsPerPixel = params.bitPattern.reduce((a,b)=>a+b,0); // conceptual; actual channel mapping approximated
+    const bands = params.pixelsPerFrame * params.bitPattern.length; 
+    const bitsPerFrame = params.pixelsPerFrame * bitsPerPixel;
+    ui.bandCount.textContent = 'Bands: '+bands;
+    ui.bitsPerFrame.textContent = 'Bits/Frame: '+bitsPerFrame;
+  }
+  function syncFromUI(){
+    params.hubRadius = parseInt(ui.hub.value)||0;
+    params.bitPattern = ui.bits.value.split(/[,\s]+/).map(n=>parseInt(n)).filter(n=>!isNaN(n)&&n>0&&n<=6).slice(0,8);
+    if(!params.bitPattern.length) params.bitPattern=[3,3,2];
+  params.pixelsPerFrame = Math.min(255, Math.max(1, parseInt(ui.ppf.value)||1));
+    params.encodeGamma = parseFloat(ui.gamma.value)||0.65;
+    params.minFreq = parseFloat(ui.minF.value)||80;
+    params.maxFreq = parseFloat(ui.maxF.value)||4000;
+    // no legacy mode
+    recalcDerived();
+  }
+  ['hub','bits','ppf','gamma','minF','maxF'].forEach(k=> ui[k].addEventListener('input', syncFromUI));
+  ['hub','bits','ppf','gamma','minF','maxF'].forEach(k=> ui[k].addEventListener('input', ()=>{ discDirty=true; }));
+  syncFromUI();
+
+  // Parameters
+  const FRAME_SIZE = 1024; // STFT frame length
+  const HOP_SIZE = 512;    // overlap-add hop
+  // Legacy constants retained for backward decode path
+  const LEGACY_MIN_FREQ = 80;
+  const LEGACY_MAX_FREQ = 4000;
+  const LEGACY_BAND_COUNT = 6;    // 6 * 4-bit = 24 bits
+  const NIBBLE_LEVELS = 16; // legacy level count
+
+  let audioBuffer = null; // original loaded/recorded
+  let recordedChunks = [];
+  let mediaRecorder = null;
+  const debugStore = { floatBands: null, quantBands: null, packedFrames: null, sampleRate: null, paramsSnapshot: null };
+  let labelImageOriginal = null; // original image element or offscreen canvas
+  let lastLabelOverlayResult = false;
+  let lastDiscRadius = 0;
+  let lastHubColor = [0,0,0];
+  let lastLabelPreviewURL = null;
+  function markOverlayUnknown(){ lastLabelOverlayResult = false; }
+
+  // ---------------- Label Image Import (top-level) -----------------
+  // Keep label import handlers at top-level so they work immediately
+  function handleLabelFile(f){
+    if(!f) return;
+    const dbgCanvas = document.getElementById('labelDebugCanvas');
+    const dbgCtx = dbgCanvas ? dbgCanvas.getContext('2d') : null;
+    const reader = new FileReader();
+    reader.onload = (ev)=>{
+      const url = ev.target.result;
+  // label file read
+      if(encodeStatus) encodeStatus.textContent += '[label] file read, size~'+Math.round((url?.length||0)/1024)+'KB\n';
+      const img = new Image();
+      img.onload = ()=>{
+  // label image loaded
+  // Crop to centered square based on shortest side to make hub labels predictable
+  const srcW = img.naturalWidth, srcH = img.naturalHeight;
+  const side = Math.min(srcW, srcH) | 0;
+  const sx = Math.floor((srcW - side) / 2);
+  const sy = Math.floor((srcH - side) / 2);
+  const c = document.createElement('canvas');
+  c.width = side; c.height = side;
+  const ictx = c.getContext('2d');
+  ictx.drawImage(img, sx, sy, side, side, 0, 0, side, side);
+  labelImageOriginal = c; // store cropped square
+        markOverlayUnknown();
+        // show UI preview by creating a blob URL from the offscreen canvas (more reliable than large dataURLs)
+        try{
+          c.toBlob((blob)=>{
+            if(!blob){
+              labelPreview.style.display='none';
+              if(encodeStatus) encodeStatus.textContent += '[label] preview blob creation failed\n';
+              return;
+            }
+            const obj = URL.createObjectURL(blob);
+            labelPreview.onload = ()=>{ if(encodeStatus) encodeStatus.textContent += '[label] preview rendered\n'; setTimeout(()=>URL.revokeObjectURL(obj),1500); };
+            labelPreview.onerror = (ev)=>{ if(encodeStatus) encodeStatus.textContent += '[label] preview image failed to render (blob)\n'; };
+            if(lastLabelPreviewURL) try{ URL.revokeObjectURL(lastLabelPreviewURL); }catch(e){}
+            lastLabelPreviewURL = obj;
+            labelPreview.src = obj; labelPreview.style.display='block';
+          });
+  }catch(e){ /* toBlob failed (suppressed) */ labelPreview.style.display='none'; }
+        // draw scaled thumbnail into debug canvas so user always sees something
+        if(dbgCtx){
+          dbgCtx.clearRect(0,0,dbgCanvas.width, dbgCanvas.height);
+          // compute fit
+          const scale = Math.min(dbgCanvas.width / img.naturalWidth, dbgCanvas.height / img.naturalHeight);
+          const w = Math.round(img.naturalWidth * scale); const h = Math.round(img.naturalHeight * scale);
+          const ox = Math.round((dbgCanvas.width - w)/2); const oy = Math.round((dbgCanvas.height - h)/2);
+          try{ dbgCtx.drawImage(img, ox, oy, w, h); }catch(e){ /* debug draw failed */ }
+        }
+        if(encodeStatus) encodeStatus.textContent += '[label] imported ('+c.width+'x'+c.height+')\n';
+        discDirty = true;
+        if(debugStore.packedFrames && debugStore.sampleRate){
+          buildDisc(debugStore.packedFrames, debugStore.sampleRate);
+        }
+      };
+      img.onerror = (ev)=>{ if(encodeStatus) encodeStatus.textContent += '[label] image load error\n';
+        if(dbgCtx){ dbgCtx.clearRect(0,0,dbgCanvas.width, dbgCanvas.height); dbgCtx.fillStyle='#600'; dbgCtx.fillRect(0,0,dbgCanvas.width, dbgCanvas.height); }
+      };
+      img.src = url;
+    };
+    reader.onerror = (ev)=>{ if(encodeStatus) encodeStatus.textContent += '[label] file read error\n'; };
+    reader.readAsDataURL(f);
+  }
+
+  labelIn.addEventListener('change', e=>{ handleLabelFile(e.target.files[0]); });
+
+  // Reapply button removed
+
+  btnExportSrc.addEventListener('click', ()=>{
+    if(!audioBuffer) return;
+    const sr = audioBuffer.sampleRate;
+    const mono = downmixToMono(audioBuffer);
+    const wavBuf = float32ToWav(mono, sr);
+    const blob = new Blob([wavBuf], {type:'audio/wav'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='rpm-source.wav'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1200);
+  });
+
+  function log(el, msg) {
+    el.textContent += msg + '\n';
+    el.scrollTop = el.scrollHeight;
+  }
+  function clearLog(el){ el.textContent=''; }
+  function setProgress(p){ progBar.style.width = (p*100).toFixed(1)+'%'; }
+
+  fileIn.addEventListener('change', async e => {
+    const f = e.target.files[0]; if(!f) return;
+    clearLog(encodeStatus); clearLog(decodeStatus);
+    log(encodeStatus, 'Loading audio: ' + f.name);
+    const ab = await f.arrayBuffer();
+    const ac = new (window.AudioContext||window.webkitAudioContext)();
+    audioBuffer = await ac.decodeAudioData(ab.slice(0));
+    ac.close();
+    audioSrc.src = URL.createObjectURL(new Blob([ab]));
+    audioSrc.style.display='block';
+    btnEncode.disabled = false;
+  btnExportSrc.disabled = false;
+  btnSimpleExportDisc.disabled = false;
+  btnImportFromEncode.disabled = false; // allow direct From Encoding before user manually encodes; we'll auto-encode
+  discDirty = true;
+    log(encodeStatus, 'Audio loaded. Duration=' + audioBuffer.duration.toFixed(2)+'s SR=' + audioBuffer.sampleRate);
+  });
+
+  // Recording
+  btnRecord.addEventListener('click', async () => {
+    if(!navigator.mediaDevices) { recStatus.textContent='MediaDevices unavailable'; return; }
+    recordedChunks = [];
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = ev => { if(ev.data.size>0) recordedChunks.push(ev.data); };
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(recordedChunks, {type:'audio/webm'});
+        const arr = await blob.arrayBuffer();
+        const ac = new (window.AudioContext||window.webkitAudioContext)();
+        audioBuffer = await ac.decodeAudioData(arr.slice(0));
+        ac.close();
+        audioSrc.src = URL.createObjectURL(blob);
+        audioSrc.style.display='block';
+        btnEncode.disabled=false;
+  btnExportSrc.disabled=false;
+  btnSimpleExportDisc.disabled=false;
+    btnImportFromEncode.disabled=false;
+        recStatus.textContent='Recording complete';
+  discDirty = true;
+      };
+      mediaRecorder.start();
+      recStatus.textContent='Recording...';
+      btnRecord.disabled=true; btnStopRec.disabled=false;
+    } catch(e){ recStatus.textContent='Mic denied: '+e; }
+  });
+  btnStopRec.addEventListener('click', ()=>{
+    if(mediaRecorder && mediaRecorder.state==='recording'){ mediaRecorder.stop(); }
+    btnRecord.disabled=false; btnStopRec.disabled=true;
+  });
+
+  // FFT implementation (radix-2, minimal) ---------------------------------
+  function fftReal(signal) { // returns complex arrays {re, im}
+    const n = signal.length; if((n & (n-1)) !== 0) throw new Error('FFT size must be power of two');
+    const re = signal.slice();
+    const im = new Float32Array(n);
+    // bit-reverse
+    let j=0; for(let i=0;i<n;i++){ if(i<j){ const tr=re[i]; re[i]=re[j]; re[j]=tr; const ti=im[i]; im[i]=im[j]; im[j]=ti; } let m=n>>1; while(m>=1 && j>=m){ j-=m; m>>=1; } j+=m; }
+    for(let size=2; size<=n; size<<=1){
+      const half = size>>1; const step = Math.PI*2/size;
+      for(let i=0; i<n; i+=size){
+        for(let k=0;k<half;k++){
+          const a = i+k; const b = a+half;
+          const ang = step*k;
+            const wr = Math.cos(ang), wi = Math.sin(ang);
+          const br = re[b]*wr - im[b]*wi;
+          const bi = re[b]*wi + im[b]*wr;
+          re[b] = re[a]-br; im[b] = im[a]-bi;
+          re[a] += br; im[a] += bi;
+        }
+      }
+    }
+    return {re, im};
+  }
+
+  function hann(n){ const w=new Float32Array(n); for(let i=0;i<n;i++){ w[i]=0.5-0.5*Math.cos(2*Math.PI*i/(n-1)); } return w; }
+  const HANN = hann(FRAME_SIZE);
+
+  function downmixToMono(buf){
+    if(buf.numberOfChannels===1) return buf.getChannelData(0).slice();
+    const L = buf.getChannelData(0), R = buf.getChannelData(1);
+    const out = new Float32Array(buf.length);
+    for(let i=0;i<buf.length;i++) out[i] = (L[i]+R[i])*0.5;
+    return out;
+  }
+
+  function freqToIndex(f, sampleRate){ return Math.round(f * FRAME_SIZE / sampleRate); }
+
+  function computeBandEdges(sampleRate, bandCount, minF, maxF){
+    const edges = [];
+    const span = Math.log2(maxF/minF);
+    for(let i=0;i<=bandCount;i++){
+      const f = minF * 2**(span * i / bandCount);
+      edges.push(f);
+    }
+    edges[edges.length-1] = Math.min(edges[edges.length-1], sampleRate/2 * 0.98);
+    return edges;
+  }
+
+  function packBands(nibbles){
+    // nibbles length == 6
+    return [ (nibbles[0]<<4) | nibbles[1], (nibbles[2]<<4) | nibbles[3], (nibbles[4]<<4) | nibbles[5] ];
+  }
+  function unpackBands(bytes){
+    return [ bytes[0]>>4, bytes[0]&15, bytes[1]>>4, bytes[1]&15, bytes[2]>>4, bytes[2]&15 ];
+  }
+
+  // Dynamic packing: deterministic mapping, first 3 pattern entries -> RGB per pixel (extension point for >3 later)
+  function packDynamicBands(values, bitPattern, pixelsPerFrame){
+    const bytes = [];
+    let vIndex=0;
+    for(let p=0;p<pixelsPerFrame;p++){
+      let r=0,g=0,b=0;
+      for(let c=0;c<bitPattern.length && vIndex<values.length;c++){
+        const bits = bitPattern[c];
+        const levels = (1<<bits)-1;
+        const raw = values[vIndex++];
+        const quant = Math.min(levels, Math.round(raw * levels));
+        const scaled = bits<8 ? Math.round(quant * (255/levels)) : quant; // expand to full 0..255
+        if(c===0) r = scaled; else if(c===1) g = scaled; else if(c===2) b = scaled;
+      }
+      bytes.push(r,g,b);
+    }
+    return bytes;
+  }
+
+  async function encodeDisc(){
+    if(!audioBuffer) return;
+    clearLog(encodeStatus); setProgress(0);
+    log(encodeStatus,'Preparing frames (two-pass normalization)...');
+    const sr = audioBuffer.sampleRate;
+    const mono = downmixToMono(audioBuffer);
+    const dynFrames = [];
+    debugStore.floatBands = [];
+    debugStore.quantBands = [];
+    debugStore.packedFrames = null;
+    debugStore.sampleRate = sr;
+    syncFromUI();
+    const dynamicBandCount = (params.pixelsPerFrame * params.bitPattern.length);
+    const edges = computeBandEdges(sr, dynamicBandCount, params.minFreq, params.maxFreq);
+    const bandRanges = edges.map((e,i)=> i<edges.length-1 ? [edges[i], edges[i+1]] : null).filter(Boolean);
+    const totalFrames = Math.max(0, Math.floor((mono.length - FRAME_SIZE)/HOP_SIZE)+1);
+    const rawBandFrames = new Array(totalFrames);
+    const globalMaxPerBand = new Float32Array(dynamicBandCount);
+    for(let f=0; f<totalFrames; f++){
+      const offset = f*HOP_SIZE;
+      const slice = mono.subarray(offset, offset+FRAME_SIZE);
+      const win = new Float32Array(FRAME_SIZE);
+      for(let i=0;i<FRAME_SIZE;i++) win[i] = (slice[i]||0) * HANN[i];
+      const {re, im} = fftReal(win);
+      const mags = new Float32Array(FRAME_SIZE/2);
+      for(let k=0;k<mags.length;k++) mags[k] = Math.hypot(re[k], im[k]);
+      const bandVals = [];
+      for(const [lo,hi] of bandRanges){
+        const i1=freqToIndex(lo,sr), i2=freqToIndex(hi,sr);
+        let sum=0, count=0; for(let k=i1;k<=i2 && k<mags.length;k++){ sum+=mags[k]; count++; }
+        bandVals.push(count? sum/count : 0);
+      }
+      rawBandFrames[f] = bandVals;
+      for(let b=0;b<dynamicBandCount;b++){ if(bandVals[b] > globalMaxPerBand[b]) globalMaxPerBand[b] = bandVals[b]; }
+      if(f%40===0) setProgress(f/totalFrames*0.5);
+    }
+    for(let b=0;b<dynamicBandCount;b++){ if(globalMaxPerBand[b]===0) globalMaxPerBand[b]=1e-9; }
+    log(encodeStatus,'Global band maxima sample: '+Array.from(globalMaxPerBand.slice(0,Math.min(6,dynamicBandCount))).map(v=>v.toExponential(2)).join(','));
+    // Second pass
+    for(let f=0; f<totalFrames; f++){
+      const gamma = params.encodeGamma;
+      const norm = rawBandFrames[f].map((v,i)=> (v / globalMaxPerBand[i]) ** gamma);
+      debugStore.floatBands.push(norm.slice());
+      const packed = packDynamicBands(norm, params.bitPattern, params.pixelsPerFrame);
+      const perChan = [];
+      for(let i=0;i<packed.length;i+=3){ perChan.push(packed[i]/255, packed[i+1]/255, packed[i+2]/255); }
+      debugStore.quantBands.push(perChan.slice(0, norm.length));
+      dynFrames.push(packed);
+      if(f%40===0) setProgress(0.5 + f/totalFrames*0.5);
+    }
+    setProgress(1);
+    log(encodeStatus,'Frames: '+dynFrames.length+' (duration '+(dynFrames.length*HOP_SIZE/sr).toFixed(2)+'s)');
+    log(encodeStatus,'Dynamic hub='+params.hubRadius+'px bands='+(dynamicBandCount)+' ppf='+params.pixelsPerFrame+' pattern='+params.bitPattern.join('-'));
+    debugStore.packedFrames = dynFrames;
+    debugStore.paramsSnapshot = JSON.parse(JSON.stringify(params));
+    btnPlayFloat.disabled = false; btnPlayQuant.disabled = false; btnPlayPacked.disabled = false;
+    log(encodeStatus,'Debug: stored '+debugStore.floatBands.length+' normalized frames');
+    drawDebugStrip(dynFrames.map(pix=>{ const arr = pix.slice(0,3); return [arr[0]>>4, arr[0]&15, arr[1]>>4, arr[1]&15, arr[2]>>4, arr[2]&15]; }), 'debugCanvas', Math.min(LEGACY_BAND_COUNT, dynamicBandCount));
+    log(encodeStatus,'Laying out disc...');
+  markOverlayUnknown();
+  buildDisc(dynFrames, sr);
+    log(encodeStatus,'Disc ready. PNG size '+discCanvas.width+'x'+discCanvas.height);
+    btnDownloadDisc.disabled=false; btnDownloadDebug.disabled=false; btnImportFromEncode.disabled=false;
+  }
+
+  function drawDebugStrip(frames, id, bands){
+    const canvas = debugCanvas; const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    canvas.width = frames.length; canvas.height = bands; canvas.hidden=false;
+    const img = ctx.createImageData(canvas.width, canvas.height);
+    for(let x=0;x<frames.length;x++){
+      const n = unpackBands(frames[x]);
+      for(let b=0;b<bands;b++){
+        const v = n[b]/15 * 255;
+        const idx = (b*canvas.width + x)*4;
+        img.data[idx]=img.data[idx+1]=img.data[idx+2]=v;
+        img.data[idx+3]=255;
+      }
+    }
+    ctx.putImageData(img,0,0);
+  }
+
+  function effectiveHubRadius(hub, discRadius){
+    if(hub && hub > 0) return hub;
+    if(discRadius && discRadius > 0) return Math.max(8, discRadius * 0.35);
+    return 0;
+  }
+
+  function applyLabelOverlay(ctx, size, hub, discRadius){
+    if(!labelImageOriginal) return false;
+    const lw = labelImageOriginal.width;
+    const lh = labelImageOriginal.height;
+    if(!lw || !lh) return false;
+    const baseRadius = effectiveHubRadius(hub, discRadius);
+    if(baseRadius <= 0) return false;
+    const outerRadius = baseRadius * 0.96;
+    const innerRadius = baseRadius * 0.12;
+    const targetOuter = outerRadius * 2;
+  const scale = Math.min(targetOuter / lw, targetOuter / lh);
+  // applyLabelOverlay: parameters computed (debug log suppressed)
+    if(!isFinite(scale) || scale <= 0) return false;
+    const drawW = lw * scale;
+    const drawH = lh * scale;
+    const cx = size/2;
+    const cy = size/2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.beginPath();
+    ctx.arc(0, 0, outerRadius, 0, Math.PI*2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(labelImageOriginal, -drawW/2, -drawH/2, drawW, drawH);
+    if(innerRadius > 1){
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.beginPath();
+      ctx.arc(0, 0, innerRadius, 0, Math.PI*2);
+      ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    ctx.restore();
+    return true;
+  }
+
+  // Render label into an offscreen canvas (same size as disc) with outer clip and inner punch.
+  function renderLabelCanvas(size, hub, discRadius){
+    if(!labelImageOriginal) return null;
+    const lw = labelImageOriginal.width, lh = labelImageOriginal.height;
+    const baseRadius = effectiveHubRadius(hub, discRadius);
+    if(baseRadius <= 0) return null;
+    const outerRadius = baseRadius * 0.96;
+    const innerRadius = baseRadius * 0.12;
+    const targetOuter = outerRadius * 2;
+    const scale = Math.min(targetOuter / lw, targetOuter / lh);
+    if(!isFinite(scale) || scale <= 0) return null;
+    const drawW = lw * scale, drawH = lh * scale;
+    const c = document.createElement('canvas'); c.width = size; c.height = size;
+    const ctx = c.getContext('2d');
+    const cx = size/2, cy = size/2;
+    ctx.save(); ctx.translate(cx, cy);
+    ctx.beginPath(); ctx.arc(0,0,outerRadius,0,Math.PI*2); ctx.closePath(); ctx.clip();
+    ctx.drawImage(labelImageOriginal, -drawW/2, -drawH/2, drawW, drawH);
+    if(innerRadius > 1){ ctx.globalCompositeOperation = 'destination-out'; ctx.beginPath(); ctx.arc(0,0,innerRadius,0,Math.PI*2); ctx.fill(); ctx.globalCompositeOperation = 'source-over'; }
+    ctx.restore();
+    return c;
+  }
+
+  // Merge label canvas pixels into the disc image data while protecting a rectangular metadata area.
+  function mergeLabelOntoImageData(imgData, labelCanvas, metaRect){
+    if(!labelCanvas) return false;
+    const size = labelCanvas.width;
+    const lctx = labelCanvas.getContext('2d', { willReadFrequently: true });
+    const lab = lctx.getImageData(0,0,size,size).data;
+    const data = imgData.data;
+    const mx0 = metaRect.x, my0 = metaRect.y, mx1 = mx0 + metaRect.w, my1 = my0 + metaRect.h;
+    let applied = false;
+    for(let y=0;y<size;y++){
+      for(let x=0;x<size;x++){
+        const idx = (y*size + x)*4;
+        const alpha = lab[idx+3];
+        if(alpha===0) continue; // nothing to blit
+        // skip meta rect to preserve metadata
+        if(x>=mx0 && x<mx1 && y>=my0 && y<my1) continue;
+        data[idx] = lab[idx]; data[idx+1] = lab[idx+1]; data[idx+2] = lab[idx+2]; data[idx+3] = lab[idx+3];
+        applied = true;
+      }
+    }
+    return applied;
+  }
+
+  function verifyLabelOverlay(ctx, size, hub, discRadius, hubColor){
+    if(!labelImageOriginal) return false;
+    const baseRadius = effectiveHubRadius(hub, discRadius);
+    if(baseRadius <= 0) return false;
+    const outerRadius = baseRadius * 0.9;
+    const innerRadius = baseRadius * 0.2;
+    if(outerRadius <= innerRadius) return false;
+    const testRadius = (outerRadius + innerRadius) * 0.5;
+    const cx = size/2;
+    const cy = size/2;
+    const img = ctx.getImageData(0,0,size,size);
+    const [hubR, hubG, hubB] = hubColor;
+    let hits = 0;
+    for(let i=0;i<12;i++){
+      const ang = (Math.PI*2*i)/12;
+      const x = Math.round(cx + Math.cos(ang)*testRadius);
+      const y = Math.round(cy + Math.sin(ang)*testRadius);
+      if(x<0||y<0||x>=size||y>=size) continue;
+      const idx = (y*size + x)*4;
+      const r = img.data[idx], g = img.data[idx+1], b = img.data[idx+2];
+      if(Math.abs(r-hubR)>2 || Math.abs(g-hubG)>2 || Math.abs(b-hubB)>2){
+        hits++;
+      }
+    }
+    return hits >= 3;
+  }
+
+  function buildDisc(frames, sampleRate){
+  const hub = params.hubRadius|0;
+    const ppf = params.pixelsPerFrame;
+    const frameCount = frames.length;
+    const requiredFramePixels = frameCount * ppf;
+    // Radius estimation then exact count refinement
+    function estimateRadius(req, hub){ return Math.ceil(Math.sqrt(hub*hub + req/Math.PI))+2; }
+    function countCoords(r){
+      let cnt=0; const r2=r*r, hub2=hub*hub;
+      for(let y=-r;y<=r;y++){
+        for(let x=-r;x<=r;x++){
+          const d2 = x*x + y*y; if(d2>r2 || d2<=hub2) continue; cnt++; }
+      }
+      return cnt;
+    }
+    let radius = estimateRadius(requiredFramePixels, hub);
+    while(countCoords(radius) < requiredFramePixels) radius++;
+    const radiusHigh = (radius>>8)&0xF, radiusLow = radius & 0xFF;
+    const size = radius*2 + 6; // margin
+    discCanvas.width = discCanvas.height = size; discCanvas.hidden=false;
+    const ctx = discCanvas.getContext('2d', { willReadFrequently: true });
+    ctx.clearRect(0,0,size,size);
+    const cx = size/2, cy = size/2;
+    const img = ctx.getImageData(0,0,size,size);
+    function setPixel(x,y,r,g,b,a){ if(x<0||y<0||x>=size||y>=size) return; const i=(y*size+x)*4; img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=a; }
+    for(let i=0;i<img.data.length;i+=4) img.data[i+3]=0;
+    function hashAudio(){ if(!audioBuffer) return 0x123456; const ch = audioBuffer.getChannelData(0); let h=2166136261>>>0; const step=Math.max(1,Math.floor(ch.length/5000)); for(let i=0;i<ch.length;i+=step){ let v=(ch[i]*32767)|0; h ^= v; h = Math.imul(h,16777619);} return h>>>0; }
+  const hcol = hashAudio(); const hubR = hcol & 0xFF, hubG=(hcol>>>8)&0xFF, hubB=(hcol>>>16)&0xFF;
+  lastHubColor = [hubR, hubG, hubB];
+    // Draw hub color fill (label applied later to ensure on top)
+    for(let y=0;y<size;y++) for(let x=0;x<size;x++){ const dx=x-cx, dy=y-cy; if(dx*dx+dy*dy <= hub*hub){ setPixel(x,y,hubR,hubG,hubB,255);} }
+    // Extended metadata with radius encoding
+    const version = 1;
+    const gamma100 = Math.min(255, Math.round((params.encodeGamma||0.65)*100));
+    const minF = Math.round(params.minFreq)||0; const maxF = Math.round(params.maxFreq)||0;
+    const fcHi = (frameCount>>16)&255, fcMid=(frameCount>>8)&255, fcLo=frameCount&255;
+    const mCx = Math.round(cx), mCy = Math.round(cy);
+    // Pixel layout (updated):
+    // #1: version(high4)|radiusHigh(low4), frameCountHi, frameCountMid
+    // #2: frameCountLow, SRhi, SRlo
+    // #3: hub, ppf, patternLen
+    // #4: gamma*100, minFhi, minFlo
+    // #5: maxFhi, maxFlo, radiusLow
+    // #6.. pattern
+    setPixel(mCx, mCy, ((version&0xF)<<4)|(radiusHigh&0xF), fcHi, fcMid, 255);
+    setPixel(mCx+1, mCy, fcLo, (sampleRate>>8)&255, sampleRate&255, 255);
+    setPixel(mCx, mCy+1, Math.min(255,hub), ppf & 255, params.bitPattern.length & 255, 255);
+    setPixel(mCx+1, mCy+1, gamma100, (minF>>8)&255, minF&255, 255);
+    setPixel(mCx+2, mCy, (maxF>>8)&255, maxF&255, radiusLow, 255);
+    const pattern = params.bitPattern.slice(0,8);
+    const neededPatternPixels = Math.ceil(pattern.length/3);
+    for(let i=0;i<neededPatternPixels;i++){
+      const b0=pattern[i*3]||0, b1=pattern[i*3+1]||0, b2=pattern[i*3+2]||0;
+      setPixel(mCx+2+i, mCy+1, b0&255, b1&255, b2&255, 255);
+    }
+    // Enumerate coordinates outside hub sorted by radius then angle
+    const coords=[]; const r2=radius*radius, hub2=hub*hub;
+    for(let y=-radius;y<=radius;y++){
+      for(let x=-radius;x<=radius;x++){
+        const d2 = x*x + y*y; if(d2<=hub2 || d2>r2) continue; coords.push({x,y,d2,ang:Math.atan2(y,x)}); }
+    }
+    coords.sort((a,b)=> a.d2===b.d2 ? a.ang-b.ang : a.d2-b.d2);
+    // Fill frame pixels sequentially
+    let neededPixels = requiredFramePixels;
+    let coordIndex=0; let frameIndex=0; let pixelInFrame=0; let triplets=null;
+    while(frameIndex < frameCount && coordIndex < coords.length){
+      if(triplets===null){
+        const fr = frames[frameIndex]; triplets=[]; for(let i=0;i<fr.length;i+=3) triplets.push([fr[i],fr[i+1],fr[i+2]]); pixelInFrame=0; }
+      const cpt = coords[coordIndex++];
+      const [r0,g0,b0] = triplets[pixelInFrame++];
+      setPixel(mCx + cpt.x, mCy + cpt.y, r0,g0,b0,255);
+      if(pixelInFrame>=triplets.length){ frameIndex++; triplets=null; }
+    }
+    lastDiscRadius = radius;
+    // Compose label onto imageData while protecting metadata region.
+    const labelCanvasRendered = renderLabelCanvas(size, hub, radius);
+    // metadata rectangle: we reserved pixels at (mCx, mCy) to (mCx+2+neededPatternPixels, mCy+1)
+    const metaW = 3 + neededPatternPixels; const metaH = 2;
+    const metaRect = { x: Math.max(0, mCx - 0), y: Math.max(0, mCy - 0), w: metaW, h: metaH };
+    let applied = false;
+    if(labelCanvasRendered){
+      applied = mergeLabelOntoImageData(img, labelCanvasRendered, metaRect);
+      if(applied) ctx.putImageData(img,0,0);
+    }
+    if(!applied){
+      // Merge did not apply; label may be missing or empty (debug suppressed)
+      if(encodeStatus) encodeStatus.textContent += 'Label overlay: apply failed\n';
+    }
+    lastLabelOverlayResult = applied && verifyLabelOverlay(ctx, size, hub, radius, [hubR, hubG, hubB]);
+    if(labelImageOriginal){
+      if(encodeStatus){
+        if(lastLabelOverlayResult){
+          encodeStatus.textContent += 'Label applied\n';
+        } else if(applied){
+          encodeStatus.textContent += 'Label applied but verification failed\n';
+        } else {
+          encodeStatus.textContent += 'Label image present but overlay failed\n';
+        }
+      }
+  // label overlay status
+    }
+  }
+
+  function downloadCanvas(c, name){ c.toBlob(b=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1500); }, 'image/png'); }
+
+  async function ensureEncodedThenDownload(){
+    if(discDirty){
+      await encodeDisc();
+      discDirty=false;
+    } else {
+      // Ensure disc canvas reflects latest frames (especially for label overlay) before export.
+      if(debugStore.packedFrames && debugStore.sampleRate){
+        if(debugStore.paramsSnapshot){
+          Object.assign(params, debugStore.paramsSnapshot);
+          recalcDerived();
+        }
+        markOverlayUnknown();
+        buildDisc(debugStore.packedFrames, debugStore.sampleRate);
+        if(encodeStatus){
+          encodeStatus.textContent += lastLabelOverlayResult ? 'Label refreshed pre-export\n' : 'Label refresh failed pre-export\n';
+        }
+      }
+    }
+    if(labelImageOriginal && debugStore.packedFrames && debugStore.sampleRate && !lastLabelOverlayResult){
+      // Attempt safe merge: render label into offscreen canvas then merge preserving metadata
+      const labelCanvasRendered = renderLabelCanvas(discCanvas.width, params.hubRadius|0, lastDiscRadius);
+      const ctx = discCanvas.getContext('2d');
+      if(labelCanvasRendered){
+        // metadata area estimate around center
+        const mCx = Math.round(discCanvas.width/2), mCy = Math.round(discCanvas.height/2);
+        const pattern = params.bitPattern.slice(0,8);
+        const neededPatternPixels = Math.ceil(pattern.length/3);
+        const metaW = 3 + neededPatternPixels, metaH = 2;
+        const metaRect = { x: Math.max(0, mCx - 0), y: Math.max(0, mCy - 0), w: metaW, h: metaH };
+        const img = ctx.getImageData(0,0,discCanvas.width, discCanvas.height);
+        const applied = mergeLabelOntoImageData(img, labelCanvasRendered, metaRect);
+  if(applied){ ctx.putImageData(img,0,0); const verified = verifyLabelOverlay(ctx, discCanvas.width, params.hubRadius|0, lastDiscRadius, lastHubColor); lastLabelOverlayResult = verified || applied; if(encodeStatus) encodeStatus.textContent += verified ? 'Label overlay recovered at export\n' : 'Label overlay applied without verification\n'; }
+        else { if(encodeStatus) encodeStatus.textContent += 'Warning: label overlay missing\n'; /* suppressed console warning */ }
+  } else { if(encodeStatus) encodeStatus.textContent += 'Warning: label render failed\n'; /* suppressed console warning */ }
+    }
+    downloadCanvas(discCanvas, 'rpm-disc.png');
+  }
+
+  btnEncode.addEventListener('click', encodeDisc);
+  btnDownloadDisc.addEventListener('click', (e)=>{ e.preventDefault(); ensureEncodedThenDownload(); });
+  btnSimpleExportDisc.addEventListener('click', (e)=>{ e.preventDefault(); ensureEncodedThenDownload(); });
+  btnDownloadDebug.addEventListener('click', ()=> downloadCanvas(debugCanvas, 'rpm-debug-strip.png') );
+
+  // ------------------------------ DECODING ------------------------------
+  let decodedFrames = null; let decodedSampleRate = 16000; let lastDecodedMeta = null;
+
+  function decodeFromCanvas(c){
+    const ctx=c.getContext('2d', { willReadFrequently: true });
+    const data = ctx.getImageData(0,0,c.width,c.height);
+    const cx=c.width/2, cy=c.height/2;
+    function get(x,y){ const i=(y*c.width+x)*4; return [data.data[i],data.data[i+1],data.data[i+2],data.data[i+3]]; }
+    const cxi=Math.round(cx), cyi=Math.round(cy);
+    const [vNib, fcHi, fcMid, a1] = get(cxi, cyi); if(a1!==255){ log(decodeStatus,'Missing meta #1'); return false; }
+    const version = (vNib>>4)&0xF; const radiusHigh = vNib & 0xF;
+    const [fcLo, srHi, srLo, a2] = get(cxi+1, cyi); if(a2!==255){ log(decodeStatus,'Missing meta #2'); return false; }
+    const frameCount = (fcHi<<16)|(fcMid<<8)|fcLo;
+    const sampleRate = (srHi<<8)|srLo; decodedSampleRate = sampleRate;
+    const [hubR, ppf, patLen, a3] = get(cxi, cyi+1); if(a3!==255){ log(decodeStatus,'Missing meta #3'); return false; }
+    const [gamma100, minFHi, minFLo, a4] = get(cxi+1, cyi+1); if(a4!==255){ log(decodeStatus,'Missing meta #4'); return false; }
+    const [maxFHi, maxFLo, radiusLow, a5] = get(cxi+2, cyi); if(a5!==255){ log(decodeStatus,'Missing meta #5'); return false; }
+    const radius = ((radiusHigh<<8)|radiusLow);
+    const minFreq = (minFHi<<8)|minFLo; const maxFreq = (maxFHi<<8)|maxFLo; const gamma = gamma100/100 || 0.65;
+    // Pattern pixels start at (cxi+2, cyi+1)
+    const pattern = [];
+    if(patLen>0){
+      const neededPatternPixels = Math.ceil(patLen/3);
+      for(let i=0;i<neededPatternPixels;i++){
+        const [b0,b1,b2,aP] = get(cxi+2+i, cyi+1); if(aP!==255) break; pattern.push(b0,b1,b2); }
+    }
+    const bitPattern = pattern.slice(0,patLen).filter(v=>v>0);
+    log(decodeStatus,'Meta v'+version+': frames='+frameCount+' SR='+sampleRate+' hub='+hubR+' ppf='+ppf+' bands='+(ppf*bitPattern.length)+' gamma='+gamma.toFixed(2)+' f=['+minFreq+','+maxFreq+'] radius='+radius+' pattern='+bitPattern.join(','));
+  const dyn = { hubRadius: hubR, pixelsPerFrame: ppf, bitPattern, minFreq, maxFreq, gamma };
+  lastDecodedMeta = dyn;
+    const frames = [];
+    const hub2 = dyn.hubRadius*dyn.hubRadius; const r2 = radius*radius;
+    const coords=[];
+    for(let y=-radius;y<=radius;y++){
+      for(let x=-radius;x<=radius;x++){
+        const d2 = x*x + y*y; if(d2<=hub2 || d2>r2) continue; coords.push({x,y,d2,ang:Math.atan2(y,x)});
+      }
+    }
+    coords.sort((a,b)=> a.d2===b.d2 ? a.ang-b.ang : a.d2-b.d2);
+    const pixelsPerFrame = dyn.pixelsPerFrame;
+    const requiredPixels = frameCount * pixelsPerFrame;
+    if(coords.length < requiredPixels){ log(decodeStatus,'Error: coord underflow'); return false; }
+    for(let f=0; f<frameCount; f++){
+      const arr=[];
+      for(let p=0;p<pixelsPerFrame;p++){
+        const cpt = coords[f*pixelsPerFrame + p];
+        const [r0,r1,r2,a] = get(cxi + cpt.x, cyi + cpt.y);
+        arr.push(r0,r1,r2);
+      }
+      frames.push(arr);
+    }
+    decodedFrames = frames;
+    btnDecode.disabled=false;
+    return true;
+  }
+
+  discIn.addEventListener('change', e=>{
+    const f = e.target.files[0]; if(!f) return;
+    // set preview image (clickable to toggle fullscreen)
+    const preview = document.getElementById('discPreview');
+    if(preview){
+      try{ if(preview._objUrl) URL.revokeObjectURL(preview._objUrl); }catch(e){}
+      const obj = URL.createObjectURL(f); preview._objUrl = obj; preview.src = obj; preview.style.display='block';
+    }
+    const img = new Image();
+    const imgObjUrl = URL.createObjectURL(f);
+    img.onload = ()=>{
+      const c = document.createElement('canvas'); c.width=img.width; c.height=img.height; c.getContext('2d', { willReadFrequently: true }).drawImage(img,0,0);
+      decodeFromCanvas(c);
+      try{ URL.revokeObjectURL(imgObjUrl); }catch(e){}
+    };
+    img.src = imgObjUrl;
+
+    // lazy create fullscreen overlay and wire preview click
+    let overlay = document.getElementById('discPreviewOverlay');
+    if(!overlay){
+      overlay = document.createElement('div'); overlay.id='discPreviewOverlay';
+      overlay.style = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);z-index:9999;cursor:pointer';
+      const imgFull = document.createElement('img'); imgFull.id='discPreviewFull'; imgFull.style='max-width:98%;max-height:98%;border-radius:12px;box-shadow:0 8px 40px #000';
+      overlay.appendChild(imgFull);
+      document.body.appendChild(overlay);
+      overlay.addEventListener('click', ()=>{ overlay.style.display='none'; });
+      // close on Escape
+      document.addEventListener('keydown', e=>{ if(e.key==='Escape') overlay.style.display='none'; });
+    }
+    // update full image when preview clicked
+    if(preview){
+      preview.onclick = ()=>{
+        const full = document.getElementById('discPreviewFull');
+        if(!full) return;
+        full.src = preview.src;
+        overlay.style.display = 'flex';
+      };
+    }
+  });
+
+  btnDecode.addEventListener('click', async ()=>{
+    if(!decodedFrames){ return; }
+    clearLog(decodeStatus);
+    log(decodeStatus,'Reconstructing audio from '+decodedFrames.length+' frames...');
+    const wav = rebuildAudio(decodedFrames, decodedSampleRate);
+    const blob = new Blob([wav], {type:'audio/wav'});
+    decodedAudio.src = URL.createObjectURL(blob);
+    decodedAudio.style.display='block';
+    btnDownloadWav.disabled=false;
+    log(decodeStatus,'Decode complete. Duration ~'+decodedFrames.length*HOP_SIZE/decodedSampleRate+'s');
+  });
+
+  btnDownloadWav.addEventListener('click', ()=>{
+    if(!decodedAudio.src) return;
+    fetch(decodedAudio.src).then(r=>r.blob()).then(blob=>{
+      const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='rpm-decoded.wav'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1200);
+    });
+  });
+
+  btnImportFromEncode.addEventListener('click', ()=>{
+    clearLog(decodeStatus);
+    const needEncode = discDirty || discCanvas.width===0;
+    const proceed = async () => {
+      if(needEncode){
+        log(decodeStatus,'Auto-encoding disc before decode...');
+        await encodeDisc();
+        discDirty=false;
+      }
+      log(decodeStatus,'Decoding from current in-memory disc...');
+      decodeFromCanvas(discCanvas);
+    };
+    proceed();
+  });
+
+  function rebuildAudio(frames, sr){
+    const samples = (frames.length-1)*HOP_SIZE + FRAME_SIZE;
+    const out = new Float32Array(samples);
+    // Derive band frequency centers same as encode
+    // Determine if dynamic: frame element length !=3
+    const dynamic = frames.length>0 && frames[0].length!==3;
+    let bandCount = LEGACY_BAND_COUNT;
+    if(dynamic){
+      // Each channel value acts as its own band
+      bandCount = frames[0].length; 
+    }
+  const minF = dynamic ? (lastDecodedMeta?.minFreq ?? params.minFreq) : LEGACY_MIN_FREQ;
+  const maxF = dynamic ? (lastDecodedMeta?.maxFreq ?? params.maxFreq) : LEGACY_MAX_FREQ;
+    const edges = computeBandEdges(sr, bandCount, minF, maxF);
+    const centers = []; for(let i=0;i<edges.length-1;i++){ centers.push(Math.sqrt(edges[i]*edges[i+1])); }
+    for(let i=0;i<frames.length;i++){
+      let amps;
+      if(!dynamic){
+        const frame = unpackBands(frames[i]);
+        amps = frame.map(v=> (v/15) ** (1/0.65));
+      } else {
+        const pix = frames[i]; // dynamic: already expanded RGB values per pixel
+        amps = new Array(pix.length);
+  const gInv = 1/((lastDecodedMeta?.gamma)||params.encodeGamma||0.65);
+        for(let k=0;k<pix.length;k++) amps[k] = (pix[k]/255) ** gInv;
+      }
+      const offset = i*HOP_SIZE;
+      for(let n=0;n<FRAME_SIZE;n++){
+        const t = (n/ sr);
+        let sample = 0;
+        for(let b=0;b<centers.length;b++){
+          const freq = centers[b];
+            sample += Math.sin(2*Math.PI*freq*(i*HOP_SIZE/ sr + n/ sr)) * amps[b];
+        }
+        sample *= HANN[n];
+        out[offset+n] += sample * 0.15; // scale down to avoid clipping
+      }
+    }
+    // normalize
+    let peak=0; for(let i=0;i<out.length;i++){ const a=Math.abs(out[i]); if(a>peak) peak=a; }
+    if(peak>0){ const g=1/peak; for(let i=0;i<out.length;i++){ out[i]*=g*0.9; } }
+    return float32ToWav(out, sr);
+  }
+
+  // Generic synthesis from band energy frames (normalized 0..1)
+  function synthFromBands(bandFrames, sr, minF, maxF){
+    if(!bandFrames || !bandFrames.length) return null;
+    const bandCount = bandFrames[0].length;
+    const edges = computeBandEdges(sr, bandCount, minF, maxF);
+    const centers = []; for(let i=0;i<edges.length-1;i++){ centers.push(Math.sqrt(edges[i]*edges[i+1])); }
+    const samples = (bandFrames.length-1)*HOP_SIZE + FRAME_SIZE;
+    const out = new Float32Array(samples);
+    for(let i=0;i<bandFrames.length;i++){
+      const amps = bandFrames[i];
+      const offset=i*HOP_SIZE;
+      for(let n=0;n<FRAME_SIZE;n++){
+        let sample=0; for(let b=0;b<centers.length;b++){ sample += Math.sin(2*Math.PI*centers[b]*(i*HOP_SIZE/sr + n/sr)) * (amps[b]**(1/(params.encodeGamma||0.65))); }
+        sample *= HANN[n];
+        out[offset+n]+= sample * 0.15;
+      }
+    }
+    let peak=0; for(let i=0;i<out.length;i++){ const a=Math.abs(out[i]); if(a>peak) peak=a; }
+    if(peak>0){ const g=0.9/peak; for(let i=0;i<out.length;i++) out[i]*=g; }
+    return float32ToWav(out, sr);
+  }
+
+  function playDebug(buffer, label){
+    if(!buffer){ log(debugStatus, 'No data for '+label); return; }
+    const blob = new Blob([buffer], {type:'audio/wav'});
+    debugAudio.src = URL.createObjectURL(blob);
+    debugAudio.style.display='block';
+    debugAudio.play();
+    log(debugStatus, 'Playing '+label+' ('+ (buffer.byteLength/1024).toFixed(1)+' KB WAV)');
+  }
+
+  btnPlayFloat.addEventListener('click', ()=>{
+    if(!debugStore.floatBands){ log(debugStatus,'No float bands yet'); return; }
+    const wav = synthFromBands(debugStore.floatBands, debugStore.sampleRate, params.minFreq, params.maxFreq);
+    playDebug(wav,'Pre-Quant');
+  });
+  btnPlayQuant.addEventListener('click', ()=>{
+    if(!debugStore.quantBands){ log(debugStatus,'No quant bands yet'); return; }
+    const wav = synthFromBands(debugStore.quantBands, debugStore.sampleRate, params.minFreq, params.maxFreq);
+    playDebug(wav,'Quantized');
+  });
+  btnPlayPacked.addEventListener('click', ()=>{
+    if(!debugStore.packedFrames){ log(debugStatus,'No packed frames yet'); return; }
+    const wav = rebuildAudio(debugStore.packedFrames, debugStore.sampleRate);
+    playDebug(wav,'Packed Decode Path');
+  });
+
+  function float32ToWav(float32, sampleRate){
+    const buffer = new ArrayBuffer(44 + float32.length*2);
+    const view = new DataView(buffer);
+    function writeStr(o,str){ for(let i=0;i<str.length;i++) view.setUint8(o+i, str.charCodeAt(i)); }
+    const samples = float32.length;
+    // RIFF header
+    writeStr(0,'RIFF'); view.setUint32(4, 36 + samples*2, true); writeStr(8,'WAVE');
+    // fmt chunk
+    writeStr(12,'fmt '); view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true); view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true); view.setUint16(32,2,true); view.setUint16(34,16,true);
+    // data chunk
+    writeStr(36,'data'); view.setUint32(40, samples*2, true);
+    let o=44;
+    for(let i=0;i<samples;i++){
+      let s = Math.max(-1, Math.min(1, float32[i]));
+      view.setInt16(o, s<0 ? s*0x8000 : s*0x7FFF, true);
+      o+=2;
+    }
+    return buffer;
+  }
+
+})();
+</script>
+</body>
+</html>
