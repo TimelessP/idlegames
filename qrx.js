@@ -452,7 +452,7 @@ class FileChunker {
             resolve({
               filename: file.name,
               size: file.size,
-              type: file.type,
+              fileType: file.type, // Renamed for consistency with protocol message
               totalChunks,
               chunks,
               fileChecksum: this.calculateFileChecksum(chunks)
@@ -509,7 +509,7 @@ class FileChunker {
       throw new Error('File integrity check failed');
     }
     
-    return new Blob([combined], { type: metadata.type });
+    return new Blob([combined], { type: metadata.fileType });
   }
 }
 
@@ -746,7 +746,7 @@ class QRXSession {
       sessionId: this.sessionId,
       filename: file.name,
       size: file.size,
-      type: file.type,
+      fileType: file.type, // Renamed to avoid conflict with message type
       totalChunks: this.transferData.totalChunks,
       checksum: this.transferData.fileChecksum,
       timestamp: Date.now()
