@@ -529,13 +529,29 @@ class QRXSession {
   }
 
   handleHandshake(data) {
-    if (this.state !== 'idle') return null;
+    console.log('🤝 Processing handshake. Current state:', this.state);
+    console.log('🤝 Received sessionId:', data.sessionId);
+    
+    if (this.state !== 'idle') {
+      console.warn('⚠️ Handshake received but not in idle state. Current state:', this.state);
+      this.notifyError(`Cannot accept connection - already in ${this.state} state`);
+      return null;
+    }
+    
+    // Validate handshake data
+    if (!data.sessionId || !data.capabilities) {
+      console.error('❌ Invalid handshake data');
+      this.notifyError('Invalid connection request received');
+      return null;
+    }
     
     this.sessionId = data.sessionId;
     this.state = 'connected';
     this.peerCapabilities = data.capabilities;
     this.isInitiator = false;
     this.notifyStateChange();
+    
+    console.log('✅ Handshake accepted, sending acknowledgment');
     
     // Send acknowledgment
     const ack = {
@@ -693,6 +709,7 @@ class QRXApp {
       qrDisplay: document.getElementById('qrDisplay'),
       video: document.getElementById('video'),
       startSession: document.getElementById('startSession'),
+      resetSession: document.getElementById('resetSession'),
       debugLibs: document.getElementById('debugLibs'),
       startCamera: document.getElementById('startCamera'),
       useBackCamera: document.getElementById('useBackCamera'),
@@ -721,9 +738,22 @@ class QRXApp {
       this.elements.sessionState.textContent = state;
       this.elements.sessionId.textContent = sessionId || 'Not Connected';
       
-      if (state === 'connected') {
+      // Update UI based on session state
+      if (state === 'idle') {
+        this.elements.startSession.textContent = 'Start New Session';
+        this.elements.startSession.disabled = false;
+        this.elements.sessionInfo.classList.add('hidden');
+      } else if (state === 'waiting_for_peer') {
+        this.elements.startSession.textContent = 'Waiting for Connection';
+        this.elements.startSession.disabled = true;
+        this.showStatus('📱 Waiting for other device to scan QR code. Do not start a session on the other device!', 'info');
+      } else if (state === 'connected') {
+        this.elements.startSession.textContent = 'Connected';
+        this.elements.startSession.disabled = true;
         this.elements.sessionInfo.classList.remove('hidden');
-        this.showStatus('Connected! Ready to transfer files.', 'success');
+        this.showStatus('✅ Connected! Ready to transfer files. Drop a file or click the file area to select.', 'success');
+      } else if (state === 'offering_file' || state === 'transferring') {
+        this.showStatus(`📤 ${state === 'offering_file' ? 'Offering file to peer...' : 'Transferring file...'}`, 'info');
       }
     };
 
@@ -767,9 +797,39 @@ class QRXApp {
         return;
       }
       
-      this.showStatus('Starting session...', 'success');
+      // Check if we're already in a session
+      if (this.session.state !== 'idle') {
+        this.showStatus('⚠️ Session already active. Stop current session to start a new one.', 'error');
+        return;
+      }
+      
+      this.showStatus('📱 Starting session... The other device should scan this QR code (not start its own session!)', 'success');
       const message = this.session.startSession();
       await this.displayQR(message);
+      
+      // Update the button text to make the flow clearer
+      this.elements.startSession.textContent = 'Session Active';
+      this.elements.startSession.disabled = true;
+    });
+
+    this.elements.resetSession.addEventListener('click', () => {
+      // Reset session state
+      this.session.state = 'idle';
+      this.session.sessionId = null;
+      this.session.isInitiator = false;
+      this.session.peerCapabilities = null;
+      this.session.currentFile = null;
+      this.session.transferData = null;
+      this.session.receivedChunks.clear();
+      
+      // Reset UI
+      this.elements.qrDisplay.innerHTML = '<div style="opacity: 0.5;">QR Code will appear here</div>';
+      this.elements.progressContainer.classList.add('hidden');
+      
+      // Trigger state change to update UI
+      this.session.notifyStateChange();
+      
+      this.showStatus('🔄 Session reset. Ready to start fresh.', 'success');
     });
 
     this.elements.debugLibs.addEventListener('click', () => {
@@ -966,14 +1026,25 @@ class QRXApp {
       }
       
       // Try to validate it's JSON before passing to session
+      let parsedData;
       try {
-        JSON.parse(data);
+        parsedData = JSON.parse(data);
         console.log('✅ QR data is valid JSON');
+        console.log('🔍 Message type:', parsedData.type);
       } catch (jsonError) {
         console.error('❌ QR data is not valid JSON:', jsonError.message);
         console.error('❌ Raw data preview:', data.substring(0, 100) + (data.length > 100 ? '...' : ''));
-        this.showStatus('QR code contains invalid data format', 'error');
+        this.showStatus('QR code contains invalid data format - not a QRX code', 'error');
         return;
+      }
+      
+      // Provide feedback based on message type
+      if (parsedData.type === 'handshake') {
+        this.showStatus('🤝 Detected connection request, processing...', 'info');
+      } else if (parsedData.type === 'handshake_ack') {
+        this.showStatus('✅ Connection confirmed!', 'success');
+      } else if (parsedData.type === 'file_offer') {
+        this.showStatus('📁 File offer detected...', 'info');
       }
       
       const response = this.session.handleMessage(data);
