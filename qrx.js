@@ -142,47 +142,41 @@ class QRScanner {
     this.lastDetectedData = null;
     this.lastDetectionTime = 0;
     this.detectionCooldown = 2000; // 2 seconds between same QR detections
+    this.preferredFacingMode = null; // User's camera preference
   }
 
-  async startCamera() {
+  async startCamera(facingMode = null) {
     // Check if navigator.mediaDevices is available
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       console.error('Camera API not available - requires HTTPS or localhost');
       return false;
     }
 
-    // Detect if we're on mobile to prioritize camera selection
-    const isMobile = /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    console.log('📱 Device detection - Mobile:', isMobile);
+    // Use specified facing mode or fall back to user preference or auto-detection
+    const requestedFacingMode = facingMode || this.preferredFacingMode || this.getDefaultFacingMode();
+    console.log('� Starting camera with facing mode:', requestedFacingMode);
 
     try {
-      let constraints;
-      
-      if (isMobile) {
-        // On mobile, prefer back camera (environment) for QR scanning
-        console.log('📷 Mobile detected - requesting back camera (environment)');
-        constraints = {
-          video: {
-            facingMode: { exact: 'environment' }, // Back camera preferred on mobile
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }
-        };
-      } else {
-        // On desktop, just request any available camera
-        console.log('💻 Desktop detected - requesting any available camera');
-        constraints = {
-          video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }
-        };
+      let constraints = {
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+
+      // Add facing mode constraint if specified
+      if (requestedFacingMode) {
+        constraints.video.facingMode = { exact: requestedFacingMode };
       }
 
+      console.log('📷 Camera constraints:', constraints);
       this.stream = await navigator.mediaDevices.getUserMedia(constraints);
       
       this.video = document.getElementById('video');
       this.video.srcObject = this.stream;
+      
+      // Store the successful facing mode
+      this.currentFacingMode = requestedFacingMode;
       
       // Adjust overlay when video loads
       this.video.addEventListener('loadedmetadata', () => {
@@ -193,57 +187,76 @@ class QRScanner {
       this.scanning = true;
       this.scanLoop();
       
-      console.log('✅ Camera started successfully');
+      console.log('✅ Camera started successfully with', requestedFacingMode || 'default', 'camera');
       return true;
       
     } catch (error) {
-      console.error('❌ Primary camera request failed:', error);
+      console.error('❌ Camera request failed:', error);
       
-      // Fallback strategy
-      if (isMobile) {
-        console.log('📷 Fallback - trying front camera (user) on mobile');
-        try {
-          this.stream = await navigator.mediaDevices.getUserMedia({
-            video: { 
-              facingMode: 'user', // Front camera fallback
-              width: { ideal: 1280 },
-              height: { ideal: 720 }
-            }
-          });
-        } catch (fallbackError) {
-          console.log('📷 Second fallback - trying any camera without constraints');
-          this.stream = await navigator.mediaDevices.getUserMedia({
-            video: true
-          });
-        }
-      } else {
-        // Desktop fallback - try basic video constraints
-        console.log('💻 Desktop fallback - trying basic camera access');
-        try {
-          this.stream = await navigator.mediaDevices.getUserMedia({
-            video: true
-          });
-        } catch (fallbackError) {
-          console.error('❌ No camera available on desktop:', fallbackError);
-          return false;
-        }
-      }
-      
-      // Apply the fallback stream
-      this.video = document.getElementById('video');
-      this.video.srcObject = this.stream;
-      
-      // Adjust overlay when video loads
-      this.video.addEventListener('loadedmetadata', () => {
-        this.adjustOverlayPosition();
-      });
-      
-      this.scanning = true;
-      this.scanLoop();
-      
-      console.log('✅ Camera started with fallback');
-      return true;
+      // Try fallback strategies
+      return await this.tryFallbackCameras(requestedFacingMode);
     }
+  }
+
+  getDefaultFacingMode() {
+    // Detect if we're on mobile to suggest default camera
+    const isMobile = /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    return isMobile ? 'environment' : null; // Back camera on mobile, any on desktop
+  }
+
+  async tryFallbackCameras(originalRequest) {
+    console.log('🔄 Trying fallback camera options...');
+    
+    const fallbackModes = [];
+    
+    if (originalRequest === 'environment') {
+      fallbackModes.push('user', null);
+    } else if (originalRequest === 'user') {
+      fallbackModes.push('environment', null);
+    } else {
+      fallbackModes.push('environment', 'user', null);
+    }
+
+    for (const mode of fallbackModes) {
+      try {
+        console.log('� Trying fallback:', mode || 'any camera');
+        
+        let constraints = {
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        };
+
+        if (mode) {
+          constraints.video.facingMode = mode;
+        }
+
+        this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+        
+        this.video = document.getElementById('video');
+        this.video.srcObject = this.stream;
+        this.currentFacingMode = mode;
+        
+        // Adjust overlay when video loads
+        this.video.addEventListener('loadedmetadata', () => {
+          this.adjustOverlayPosition();
+        });
+        
+        this.scanning = true;
+        this.scanLoop();
+        
+        console.log('✅ Camera started with fallback:', mode || 'default');
+        return true;
+        
+      } catch (error) {
+        console.log('❌ Fallback failed for', mode || 'default camera', ':', error.message);
+        continue;
+      }
+    }
+
+    console.error('❌ All camera options failed');
+    return false;
   }
 
   stopCamera() {
@@ -681,6 +694,8 @@ class QRXApp {
       startSession: document.getElementById('startSession'),
       debugLibs: document.getElementById('debugLibs'),
       startCamera: document.getElementById('startCamera'),
+      useBackCamera: document.getElementById('useBackCamera'),
+      useFrontCamera: document.getElementById('useFrontCamera'),
       stopCamera: document.getElementById('stopCamera'),
       manualInput: document.getElementById('manualInput'),
       processManual: document.getElementById('processManual'),
@@ -802,10 +817,14 @@ class QRXApp {
       const started = await this.scanner.startCamera();
       if (started) {
         this.elements.startCamera.disabled = true;
+        this.elements.useBackCamera.disabled = false;
+        this.elements.useFrontCamera.disabled = false;
         this.elements.stopCamera.disabled = false;
         this.showStatus('Camera started. Point at QR codes to scan.', 'success');
       } else {
         this.elements.startCamera.disabled = false;
+        this.elements.useBackCamera.disabled = true;
+        this.elements.useFrontCamera.disabled = true;
         this.elements.stopCamera.disabled = true;
         
         // Provide specific error message based on the environment
@@ -819,9 +838,39 @@ class QRXApp {
       }
     });
 
+    this.elements.useBackCamera.addEventListener('click', async () => {
+      this.showStatus('Switching to back camera...', 'info');
+      this.scanner.stopCamera();
+      
+      const started = await this.scanner.startCamera('environment');
+      if (started) {
+        this.scanner.preferredFacingMode = 'environment';
+        this.showStatus('✅ Switched to back camera. Better for scanning QR codes!', 'success');
+      } else {
+        this.showStatus('❌ Back camera not available. Using current camera.', 'error');
+        await this.scanner.startCamera(); // Restart with fallback
+      }
+    });
+
+    this.elements.useFrontCamera.addEventListener('click', async () => {
+      this.showStatus('Switching to front camera...', 'info');
+      this.scanner.stopCamera();
+      
+      const started = await this.scanner.startCamera('user');
+      if (started) {
+        this.scanner.preferredFacingMode = 'user';
+        this.showStatus('✅ Switched to front camera.', 'success');
+      } else {
+        this.showStatus('❌ Front camera not available. Using current camera.', 'error');
+        await this.scanner.startCamera(); // Restart with fallback
+      }
+    });
+
     this.elements.stopCamera.addEventListener('click', () => {
       this.scanner.stopCamera();
       this.elements.startCamera.disabled = false;
+      this.elements.useBackCamera.disabled = true;
+      this.elements.useFrontCamera.disabled = true;
       this.elements.stopCamera.disabled = true;
       this.showStatus('Camera stopped.');
     });
