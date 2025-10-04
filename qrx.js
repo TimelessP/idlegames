@@ -166,7 +166,8 @@ class QRScanner {
 
       // Add facing mode constraint if specified
       if (requestedFacingMode) {
-        constraints.video.facingMode = { exact: requestedFacingMode };
+        // Use 'ideal' instead of 'exact' to be less strict - allows fallback
+        constraints.video.facingMode = { ideal: requestedFacingMode };
       }
 
       console.log('📷 Camera constraints:', constraints);
@@ -229,7 +230,7 @@ class QRScanner {
         };
 
         if (mode) {
-          constraints.video.facingMode = mode;
+          constraints.video.facingMode = { ideal: mode }; // Use ideal instead of exact
         }
 
         this.stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -843,9 +844,13 @@ class QRXApp {
       this.scanner.stopCamera();
       
       const started = await this.scanner.startCamera('environment');
-      if (started) {
+      if (started && this.scanner.currentFacingMode === 'environment') {
         this.scanner.preferredFacingMode = 'environment';
         this.showStatus('✅ Switched to back camera. Better for scanning QR codes!', 'success');
+      } else if (started) {
+        // Camera started but may not be the exact one requested (desktop scenario)
+        this.scanner.preferredFacingMode = 'environment';
+        this.showStatus('📷 Camera active (may be the only available camera on this device)', 'success');
       } else {
         this.showStatus('❌ Back camera not available. Using current camera.', 'error');
         await this.scanner.startCamera(); // Restart with fallback
@@ -857,9 +862,13 @@ class QRXApp {
       this.scanner.stopCamera();
       
       const started = await this.scanner.startCamera('user');
-      if (started) {
+      if (started && this.scanner.currentFacingMode === 'user') {
         this.scanner.preferredFacingMode = 'user';
         this.showStatus('✅ Switched to front camera.', 'success');
+      } else if (started) {
+        // Camera started but may not be the exact one requested (desktop scenario)
+        this.scanner.preferredFacingMode = 'user';
+        this.showStatus('📷 Camera active (may be the only available camera on this device)', 'success');
       } else {
         this.showStatus('❌ Front camera not available. Using current camera.', 'error');
         await this.scanner.startCamera(); // Restart with fallback
