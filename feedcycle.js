@@ -1586,8 +1586,67 @@
       return u.href; }catch{ return null; }
   }
   function pickImage(post){
-    if(post.media){ const m = post.media.find(m=> (m.type||'').startsWith('image/')); if(m){ const s=safeImageUrl(m.url); if(s) return s; } }
-    const m = /<img[^>]+src=["']([^"']+)["']/i.exec(post.content||''); if(m){ const s=safeImageUrl(m[1]); if(s) return s; }
+    // Priority 1: iTunes image (for podcasts, usually high quality)
+    if(post.images?.length) {
+      const itunesImg = post.images.find(img => img.source === 'itunes:image');
+      if(itunesImg) return itunesImg.url;
+    }
+
+    // Priority 2: Media content/thumbnail with size preference (larger is better)
+    if(post.images?.length) {
+      const mediaImages = post.images.filter(img => 
+        img.source === 'media:content' || img.source === 'media:thumbnail'
+      );
+      if(mediaImages.length) {
+        // Sort by size (width * height), preferring larger images
+        mediaImages.sort((a, b) => {
+          const sizeA = (a.width || 0) * (a.height || 0);
+          const sizeB = (b.width || 0) * (b.height || 0);
+          return sizeB - sizeA; // Descending order
+        });
+        return mediaImages[0].url;
+      }
+    }
+
+    // Priority 3: Traditional media array (enclosures, etc.)
+    if(post.media){ 
+      const m = post.media.find(m=> (m.type||'').startsWith('image/')); 
+      if(m){ 
+        const s=safeImageUrl(m.url); 
+        if(s) return s; 
+      } 
+    }
+
+    // Priority 4: Channel iTunes image (high quality for podcasts)
+    if(post.images?.length) {
+      const channelItunesImg = post.images.find(img => img.source === 'channel:itunes:image');
+      if(channelItunesImg) return channelItunesImg.url;
+    }
+
+    // Priority 5: Other item-level image sources (enclosures, standard image tags)
+    if(post.images?.length) {
+      const otherItemImages = post.images.filter(img => 
+        img.source !== 'itunes:image' && 
+        img.source !== 'media:content' && 
+        img.source !== 'media:thumbnail' &&
+        !img.source.startsWith('channel:')
+      );
+      if(otherItemImages.length) return otherItemImages[0].url;
+    }
+
+    // Priority 6: Channel standard image (fallback for feeds without item-specific images)
+    if(post.images?.length) {
+      const channelImg = post.images.find(img => img.source === 'channel:image');
+      if(channelImg) return channelImg.url;
+    }
+
+    // Priority 7: Images from content HTML (last resort)
+    const m = /<img[^>]+src=["']([^"']+)["']/i.exec(post.content||''); 
+    if(m){ 
+      const s=safeImageUrl(m[1]); 
+      if(s) return s; 
+    }
+
     return null;
   }
   const placeholderCache = new Map();
@@ -1681,6 +1740,72 @@
       medium: raw.medium||''
     };
   }
+  function extractImageUrls(item){
+    const images = [];
+    const seen = new Set();
+    const addImage = (url, source, width, height) => {
+      if(!url || seen.has(url)) return;
+      const safeUrl = safeImageUrl(url);
+      if(!safeUrl) return;
+      seen.add(url);
+      images.push({ url: safeUrl, source, width: width ? parseInt(width) : null, height: height ? parseInt(height) : null });
+    };
+
+    // Try multiple approaches for namespace handling since different browsers/parsers handle it differently
+    
+    // iTunes namespace images (podcasts) - try both approaches
+    let itunesImage = item.querySelector('itunes\\:image') || item.getElementsByTagName('itunes:image')[0];
+    if(itunesImage) {
+      const href = itunesImage.getAttribute('href');
+      if(href) addImage(href, 'itunes:image');
+    }
+
+    // Media namespace thumbnails (BBC, Yahoo, etc.) - try both approaches
+    let mediaThumbs = item.querySelectorAll('media\\:thumbnail');
+    if(mediaThumbs.length === 0) {
+      mediaThumbs = item.getElementsByTagName('media:thumbnail');
+    }
+    Array.from(mediaThumbs).forEach(thumb => {
+      const url = thumb.getAttribute('url');
+      const width = thumb.getAttribute('width');
+      const height = thumb.getAttribute('height');
+      if(url) addImage(url, 'media:thumbnail', width, height);
+    });
+
+    // Media namespace content with image types - try both approaches
+    let mediaContent = item.querySelectorAll('media\\:content');
+    if(mediaContent.length === 0) {
+      mediaContent = item.getElementsByTagName('media:content');
+    }
+    Array.from(mediaContent).forEach(content => {
+      const url = content.getAttribute('url');
+      const type = content.getAttribute('type');
+      const medium = content.getAttribute('medium');
+      const width = content.getAttribute('width');
+      const height = content.getAttribute('height');
+      if(url && (type?.startsWith('image/') || medium === 'image')) {
+        addImage(url, 'media:content', width, height);
+      }
+    });
+
+    // Standard enclosure images
+    item.querySelectorAll('enclosure').forEach(enc => {
+      const url = enc.getAttribute('url');
+      const type = enc.getAttribute('type');
+      if(url && type?.startsWith('image/')) {
+        addImage(url, 'enclosure');
+      }
+    });
+
+    // Standard image elements  
+    const imageEl = item.querySelector('image url');
+    if(imageEl) {
+      addImage(imageEl.textContent?.trim(), 'image');
+    }
+
+    return images;
+  }
+
   function extractMediaEntries(item){
     const entries = [];
     const seen = new Set();
@@ -1731,6 +1856,10 @@
   function parseFeedDocument(doc, feed){
     const isAtom = !!doc.querySelector('feed > entry');
     const items = isAtom? [...doc.querySelectorAll('feed > entry')] : [...doc.querySelectorAll('rss channel item')];
+    
+    // Extract channel-level images that can be used as fallbacks for individual items
+    const channelImages = extractChannelImages(doc);
+    
     return items.map(it=>{
       const title = (it.querySelector('title')?.textContent||'').trim();
       // canonical link from RSS/Atom
@@ -1754,6 +1883,11 @@
       const id = hashId((feed.id||'')+'|'+guidSrc);
       const published = it.querySelector('pubDate, updated, published')?.textContent||'';
       const media = extractMediaEntries(it);
+      const images = extractImageUrls(it);
+      
+      // Combine item-specific images with channel images as fallbacks
+      const allImages = [...images, ...channelImages];
+      
       return {
         id,
         feedId: feed.id,
@@ -1762,9 +1896,41 @@
         content,
         summary: stripHtml(content).slice(0,400),
         published,
-        media
+        media,
+        images: allImages
       };
     });
+  }
+
+  function extractChannelImages(doc){
+    const images = [];
+    const seen = new Set();
+    const addImage = (url, source) => {
+      if(!url || seen.has(url)) return;
+      const safeUrl = safeImageUrl(url);
+      if(!safeUrl) return;
+      seen.add(url);
+      images.push({ url: safeUrl, source });
+    };
+
+    const isAtom = !!doc.querySelector('feed > entry');
+    const channelSelector = isAtom ? 'feed' : 'channel';
+
+    // Standard RSS/Atom channel image
+    const channelImageUrl = doc.querySelector(`${channelSelector} > image > url`);
+    if(channelImageUrl) {
+      addImage(channelImageUrl.textContent?.trim(), 'channel:image');
+    }
+
+    // iTunes channel image - try both selector approaches
+    let itunesChannelImage = doc.querySelector(`${channelSelector} > itunes\\:image`) || 
+                           doc.querySelector(`${channelSelector}`).getElementsByTagName('itunes:image')[0];
+    if(itunesChannelImage) {
+      const href = itunesChannelImage.getAttribute('href');
+      if(href) addImage(href, 'channel:itunes:image');
+    }
+
+    return images;
   }
 
   function extractFeedTitle(doc){
