@@ -717,8 +717,9 @@
     });
     c.append(favBtn);
     const realImg = pickImage(p);
+    const mw = el('div',{class:'card-media'});
+    
     if(realImg){
-      const mw = el('div',{class:'card-media'});
       const im = el('img',{src:realImg, alt:'', loading:'lazy', decoding:'async', referrerpolicy:'no-referrer'});
       im.addEventListener('error', ()=>{
         if(im.dataset.fallback) return;
@@ -727,12 +728,32 @@
         if(svg){ mw.innerHTML = svg; }
         else { im.src = onePixelPng(); }
       });
-      mw.append(im); c.append(mw);
+      mw.append(im);
     } else {
-      const mw = el('div',{class:'card-media'});
+      // No sync image found, show placeholder initially
       mw.innerHTML = generateInlinePlaceholderSVG(p) || `<img src="${onePixelPng()}" alt="" loading="lazy" decoding="async">`;
-      c.append(mw);
+      
+      // Try async image loading for Open Graph fallback
+      pickImageAsync(p).then(asyncImg => {
+        if(asyncImg && asyncImg !== realImg) {
+          // Replace placeholder with async image
+          const newIm = el('img',{src:asyncImg, alt:'', loading:'lazy', decoding:'async', referrerpolicy:'no-referrer'});
+          newIm.addEventListener('error', ()=>{
+            if(newIm.dataset.fallback) return;
+            newIm.dataset.fallback='1';
+            const svg = generateInlinePlaceholderSVG(p);
+            if(svg){ mw.innerHTML = svg; }
+            else { newIm.src = onePixelPng(); }
+          });
+          mw.innerHTML = '';
+          mw.append(newIm);
+        }
+      }).catch(() => {
+        // Async loading failed, keep placeholder
+      });
     }
+    
+    c.append(mw);
     c.append(el('h3',{}, p.title||'(untitled)'));
     const chips = el('div',{class:'chips'});
   p.read = true;
@@ -1640,15 +1661,45 @@
       if(channelImg) return channelImg.url;
     }
 
-    // Priority 7: Images from content HTML (last resort)
+    // Priority 7: Images from content HTML
     const m = /<img[^>]+src=["']([^"']+)["']/i.exec(post.content||''); 
     if(m){ 
       const s=safeImageUrl(m[1]); 
       if(s) return s; 
     }
 
+    // Priority 8: Open Graph image (if available in post metadata)
+    if(post.ogImage) {
+      const s = safeImageUrl(post.ogImage);
+      if(s) return s;
+    }
+
     return null;
   }
+
+  // Enhanced async version that can attempt Open Graph extraction as fallback
+  async function pickImageAsync(post) {
+    const existingImage = pickImage(post);
+    if (existingImage) return existingImage;
+    
+    // If no image found and we haven't tried Open Graph yet, attempt it
+    if (post.ogImage === undefined && post.link) {
+      const ogImage = await enhancePostWithOpenGraph(post);
+      if (ogImage) return ogImage;
+    }
+    
+    return null;
+  }
+  // Async function to enhance posts with Open Graph images (called when no other images found)
+  async function enhancePostWithOpenGraph(post) {
+    if (!post.link || post.ogImage !== undefined) return; // Skip if no link or already processed
+    
+    const ogImage = await extractOpenGraphImage(post.link);
+    post.ogImage = ogImage; // Store result (null if not found) to prevent re-fetching
+    
+    return ogImage;
+  }
+
   const placeholderCache = new Map();
   const PLACEHOLDER_VERSION = 2;
   function pickPlaceholder(post){
@@ -1900,6 +1951,58 @@
         images: allImages
       };
     });
+  }
+
+  async function extractOpenGraphImage(articleUrl) {
+    if (!articleUrl) return null;
+    
+    try {
+      // Use the same proxy/fetch system as feeds for CORS handling
+      const candidates = getProxyCandidates();
+      let html = '';
+      let lastErr = null;
+      
+      for (const c of candidates.slice(0, 2)) { // Limit to 2 proxy attempts for performance
+        const proxied = buildProxiedUrl(articleUrl, c);
+        try {
+          html = await fetchWithCache(proxied);
+          if (html) break;
+        } catch (e) {
+          lastErr = e;
+          // Silently handle common CORS/403 errors for Open Graph fetching
+          if (typeof c !== 'string') {
+            recordProxyResult(c.name, false);
+          }
+          // Don't log 403/CORS errors for Open Graph - they're expected
+          if (!e.message?.includes('403') && !e.message?.includes('CORS')) {
+            console.warn('[Feed Cycle] Open Graph proxy attempt failed:', e.message);
+          }
+        }
+      }
+      
+      if (!html) {
+        try {
+          html = await fetchWithCache(articleUrl);
+        } catch (e) {
+          lastErr = e;
+          // Don't log direct fetch errors for Open Graph - they're expected for many sites
+        }
+      }
+      
+      if (!html) return null;
+      
+      // Parse HTML to extract Open Graph image
+      const ogImageMatch = /<meta\s+property\s*=\s*["']og:image["']\s+content\s*=\s*["']([^"']+)["']/i.exec(html);
+      if (ogImageMatch) {
+        const ogImageUrl = ogImageMatch[1];
+        return safeImageUrl(ogImageUrl);
+      }
+      
+      return null;
+    } catch (e) {
+      console.warn('Failed to extract Open Graph image from', articleUrl, e);
+      return null;
+    }
   }
 
   function extractChannelImages(doc){
