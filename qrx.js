@@ -141,7 +141,7 @@ class QRScanner {
     this.onQRDetected = null;
     this.lastDetectedData = null;
     this.lastDetectionTime = 0;
-    this.detectionCooldown = 2000; // 2 seconds between same QR detections
+    this.detectionCooldown = 3000; // 3 seconds between same QR detections (increased)
     this.preferredFacingMode = null; // User's camera preference
   }
 
@@ -310,6 +310,23 @@ class QRScanner {
       if (result && this.onQRDetected) {
         const currentTime = Date.now();
         
+        // Validate that we actually have data
+        if (!result.data || typeof result.data !== 'string' || result.data.length === 0) {
+          console.log('📷 QR Scanner - Detected QR but no valid data extracted:', {
+            hasData: !!result.data,
+            dataType: typeof result.data,
+            dataLength: result.data ? result.data.length : 0,
+            fullResult: result
+          });
+          return; // Skip empty/invalid results
+        }
+        
+        // Additional validation - ensure it looks like JSON (QRX protocol requirement)
+        if (!result.data.startsWith('{') || !result.data.endsWith('}')) {
+          console.log('📷 QR Scanner - Detected non-QRX data:', result.data.substring(0, 50) + '...');
+          return; // Skip non-JSON QR codes
+        }
+        
         // Prevent duplicate detections of the same data
         if (result.data !== this.lastDetectedData || 
             currentTime - this.lastDetectionTime > this.detectionCooldown) {
@@ -351,6 +368,16 @@ class QRScanner {
         const code = jsQR(imageData.data, imageData.width, imageData.height, {
           inversionAttempts: 'dontInvert'
         });
+        
+        // Debug QR detection results
+        if (code) {
+          console.log('📷 jsQR detected code:', {
+            data: code.data ? code.data.substring(0, 100) + '...' : 'NO DATA',
+            dataLength: code.data ? code.data.length : 0,
+            location: code.location ? 'present' : 'missing'
+          });
+        }
+        
         return code;
       } else {
         // Fallback: no real QR detection without library
@@ -1019,9 +1046,10 @@ class QRXApp {
       console.log('🔍 QR Detection - Data type:', typeof data);
       console.log('🔍 QR Detection - Data length:', data ? data.length : 'null/undefined');
       
-      if (!data || typeof data !== 'string') {
+      if (!data || typeof data !== 'string' || data.length === 0) {
         console.error('❌ Invalid QR data: not a string or empty');
-        this.showStatus('Invalid QR data received', 'error');
+        console.error('❌ Received data:', JSON.stringify(data));
+        this.showStatus('Invalid QR data received (empty or malformed)', 'error');
         return;
       }
       
