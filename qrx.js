@@ -45,11 +45,18 @@ class QRGenerator {
         const canvas = document.createElement('canvas');
         
         console.log('QRGenerator: Initializing QRious with options:', { text: text.substring(0, 50) + '...', size: options.size || 200 });
+        
+        // Try different error correction levels for better readability
+        const errorLevel = options.errorLevel || 'H'; // High error correction for better scanning
+        const size = options.size || 200;
+        
+        console.log('QRGenerator: Using error correction level:', errorLevel);
+        
         const qr = new QRious({
           element: canvas,
           value: text,
-          size: options.size || 200,
-          level: 'M'
+          size: size,
+          level: errorLevel
         });
 
         console.log('QRGenerator: Getting data URL');
@@ -365,20 +372,36 @@ class QRScanner {
       
       // Use jsQR to detect QR codes if available
       if (typeof jsQR !== 'undefined') {
-        const code = jsQR(imageData.data, imageData.width, imageData.height, {
-          inversionAttempts: 'dontInvert'
-        });
+        // Try multiple detection strategies
+        const strategies = [
+          { inversionAttempts: 'dontInvert' },
+          { inversionAttempts: 'onlyInvert' }, 
+          { inversionAttempts: 'attemptBoth' },
+          {} // Default settings
+        ];
         
-        // Debug QR detection results
-        if (code) {
-          console.log('📷 jsQR detected code:', {
-            data: code.data ? code.data.substring(0, 100) + '...' : 'NO DATA',
-            dataLength: code.data ? code.data.length : 0,
-            location: code.location ? 'present' : 'missing'
-          });
+        for (let i = 0; i < strategies.length; i++) {
+          const code = jsQR(imageData.data, imageData.width, imageData.height, strategies[i]);
+          
+          // Debug QR detection results for each attempt
+          if (code) {
+            console.log(`📷 jsQR attempt ${i + 1} detected code:`, {
+              data: code.data ? code.data.substring(0, 100) + '...' : 'NO DATA',
+              dataLength: code.data ? code.data.length : 0,
+              location: code.location ? 'present' : 'missing',
+              strategy: JSON.stringify(strategies[i])
+            });
+            
+            // If we got actual data, return it
+            if (code.data && code.data.length > 0) {
+              return code;
+            }
+          }
         }
         
-        return code;
+        // If we tried all strategies and got no data, return null
+        console.log('📷 jsQR: All detection strategies failed to extract data');
+        return null;
       } else {
         // Fallback: no real QR detection without library
         // This would need manual QR code input or different approach
@@ -1093,10 +1116,21 @@ class QRXApp {
       console.log('Attempting to generate QR for data:', data.substring(0, 50) + '...');
       console.log('QRious available:', typeof QRious !== 'undefined');
       
-      const qrDataURL = await QRGenerator.generateDataURL(data, { size: 280 });
+      const qrDataURL = await QRGenerator.generateDataURL(data, { 
+        size: 280, 
+        errorLevel: 'H' // High error correction for better scanning reliability
+      });
       console.log('QR generation completed, data URL length:', qrDataURL.length);
       
-      this.elements.qrDisplay.innerHTML = `<img src="${qrDataURL}" alt="QR Code" style="max-width: 100%; height: auto;">`;
+      this.elements.qrDisplay.innerHTML = `
+        <img src="${qrDataURL}" alt="QR Code" style="max-width: 100%; height: auto;">
+        <div style="margin-top: 10px;">
+          <button onclick="navigator.clipboard.writeText('${data.replace(/'/g, "\\'")}').then(() => alert('QR data copied to clipboard!')).catch(() => alert('Copy failed - check console'))" 
+                  style="padding: 5px 10px; font-size: 11px; background: #0066cc; color: white; border: none; border-radius: 3px; cursor: pointer;">
+            📋 Copy Data
+          </button>
+        </div>
+      `;
       this.currentQR = data;
       
       console.log('QR code displayed successfully');
