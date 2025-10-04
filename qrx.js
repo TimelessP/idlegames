@@ -29,33 +29,39 @@ class QRXProtocol {
 }
 
 class QRGenerator {
-  static async generateDataURL(data, options = {}) {
-    const size = options.size || 300;
-    const errorCorrection = options.errorCorrection || QRXProtocol.QR_ERROR_CORRECTION;
-    
-    // Check if QRious library is available (much more reliable than QRCode)
-    if (typeof QRious !== 'undefined') {
+  static async generateDataURL(text, options = {}) {
+    return new Promise((resolve, reject) => {
       try {
-        // Create canvas for QRious
+        console.log('QRGenerator: Starting generation process');
+        console.log('QRGenerator: QRious type check:', typeof QRious);
+        
+        if (typeof QRious === 'undefined') {
+          console.error('QRGenerator: QRious library not loaded');
+          reject(new Error('QRious library not loaded'));
+          return;
+        }
+
+        console.log('QRGenerator: Creating canvas element');
         const canvas = document.createElement('canvas');
         
-        // Use QRious library for proper QR generation
+        console.log('QRGenerator: Initializing QRious with options:', { text: text.substring(0, 50) + '...', size: options.size || 200 });
         const qr = new QRious({
           element: canvas,
-          value: data,
-          size: size,
-          level: errorCorrection,
-          padding: null // auto padding
+          value: text,
+          size: options.size || 200,
+          level: 'M'
         });
+
+        console.log('QRGenerator: Getting data URL');
+        const dataURL = qr.toDataURL();
+        console.log('QRGenerator: Success, data URL prefix:', dataURL.substring(0, 50));
         
-        return qr.toDataURL();
+        resolve(dataURL);
       } catch (error) {
-        console.error('QR generation failed:', error);
+        console.error('QRGenerator: Error during generation:', error);
+        reject(error);
       }
-    }
-    
-    // Fallback to base64 encoded data display
-    return this.generateDataDisplay(data, size);
+    });
   }
   
   static generateDataDisplay(data, size) {
@@ -613,6 +619,7 @@ class QRXApp {
       qrDisplay: document.getElementById('qrDisplay'),
       video: document.getElementById('video'),
       startSession: document.getElementById('startSession'),
+      debugLibs: document.getElementById('debugLibs'),
       startCamera: document.getElementById('startCamera'),
       stopCamera: document.getElementById('stopCamera'),
       manualInput: document.getElementById('manualInput'),
@@ -662,8 +669,73 @@ class QRXApp {
 
     // UI event handlers
     this.elements.startSession.addEventListener('click', async () => {
+      // First check if libraries are available
+      const qriousAvailable = typeof QRious !== 'undefined';
+      console.log('Start Session clicked - QRious available:', qriousAvailable);
+      
+      if (!qriousAvailable) {
+        console.error('Cannot start session: QRious library not available');
+        this.showStatus('❌ Cannot generate QR codes: Library not loaded. Check console for details.', 'error');
+        
+        // Show library status in the QR display area
+        this.elements.qrDisplay.innerHTML = `
+          <div style="color: red; text-align: center; padding: 20px;">
+            <strong>QR Generation Unavailable</strong><br>
+            <small>Check browser console for details</small><br><br>
+            <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px;">
+              QRious: ${typeof QRious}<br>
+              User Agent: ${navigator.userAgent.substring(0, 50)}...
+            </div>
+          </div>
+        `;
+        return;
+      }
+      
+      this.showStatus('Starting session...', 'success');
       const message = this.session.startSession();
       await this.displayQR(message);
+    });
+
+    this.elements.debugLibs.addEventListener('click', () => {
+      const debugInfo = {
+        QRious: {
+          available: typeof QRious !== 'undefined',
+          type: typeof QRious,
+          constructor: typeof QRious !== 'undefined' ? QRious.name : 'N/A'
+        },
+        jsQR: {
+          available: typeof jsQR !== 'undefined',
+          type: typeof jsQR
+        },
+        environment: {
+          userAgent: navigator.userAgent,
+          url: window.location.href,
+          protocol: window.location.protocol,
+          host: window.location.host
+        },
+        scripts: Array.from(document.scripts)
+          .map(s => s.src)
+          .filter(s => s.includes('qr') || s.includes('QR'))
+      };
+      
+      console.log('🔍 Debug Info:', debugInfo);
+      
+      this.elements.qrDisplay.innerHTML = `
+        <div style="text-align: left; font-family: monospace; font-size: 11px; padding: 15px; background: #f5f5f5; border-radius: 8px; max-height: 280px; overflow-y: auto;">
+          <strong>Library Debug Information:</strong><br><br>
+          <strong>QRious:</strong> ${debugInfo.QRious.available ? '✅' : '❌'} (${debugInfo.QRious.type})<br>
+          <strong>jsQR:</strong> ${debugInfo.jsQR.available ? '✅' : '❌'} (${debugInfo.jsQR.type})<br><br>
+          <strong>Environment:</strong><br>
+          URL: ${debugInfo.environment.url}<br>
+          Protocol: ${debugInfo.environment.protocol}<br><br>
+          <strong>QR Scripts:</strong><br>
+          ${debugInfo.scripts.length ? debugInfo.scripts.join('<br>') : 'None found'}<br><br>
+          <strong>User Agent:</strong><br>
+          ${debugInfo.environment.userAgent}
+        </div>
+      `;
+      
+      this.showStatus('Debug info displayed. Check console for full details.', 'success');
     });
 
     this.elements.startCamera.addEventListener('click', async () => {
@@ -779,12 +851,22 @@ class QRXApp {
     this.elements.qrDisplay.innerHTML = '<div style="opacity: 0.5;">Generating QR code...</div>';
     
     try {
+      console.log('Attempting to generate QR for data:', data.substring(0, 50) + '...');
+      console.log('QRious available:', typeof QRious !== 'undefined');
+      
       const qrDataURL = await QRGenerator.generateDataURL(data, { size: 280 });
+      console.log('QR generation completed, data URL length:', qrDataURL.length);
+      
       this.elements.qrDisplay.innerHTML = `<img src="${qrDataURL}" alt="QR Code" style="max-width: 100%; height: auto;">`;
       this.currentQR = data;
+      
+      console.log('QR code displayed successfully');
     } catch (error) {
-      this.elements.qrDisplay.innerHTML = '<div style="color: red;">QR generation failed</div>';
       console.error('QR display error:', error);
+      this.elements.qrDisplay.innerHTML = `<div style="color: red;">QR generation failed: ${error.message}</div>`;
+      
+      // Show the raw data as fallback
+      this.elements.qrDisplay.innerHTML += `<div style="margin-top: 10px; font-size: 12px; font-family: monospace; word-break: break-all; max-height: 200px; overflow-y: auto; background: #f5f5f5; padding: 10px; border-radius: 4px;">${data}</div>`;
     }
   }
 
@@ -823,6 +905,8 @@ class LibraryLoader {
     let retries = 0;
     
     console.log('Checking for QR libraries...');
+    console.log('User Agent:', navigator.userAgent);
+    console.log('URL:', window.location.href);
     
     while (retries < maxRetries) {
       // Check if libraries are loaded
@@ -833,6 +917,18 @@ class LibraryLoader {
       
       if (qriousLoaded && jsQRLoaded) {
         console.log('✅ All QR libraries loaded successfully!');
+        // Test QRious functionality
+        try {
+          const testCanvas = document.createElement('canvas');
+          const testQR = new QRious({
+            element: testCanvas,
+            value: 'test',
+            size: 100
+          });
+          console.log('✅ QRious functionality verified');
+        } catch (e) {
+          console.error('❌ QRious loaded but not functional:', e);
+        }
         return true;
       }
       
@@ -840,6 +936,13 @@ class LibraryLoader {
       await new Promise(resolve => setTimeout(resolve, 800));
       retries++;
     }
+    
+    console.error('❌ QR libraries failed to load after all retries');
+    console.error('Final check:', {
+      QRious: typeof QRious,
+      jsQR: typeof jsQR,
+      scripts: Array.from(document.scripts).map(s => s.src).filter(s => s.includes('qr'))
+    });
     
     console.warn('⚠️ QR libraries not loaded from CDN, using fallback implementations');
     console.log('Manual data entry will be available for QR scanning');
