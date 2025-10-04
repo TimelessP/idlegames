@@ -328,10 +328,16 @@ class QRScanner {
           return; // Skip empty/invalid results
         }
         
-        // Additional validation - ensure it looks like JSON (QRX protocol requirement)
+        // Additional validation - ensure it looks like QRX protocol JSON
         if (!result.data.startsWith('{') || !result.data.endsWith('}')) {
-          console.log('📷 QR Scanner - Detected non-QRX data:', result.data.substring(0, 50) + '...');
+          console.log('📷 QR Scanner - Detected non-JSON data (probably not QRX):', result.data.substring(0, 50) + '...');
           return; // Skip non-JSON QR codes
+        }
+        
+        // Quick check if it contains QRX protocol fields
+        if (!result.data.includes('"type"') || !result.data.includes('"sessionId"')) {
+          console.log('📷 QR Scanner - JSON detected but missing QRX protocol fields:', result.data.substring(0, 100) + '...');
+          return; // Skip non-QRX JSON
         }
         
         // Prevent duplicate detections of the same data
@@ -545,7 +551,33 @@ class QRXSession {
 
   handleMessage(message) {
     try {
+      // First, validate that this is a valid QRX protocol message
+      if (!message || typeof message !== 'string') {
+        throw new Error('Invalid message format - not a string');
+      }
+      
+      // Check if it looks like a file type or non-JSON data
+      if (message.startsWith('image/') || 
+          message.startsWith('video/') || 
+          message.startsWith('audio/') || 
+          message.startsWith('application/') ||
+          message.startsWith('text/') ||
+          !message.startsWith('{')) {
+        throw new Error(`Detected file data instead of QRX protocol message: ${message.substring(0, 50)}...`);
+      }
+      
       const data = JSON.parse(message);
+      
+      // Validate QRX protocol structure
+      if (!data.type || typeof data.type !== 'string') {
+        throw new Error('Missing or invalid message type field');
+      }
+      
+      // Check if it's a valid QRX message type
+      const validTypes = Object.values(QRXProtocol.MESSAGE_TYPES);
+      if (!validTypes.includes(data.type)) {
+        throw new Error(`Unknown QRX message type: ${data.type}. Valid types: ${validTypes.join(', ')}`);
+      }
       
       switch (data.type) {
         case QRXProtocol.MESSAGE_TYPES.HANDSHAKE:
@@ -570,10 +602,20 @@ class QRXSession {
           return this.handleChunkAck(data);
           
         default:
-          throw new Error(`Unknown message type: ${data.type}`);
+          throw new Error(`Unhandled QRX message type: ${data.type}`);
       }
     } catch (error) {
-      this.notifyError('Invalid message received: ' + error.message);
+      console.error('❌ Message processing error:', error.message);
+      console.error('❌ Raw message preview:', message ? message.substring(0, 100) + '...' : 'null/undefined');
+      
+      // Provide more helpful error messages
+      if (error.message.includes('file data')) {
+        this.notifyError('Scanned file data instead of QRX code. Please scan the QR code shown on the other device.');
+      } else if (error.message.includes('JSON')) {
+        this.notifyError('Invalid QR code format. Please scan a QRX protocol QR code.');
+      } else {
+        this.notifyError('Message processing failed: ' + error.message);
+      }
       return null;
     }
   }
