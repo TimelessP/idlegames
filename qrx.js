@@ -135,9 +135,13 @@ class QRGenerator {
 class QRScanner {
   constructor() {
     this.video = null;
-    this.stream = null;
+    this.canvas = null;
+    this.context = null;
     this.scanning = false;
     this.onQRDetected = null;
+    this.lastDetectedData = null;
+    this.lastDetectionTime = 0;
+    this.detectionCooldown = 2000; // 2 seconds between same QR detections
   }
 
   async startCamera() {
@@ -147,15 +151,35 @@ class QRScanner {
       return false;
     }
 
+    // Detect if we're on mobile to prioritize camera selection
+    const isMobile = /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    console.log('📱 Device detection - Mobile:', isMobile);
+
     try {
-      // Request camera access - prefer back camera for scanning
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'environment', // Back camera
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        }
-      });
+      let constraints;
+      
+      if (isMobile) {
+        // On mobile, prefer back camera (environment) for QR scanning
+        console.log('📷 Mobile detected - requesting back camera (environment)');
+        constraints = {
+          video: {
+            facingMode: { exact: 'environment' }, // Back camera preferred on mobile
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        };
+      } else {
+        // On desktop, just request any available camera
+        console.log('💻 Desktop detected - requesting any available camera');
+        constraints = {
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        };
+      }
+
+      this.stream = await navigator.mediaDevices.getUserMedia(constraints);
       
       this.video = document.getElementById('video');
       this.video.srcObject = this.stream;
@@ -169,30 +193,56 @@ class QRScanner {
       this.scanning = true;
       this.scanLoop();
       
+      console.log('✅ Camera started successfully');
       return true;
-    } catch (error) {
-      console.error('Camera access failed:', error);
       
-      // Fallback to front camera
-      try {
-        this.stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user' }
-        });
-        this.video = document.getElementById('video');
-        this.video.srcObject = this.stream;
-        
-        // Adjust overlay when video loads
-        this.video.addEventListener('loadedmetadata', () => {
-          this.adjustOverlayPosition();
-        });
-        
-        this.scanning = true;
-        this.scanLoop();
-        return true;
-      } catch (fallbackError) {
-        console.error('No camera available:', fallbackError);
-        return false;
+    } catch (error) {
+      console.error('❌ Primary camera request failed:', error);
+      
+      // Fallback strategy
+      if (isMobile) {
+        console.log('📷 Fallback - trying front camera (user) on mobile');
+        try {
+          this.stream = await navigator.mediaDevices.getUserMedia({
+            video: { 
+              facingMode: 'user', // Front camera fallback
+              width: { ideal: 1280 },
+              height: { ideal: 720 }
+            }
+          });
+        } catch (fallbackError) {
+          console.log('📷 Second fallback - trying any camera without constraints');
+          this.stream = await navigator.mediaDevices.getUserMedia({
+            video: true
+          });
+        }
+      } else {
+        // Desktop fallback - try basic video constraints
+        console.log('💻 Desktop fallback - trying basic camera access');
+        try {
+          this.stream = await navigator.mediaDevices.getUserMedia({
+            video: true
+          });
+        } catch (fallbackError) {
+          console.error('❌ No camera available on desktop:', fallbackError);
+          return false;
+        }
       }
+      
+      // Apply the fallback stream
+      this.video = document.getElementById('video');
+      this.video.srcObject = this.stream;
+      
+      // Adjust overlay when video loads
+      this.video.addEventListener('loadedmetadata', () => {
+        this.adjustOverlayPosition();
+      });
+      
+      this.scanning = true;
+      this.scanLoop();
+      
+      console.log('✅ Camera started with fallback');
+      return true;
     }
   }
 
@@ -244,7 +294,17 @@ class QRScanner {
     requestAnimationFrame(() => {
       const result = this.detectQR();
       if (result && this.onQRDetected) {
-        this.onQRDetected(result.data);
+        const currentTime = Date.now();
+        
+        // Prevent duplicate detections of the same data
+        if (result.data !== this.lastDetectedData || 
+            currentTime - this.lastDetectionTime > this.detectionCooldown) {
+          
+          console.log('📷 QR Scanner - New detection:', result.data.substring(0, 50) + '...');
+          this.lastDetectedData = result.data;
+          this.lastDetectionTime = currentTime;
+          this.onQRDetected(result.data);
+        }
       }
       
       if (this.scanning) {
@@ -837,11 +897,33 @@ class QRXApp {
 
   async handleQRDetection(data) {
     try {
+      console.log('🔍 QR Detection - Raw data received:', data);
+      console.log('🔍 QR Detection - Data type:', typeof data);
+      console.log('🔍 QR Detection - Data length:', data ? data.length : 'null/undefined');
+      
+      if (!data || typeof data !== 'string') {
+        console.error('❌ Invalid QR data: not a string or empty');
+        this.showStatus('Invalid QR data received', 'error');
+        return;
+      }
+      
+      // Try to validate it's JSON before passing to session
+      try {
+        JSON.parse(data);
+        console.log('✅ QR data is valid JSON');
+      } catch (jsonError) {
+        console.error('❌ QR data is not valid JSON:', jsonError.message);
+        console.error('❌ Raw data preview:', data.substring(0, 100) + (data.length > 100 ? '...' : ''));
+        this.showStatus('QR code contains invalid data format', 'error');
+        return;
+      }
+      
       const response = this.session.handleMessage(data);
       if (response) {
         await this.displayQR(response);
       }
     } catch (error) {
+      console.error('❌ QR processing error:', error);
       this.showStatus(`QR processing error: ${error.message}`, 'error');
     }
   }
