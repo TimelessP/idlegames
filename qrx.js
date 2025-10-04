@@ -747,9 +747,9 @@ class QRXSession {
     const offer = {
       type: QRXProtocol.MESSAGE_TYPES.FILE_OFFER,
       sessionId: this.sessionId,
-      filename: file.name,
+      filename: file.name.length > 50 ? file.name.substring(0, 47) + '...' : file.name, // Truncate long filenames
       size: file.size,
-      fileType: file.type, // Renamed to avoid conflict with message type
+      fileType: file.type,
       totalChunks: this.transferData.totalChunks,
       checksum: this.transferData.fileChecksum,
       timestamp: Date.now()
@@ -761,13 +761,14 @@ class QRXSession {
     console.log('🔧 DEBUG - Offer type field:', offer.type);
     
     const message = this.createMessage(offer);
-    console.log('🔧 DEBUG - Final message:', message.substring(0, 200) + '...');
+    console.log('🔧 DEBUG - Final message length:', message.length, 'characters');
+    console.log('🔧 DEBUG - Final message:', message);
     
     return message;
   }
 
   createMessage(data) {
-    // Compress message for QR codes
+    // Compress message for QR codes - remove unnecessary whitespace
     return JSON.stringify(data);
   }
 
@@ -1194,8 +1195,8 @@ class QRXApp {
       console.log('QRious available:', typeof QRious !== 'undefined');
       
       const qrDataURL = await QRGenerator.generateDataURL(data, { 
-        size: 280, 
-        errorLevel: 'H' // High error correction for better scanning reliability
+        size: 240, // Smaller size for denser data
+        errorLevel: 'M' // Medium error correction - better balance of data vs reliability for longer messages
       });
       console.log('QR generation completed, data URL length:', qrDataURL.length);
       
