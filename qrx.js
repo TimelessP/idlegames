@@ -344,10 +344,13 @@ class QRScanner {
         if (result.data !== this.lastDetectedData || 
             currentTime - this.lastDetectionTime > this.detectionCooldown) {
           
-          console.log('📷 QR Scanner - New detection:', result.data.substring(0, 50) + '...');
+          console.log('📷 QR Scanner - New QR detected:', result.data.substring(0, 50) + '...');
           this.lastDetectedData = result.data;
           this.lastDetectionTime = currentTime;
           this.onQRDetected(result.data);
+        } else {
+          // Skip duplicate detection (same QR within cooldown period)
+          return;
         }
       }
       
@@ -752,7 +755,15 @@ class QRXSession {
       timestamp: Date.now()
     };
     
-    return this.createMessage(offer);
+    // Debug: Log the offer object before creating message
+    console.log('🔧 DEBUG - FILE_OFFER constant:', QRXProtocol.MESSAGE_TYPES.FILE_OFFER);
+    console.log('🔧 DEBUG - Offer object before JSON:', offer);
+    console.log('🔧 DEBUG - Offer type field:', offer.type);
+    
+    const message = this.createMessage(offer);
+    console.log('🔧 DEBUG - Final message:', message.substring(0, 200) + '...');
+    
+    return message;
   }
 
   createMessage(data) {
