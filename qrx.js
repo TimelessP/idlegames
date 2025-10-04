@@ -1125,13 +1125,35 @@ class QRXApp {
       this.elements.qrDisplay.innerHTML = `
         <img src="${qrDataURL}" alt="QR Code" style="max-width: 100%; height: auto;">
         <div style="margin-top: 10px;">
-          <button onclick="navigator.clipboard.writeText('${data.replace(/'/g, "\\'")}').then(() => alert('QR data copied to clipboard!')).catch(() => alert('Copy failed - check console'))" 
-                  style="padding: 5px 10px; font-size: 11px; background: #0066cc; color: white; border: none; border-radius: 3px; cursor: pointer;">
+          <button id="copyQRData" style="padding: 5px 10px; font-size: 11px; background: #0066cc; color: white; border: none; border-radius: 3px; cursor: pointer;">
             📋 Copy Data
           </button>
         </div>
       `;
       this.currentQR = data;
+      
+      // Add event listener for copy button (safer than inline onclick)
+      const copyButton = this.elements.qrDisplay.querySelector('#copyQRData');
+      if (copyButton) {
+        copyButton.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(data);
+            copyButton.textContent = '✅ Copied!';
+            setTimeout(() => {
+              copyButton.textContent = '📋 Copy Data';
+            }, 2000);
+          } catch (error) {
+            console.error('Copy failed:', error);
+            copyButton.textContent = '❌ Copy Failed';
+            setTimeout(() => {
+              copyButton.textContent = '📋 Copy Data';
+            }, 2000);
+            
+            // Fallback: show the data for manual copy
+            alert('Copy failed. Here is the data to copy manually:\n\n' + data);
+          }
+        });
+      }
       
       console.log('QR code displayed successfully');
     } catch (error) {
