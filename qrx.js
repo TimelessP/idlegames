@@ -838,14 +838,22 @@ class QRXApp {
       } else if (state === 'waiting_for_peer') {
         this.elements.startSession.textContent = 'Waiting for Connection';
         this.elements.startSession.disabled = true;
-        this.showStatus('📱 Waiting for other device to scan QR code. Do not start a session on the other device!', 'info');
+        this.showStatus('📱 Step 2: Other device should scan this QR code (do NOT start a session on the other device)', 'info');
       } else if (state === 'connected') {
         this.elements.startSession.textContent = 'Connected';
         this.elements.startSession.disabled = true;
         this.elements.sessionInfo.classList.remove('hidden');
-        this.showStatus('✅ Connected! Ready to transfer files. Drop a file or click the file area to select.', 'success');
-      } else if (state === 'offering_file' || state === 'transferring') {
-        this.showStatus(`📤 ${state === 'offering_file' ? 'Offering file to peer...' : 'Transferring file...'}`, 'info');
+        
+        // Different messages based on role
+        if (this.session.isInitiator) {
+          this.showStatus('✅ Connected! You can now send files. Drop a file or click the file area to select.', 'success');
+        } else {
+          this.showStatus('✅ Connected! You are the receiver. Scan QR codes from the sender device to receive files.', 'success');
+        }
+      } else if (state === 'offering_file') {
+        this.showStatus('📤 Step 4: File offer sent! Other device should scan the QR code to accept the file transfer.', 'info');
+      } else if (state === 'transferring') {
+        this.showStatus('📤 Transferring file... Please wait for completion.', 'info');
       }
     };
 
@@ -895,7 +903,7 @@ class QRXApp {
         return;
       }
       
-      this.showStatus('📱 Starting session... The other device should scan this QR code (not start its own session!)', 'success');
+      this.showStatus('📱 Step 1: Session started! Show this QR code to the other device to scan.', 'success');
       const message = this.session.startSession();
       await this.displayQR(message);
       
@@ -1094,11 +1102,27 @@ class QRXApp {
     try {
       this.showStatus(`Selected: ${file.name} (${this.formatFileSize(file.size)})`);
       
+      // Check session state and provide specific guidance
       if (this.session.state === 'connected') {
+        // Only the session initiator should send files
+        if (!this.session.isInitiator) {
+          this.showStatus('❌ Only the device that started the session can send files. This device should scan QR codes from the sender.', 'error');
+          return;
+        }
+        
         const message = await this.session.offerFile(file);
         await this.displayQR(message);
+        this.showStatus('📤 File offer created! Other device should scan this QR code to accept the file.', 'info');
+      } else if (this.session.state === 'idle') {
+        this.showStatus('❌ No connection. Start a new session first, then select a file to send.', 'error');
+      } else if (this.session.state === 'waiting_for_peer') {
+        this.showStatus('❌ Still waiting for connection. The other device needs to scan your QR code first.', 'error');
+      } else if (this.session.state === 'offering_file') {
+        this.showStatus('❌ Already offering a file. Wait for the other device to scan the current QR code.', 'error');
+      } else if (this.session.state === 'transferring') {
+        this.showStatus('❌ File transfer already in progress. Please wait for it to complete.', 'error');
       } else {
-        this.showStatus('Please connect to a device first by starting a session or scanning a QR code.');
+        this.showStatus(`❌ Cannot send file in current state: ${this.session.state}`, 'error');
       }
     } catch (error) {
       this.showStatus(`Error: ${error.message}`, 'error');
