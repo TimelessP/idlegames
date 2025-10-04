@@ -33,23 +33,22 @@ class QRGenerator {
     const size = options.size || 300;
     const errorCorrection = options.errorCorrection || QRXProtocol.QR_ERROR_CORRECTION;
     
-    // Check if QR library is available
-    if (typeof QRCode !== 'undefined') {
+    // Check if QRious library is available (much more reliable than QRCode)
+    if (typeof QRious !== 'undefined') {
       try {
-        // Use QRCode.js library for proper QR generation
+        // Create canvas for QRious
         const canvas = document.createElement('canvas');
-        await QRCode.toCanvas(canvas, data, {
-          width: size,
-          height: size,
-          errorCorrectionLevel: errorCorrection,
-          margin: 2,
-          color: {
-            dark: '#000000',
-            light: '#FFFFFF'
-          }
+        
+        // Use QRious library for proper QR generation
+        const qr = new QRious({
+          element: canvas,
+          value: data,
+          size: size,
+          level: errorCorrection,
+          padding: null // auto padding
         });
         
-        return canvas.toDataURL();
+        return qr.toDataURL();
       } catch (error) {
         console.error('QR generation failed:', error);
       }
@@ -136,6 +135,12 @@ class QRScanner {
   }
 
   async startCamera() {
+    // Check if navigator.mediaDevices is available
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.error('Camera API not available - requires HTTPS or localhost');
+      return false;
+    }
+
     try {
       // Request camera access - prefer back camera for scanning
       this.stream = await navigator.mediaDevices.getUserMedia({
@@ -473,6 +478,67 @@ class QRXSession {
     return null; // No response needed
   }
 
+  handleFileOffer(data) {
+    if (this.state !== 'connected' || data.sessionId !== this.sessionId) return null;
+    
+    // Store the file offer details
+    this.pendingFileOffer = data;
+    this.state = 'file_offered';
+    this.notifyStateChange();
+    
+    // For now, auto-accept files (in production, would show user prompt)
+    const accept = {
+      type: QRXProtocol.MESSAGE_TYPES.FILE_ACCEPT,
+      sessionId: this.sessionId,
+      accepted: true,
+      timestamp: Date.now()
+    };
+    
+    return this.createMessage(accept);
+  }
+
+  handleFileAccept(data) {
+    if (this.state !== 'offering_file' || data.sessionId !== this.sessionId) return null;
+    
+    if (data.accepted) {
+      this.state = 'transferring';
+      this.notifyStateChange();
+      this.notifyProgress(0, this.transferData.totalChunks, 'Starting file transfer...');
+      
+      // Start with first chunk
+      const firstChunk = {
+        type: QRXProtocol.MESSAGE_TYPES.CHUNK_DATA,
+        sessionId: this.sessionId,
+        chunkId: 0,
+        data: this.transferData.chunks[0].data,
+        checksum: this.transferData.chunks[0].checksum,
+        timestamp: Date.now()
+      };
+      
+      return this.createMessage(firstChunk);
+    } else {
+      this.state = 'connected';
+      this.notifyStateChange();
+      this.notifyError('File transfer was declined by peer');
+      return null;
+    }
+  }
+
+  handleChunkRequest(data) {
+    // Implementation for chunk requests (would handle retries)
+    return null;
+  }
+
+  handleChunkData(data) {
+    // Implementation for receiving chunk data
+    return null;
+  }
+
+  handleChunkAck(data) {
+    // Implementation for chunk acknowledgments  
+    return null;
+  }
+
   async offerFile(file) {
     if (this.state !== 'connected') {
       throw new Error('No active session');
@@ -607,7 +673,17 @@ class QRXApp {
         this.elements.stopCamera.disabled = false;
         this.showStatus('Camera started. Point at QR codes to scan.', 'success');
       } else {
-        this.showStatus('Failed to access camera. Please check permissions.', 'error');
+        this.elements.startCamera.disabled = false;
+        this.elements.stopCamera.disabled = true;
+        
+        // Provide specific error message based on the environment
+        if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+          this.showStatus('❌ Camera requires HTTPS or localhost. Use manual input instead.', 'error');
+        } else if (!navigator.mediaDevices) {
+          this.showStatus('❌ Camera API not supported in this browser. Use manual input instead.', 'error');
+        } else {
+          this.showStatus('❌ Camera access denied. Check permissions or use manual input.', 'error');
+        }
       }
     });
 
@@ -750,12 +826,12 @@ class LibraryLoader {
     
     while (retries < maxRetries) {
       // Check if libraries are loaded
-      const qrCodeLoaded = typeof QRCode !== 'undefined';
+      const qriousLoaded = typeof QRious !== 'undefined';
       const jsQRLoaded = typeof jsQR !== 'undefined';
       
-      console.log(`Attempt ${retries + 1}: QRCode=${qrCodeLoaded}, jsQR=${jsQRLoaded}`);
+      console.log(`Attempt ${retries + 1}: QRious=${qriousLoaded}, jsQR=${jsQRLoaded}`);
       
-      if (qrCodeLoaded && jsQRLoaded) {
+      if (qriousLoaded && jsQRLoaded) {
         console.log('✅ All QR libraries loaded successfully!');
         return true;
       }
