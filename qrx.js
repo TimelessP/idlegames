@@ -33,39 +33,97 @@ class QRGenerator {
     const size = options.size || 300;
     const errorCorrection = options.errorCorrection || QRXProtocol.QR_ERROR_CORRECTION;
     
-    try {
-      // Use QRCode.js library for proper QR generation
-      const canvas = document.createElement('canvas');
-      await QRCode.toCanvas(canvas, data, {
-        width: size,
-        height: size,
-        errorCorrectionLevel: errorCorrection,
-        margin: 2,
-        color: {
-          dark: '#000000',
-          light: '#FFFFFF'
-        }
-      });
-      
-      return canvas.toDataURL();
-    } catch (error) {
-      console.error('QR generation failed:', error);
-      
-      // Fallback to simple placeholder
-      const canvas = document.createElement('canvas');
-      canvas.width = size;
-      canvas.height = size;
-      const ctx = canvas.getContext('2d');
-      
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(0, 0, size, size);
-      ctx.fillStyle = '#000';
-      ctx.font = '14px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('QR ERROR', size/2, size/2);
-      
-      return canvas.toDataURL();
+    // Check if QR library is available
+    if (typeof QRCode !== 'undefined') {
+      try {
+        // Use QRCode.js library for proper QR generation
+        const canvas = document.createElement('canvas');
+        await QRCode.toCanvas(canvas, data, {
+          width: size,
+          height: size,
+          errorCorrectionLevel: errorCorrection,
+          margin: 2,
+          color: {
+            dark: '#000000',
+            light: '#FFFFFF'
+          }
+        });
+        
+        return canvas.toDataURL();
+      } catch (error) {
+        console.error('QR generation failed:', error);
+      }
     }
+    
+    // Fallback to base64 encoded data display
+    return this.generateDataDisplay(data, size);
+  }
+  
+  static generateDataDisplay(data, size) {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    
+    // White background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, size, size);
+    
+    // Black border
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1, 1, size-2, size-2);
+    
+    // Title
+    ctx.fillStyle = '#000000';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('QRX DATA', size/2, 30);
+    
+    // Data content in a scrollable format
+    ctx.font = '12px monospace';
+    const maxWidth = size - 20;
+    const lineHeight = 16;
+    let y = 60;
+    
+    // Word wrap the data
+    const words = data.split(' ');
+    let line = '';
+    
+    for (let n = 0; n < words.length && y < size - 40; n++) {
+      const testLine = line + words[n] + ' ';
+      const metrics = ctx.measureText(testLine);
+      
+      if (metrics.width > maxWidth && line.length > 0) {
+        ctx.fillText(line.trim(), size/2, y);
+        line = words[n] + ' ';
+        y += lineHeight;
+      } else {
+        line = testLine;
+      }
+    }
+    
+    if (line.trim().length > 0 && y < size - 20) {
+      ctx.fillText(line.trim(), size/2, y);
+    }
+    
+    // Instructions
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = '#666666';
+    ctx.fillText('Manual entry required', size/2, size - 20);
+    ctx.fillText('(No QR scanner available)', size/2, size - 8);
+    
+    return canvas.toDataURL();
+  }
+  
+  static simpleHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash);
   }
 }
 
@@ -203,12 +261,17 @@ class QRScanner {
       // Get image data
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       
-      // Use jsQR to detect QR codes
-      const code = jsQR(imageData.data, imageData.width, imageData.height, {
-        inversionAttempts: 'dontInvert'
-      });
-      
-      return code;
+      // Use jsQR to detect QR codes if available
+      if (typeof jsQR !== 'undefined') {
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: 'dontInvert'
+        });
+        return code;
+      } else {
+        // Fallback: no real QR detection without library
+        // This would need manual QR code input or different approach
+        return null;
+      }
     } catch (error) {
       // Silent fail - QR detection errors are common and expected
       return null;
@@ -486,6 +549,8 @@ class QRXApp {
       startSession: document.getElementById('startSession'),
       startCamera: document.getElementById('startCamera'),
       stopCamera: document.getElementById('stopCamera'),
+      manualInput: document.getElementById('manualInput'),
+      processManual: document.getElementById('processManual'),
       fileDrop: document.getElementById('fileDrop'),
       fileInput: document.getElementById('fileInput'),
       sessionInfo: document.getElementById('sessionInfo'),
@@ -551,6 +616,16 @@ class QRXApp {
       this.elements.startCamera.disabled = false;
       this.elements.stopCamera.disabled = true;
       this.showStatus('Camera stopped.');
+    });
+
+    this.elements.processManual.addEventListener('click', () => {
+      const data = this.elements.manualInput.value.trim();
+      if (data) {
+        this.handleQRDetection(data);
+        this.elements.manualInput.value = '';
+      } else {
+        this.showStatus('Please enter QRX data to process.', 'error');
+      }
     });
 
     // File handling
@@ -665,7 +740,57 @@ class QRXApp {
   }
 }
 
+// Library loading utilities
+class LibraryLoader {
+  static async ensureQRLibraries() {
+    const maxRetries = 5;
+    let retries = 0;
+    
+    console.log('Checking for QR libraries...');
+    
+    while (retries < maxRetries) {
+      // Check if libraries are loaded
+      const qrCodeLoaded = typeof QRCode !== 'undefined';
+      const jsQRLoaded = typeof jsQR !== 'undefined';
+      
+      console.log(`Attempt ${retries + 1}: QRCode=${qrCodeLoaded}, jsQR=${jsQRLoaded}`);
+      
+      if (qrCodeLoaded && jsQRLoaded) {
+        console.log('✅ All QR libraries loaded successfully!');
+        return true;
+      }
+      
+      // Wait and retry
+      await new Promise(resolve => setTimeout(resolve, 800));
+      retries++;
+    }
+    
+    console.warn('⚠️ QR libraries not loaded from CDN, using fallback implementations');
+    console.log('Manual data entry will be available for QR scanning');
+    return false;
+  }
+}
+
 // Initialize app when DOM is loaded
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  // Show loading status
+  const statusElement = document.getElementById('status');
+  if (statusElement) {
+    statusElement.textContent = 'Loading QR libraries...';
+    statusElement.className = 'status';
+    statusElement.classList.remove('hidden');
+  }
+  
+  // Try to ensure libraries are loaded
+  const librariesLoaded = await LibraryLoader.ensureQRLibraries();
+  
+  // Initialize app
   window.qrxApp = new QRXApp();
+  
+  // Update status based on library loading
+  if (librariesLoaded) {
+    window.qrxApp.showStatus('✅ Full QR functionality available! Ready to transfer files.', 'success');
+  } else {
+    window.qrxApp.showStatus('⚠️ Limited mode: Manual data entry available (CDN libraries failed to load)');
+  }
 });
