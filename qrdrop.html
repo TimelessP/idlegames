@@ -829,24 +829,24 @@ You can also manually paste text here if needed."
           // Create canvas element for QR code  
           const canvas = document.createElement('canvas');
           
-          // Generate QR code with proper sizing to include all quiet zones
-          // Use a size that ensures complete quiet zones are rendered
+          // Generate QR code with QRious (let it do whatever sizing it wants)
+          const tempCanvas = document.createElement('canvas');
           const qr = new QRious({
-            element: canvas,
+            element: tempCanvas,
             value: text,
             // calculate the optimal size based on text length
             size: Math.min(512, Math.max(100, text.length * 8)), // Dynamic size
             level: 'M', // Medium error correction
             foreground: '#000000',
-            background: '#ffffff',
-            // quiet zone is 4 blocks, and we have pixels here, so let's calculate size
-            padding: 32,
-            mime: "image/png"
+            background: '#ffffff'
           });
           
-          // Display the QR code
+          // Post-process: find the actual QR code bounds and create optimized canvas
+          const optimizedCanvas = this.postProcessQRCode(tempCanvas, canvas);
+          
+          // Display the optimized QR code
           this.elements.qrDisplay.innerHTML = '';
-          this.elements.qrDisplay.appendChild(canvas);
+          this.elements.qrDisplay.appendChild(optimizedCanvas);
           
           this.showStatus(`QR code generated! (${text.length} characters)`, 'success');
           
@@ -866,6 +866,78 @@ You can also manually paste text here if needed."
         if (typeof QRious === 'undefined') {
           throw new Error('QRious library not available');
         }
+      }
+      
+      postProcessQRCode(sourceCanvas, targetCanvas) {
+        const sourceCtx = sourceCanvas.getContext('2d');
+        const imageData = sourceCtx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+        const data = imageData.data;
+        
+        // Find bounds of the actual QR code (non-white pixels)
+        let minX = sourceCanvas.width, maxX = 0;
+        let minY = sourceCanvas.height, maxY = 0;
+        let foundQR = false;
+        
+        // Scan for black pixels to find QR code bounds
+        for (let y = 0; y < sourceCanvas.height; y++) {
+          for (let x = 0; x < sourceCanvas.width; x++) {
+            const index = (y * sourceCanvas.width + x) * 4;
+            const r = data[index];
+            const g = data[index + 1];
+            const b = data[index + 2];
+            
+            // Check if pixel is significantly darker than white (accounting for any artifacts)
+            if (r < 240 || g < 240 || b < 240) {
+              foundQR = true;
+              minX = Math.min(minX, x);
+              maxX = Math.max(maxX, x);
+              minY = Math.min(minY, y);
+              maxY = Math.max(maxY, y);
+            }
+          }
+        }
+        
+        if (!foundQR) {
+          // Fallback: return the original canvas if no QR code found
+          return sourceCanvas;
+        }
+        
+        // Calculate QR code dimensions
+        const qrWidth = maxX - minX + 1;
+        const qrHeight = maxY - minY + 1;
+        const qrSize = Math.max(qrWidth, qrHeight); // Use the larger dimension
+        
+        // Set target canvas to high resolution (1024x1024) - let browser scale it down
+        const canvasSize = 1024;
+        
+        targetCanvas.width = canvasSize;
+        targetCanvas.height = canvasSize;
+        // No explicit style sizing - let CSS handle the scaling
+        
+        const targetCtx = targetCanvas.getContext('2d');
+        
+        // Disable anti-aliasing for crisp pixel rendering
+        targetCtx.imageSmoothingEnabled = false;
+        targetCtx.webkitImageSmoothingEnabled = false;
+        targetCtx.mozImageSmoothingEnabled = false;
+        targetCtx.msImageSmoothingEnabled = false;
+        
+        // Fill with white background
+        targetCtx.fillStyle = '#ffffff';
+        targetCtx.fillRect(0, 0, canvasSize, canvasSize);
+        
+        // Calculate quiet zone (typically 4 modules, we'll use about 8% of canvas)
+        const quietZone = Math.floor(canvasSize * 0.08);
+        const qrRenderSize = canvasSize - (quietZone * 2);
+        
+        // Draw the extracted QR code data centered with quiet zones
+        targetCtx.drawImage(
+          sourceCanvas,
+          minX, minY, qrSize, qrSize, // Source: extract just the QR code
+          quietZone, quietZone, qrRenderSize, qrRenderSize // Target: centered with quiet zones
+        );
+        
+        return targetCanvas;
       }
       
       showTextAsQR(text) {
@@ -1207,38 +1279,38 @@ You can also manually paste text here if needed."
           // Continue anyway - modal will still work without fullscreen
         }
         
-        // Clone the canvas for the modal
-        const modalCanvas = canvas.cloneNode(true);
+        // Create a new canvas for the fullscreen modal
+        const modalCanvas = document.createElement('canvas');
         
-        // Calculate size to fit the smallest dimension of client area
-        const clientSize = Math.min(window.innerWidth * 0.9, window.innerHeight * 0.9);
+        // Set modal canvas to high resolution (1024x1024) - let CSS handle scaling
+        const canvasSize = 1024;
         
-        // Get the original canvas dimensions (auto-sized by QRious)
-        const originalWidth = canvas.width;
-        const originalHeight = canvas.height;
+        modalCanvas.width = canvasSize;
+        modalCanvas.height = canvasSize;
+        // CSS will handle the scaling via .qr-modal canvas rules
         
-        // Calculate scale factor to fit the client area while preserving quiet zones
-        // Use 95% of client size to ensure quiet zones aren't clipped
-        const safeClientSize = clientSize * 0.95;
-        const scaleX = safeClientSize / originalWidth;
-        const scaleY = safeClientSize / originalHeight; 
-        const scale = Math.min(scaleX, scaleY);
-        
-        // Set modal canvas to scaled dimensions
-        modalCanvas.width = originalWidth * scale;
-        modalCanvas.height = originalHeight * scale;
-        
-        // Redraw the QR code at the new size with disabled anti-aliasing
-        const ctx = modalCanvas.getContext('2d');
+        const modalCtx = modalCanvas.getContext('2d');
         
         // Disable anti-aliasing for crisp QR code rendering
-        ctx.imageSmoothingEnabled = false;
-        ctx.webkitImageSmoothingEnabled = false;
-        ctx.mozImageSmoothingEnabled = false;
-        ctx.msImageSmoothingEnabled = false;
+        modalCtx.imageSmoothingEnabled = false;
+        modalCtx.webkitImageSmoothingEnabled = false;
+        modalCtx.mozImageSmoothingEnabled = false;
+        modalCtx.msImageSmoothingEnabled = false;
         
-        // Scale the original QR code to fit the modal canvas, preserving all quiet zones
-        ctx.drawImage(canvas, 0, 0, modalCanvas.width, modalCanvas.height);
+        // Fill with white background
+        modalCtx.fillStyle = '#ffffff';
+        modalCtx.fillRect(0, 0, canvasSize, canvasSize);
+        
+        // Calculate quiet zone for fullscreen (about 6% for better visibility)
+        const quietZone = Math.floor(canvasSize * 0.06);
+        const qrRenderSize = canvasSize - (quietZone * 2);
+        
+        // Draw the preview canvas scaled to fullscreen size with proper quiet zones
+        modalCtx.drawImage(
+          canvas,
+          0, 0, canvas.width, canvas.height, // Source: entire preview canvas
+          quietZone, quietZone, qrRenderSize, qrRenderSize // Target: centered with quiet zones
+        );
         
         // Clear modal content and add the new canvas
         this.elements.qrModalContent.innerHTML = '';
