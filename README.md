@@ -69,10 +69,10 @@ Delightful, local-first RSS/Atom reader that supports OPML import/export and dir
 - Features: OPML import/export/edit, media playback, categories/filters, favorites/tags, unified search (substring/regex/soundex/cosine), refresh schedules, caching, responsive UI
 - Tags: Utility, Reader, SPA
 
-### � [QR Drop](https://timelessp.github.io/idlegames/qrdrop.html)
-Simple and elegant text sharing between devices using QR codes. Clean interface with crisp QR rendering and fullscreen display.
-- Features: Instant QR generation, fullscreen modal, camera scanning, mobile-optimized, crisp pixel-perfect rendering
-- Tags: Utility, Sharing, QR Codes
+### 🔄 [QR Loop](https://timelessp.github.io/idlegames/qrloop.html)
+Advanced file transfer via chunked QR codes. Transfer files of any size by automatically cycling through QR codes with universal accessibility.
+- Features: Chunked transmission, automatic looping, URL-based QR codes, universal QR reader compatibility, 512-byte chunks, 1-second intervals
+- Tags: Utility, File Transfer, QR Codes, Chunked
 
 ### �📔 [Personal Organiser](https://timelessp.github.io/idlegames/po.html)
 Adorable, mobile-first organiser with Notes, Calendar, Tasks, Flip Cards, and Calculator — all local-first.
@@ -158,7 +158,7 @@ Simply visit [https://timelessp.github.io/idlegames/](https://timelessp.github.i
 - 🧩 Puzzle/Casual: Fit the Shapes, Jigsaw Puzzle, Yahtzee, Maze Balls, Garden Grower
 - 🧪 Physics/Toys: Magic Potion, Physics Toy, Cyber Deck
 - 🎯 Action/Arcade: Space Scroller
-- 🛠️ Utilities/Extras: Dictaphone, QR Drop, Feed Cycle, Personal Organiser
+- 🛠️ Utilities/Extras: Dictaphone, QR Loop, Feed Cycle, Personal Organiser
 
 ## 🤝 Contributing
 
