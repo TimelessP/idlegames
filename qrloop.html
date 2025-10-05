@@ -1178,6 +1178,37 @@
           this.elements.video.srcObject = this.stream;
           this.currentFacingMode = requestedMode;
           
+          // Wait for video to be ready with metadata
+          await new Promise((resolve) => {
+            let resolved = false;
+            
+            const onLoadedMetadata = () => {
+              if (resolved) return;
+              resolved = true;
+              this.elements.video.removeEventListener('loadedmetadata', onLoadedMetadata);
+              console.log(`Video ready: ${this.elements.video.videoWidth}x${this.elements.video.videoHeight}`);
+              resolve();
+            };
+            
+            // Check if metadata is already available
+            if (this.elements.video.videoWidth > 0 && this.elements.video.videoHeight > 0) {
+              console.log(`Video already ready: ${this.elements.video.videoWidth}x${this.elements.video.videoHeight}`);
+              resolve();
+              return;
+            }
+            
+            this.elements.video.addEventListener('loadedmetadata', onLoadedMetadata);
+            
+            // Fallback timeout
+            setTimeout(() => {
+              if (resolved) return;
+              resolved = true;
+              this.elements.video.removeEventListener('loadedmetadata', onLoadedMetadata);
+              console.log('Video metadata timeout, proceeding anyway');
+              resolve();
+            }, 2000);
+          });
+          
           // Update button states
           this.elements.startCamera.disabled = true;
           this.elements.useBackCamera.disabled = false;
@@ -1253,6 +1284,7 @@
         requestAnimationFrame(() => {
           const result = this.detectQR();
           if (result) {
+            console.log('QR detected:', result.substring(0, 50) + '...');
             this.handleQRDetection(result);
           }
           
@@ -1300,24 +1332,36 @@
           // Check if QR data is a URL with our parameters
           if (qrData.includes('receive=1') && qrData.includes('data=')) {
             const url = new URL(qrData);
+            console.log('Parsed URL:', url.toString());
             
             // Verify this is our page URL (same origin and path)
             const currentUrl = new URL(window.location.href);
+            console.log('Current URL origin:', currentUrl.origin, 'path:', currentUrl.pathname);
+            console.log('QR URL origin:', url.origin, 'path:', url.pathname);
+            
             if (url.origin === currentUrl.origin && 
                 url.pathname === currentUrl.pathname) {
               base64Data = url.searchParams.get('data');
+              console.log('Extracted base64 data length:', base64Data?.length);
+            } else {
+              console.warn('URL origin/path mismatch - not processing');
             }
           } else {
             // Fallback: treat as direct base64 data for backward compatibility
+            console.log('Using direct base64 fallback');
             base64Data = qrData;
           }
           
-          if (!base64Data) return;
+          if (!base64Data) {
+            console.warn('No base64 data found');
+            return;
+          }
           
           // Decode base64 data with better error handling
           let binaryString;
           try {
             binaryString = atob(base64Data);
+            console.log('Base64 decoded to binary string length:', binaryString.length);
           } catch (e) {
             console.warn('Base64 decode failed:', e);
             return;
@@ -1339,9 +1383,13 @@
           }
           
           if (metadataEnd === -1) {
-            console.warn('Metadata separator not found');
+            console.warn('Metadata separator not found in', bytes.length, 'bytes');
+            // Log first few bytes to debug
+            console.log('First 50 bytes as text:', decoder.decode(bytes.slice(0, Math.min(50, bytes.length))));
             return;
           }
+          
+          console.log('Metadata separator found at position:', metadataEnd);
           
           const metadataBytes = bytes.slice(0, metadataEnd - 1);
           const chunkData = bytes.slice(metadataEnd);
@@ -1349,7 +1397,9 @@
           let metadata;
           try {
             const metadataJson = decoder.decode(metadataBytes);
+            console.log('Metadata JSON:', metadataJson);
             metadata = JSON.parse(metadataJson);
+            console.log('Parsed metadata:', metadata);
           } catch (e) {
             console.warn('Metadata parse failed:', e);
             return;
@@ -1361,6 +1411,7 @@
             return;
           }
           
+          console.log('Processing chunk:', metadata.chunkNumber, 'of', metadata.totalChunks);
           this.processReceivedChunk(metadata, chunkData);
           
         } catch (error) {
