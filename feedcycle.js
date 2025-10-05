@@ -46,8 +46,6 @@
   const VERSION = '2.0.0';
   const LS_KEY = 'feedcycle-v2';
   const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{}, proxyScores:{}, proxyScoresResetAt:0 }; // posts ephemeral + tags mapping postId -> [tag]
-  const migrationResult = (typeof window !== 'undefined' && window.feedcycleMigrateV1toV2 && typeof window.feedcycleMigrateV1toV2.run === 'function') ? window.feedcycleMigrateV1toV2.run() : null;
-  if(migrationResult){ console.info('[FeedCycle v2] Migrated feeds from v1', migrationResult); }
   // state will be loaded after proxy scoring utilities are defined
   let state; // defer assignment
   let posts = {}; // id -> post (ephemeral)

@@ -64,7 +64,7 @@ Handy voice recorder with waveform/meter UI and export options. Built as a simpl
 - Features: Record/playback, trimming/jumping, gain/volume controls, theme support
 - Tags: Utility, Audio, SPA
 
-### 🌀📡 [Feed Cycle](https://timelessp.github.io/idlegames/feed-cycle.html)
+### 🌀📡 [Feed Cycle](https://timelessp.github.io/idlegames/feedcycle.html)
 Delightful, local-first RSS/Atom reader that supports OPML import/export and direct editing. Plays podcasts (audio/video), renders images, tagging, favoriting, read/unread, powerful combined search, and responsive touch/mouse/keyboard UI with system/light/dark themes. Data stored in LocalStorage with optional Cache API for responses.
 - Features: OPML import/export/edit, media playback, categories/filters, favorites/tags, unified search (substring/regex/soundex/cosine), refresh schedules, caching, responsive UI
 - Tags: Utility, Reader, SPA
