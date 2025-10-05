@@ -69,7 +69,7 @@ Delightful, local-first RSS/Atom reader that supports OPML import/export and dir
 - Features: OPML import/export/edit, media playback, categories/filters, favorites/tags, unified search (substring/regex/soundex/cosine), refresh schedules, caching, responsive UI
 - Tags: Utility, Reader, SPA
 
-### 📔 [Personal Organiser](https://timelessp.github.io/idlegames/organiser.html)
+### 📔 [Personal Organiser](https://timelessp.github.io/idlegames/po.html)
 Adorable, mobile-first organiser with Notes, Calendar, Tasks, Flip Cards, and Calculator — all local-first.
 - Features: Scalable UI, drag-and-drop sorting (touch + mouse), fullscreen, JSON import/export, mode persistence, autosizing calculator
 - Tags: Utility, Productivity, Notes, Calendar, Tasks
