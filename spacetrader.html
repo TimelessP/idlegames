@@ -329,13 +329,12 @@
       background: rgba(0, 0, 0, 0.9);
       display: none;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-start;
       flex-direction: column;
+      padding-top: 16px;
     }
     
-    .system-map.active {
-      display: flex;
-    }
+    .system-map.active { display: flex; }
     
     .map-container {
       width: 80%;
@@ -567,15 +566,22 @@
     .moon-chip:hover { background: #003300; }
 
     /* Galaxy Map */
-    .galaxy-map { position: absolute; inset: 0; background: rgba(0,0,0,0.95); display: none; align-items: center; justify-content: center; flex-direction: column; }
-    .galaxy-map.active { display: flex; }
-    .galaxy-container { width: 85%; height: 70%; border: 2px solid #00ff00; border-radius: 10px; background: #000; position: relative; overflow: hidden; }
+  .galaxy-map { position: absolute; inset: 0; background: rgba(0,0,0,0.95); display: none; align-items: center; justify-content: flex-start; flex-direction: column; padding-top: 16px; }
+  .galaxy-map.active { display: flex; }
+  .galaxy-container { width: 85%; height: 70%; border: 2px solid #00ff00; border-radius: 10px; background: #000; position: relative; overflow: hidden; touch-action: none; }
   .galaxy-stage { position: absolute; inset: 0; transform-origin: 0 0; }
   .galaxy-canvas { position: absolute; inset: 0; }
     .system-node { position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #00ff00; border: 2px solid #004400; cursor: pointer; transition: transform 0.2s ease, box-shadow 0.2s ease; }
     .system-node:hover { transform: scale(1.4); box-shadow: 0 0 12px rgba(0,255,0,0.7); }
     .system-node.current { background: #ffff00; box-shadow: 0 0 14px rgba(255,255,0,0.8); }
     .node-label { position: absolute; transform: translate(-50%, 14px); color: #00ff99; font-size: 10px; white-space: nowrap; }
+
+    /* Mobile-friendly galaxy map sizing and targets */
+    @media (max-width: 760px) {
+      .galaxy-container { width: 96vw; height: 70vh; }
+      .system-node { width: 20px; height: 20px; }
+      .node-label { font-size: 11px; }
+    }
 
     /* Cargo beam effect */
     .beam-overlay { position: absolute; inset: 0; pointer-events: none; display: none; }
@@ -588,6 +594,9 @@
     }
     @media (max-width: 600px) {
       .deck-grid { grid-template-columns: 1fr; }
+      .system-map { padding-top: 8px; }
+      .map-container { width: 96vw; height: 70vh; }
+      .galaxy-map { padding-top: 8px; }
       .button { font-size: 10px; padding: 6px; }
       .viewport { margin: 10px; }
       .topbar { gap: 10px; }
@@ -1168,7 +1177,7 @@
           stage.appendChild(label);
         });
 
-        // Zoom and pan handlers
+        // Zoom and pan handlers (wheel + pointer events for touch)
         const onWheel = (e) => {
           e.preventDefault();
           const rect = container.getBoundingClientRect();
@@ -1186,28 +1195,63 @@
           this._galaxyZoom = newScale;
           stage.style.transform = `translate(${this._galaxyPanX}px, ${this._galaxyPanY}px) scale(${this._galaxyZoom})`;
         };
-        const onMouseDown = (e) => {
-          if (e.button !== 0) return;
-          this._panning = true;
-          this._panStartX = e.clientX - this._galaxyPanX;
-          this._panStartY = e.clientY - this._galaxyPanY;
-        };
-        const onMouseMove = (e) => {
-          if (!this._panning) return;
-          this._galaxyPanX = e.clientX - this._panStartX;
-          this._galaxyPanY = e.clientY - this._panStartY;
+        // Pointer state
+        this._pointers = new Map();
+        const setTransform = () => {
           stage.style.transform = `translate(${this._galaxyPanX}px, ${this._galaxyPanY}px) scale(${this._galaxyZoom})`;
         };
-        const onMouseUp = () => { this._panning = false; };
-        const onLeave = () => { this._panning = false; };
+        const onPointerDown = (e) => {
+          container.setPointerCapture(e.pointerId);
+          this._pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+          if (this._pointers.size === 1) {
+            this._panning = true;
+            this._panStartX = e.clientX - this._galaxyPanX;
+            this._panStartY = e.clientY - this._galaxyPanY;
+          } else if (this._pointers.size === 2) {
+            // Initialize pinch
+            const pts = Array.from(this._pointers.values());
+            this._pinchStartDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+            this._pinchStartScale = this._galaxyZoom;
+            const rect = container.getBoundingClientRect();
+            this._pinchCenter = {
+              x: (pts[0].x + pts[1].x) / 2 - rect.left,
+              y: (pts[0].y + pts[1].y) / 2 - rect.top
+            };
+          }
+        };
+        const onPointerMove = (e) => {
+          if (!this._pointers.has(e.pointerId)) return;
+          this._pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+          if (this._pointers.size === 1 && this._panning) {
+            this._galaxyPanX = e.clientX - this._panStartX;
+            this._galaxyPanY = e.clientY - this._panStartY;
+            setTransform();
+          } else if (this._pointers.size === 2) {
+            const pts = Array.from(this._pointers.values());
+            const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+            const scale = Math.max(0.4, Math.min(3.0, this._pinchStartScale * (dist / this._pinchStartDist)));
+            // Zoom around pinch center
+            const sx = (this._pinchCenter.x - this._galaxyPanX) / this._galaxyZoom;
+            const sy = (this._pinchCenter.y - this._galaxyPanY) / this._galaxyZoom;
+            this._galaxyPanX = this._pinchCenter.x - sx * scale;
+            this._galaxyPanY = this._pinchCenter.y - sy * scale;
+            this._galaxyZoom = scale;
+            setTransform();
+          }
+        };
+        const onPointerUp = (e) => {
+          if (container.hasPointerCapture?.(e.pointerId)) container.releasePointerCapture(e.pointerId);
+          this._pointers.delete(e.pointerId);
+          if (this._pointers.size === 0) this._panning = false;
+        };
         // Bind
         container.addEventListener('wheel', onWheel, { passive: false });
-        container.addEventListener('mousedown', onMouseDown);
-        window.addEventListener('mousemove', onMouseMove);
-        window.addEventListener('mouseup', onMouseUp);
-        container.addEventListener('mouseleave', onLeave);
+        container.addEventListener('pointerdown', onPointerDown);
+        container.addEventListener('pointermove', onPointerMove);
+        container.addEventListener('pointerup', onPointerUp);
+        container.addEventListener('pointercancel', onPointerUp);
         // Store handlers for cleanup
-        this._galaxyHandlers = { onWheel, onMouseDown, onMouseMove, onMouseUp, onLeave };
+        this._galaxyHandlers = { onWheel, onPointerDown, onPointerMove, onPointerUp };
 
         // Show route info: current -> neighbors (1 hop) -> their neighbors (2 hops)
         const oneHop = this.getNeighbors(this.currentSystem.name);
@@ -1228,11 +1272,12 @@
         const container = overlay.querySelector('.galaxy-container');
         if (this._galaxyHandlers && container) {
           container.removeEventListener('wheel', this._galaxyHandlers.onWheel);
-          container.removeEventListener('mousedown', this._galaxyHandlers.onMouseDown);
-          window.removeEventListener('mousemove', this._galaxyHandlers.onMouseMove);
-          window.removeEventListener('mouseup', this._galaxyHandlers.onMouseUp);
-          container.removeEventListener('mouseleave', this._galaxyHandlers.onLeave);
+          container.removeEventListener('pointerdown', this._galaxyHandlers.onPointerDown);
+          container.removeEventListener('pointermove', this._galaxyHandlers.onPointerMove);
+          container.removeEventListener('pointerup', this._galaxyHandlers.onPointerUp);
+          container.removeEventListener('pointercancel', this._galaxyHandlers.onPointerUp);
           this._galaxyHandlers = null;
+          this._pointers = null;
         }
       }
 
