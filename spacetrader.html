@@ -570,7 +570,8 @@
     .galaxy-map { position: absolute; inset: 0; background: rgba(0,0,0,0.95); display: none; align-items: center; justify-content: center; flex-direction: column; }
     .galaxy-map.active { display: flex; }
     .galaxy-container { width: 85%; height: 70%; border: 2px solid #00ff00; border-radius: 10px; background: #000; position: relative; overflow: hidden; }
-    .galaxy-canvas { position: absolute; inset: 0; }
+  .galaxy-stage { position: absolute; inset: 0; transform-origin: 0 0; }
+  .galaxy-canvas { position: absolute; inset: 0; }
     .system-node { position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #00ff00; border: 2px solid #004400; cursor: pointer; transition: transform 0.2s ease, box-shadow 0.2s ease; }
     .system-node:hover { transform: scale(1.4); box-shadow: 0 0 12px rgba(0,255,0,0.7); }
     .system-node.current { background: #ffff00; box-shadow: 0 0 14px rgba(255,255,0,0.8); }
@@ -676,8 +677,10 @@
     <!-- Galaxy Map Overlay -->
     <div class="galaxy-map" id="galaxyMap">
       <div class="galaxy-container">
-        <canvas id="galaxyCanvas" class="galaxy-canvas"></canvas>
-        <!-- Nodes will be added dynamically -->
+        <div id="galaxyStage" class="galaxy-stage">
+          <canvas id="galaxyCanvas" class="galaxy-canvas"></canvas>
+          <!-- Nodes will be added dynamically into the stage -->
+        </div>
       </div>
       <div id="routeInfo" style="margin-top:10px; color:#00ff99; font-size:12px; text-align:center;"></div>
       <button class="button" onclick="game.closeGalaxyMap()" style="margin-top: 20px;">Close Galaxy Map</button>
@@ -1119,10 +1122,16 @@
       showGalaxyMap() {
         const overlay = document.getElementById('galaxyMap');
         const container = overlay.querySelector('.galaxy-container');
+        const stage = document.getElementById('galaxyStage');
         const canvas = document.getElementById('galaxyCanvas');
         overlay.classList.add('active');
+        // Reset zoom/pan
+        this._galaxyZoom = 1;
+        this._galaxyPanX = 0;
+        this._galaxyPanY = 0;
+        stage.style.transform = `translate(0px, 0px) scale(1)`;
         // Prepare nodes
-        container.querySelectorAll('.system-node, .node-label').forEach(n => n.remove());
+        stage.querySelectorAll('.system-node, .node-label').forEach(n => n.remove());
         this.resizeGalaxyCanvas();
 
   const nodes = this.buildGalaxyNodes(this.currentSystem.name);
@@ -1155,9 +1164,50 @@
           label.style.left = `${pos.x}px`;
           label.style.top = `${pos.y}px`;
           label.textContent = name;
-          container.appendChild(node);
-          container.appendChild(label);
+          stage.appendChild(node);
+          stage.appendChild(label);
         });
+
+        // Zoom and pan handlers
+        const onWheel = (e) => {
+          e.preventDefault();
+          const rect = container.getBoundingClientRect();
+          const cx = e.clientX - rect.left;
+          const cy = e.clientY - rect.top;
+          const prevScale = this._galaxyZoom;
+          const delta = -e.deltaY; // wheel up to zoom in
+          const factor = Math.exp(delta * 0.0015);
+          const newScale = Math.max(0.4, Math.min(3.0, prevScale * factor));
+          // Adjust pan so zoom focuses around cursor point
+          const sx = (cx - this._galaxyPanX) / prevScale;
+          const sy = (cy - this._galaxyPanY) / prevScale;
+          this._galaxyPanX = cx - sx * newScale;
+          this._galaxyPanY = cy - sy * newScale;
+          this._galaxyZoom = newScale;
+          stage.style.transform = `translate(${this._galaxyPanX}px, ${this._galaxyPanY}px) scale(${this._galaxyZoom})`;
+        };
+        const onMouseDown = (e) => {
+          if (e.button !== 0) return;
+          this._panning = true;
+          this._panStartX = e.clientX - this._galaxyPanX;
+          this._panStartY = e.clientY - this._galaxyPanY;
+        };
+        const onMouseMove = (e) => {
+          if (!this._panning) return;
+          this._galaxyPanX = e.clientX - this._panStartX;
+          this._galaxyPanY = e.clientY - this._panStartY;
+          stage.style.transform = `translate(${this._galaxyPanX}px, ${this._galaxyPanY}px) scale(${this._galaxyZoom})`;
+        };
+        const onMouseUp = () => { this._panning = false; };
+        const onLeave = () => { this._panning = false; };
+        // Bind
+        container.addEventListener('wheel', onWheel, { passive: false });
+        container.addEventListener('mousedown', onMouseDown);
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+        container.addEventListener('mouseleave', onLeave);
+        // Store handlers for cleanup
+        this._galaxyHandlers = { onWheel, onMouseDown, onMouseMove, onMouseUp, onLeave };
 
         // Show route info: current -> neighbors (1 hop) -> their neighbors (2 hops)
         const oneHop = this.getNeighbors(this.currentSystem.name);
@@ -1171,7 +1221,20 @@
         }
       }
 
-      closeGalaxyMap() { document.getElementById('galaxyMap').classList.remove('active'); }
+      closeGalaxyMap() { 
+        const overlay = document.getElementById('galaxyMap');
+        overlay.classList.remove('active');
+        // Cleanup event handlers
+        const container = overlay.querySelector('.galaxy-container');
+        if (this._galaxyHandlers && container) {
+          container.removeEventListener('wheel', this._galaxyHandlers.onWheel);
+          container.removeEventListener('mousedown', this._galaxyHandlers.onMouseDown);
+          window.removeEventListener('mousemove', this._galaxyHandlers.onMouseMove);
+          window.removeEventListener('mouseup', this._galaxyHandlers.onMouseUp);
+          container.removeEventListener('mouseleave', this._galaxyHandlers.onLeave);
+          this._galaxyHandlers = null;
+        }
+      }
 
       resizeGalaxyCanvas() {
         const canvas = document.getElementById('galaxyCanvas');
