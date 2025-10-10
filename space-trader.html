@@ -660,7 +660,7 @@
               <div class="glass"></div>
               <div class="hub"></div>
             </div>
-            <div class="gauge-label">FUEL</div>
+            <div class="gauge-label">FUEL (%)</div>
           </div>
         </div>
         <div>
@@ -692,7 +692,7 @@ Cost to refuel : 234₵</pre>
               <div class="glass"></div>
               <div class="hub"></div>
             </div>
-            <div class="gauge-label">BATTERY A</div>
+            <div class="gauge-label">BATTERY A (%)</div>
           </div>
         </div>
         <div>
@@ -707,7 +707,7 @@ Cost to refuel : 234₵</pre>
               <div class="glass"></div>
               <div class="hub"></div>
             </div>
-            <div class="gauge-label">BATTERY B</div>
+            <div class="gauge-label">BATTERY B (%)</div>
           </div>
         </div>
       </div>
@@ -750,7 +750,7 @@ Cost to refuel : 234₵</pre>
               <div class="glass"></div>
               <div class="hub"></div>
             </div>
-            <div class="gauge-label">CHARGE</div>
+            <div class="gauge-label">CHARGE (W)</div>
           </div>
         </div>
         <div>
@@ -765,7 +765,7 @@ Cost to refuel : 234₵</pre>
               <div class="glass"></div>
               <div class="hub"></div>
             </div>
-            <div class="gauge-label">DRAW</div>
+            <div class="gauge-label">DRAW (W)</div>
           </div>
         </div>
       </div>
@@ -870,10 +870,1368 @@ Standing: Neutral</pre>
         <div class="cargo-slot empty"></div>
       </div>
     </section>
+
+    <!-- New Game Controls -->
+    <section class="panel section">
+      <div class="rivet tl"></div><div class="rivet tr"></div><div class="rivet bl"></div><div class="rivet br"></div>
+
+      <h2 class="label">New Game</h2>
+      <div class="row">
+        <div>
+          <div class="label">Safety Lock</div>
+          <label class="toggle">
+            <input type="checkbox" id="new-game-arm">
+            <span class="track"><span class="thumb"></span></span>
+            <span>ARMED / SAFE</span>
+          </label>
+        </div>
+        <div>
+          <div class="label">Reset Game</div>
+          <button type="button" class="btn" id="new-game-btn" disabled style="width: 100%; opacity: 0.5;">NEW GAME</button>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <div class="label">Auto-Save Status</div>
+          <div class="crt">
+            <pre id="save-status">Last saved: Never
+Auto-save  : Active</pre>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 
   <script>
-    // Fullscreen toggle functionality with Android immersive mode support
+    // ============================================================================
+    // EVENT BUS - Central event management system
+    // ============================================================================
+    class EventBus {
+      constructor() {
+        this.listeners = new Map();
+      }
+
+      /**
+       * Subscribe to an event
+       * @param {string} eventName - Name of the event to listen for
+       * @param {Function} callback - Function to call when event fires
+       * @param {Object} context - Optional context (this) for the callback
+       * @returns {Function} Unsubscribe function
+       */
+      on(eventName, callback, context = null) {
+        if (!this.listeners.has(eventName)) {
+          this.listeners.set(eventName, []);
+        }
+        
+        const listener = { callback, context };
+        this.listeners.get(eventName).push(listener);
+        
+        // Return unsubscribe function
+        return () => this.off(eventName, callback);
+      }
+
+      /**
+       * Subscribe to an event (one-time only)
+       */
+      once(eventName, callback, context = null) {
+        const unsubscribe = this.on(eventName, (...args) => {
+          unsubscribe();
+          callback.apply(context, args);
+        }, context);
+        return unsubscribe;
+      }
+
+      /**
+       * Unsubscribe from an event
+       */
+      off(eventName, callback) {
+        if (!this.listeners.has(eventName)) return;
+        
+        const listeners = this.listeners.get(eventName);
+        const index = listeners.findIndex(l => l.callback === callback);
+        if (index !== -1) {
+          listeners.splice(index, 1);
+        }
+        
+        if (listeners.length === 0) {
+          this.listeners.delete(eventName);
+        }
+      }
+
+      /**
+       * Emit an event to all subscribers
+       * @param {string} eventName - Name of the event
+       * @param {*} data - Data to pass to listeners
+       */
+      emit(eventName, data = null) {
+        if (!this.listeners.has(eventName)) return;
+        
+        const listeners = this.listeners.get(eventName);
+        listeners.forEach(({ callback, context }) => {
+          try {
+            callback.call(context, data);
+          } catch (error) {
+            console.error(`Error in event listener for '${eventName}':`, error);
+          }
+        });
+      }
+
+      /**
+       * Clear all listeners for an event, or all events
+       */
+      clear(eventName = null) {
+        if (eventName) {
+          this.listeners.delete(eventName);
+        } else {
+          this.listeners.clear();
+        }
+      }
+    }
+
+    // Global event bus instance
+    const eventBus = new EventBus();
+
+    // ============================================================================
+    // SAVE/LOAD SYSTEM
+    // ============================================================================
+    class SaveSystem {
+      constructor() {
+        this.SAVE_KEY = 'space-trader-v2';
+        this.AUTO_SAVE_INTERVAL = 5000; // Auto-save every 5 seconds
+        this.lastSaveTime = null;
+        this.autoSaveEnabled = true;
+        this.autoSaveTimer = null;
+      }
+
+      /**
+       * Serialize game state to JSON
+       */
+      serializeGameState() {
+        return {
+          version: 2,
+          timestamp: Date.now(),
+          batteries: batterySystem.batteries.map(b => ({
+            id: b.id,
+            maxCapacity: b.maxCapacity,
+            currentCharge: b.currentCharge,
+            maxDischargeRate: b.maxDischargeRate,
+            maxChargeRate: b.maxChargeRate,
+            efficiency: b.efficiency,
+            health: b.health,
+            connectedToBus: b.connectedToBus,
+            temperature: b.temperature,
+            cycleCount: b.cycleCount,
+            enabled: b.enabled
+          })),
+          solar: {
+            panelState: solarSystem.panelState,
+            extension: solarSystem.extension,
+            sunlightIntensity: solarSystem.sunlightIntensity
+          },
+          power: {
+            activeSystems: Array.from(powerSystem.activeSystems)
+          }
+        };
+      }
+
+      /**
+       * Deserialize game state from JSON
+       */
+      deserializeGameState(data) {
+        if (!data || data.version !== 2) {
+          console.warn('Invalid or incompatible save data');
+          return null;
+        }
+
+        return data;
+      }
+
+      /**
+       * Save game state to localStorage
+       */
+      save() {
+        try {
+          const gameState = this.serializeGameState();
+          localStorage.setItem(this.SAVE_KEY, JSON.stringify(gameState));
+          this.lastSaveTime = Date.now();
+          eventBus.emit('game:saved', { timestamp: this.lastSaveTime });
+          console.log('💾 Game saved');
+          return true;
+        } catch (error) {
+          console.error('Failed to save game:', error);
+          eventBus.emit('game:save-failed', { error });
+          return false;
+        }
+      }
+
+      /**
+       * Load game state from localStorage
+       */
+      load() {
+        try {
+          const savedData = localStorage.getItem(this.SAVE_KEY);
+          if (!savedData) {
+            console.log('No saved game found');
+            return null;
+          }
+
+          const gameState = JSON.parse(savedData);
+          const validatedState = this.deserializeGameState(gameState);
+          
+          if (validatedState) {
+            console.log('📂 Game loaded');
+            eventBus.emit('game:loaded', { timestamp: gameState.timestamp });
+            return validatedState;
+          }
+          
+          return null;
+        } catch (error) {
+          console.error('Failed to load game:', error);
+          eventBus.emit('game:load-failed', { error });
+          return null;
+        }
+      }
+
+      /**
+       * Delete saved game
+       */
+      deleteSave() {
+        try {
+          localStorage.removeItem(this.SAVE_KEY);
+          this.lastSaveTime = null;
+          console.log('🗑️ Save deleted');
+          eventBus.emit('game:save-deleted', {});
+          return true;
+        } catch (error) {
+          console.error('Failed to delete save:', error);
+          return false;
+        }
+      }
+
+      /**
+       * Check if a save exists
+       */
+      hasSave() {
+        return localStorage.getItem(this.SAVE_KEY) !== null;
+      }
+
+      /**
+       * Start auto-save timer
+       */
+      startAutoSave() {
+        if (this.autoSaveTimer) {
+          clearInterval(this.autoSaveTimer);
+        }
+
+        this.autoSaveEnabled = true;
+        this.autoSaveTimer = setInterval(() => {
+          if (this.autoSaveEnabled) {
+            this.save();
+          }
+        }, this.AUTO_SAVE_INTERVAL);
+
+        console.log(`🔄 Auto-save started (every ${this.AUTO_SAVE_INTERVAL / 1000}s)`);
+      }
+
+      /**
+       * Stop auto-save timer
+       */
+      stopAutoSave() {
+        if (this.autoSaveTimer) {
+          clearInterval(this.autoSaveTimer);
+          this.autoSaveTimer = null;
+        }
+        this.autoSaveEnabled = false;
+        console.log('⏸️ Auto-save stopped');
+      }
+
+      /**
+       * Get formatted last save time
+       */
+      getLastSaveTimeFormatted() {
+        if (!this.lastSaveTime) {
+          return 'Never';
+        }
+
+        const now = Date.now();
+        const diff = now - this.lastSaveTime;
+        
+        if (diff < 60000) {
+          return 'Just now';
+        } else if (diff < 3600000) {
+          const mins = Math.floor(diff / 60000);
+          return `${mins} min${mins !== 1 ? 's' : ''} ago`;
+        } else {
+          return new Date(this.lastSaveTime).toLocaleTimeString();
+        }
+      }
+    }
+
+    // Create save system instance
+    const saveSystem = new SaveSystem();
+
+    // ============================================================================
+    // COMPONENT BASE CLASS
+    // ============================================================================
+    class Component {
+      constructor(name) {
+        this.name = name;
+        this.enabled = true;
+      }
+
+      update(deltaTime) {
+        // Override in subclasses
+      }
+
+      destroy() {
+        // Override in subclasses for cleanup
+      }
+    }
+
+    // ============================================================================
+    // BATTERY COMPONENT
+    // ============================================================================
+    class Battery extends Component {
+      constructor(id, config = {}) {
+        super(`Battery_${id}`);
+        
+        this.id = id;
+        this.maxCapacity = config.maxCapacity || 10000; // Wh (watt-hours)
+        this.currentCharge = config.initialCharge || this.maxCapacity * 0.7;
+        this.maxDischargeRate = config.maxDischargeRate || 500; // W (watts)
+        this.maxChargeRate = config.maxChargeRate || 300; // W (watts)
+        this.efficiency = config.efficiency || 0.95; // 95% efficient
+        this.health = config.health || 100; // 0-100%
+        this.connectedToBus = config.connectedToBus !== undefined ? config.connectedToBus : true;
+        this.temperature = config.temperature || 20; // Celsius
+        this.cycleCount = config.cycleCount || 0;
+        
+        // Degradation parameters
+        this.degradationRate = 0.0001; // per cycle
+        this.optimalTempMin = 15;
+        this.optimalTempMax = 25;
+      }
+
+      /**
+       * Get charge percentage (0-100)
+       */
+      getChargePercentage() {
+        return (this.currentCharge / this.maxCapacity) * 100;
+      }
+
+      /**
+       * Get effective capacity based on health
+       */
+      getEffectiveCapacity() {
+        return this.maxCapacity * (this.health / 100);
+      }
+
+      /**
+       * Attempt to draw power from the battery
+       * @param {number} watts - Power to draw in watts
+       * @param {number} deltaTime - Time step in seconds
+       * @returns {number} Actual power drawn
+       */
+      draw(watts, deltaTime) {
+        if (!this.connectedToBus || !this.enabled) {
+          return 0;
+        }
+
+        // Limit by max discharge rate
+        const actualWatts = Math.min(watts, this.maxDischargeRate);
+        
+        // Calculate energy in watt-hours for this time step
+        const energyRequested = (actualWatts * deltaTime) / 3600;
+        
+        // Can't draw more than current charge
+        const energyDrawn = Math.min(energyRequested, this.currentCharge);
+        
+        // Update charge
+        const previousCharge = this.currentCharge;
+        this.currentCharge = Math.max(0, this.currentCharge - energyDrawn);
+        
+        // Emit events for charge level changes
+        this.checkChargeThresholds(previousCharge);
+        
+        // Apply degradation from discharge
+        this.applyDegradation(deltaTime);
+        
+        // Return actual watts drawn
+        return (energyDrawn / deltaTime) * 3600;
+      }
+
+      /**
+       * Attempt to charge the battery
+       * @param {number} watts - Power to charge with in watts
+       * @param {number} deltaTime - Time step in seconds
+       * @returns {number} Actual power accepted
+       */
+      charge(watts, deltaTime) {
+        if (!this.connectedToBus || !this.enabled) {
+          return 0;
+        }
+
+        const effectiveCapacity = this.getEffectiveCapacity();
+        const availableCapacity = effectiveCapacity - this.currentCharge;
+        
+        if (availableCapacity <= 0) {
+          return 0; // Already full
+        }
+
+        // Limit by max charge rate
+        const actualWatts = Math.min(watts, this.maxChargeRate);
+        
+        // Calculate energy in watt-hours for this time step
+        const energyOffered = (actualWatts * deltaTime) / 3600;
+        
+        // Apply efficiency loss
+        const energyAccepted = Math.min(energyOffered * this.efficiency, availableCapacity);
+        
+        // Update charge
+        const previousCharge = this.currentCharge;
+        this.currentCharge = Math.min(effectiveCapacity, this.currentCharge + energyAccepted);
+        
+        // Emit events for charge level changes
+        this.checkChargeThresholds(previousCharge);
+        
+        // Apply degradation from charging
+        this.applyDegradation(deltaTime * 0.5); // Charging causes less degradation
+        
+        // Return actual watts accepted (accounting for efficiency)
+        return (energyAccepted / this.efficiency / deltaTime) * 3600;
+      }
+
+      /**
+       * Check for threshold crossings and emit events
+       */
+      checkChargeThresholds(previousCharge) {
+        const currentPercent = this.getChargePercentage();
+        const previousPercent = (previousCharge / this.maxCapacity) * 100;
+
+        // Critical low (5%)
+        if (previousPercent > 5 && currentPercent <= 5) {
+          eventBus.emit('battery:critical', { battery: this });
+        }
+
+        // Low (20%)
+        if (previousPercent > 20 && currentPercent <= 20) {
+          eventBus.emit('battery:low', { battery: this });
+        }
+
+        // Empty (0%)
+        if (previousPercent > 0 && currentPercent <= 0) {
+          eventBus.emit('battery:depleted', { battery: this });
+        }
+
+        // Full (100%)
+        if (previousPercent < 100 && currentPercent >= 100) {
+          eventBus.emit('battery:full', { battery: this });
+        }
+
+        // General charge change
+        eventBus.emit('battery:charge-changed', { battery: this, previousPercent, currentPercent });
+      }
+
+      /**
+       * Apply degradation over time
+       */
+      applyDegradation(deltaTime) {
+        // Temperature-based degradation
+        let tempFactor = 1.0;
+        if (this.temperature < this.optimalTempMin) {
+          tempFactor = 1.2;
+        } else if (this.temperature > this.optimalTempMax) {
+          tempFactor = 1.5;
+        }
+
+        // Apply degradation
+        const degradation = this.degradationRate * tempFactor * (deltaTime / 3600);
+        this.health = Math.max(0, this.health - degradation);
+
+        // Update cycle count (rough approximation)
+        this.cycleCount += (deltaTime / 3600) / 24; // Assume 1 cycle per day of operation
+
+        if (this.health < 50 && this.health > 49.9) {
+          eventBus.emit('battery:degraded', { battery: this });
+        }
+      }
+
+      /**
+       * Connect battery to main bus
+       */
+      connectToBus() {
+        if (!this.connectedToBus) {
+          this.connectedToBus = true;
+          eventBus.emit('battery:connected', { battery: this });
+        }
+      }
+
+      /**
+       * Disconnect battery from main bus
+       */
+      disconnectFromBus() {
+        if (this.connectedToBus) {
+          this.connectedToBus = false;
+          eventBus.emit('battery:disconnected', { battery: this });
+        }
+      }
+
+      /**
+       * Toggle bus connection
+       */
+      toggleBus() {
+        if (this.connectedToBus) {
+          this.disconnectFromBus();
+        } else {
+          this.connectToBus();
+        }
+      }
+
+      /**
+       * Get status object for display
+       */
+      getStatus() {
+        return {
+          id: this.id,
+          charge: this.currentCharge,
+          chargePercent: this.getChargePercentage(),
+          maxCapacity: this.maxCapacity,
+          effectiveCapacity: this.getEffectiveCapacity(),
+          health: this.health,
+          connected: this.connectedToBus,
+          enabled: this.enabled,
+          temperature: this.temperature,
+          cycleCount: this.cycleCount
+        };
+      }
+    }
+
+    // ============================================================================
+    // POWER BUS SYSTEM - Main power distribution
+    // ============================================================================
+    class PowerBus {
+      constructor() {
+        this.currentDraw = 0; // Current power being drawn (watts)
+        this.currentSupply = 0; // Current power being supplied (watts)
+        this.voltage = 48; // Bus voltage (volts)
+        this.maxCurrent = 500; // Max current (amps)
+      }
+
+      /**
+       * Get maximum power capacity of the bus
+       */
+      getMaxPower() {
+        return this.voltage * this.maxCurrent; // 24000W = 24kW
+      }
+
+      /**
+       * Get bus utilization percentage
+       */
+      getUtilization() {
+        return Math.min(100, (this.currentDraw / this.getMaxPower()) * 100);
+      }
+
+      /**
+       * Check if power demand can be met
+       */
+      canSupply(watts) {
+        return watts <= this.getMaxPower();
+      }
+    }
+
+    // Create main power bus
+    const mainBus = new PowerBus();
+
+    // ============================================================================
+    // SOLAR PANEL SYSTEM
+    // ============================================================================
+    class SolarPanelSystem {
+      constructor() {
+        this.panelState = 1; // 0=retracted, 1=stopped, 2=extended
+        this.extension = 0.5; // 0.0 to 1.0 (0% to 100% extended)
+        this.extensionSpeed = 0.1; // Extension/retraction rate per second
+        this.maxPowerOutput = 1000; // Watts at full extension
+        this.currentOutput = 0; // Current power generation
+        this.efficiency = 0.85; // 85% efficient
+        this.temperature = 20; // Celsius
+        
+        // Sunlight intensity (simulated)
+        // TODO: Later this will vary by distance from local sun/planet
+        this.sunlightIntensity = 1.0; // 0.0 to 1.0 (currently full sun for testing)
+      }
+
+      /**
+       * Get current power output based on extension and conditions
+       */
+      getPowerOutput() {
+        // Power scales with extension percentage and sunlight
+        const output = this.maxPowerOutput * this.extension * this.sunlightIntensity * this.efficiency;
+        return Math.max(0, output);
+      }
+
+      /**
+       * Set panel control state
+       * @param {number} state - 0=retract, 1=stop, 2=extend
+       */
+      setPanelState(state) {
+        this.panelState = state;
+        eventBus.emit('solar:state-changed', { state: this.panelState });
+      }
+
+      /**
+       * Update panel extension based on current state
+       */
+      update(deltaTime) {
+        if (this.panelState === 0) {
+          // Retracting
+          this.extension = Math.max(0, this.extension - this.extensionSpeed * deltaTime);
+          if (this.extension <= 0) {
+            eventBus.emit('solar:fully-retracted', {});
+          }
+        } else if (this.panelState === 2) {
+          // Extending
+          this.extension = Math.min(1, this.extension + this.extensionSpeed * deltaTime);
+          if (this.extension >= 1) {
+            eventBus.emit('solar:fully-extended', {});
+          }
+        }
+        // State 1 = stopped, no change
+
+        // Calculate current output
+        this.currentOutput = this.getPowerOutput();
+      }
+
+      /**
+       * Simulate sunlight changes (day/night cycle, distance from star, etc.)
+       */
+      updateSunlight(intensity) {
+        this.sunlightIntensity = Math.max(0, Math.min(1, intensity));
+      }
+
+      /**
+       * Get status
+       */
+      getStatus() {
+        return {
+          state: this.panelState,
+          extension: this.extension,
+          extensionPercent: this.extension * 100,
+          currentOutput: this.currentOutput,
+          maxOutput: this.maxPowerOutput,
+          sunlightIntensity: this.sunlightIntensity,
+          temperature: this.temperature
+        };
+      }
+    }
+
+    // Create solar panel system
+    const solarSystem = new SolarPanelSystem();
+
+    // ============================================================================
+    // POWER MANAGEMENT SYSTEM
+    // ============================================================================
+    class PowerManagementSystem {
+      constructor() {
+        this.baseLoad = 50; // Base power consumption (life support, computers, etc.)
+        this.systemLoads = {
+          navigation: 20,
+          sensors: 15,
+          communications: 10,
+          lifeSupportExtra: 30
+        };
+        this.activeSystems = new Set(['navigation', 'sensors', 'communications']);
+      }
+
+      /**
+       * Calculate total power draw from all systems
+       */
+      getTotalDraw() {
+        let total = this.baseLoad;
+        this.activeSystems.forEach(system => {
+          total += this.systemLoads[system] || 0;
+        });
+        return total;
+      }
+
+      /**
+       * Enable a system
+       */
+      enableSystem(systemName) {
+        this.activeSystems.add(systemName);
+        eventBus.emit('power:system-enabled', { system: systemName });
+      }
+
+      /**
+       * Disable a system
+       */
+      disableSystem(systemName) {
+        this.activeSystems.delete(systemName);
+        eventBus.emit('power:system-disabled', { system: systemName });
+      }
+
+      /**
+       * Update power draw on the main bus
+       */
+      update(deltaTime) {
+        mainBus.currentDraw = this.getTotalDraw();
+      }
+    }
+
+    // Create power management system
+    const powerSystem = new PowerManagementSystem();
+
+    // ============================================================================
+    // BATTERY SYSTEM - Manages all batteries
+    // ============================================================================
+    class BatterySystem {
+      constructor() {
+        this.batteries = [];
+        this.totalPowerDraw = 0;
+        this.totalPowerCharge = 0;
+        this.setupEventListeners();
+      }
+
+      /**
+       * Add a battery to the system
+       */
+      addBattery(config) {
+        const id = String.fromCharCode(65 + this.batteries.length); // A, B, C, etc.
+        const battery = new Battery(id, config);
+        this.batteries.push(battery);
+        eventBus.emit('battery:added', { battery });
+        return battery;
+      }
+
+      /**
+       * Get battery by ID
+       */
+      getBattery(id) {
+        return this.batteries.find(b => b.id === id);
+      }
+
+      /**
+       * Get all connected batteries
+       */
+      getConnectedBatteries() {
+        return this.batteries.filter(b => b.connectedToBus && b.enabled);
+      }
+
+      /**
+       * Get total available power from all connected batteries
+       */
+      getTotalAvailablePower() {
+        return this.getConnectedBatteries().reduce((sum, b) => {
+          return sum + b.currentCharge;
+        }, 0);
+      }
+
+      /**
+       * Get total capacity
+       */
+      getTotalCapacity() {
+        return this.batteries.reduce((sum, b) => {
+          return sum + b.getEffectiveCapacity();
+        }, 0);
+      }
+
+      /**
+       * Get average charge percentage across all batteries
+       */
+      getAverageCharge() {
+        if (this.batteries.length === 0) return 0;
+        const total = this.batteries.reduce((sum, b) => sum + b.getChargePercentage(), 0);
+        return total / this.batteries.length;
+      }
+
+      /**
+       * Draw power from the battery system
+       * Distributes load across connected batteries proportionally
+       */
+      drawPower(watts, deltaTime) {
+        const connectedBatteries = this.getConnectedBatteries();
+        
+        if (connectedBatteries.length === 0) {
+          eventBus.emit('power:no-batteries', { requested: watts });
+          return 0;
+        }
+
+        // Calculate total available charge
+        const totalCharge = connectedBatteries.reduce((sum, b) => sum + b.currentCharge, 0);
+        
+        if (totalCharge <= 0) {
+          eventBus.emit('power:depleted', { requested: watts });
+          return 0;
+        }
+
+        let totalDrawn = 0;
+
+        // Distribute load proportionally based on current charge
+        connectedBatteries.forEach(battery => {
+          const proportion = battery.currentCharge / totalCharge;
+          const requestedFromBattery = watts * proportion;
+          const actualDrawn = battery.draw(requestedFromBattery, deltaTime);
+          totalDrawn += actualDrawn;
+        });
+
+        this.totalPowerDraw = totalDrawn;
+
+        // Check if we couldn't meet demand
+        if (totalDrawn < watts * 0.9) { // Allow 10% tolerance
+          eventBus.emit('power:insufficient', { 
+            requested: watts, 
+            actual: totalDrawn,
+            deficit: watts - totalDrawn
+          });
+        }
+
+        return totalDrawn;
+      }
+
+      /**
+       * Charge batteries from available power
+       * Distributes charging across connected batteries
+       */
+      chargeBatteries(watts, deltaTime) {
+        const connectedBatteries = this.getConnectedBatteries();
+        
+        if (connectedBatteries.length === 0) {
+          return 0;
+        }
+
+        // Find batteries that can accept charge
+        const chargingBatteries = connectedBatteries.filter(b => {
+          return b.currentCharge < b.getEffectiveCapacity();
+        });
+
+        if (chargingBatteries.length === 0) {
+          return 0; // All batteries full
+        }
+
+        let totalAccepted = 0;
+
+        // Distribute charge evenly
+        const wattsPerBattery = watts / chargingBatteries.length;
+        
+        chargingBatteries.forEach(battery => {
+          const actualAccepted = battery.charge(wattsPerBattery, deltaTime);
+          totalAccepted += actualAccepted;
+        });
+
+        this.totalPowerCharge = totalAccepted;
+
+        return totalAccepted;
+      }
+
+      /**
+       * Update all batteries
+       */
+      update(deltaTime) {
+        this.batteries.forEach(battery => {
+          if (battery.enabled) {
+            battery.update(deltaTime);
+          }
+        });
+
+        // Check for system-wide power failure
+        const availablePower = this.getTotalAvailablePower();
+        if (availablePower <= 0 && this.getConnectedBatteries().length > 0) {
+          eventBus.emit('power:system-failure', { system: 'batteries' });
+        }
+      }
+
+      /**
+       * Setup event listeners for system-level responses
+       */
+      setupEventListeners() {
+        // Example: Log critical battery events
+        eventBus.on('battery:critical', (data) => {
+          console.warn(`🔋 Battery ${data.battery.id} is critically low!`);
+        });
+
+        eventBus.on('battery:depleted', (data) => {
+          console.error(`🔋 Battery ${data.battery.id} is depleted!`);
+        });
+
+        eventBus.on('power:system-failure', (data) => {
+          console.error(`⚠️ POWER SYSTEM FAILURE: ${data.system}`);
+        });
+      }
+
+      /**
+       * Get system status
+       */
+      getStatus() {
+        return {
+          batteries: this.batteries.map(b => b.getStatus()),
+          totalCapacity: this.getTotalCapacity(),
+          totalAvailable: this.getTotalAvailablePower(),
+          averageCharge: this.getAverageCharge(),
+          connectedCount: this.getConnectedBatteries().length,
+          totalCount: this.batteries.length,
+          currentDraw: this.totalPowerDraw,
+          currentCharge: this.totalPowerCharge
+        };
+      }
+    }
+
+    // ============================================================================
+    // GAME INITIALIZATION
+    // ============================================================================
+    
+    // Create battery system
+    const batterySystem = new BatterySystem();
+
+    /**
+     * Initialize a new game with default values
+     */
+    function initializeNewGame() {
+      console.log('🎮 Initializing new game...');
+
+      // Clear existing batteries
+      batterySystem.batteries = [];
+
+      // Add two batteries (matching UI)
+      batterySystem.addBattery({
+        maxCapacity: 10000,
+        initialCharge: 7200, // 72%
+        connectedToBus: true
+      });
+
+      batterySystem.addBattery({
+        maxCapacity: 10000,
+        initialCharge: 5800, // 58%
+        connectedToBus: true
+      });
+
+      // Reset solar panels
+      solarSystem.panelState = 1; // Stopped
+      solarSystem.extension = 0.5; // 50% extended
+      solarSystem.sunlightIntensity = 1.0; // 100% sunlight (full sun strength for testing)
+
+      // Reset power systems
+      powerSystem.activeSystems = new Set(['navigation', 'sensors', 'communications']);
+
+      // Update all UI
+      updateAllUI();
+
+      // Save the new game state
+      saveSystem.save();
+      
+      eventBus.emit('game:new-game', {});
+      console.log('✅ New game initialized');
+    }
+
+    /**
+     * Load game from saved state
+     */
+    function loadGameFromSave(saveData) {
+      console.log('📂 Loading game from save...');
+
+      // Clear existing batteries
+      batterySystem.batteries = [];
+
+      // Restore batteries
+      if (saveData.batteries) {
+        saveData.batteries.forEach(batteryData => {
+          const battery = new Battery(batteryData.id, {
+            maxCapacity: batteryData.maxCapacity,
+            initialCharge: batteryData.currentCharge,
+            maxDischargeRate: batteryData.maxDischargeRate,
+            maxChargeRate: batteryData.maxChargeRate,
+            efficiency: batteryData.efficiency,
+            health: batteryData.health,
+            connectedToBus: batteryData.connectedToBus,
+            temperature: batteryData.temperature,
+            cycleCount: batteryData.cycleCount
+          });
+          battery.enabled = batteryData.enabled;
+          batterySystem.batteries.push(battery);
+        });
+      }
+
+      // Restore solar panels
+      if (saveData.solar) {
+        solarSystem.panelState = saveData.solar.panelState;
+        solarSystem.extension = saveData.solar.extension;
+        solarSystem.sunlightIntensity = saveData.solar.sunlightIntensity;
+      }
+
+      // Restore power systems
+      if (saveData.power) {
+        powerSystem.activeSystems = new Set(saveData.power.activeSystems);
+      }
+
+      // Update all UI
+      updateAllUI();
+
+      // Set last save time
+      saveSystem.lastSaveTime = saveData.timestamp;
+
+      eventBus.emit('game:loaded', { timestamp: saveData.timestamp });
+      console.log('✅ Game loaded from save');
+    }
+
+    /**
+     * Update all UI elements from current game state
+     */
+    function updateAllUI() {
+      // Update all batteries
+      batterySystem.batteries.forEach(battery => {
+        updateBatteryUI(battery);
+        updateBatteryToggleUI(battery);
+      });
+
+      // Update solar panel UI
+      updateSolarPanelUI();
+      updatePowerDrawUI();
+
+      // Update other UI elements here
+      updateSaveStatusUI();
+    }
+
+    // Subscribe to battery events for UI updates
+    eventBus.on('battery:charge-changed', (data) => {
+      updateBatteryUI(data.battery);
+    });
+
+    eventBus.on('battery:connected', (data) => {
+      console.log(`🔌 Battery ${data.battery.id} connected to main bus`);
+      updateBatteryToggleUI(data.battery);
+    });
+
+    eventBus.on('battery:disconnected', (data) => {
+      console.log(`🔌 Battery ${data.battery.id} disconnected from main bus`);
+      updateBatteryToggleUI(data.battery);
+    });
+
+    // Subscribe to save/load events
+    eventBus.on('game:saved', (data) => {
+      updateSaveStatusUI();
+    });
+
+    eventBus.on('game:loaded', (data) => {
+      updateSaveStatusUI();
+      console.log(`📂 Game loaded from ${new Date(data.timestamp).toLocaleString()}`);
+    });
+
+    eventBus.on('game:new-game', (data) => {
+      updateSaveStatusUI();
+    });
+
+    // ============================================================================
+    // UI UPDATE FUNCTIONS
+    // ============================================================================
+    
+    function updateBatteryUI(battery) {
+      // Update gauge value
+      const gaugeIndex = battery.id.charCodeAt(0) - 65; // A=0, B=1
+      const gauges = document.querySelectorAll('.gauge');
+      const batteryGauges = [gauges[1], gauges[2]]; // Battery A and B are 2nd and 3rd gauges
+      
+      if (batteryGauges[gaugeIndex]) {
+        const chargePercent = Math.round(battery.getChargePercentage());
+        batteryGauges[gaugeIndex].style.setProperty('--value', chargePercent);
+        
+        const progress = batteryGauges[gaugeIndex].querySelector('progress');
+        if (progress) {
+          progress.value = chargePercent;
+          progress.textContent = `${chargePercent}%`;
+        }
+      }
+    }
+
+    function updateBatteryToggleUI(battery) {
+      const toggleIndex = battery.id.charCodeAt(0) - 65;
+      const batterySection = document.querySelectorAll('.panel')[3]; // Batteries panel
+      const toggles = batterySection.querySelectorAll('.toggle input[type="checkbox"]');
+      
+      if (toggles[toggleIndex]) {
+        toggles[toggleIndex].checked = battery.connectedToBus;
+      }
+    }
+
+    function updateSolarPanelUI() {
+      const solarSection = document.querySelectorAll('.panel')[4]; // Solar Panels panel
+      const slider = solarSection.querySelector('.slider');
+      
+      if (slider) {
+        slider.value = solarSystem.panelState;
+      }
+
+      // Update charge gauge (solar power generation)
+      const gauges = document.querySelectorAll('.gauge');
+      const chargeGauge = gauges[3]; // First gauge in solar panel section
+      
+      if (chargeGauge) {
+        const chargePercent = Math.round((solarSystem.currentOutput / solarSystem.maxPowerOutput) * 100);
+        chargeGauge.style.setProperty('--value', chargePercent);
+        
+        const progress = chargeGauge.querySelector('progress');
+        if (progress) {
+          progress.value = chargePercent;
+          progress.textContent = `${chargePercent}%`;
+        }
+      }
+    }
+
+    function updatePowerDrawUI() {
+      const gauges = document.querySelectorAll('.gauge');
+      const drawGauge = gauges[4]; // Second gauge in solar panel section
+      
+      if (drawGauge) {
+        const totalDraw = powerSystem.getTotalDraw();
+        const drawPercent = Math.round((totalDraw / mainBus.getMaxPower()) * 100);
+        drawGauge.style.setProperty('--value', drawPercent);
+        
+        const progress = drawGauge.querySelector('progress');
+        if (progress) {
+          progress.value = drawPercent;
+          progress.textContent = `${drawPercent}%`;
+        }
+      }
+    }
+
+    function updateSaveStatusUI() {
+      const saveStatusEl = document.getElementById('save-status');
+      if (saveStatusEl) {
+        const lastSaved = saveSystem.getLastSaveTimeFormatted();
+        const autoSaveStatus = saveSystem.autoSaveEnabled ? 'Active' : 'Disabled';
+        saveStatusEl.textContent = `Last saved: ${lastSaved}\nAuto-save  : ${autoSaveStatus}`;
+      }
+    }
+
+    // ============================================================================
+    // WIRE UP UI CONTROLS
+    // ============================================================================
+    
+    document.addEventListener('DOMContentLoaded', () => {
+      // Try to load saved game, otherwise start new game
+      const savedGame = saveSystem.load();
+      if (savedGame) {
+        loadGameFromSave(savedGame);
+      } else {
+        initializeNewGame();
+      }
+
+      // Start auto-save
+      saveSystem.startAutoSave();
+
+      // Wire up battery bus toggles
+      const batterySection = document.querySelectorAll('.panel')[3]; // Batteries panel
+      const toggles = batterySection.querySelectorAll('.toggle input[type="checkbox"]');
+      
+      toggles.forEach((toggle, index) => {
+        const batteryId = String.fromCharCode(65 + index); // A, B
+        const battery = batterySystem.getBattery(batteryId);
+        
+        if (battery) {
+          // Initialize toggle state
+          toggle.checked = battery.connectedToBus;
+          
+          // Handle toggle changes
+          toggle.addEventListener('change', () => {
+            battery.toggleBus();
+          });
+        }
+      });
+
+      // Wire up solar panel slider
+      const solarSection = document.querySelectorAll('.panel')[4]; // Solar Panels panel
+      const solarSlider = solarSection.querySelector('.slider');
+      
+      if (solarSlider) {
+        // Initialize slider state
+        solarSlider.value = solarSystem.panelState;
+        
+        // Handle slider changes
+        solarSlider.addEventListener('input', () => {
+          solarSystem.setPanelState(parseInt(solarSlider.value));
+        });
+      }
+
+      // Wire up new game controls
+      const newGameArm = document.getElementById('new-game-arm');
+      const newGameBtn = document.getElementById('new-game-btn');
+
+      if (newGameArm && newGameBtn) {
+        // Handle arm toggle
+        newGameArm.addEventListener('change', () => {
+          if (newGameArm.checked) {
+            // Armed
+            newGameBtn.disabled = false;
+            newGameBtn.style.opacity = '1';
+            newGameBtn.style.background = 'linear-gradient(180deg, #8a2020, #5a1010)';
+            newGameBtn.style.color = '#fff';
+          } else {
+            // Safe
+            newGameBtn.disabled = true;
+            newGameBtn.style.opacity = '0.5';
+            newGameBtn.style.background = 'linear-gradient(180deg, var(--keycap-3), var(--keycap-2))';
+            newGameBtn.style.color = 'var(--key-text)';
+          }
+        });
+
+        // Handle new game button
+        newGameBtn.addEventListener('click', () => {
+          if (!newGameArm.checked) return;
+
+          // Confirm with user
+          const confirmed = confirm(
+            '⚠️ WARNING ⚠️\n\n' +
+            'This will DELETE your current game and start over.\n\n' +
+            'Are you sure you want to start a new game?'
+          );
+
+          if (confirmed) {
+            // Delete save
+            saveSystem.deleteSave();
+            
+            // Initialize new game
+            initializeNewGame();
+            
+            // Disarm the button
+            newGameArm.checked = false;
+            newGameBtn.disabled = true;
+            newGameBtn.style.opacity = '0.5';
+            newGameBtn.style.background = 'linear-gradient(180deg, var(--keycap-3), var(--keycap-2))';
+            newGameBtn.style.color = 'var(--key-text)';
+            
+            // Scroll to top
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            
+            console.log('🎮 New game started!');
+          }
+        });
+      }
+
+      // Update save status UI periodically
+      setInterval(updateSaveStatusUI, 1000);
+    });
+
+    // ============================================================================
+    // GAME LOOP
+    // ============================================================================
+    
+    let lastTime = performance.now();
+    const TARGET_FPS = 60;
+    const FRAME_TIME = 1000 / TARGET_FPS;
+    let frameCounter = 0;
+
+    function gameLoop(currentTime) {
+      const deltaTime = (currentTime - lastTime) / 1000; // Convert to seconds
+      lastTime = currentTime;
+      frameCounter++;
+
+      // Update all systems
+      solarSystem.update(deltaTime);
+      powerSystem.update(deltaTime);
+      batterySystem.update(deltaTime);
+
+      // Power flow management
+      const solarPower = solarSystem.currentOutput;
+      const systemDraw = powerSystem.getTotalDraw();
+      
+      // Calculate power balance
+      const powerBalance = solarPower - systemDraw;
+      
+      // Debug logging every 5 seconds (300 frames at 60fps)
+      if (frameCounter % 300 === 0) {
+        console.log(`[POWER] Solar: ${solarPower.toFixed(1)}W | Draw: ${systemDraw.toFixed(1)}W | Balance: ${powerBalance.toFixed(1)}W`);
+        console.log(`[BATTERY] A: ${batterySystem.batteries[0]?.getChargePercentage().toFixed(1)}% | B: ${batterySystem.batteries[1]?.getChargePercentage().toFixed(1)}%`);
+      }
+      
+      if (powerBalance > 0) {
+        // Surplus power - charge batteries
+        const actualCharged = batterySystem.chargeBatteries(powerBalance, deltaTime);
+        mainBus.currentSupply = solarPower;
+      } else if (powerBalance < 0) {
+        // Deficit - draw from batteries
+        const deficit = Math.abs(powerBalance);
+        const actualDrawn = batterySystem.drawPower(deficit, deltaTime);
+        mainBus.currentSupply = solarPower + actualDrawn;
+        
+        // Check if we couldn't meet demand
+        if (actualDrawn < deficit * 0.9) {
+          // Power shortage!
+          // In future: trigger brownout, disable non-critical systems
+        }
+      } else {
+        // Perfect balance (rare)
+        mainBus.currentSupply = solarPower;
+      }
+
+      // Update UI at 10 Hz (every 6 frames at 60 FPS)
+      if (frameCounter % 6 === 0) {
+        updateSolarPanelUI();
+        updatePowerDrawUI();
+        
+        // Update battery UI if charge changed significantly
+        batterySystem.batteries.forEach(battery => {
+          updateBatteryUI(battery);
+        });
+      }
+
+      // Continue loop
+      requestAnimationFrame(gameLoop);
+    }
+
+    // Start game loop
+    requestAnimationFrame(gameLoop);
+
+    // ============================================================================
+    // DEBUG HELPERS (remove in production)
+    // ============================================================================
+    
+    // Expose to window for debugging
+    window.DEBUG = {
+      eventBus,
+      batterySystem,
+      saveSystem,
+      solarSystem,
+      powerSystem,
+      mainBus,
+      getBatteryStatus: () => batterySystem.getStatus(),
+      getSolarStatus: () => solarSystem.getStatus(),
+      getPowerStatus: () => ({
+        draw: powerSystem.getTotalDraw(),
+        supply: mainBus.currentSupply,
+        balance: mainBus.currentSupply - powerSystem.getTotalDraw(),
+        busUtilization: mainBus.getUtilization()
+      }),
+      getSaveData: () => saveSystem.serializeGameState(),
+      forceSave: () => saveSystem.save(),
+      forceLoad: () => {
+        const data = saveSystem.load();
+        if (data) loadGameFromSave(data);
+        return data;
+      },
+      clearSave: () => saveSystem.deleteSave(),
+      newGame: () => initializeNewGame(),
+      setSunlight: (intensity) => solarSystem.updateSunlight(intensity)
+    };
+
+    console.log('[INIT] Space Trader systems initialized');
+    console.log('[SAVE] Auto-save enabled (every 5 seconds)');
+    console.log('[DEBUG] Use window.DEBUG to inspect systems');
+    console.log('[DEBUG] Commands:');
+    console.log('   DEBUG.getBatteryStatus() - Battery system status');
+    console.log('   DEBUG.getSolarStatus() - Solar panel status');
+    console.log('   DEBUG.getPowerStatus() - Power flow status');
+    console.log('   DEBUG.getSaveData() - Current save data');
+    console.log('   DEBUG.forceSave() - Save immediately');
+    console.log('   DEBUG.forceLoad() - Reload from save');
+    console.log('   DEBUG.clearSave() - Delete save');
+    console.log('   DEBUG.newGame() - Start new game');
+    console.log('   DEBUG.setSunlight(0.5) - Set sunlight intensity (0-1)');
+    console.log('');
+    console.log('[POWER] Solar panels at FULL SUN strength (100%) for testing');
+    console.log('[POWER] Extend panels to CHARGE batteries | Retract to DRAIN batteries');
+    console.log('[TIP] Toggle Battery Bus A/B to control which batteries power the ship');
+
+    // ============================================================================
+    // FULLSCREEN TOGGLE
+    // ============================================================================
+    
     const fullscreenToggle = document.getElementById('fullscreen-toggle');
     
     fullscreenToggle.addEventListener('change', function() {
