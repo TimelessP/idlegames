@@ -1108,6 +1108,10 @@ Auto-save  : Active</pre>
             sunlightIntensity: solarSystem.sunlightIntensity,
             connectedToBus: solarSystem.connectedToBus
           },
+          fuel: {
+            currentFuel: fuelSystem.currentFuel,
+            credits: fuelSystem.credits
+          },
           power: {
             activeSystems: Array.from(powerSystem.activeSystems)
           }
@@ -1824,6 +1828,81 @@ Auto-save  : Active</pre>
     const powerSystem = new PowerManagementSystem();
 
     // ============================================================================
+    // FUEL SYSTEM - Manages fuel tank and credits
+    // ============================================================================
+    class FuelSystem {
+      constructor() {
+        this.maxCapacity = 1000; // Liters
+        this.currentFuel = 280; // Start at 28%
+        this.refuelCostPerLiter = 1; // 1 credit per liter
+        this.credits = 123456; // Starting credits
+      }
+
+      /**
+       * Get fuel percentage
+       */
+      getFuelPercentage() {
+        return (this.currentFuel / this.maxCapacity) * 100;
+      }
+
+      /**
+       * Calculate cost to refuel to max
+       */
+      getRefuelCost() {
+        const fuelNeeded = this.maxCapacity - this.currentFuel;
+        return Math.ceil(fuelNeeded * this.refuelCostPerLiter);
+      }
+
+      /**
+       * Attempt to refuel the tank
+       * @returns {Object} Result with success flag and message
+       */
+      refuel() {
+        const cost = this.getRefuelCost();
+        
+        if (this.currentFuel >= this.maxCapacity) {
+          return { success: false, message: 'Tank already full!' };
+        }
+        
+        if (this.credits < cost) {
+          return { success: false, message: 'Insufficient credits!' };
+        }
+        
+        // Deduct credits and fill tank
+        this.credits -= cost;
+        this.currentFuel = this.maxCapacity;
+        
+        eventBus.emit('fuel:refueled', { cost, credits: this.credits });
+        
+        return { success: true, message: `Refueled! -${cost}₵` };
+      }
+
+      /**
+       * Use fuel (for travel, not implemented yet)
+       */
+      consumeFuel(amount) {
+        this.currentFuel = Math.max(0, this.currentFuel - amount);
+        eventBus.emit('fuel:consumed', { amount, remaining: this.currentFuel });
+      }
+
+      /**
+       * Get system status
+       */
+      getStatus() {
+        return {
+          currentFuel: this.currentFuel,
+          maxCapacity: this.maxCapacity,
+          fuelPercentage: this.getFuelPercentage(),
+          credits: this.credits,
+          refuelCost: this.getRefuelCost()
+        };
+      }
+    }
+
+    // Create fuel system
+    const fuelSystem = new FuelSystem();
+
+    // ============================================================================
     // BATTERY SYSTEM - Manages all batteries
     // ============================================================================
     class BatterySystem {
@@ -2110,6 +2189,12 @@ Auto-save  : Active</pre>
         solarSystem.connectedToBus = saveData.solar.connectedToBus !== undefined ? saveData.solar.connectedToBus : true;
       }
 
+      // Restore fuel system
+      if (saveData.fuel) {
+        fuelSystem.currentFuel = saveData.fuel.currentFuel;
+        fuelSystem.credits = saveData.fuel.credits;
+      }
+
       // Restore power systems
       if (saveData.power) {
         powerSystem.activeSystems = new Set(saveData.power.activeSystems);
@@ -2139,6 +2224,9 @@ Auto-save  : Active</pre>
       updateSolarPanelUI();
       updatePowerDrawUI();
       
+      // Update Fuel UI
+      updateFuelUI();
+      
       // Update Navigation UI
       updateNavigationUI();
       
@@ -2147,6 +2235,22 @@ Auto-save  : Active</pre>
 
       // Update other UI elements here
       updateSaveStatusUI();
+    }
+
+    function updateFuelUI() {
+      const fuelSection = document.querySelectorAll('.panel')[2]; // Fuel panel (index 2)
+      const fuelGauge = fuelSection.querySelector('.gauge');
+      const fuelTerminal = fuelSection.querySelector('.crt pre');
+      
+      if (fuelGauge) {
+        const fuelPercent = fuelSystem.getFuelPercentage();
+        fuelGauge.style.setProperty('--value', fuelPercent.toFixed(1));
+      }
+      
+      if (fuelTerminal) {
+        const refuelCost = fuelSystem.getRefuelCost();
+        fuelTerminal.textContent = `Current credits: ${fuelSystem.credits}₵\nCost to refuel : ${refuelCost}₵`;
+      }
     }
 
     function updateNavigationUI() {
@@ -2375,6 +2479,35 @@ Auto-save  : Active</pre>
           } else {
             powerSystem.disableSystem('navigation');
             console.log('🧭 Navigation system OFFLINE');
+          }
+        });
+      }
+
+      // Wire up Refuel button
+      const fuelSection = document.querySelectorAll('.panel')[2]; // Fuel panel (index 2)
+      const refuelButton = fuelSection.querySelector('.btn');
+      const fuelTerminal = fuelSection.querySelector('.crt pre');
+      
+      if (refuelButton) {
+        refuelButton.addEventListener('click', () => {
+          const result = fuelSystem.refuel();
+          
+          if (result.success) {
+            console.log(`⛽ ${result.message}`);
+            updateFuelUI();
+          } else {
+            console.warn(`⛽ ${result.message}`);
+            
+            // Show error message in terminal temporarily
+            if (fuelTerminal) {
+              const originalText = fuelTerminal.textContent;
+              fuelTerminal.textContent = `Current credits: ${fuelSystem.credits}₵\n${result.message}`;
+              
+              // Restore after 5 seconds
+              setTimeout(() => {
+                updateFuelUI();
+              }, 5000);
+            }
           }
         });
       }
@@ -2641,9 +2774,11 @@ Auto-save  : Active</pre>
       saveSystem,
       solarSystem,
       powerSystem,
+      fuelSystem,
       mainBus,
       getBatteryStatus: () => batterySystem.getStatus(),
       getSolarStatus: () => solarSystem.getStatus(),
+      getFuelStatus: () => fuelSystem.getStatus(),
       getPowerStatus: () => ({
         draw: powerSystem.getTotalDraw(),
         supply: mainBus.currentSupply,
@@ -2659,7 +2794,12 @@ Auto-save  : Active</pre>
       },
       clearSave: () => saveSystem.deleteSave(),
       newGame: () => initializeNewGame(),
-      setSunlight: (intensity) => solarSystem.updateSunlight(intensity)
+      setSunlight: (intensity) => solarSystem.updateSunlight(intensity),
+      addCredits: (amount) => {
+        fuelSystem.credits += amount;
+        updateFuelUI();
+        console.log(`💰 Added ${amount}₵. New balance: ${fuelSystem.credits}₵`);
+      }
     };
 
     console.log('[INIT] Space Trader systems initialized');
@@ -2668,6 +2808,7 @@ Auto-save  : Active</pre>
     console.log('[DEBUG] Commands:');
     console.log('   DEBUG.getBatteryStatus() - Battery system status');
     console.log('   DEBUG.getSolarStatus() - Solar panel status');
+    console.log('   DEBUG.getFuelStatus() - Fuel and credits status');
     console.log('   DEBUG.getPowerStatus() - Power flow status');
     console.log('   DEBUG.getSaveData() - Current save data');
     console.log('   DEBUG.forceSave() - Save immediately');
@@ -2675,6 +2816,7 @@ Auto-save  : Active</pre>
     console.log('   DEBUG.clearSave() - Delete save');
     console.log('   DEBUG.newGame() - Start new game');
     console.log('   DEBUG.setSunlight(0.5) - Set sunlight intensity (0-1)');
+    console.log('   DEBUG.addCredits(1000) - Add credits');
     console.log('');
     console.log('[POWER] Solar panels at FULL SUN strength (100%) for testing');
     console.log('[POWER] Extend panels to CHARGE batteries | Retract to DRAIN batteries');
