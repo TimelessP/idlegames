@@ -689,6 +689,14 @@
       border-color: #4a7ba7;
       background: linear-gradient(135deg, #0e1a1f, #1a2a30 50%, #0e1a1f);
     }
+    .cargo-slot.inspect-slot * {
+      pointer-events: none !important; /* Ensure ALL children don't interfere with drag-drop */
+    }
+    /* Disable pseudo-elements for inspect slot to prevent dragleave issues */
+    .cargo-slot.inspect-slot::before,
+    .cargo-slot.inspect-slot::after {
+      display: none !important;
+    }
     .cargo-slot.inspect-slot.drag-over {
       border-color: #6ba3d4;
       box-shadow: inset 0 0 20px rgba(107, 163, 212, 0.4), 0 0 20px rgba(107, 163, 212, 0.5);
@@ -751,6 +759,11 @@
     }
     
     /* Cargo type label painted on crate */
+    .cargo-slot .cargo-label {
+      pointer-events: none; /* Don't interfere with drag-and-drop */
+      user-select: none;
+    }
+    
     .cargo-slot.full .cargo-label {
       position: absolute;
       inset: 0;
@@ -763,8 +776,6 @@
       color: rgba(255, 255, 255, 0.4);
       letter-spacing: -2px;
       z-index: 100;
-      pointer-events: none;
-      user-select: none;
     }
 
     /* Teleportation effect - glittery cyan/white sparkles */
@@ -4330,7 +4341,7 @@ Auto-save  : Active</pre>
     
     function updateCargoHoldUI() {
       const cargoSection = document.querySelectorAll('.panel')[6]; // Cargo Hold panel
-      const cargoSlots = cargoSection.querySelectorAll('.cargo-slot');
+      const cargoSlots = cargoSection.querySelectorAll('.cargo-grid .cargo-slot'); // Only grid slots, not inspect slot
       
       // Update cargo slots based on tradingSystem.cargo
       cargoSlots.forEach((slot, index) => {
@@ -5000,15 +5011,20 @@ Auto-save  : Active</pre>
       }
 
       // ============================================================================
-      // CARGO DRAG-AND-DROP HANDLERS
+      // CARGO DRAG-AND-DROP HANDLERS (Mouse + Touch Support)
       // ============================================================================
       
       const cargoHoldSection = document.querySelectorAll('.panel')[6]; // Cargo Hold panel
-      const cargoHoldSlots = cargoHoldSection.querySelectorAll('.cargo-slot');
+      const cargoHoldSlots = cargoHoldSection.querySelectorAll('.cargo-grid .cargo-slot'); // Only grid slots, not inspect slot
       
-      let draggedSlotIndex = null;
+  let draggedSlotIndex = null;
+  let lastDraggedIndex = null; // Fallback for mouse synthetic drop
+      let touchDraggedSlot = null;
+      let touchClone = null;
       
       cargoHoldSlots.forEach((slot, index) => {
+        // ===== MOUSE DRAG HANDLERS =====
+        
         // Drag start
         slot.addEventListener('dragstart', (e) => {
           // Only allow dragging if slot is full
@@ -5018,15 +5034,19 @@ Auto-save  : Active</pre>
           }
           
           draggedSlotIndex = index;
+          lastDraggedIndex = index; // track last dragged index for fallback
           slot.classList.add('dragging');
           e.dataTransfer.effectAllowed = 'move';
           e.dataTransfer.setData('text/plain', index.toString());
+          console.log(`📦 Drag start: slot ${index}`);
         });
         
         // Drag end
         slot.addEventListener('dragend', (e) => {
           slot.classList.remove('dragging');
-          draggedSlotIndex = null;
+          // Defer clearing to allow other dragend listeners to read the value
+          setTimeout(() => { draggedSlotIndex = null; }, 0);
+          console.log(`📦 Drag end`);
         });
         
         // Drag over (allow drop)
@@ -5060,6 +5080,8 @@ Auto-save  : Active</pre>
           const fromIndex = parseInt(e.dataTransfer.getData('text/plain'));
           const toIndex = index;
           
+          console.log(`📦 Drop on slot ${toIndex} from slot ${fromIndex}`);
+          
           if (fromIndex !== toIndex) {
             // Perform the swap
             tradingSystem.swapCargo(fromIndex, toIndex);
@@ -5071,20 +5093,213 @@ Auto-save  : Active</pre>
             saveSystem.save();
           }
         });
+        
+        // ===== TOUCH DRAG HANDLERS =====
+        
+        slot.addEventListener('touchstart', (e) => {
+          // Only allow dragging if slot is full
+          if (!slot.classList.contains('full')) {
+            return;
+          }
+          
+          e.preventDefault(); // Prevent scrolling while dragging
+          draggedSlotIndex = index;
+          touchDraggedSlot = slot;
+          slot.classList.add('dragging');
+          
+          // Create a visual clone that follows the finger
+          touchClone = slot.cloneNode(true);
+          touchClone.style.position = 'fixed';
+          touchClone.style.pointerEvents = 'none';
+          touchClone.style.opacity = '0.8';
+          touchClone.style.zIndex = '10000';
+          touchClone.style.width = slot.offsetWidth + 'px';
+          touchClone.style.height = slot.offsetHeight + 'px';
+          
+          const touch = e.touches[0];
+          touchClone.style.left = (touch.clientX - slot.offsetWidth / 2) + 'px';
+          touchClone.style.top = (touch.clientY - slot.offsetHeight / 2) + 'px';
+          
+          document.body.appendChild(touchClone);
+          console.log(`📱 Touch start: slot ${index}`);
+        });
+        
+        slot.addEventListener('touchmove', (e) => {
+          if (!touchClone) return;
+          
+          e.preventDefault(); // Prevent scrolling
+          const touch = e.touches[0];
+          
+          // Move the clone with the finger
+          touchClone.style.left = (touch.clientX - touchClone.offsetWidth / 2) + 'px';
+          touchClone.style.top = (touch.clientY - touchClone.offsetHeight / 2) + 'px';
+          
+          // Find what element is under the finger
+          touchClone.style.display = 'none';
+          const elementBelow = document.elementFromPoint(touch.clientX, touch.clientY);
+          touchClone.style.display = 'block';
+          
+          // Remove drag-over from all slots
+          cargoHoldSlots.forEach(s => s.classList.remove('drag-over'));
+          const inspectSlot = document.getElementById('inspect-slot');
+          if (inspectSlot) inspectSlot.classList.remove('drag-over');
+          
+          // Add drag-over to the element below if it's a valid drop target
+          if (elementBelow) {
+            const targetSlot = elementBelow.closest('.cargo-slot');
+            if (targetSlot && targetSlot !== touchDraggedSlot) {
+              targetSlot.classList.add('drag-over');
+            }
+          }
+        });
+        
+        slot.addEventListener('touchend', (e) => {
+          if (!touchClone) return;
+          
+          e.preventDefault();
+          const touch = e.changedTouches[0];
+          
+          // Find what element is under the finger
+          touchClone.style.display = 'none';
+          const elementBelow = document.elementFromPoint(touch.clientX, touch.clientY);
+          
+          // Clean up
+          if (touchClone && touchClone.parentNode) {
+            touchClone.parentNode.removeChild(touchClone);
+          }
+          touchClone = null;
+          
+          if (touchDraggedSlot) {
+            touchDraggedSlot.classList.remove('dragging');
+          }
+          
+          // Remove drag-over from all slots
+          cargoHoldSlots.forEach(s => s.classList.remove('drag-over'));
+          const inspectSlotEl = document.getElementById('inspect-slot');
+          if (inspectSlotEl) inspectSlotEl.classList.remove('drag-over');
+          
+          console.log(`📱 Touch end at slot ${index}`);
+          
+          // Handle the drop
+          if (elementBelow) {
+            const targetSlot = elementBelow.closest('.cargo-slot');
+            
+            if (targetSlot) {
+              // Check if it's the inspect slot
+              if (targetSlot.id === 'inspect-slot') {
+                console.log(`📱 Dropped on inspect slot`);
+                // Inspect the cargo
+                const cargoItem = tradingSystem.cargo[draggedSlotIndex];
+                if (cargoItem) {
+                  const inspectTerminal = document.getElementById('inspect-terminal');
+                  const typeInfo = tradingSystem.cargoTypes[cargoItem.type];
+                  
+                  // Update inspect slot visual
+                  targetSlot.classList.remove('empty');
+                  targetSlot.classList.add('full');
+                  targetSlot.style.background = typeInfo.color;
+                  
+                  let label = targetSlot.querySelector('.cargo-label');
+                  if (label) {
+                    label.textContent = typeInfo.code;
+                    label.style.fontSize = '56px';
+                    label.style.opacity = '0.4';
+                    label.style.animation = 'none';
+                  }
+                  
+                  // Update terminal
+                  if (inspectTerminal) {
+                    const lines = [];
+                    lines.push(`Type: ${cargoItem.type}`);
+                    lines.push(`Code: ${typeInfo.code}`);
+                    lines.push(`Purchase Price: ${cargoItem.purchasePrice}₵`);
+                    lines.push(`Slot: ${draggedSlotIndex + 1} of ${tradingSystem.cargoCapacity}`);
+                    
+                    while (lines.length < 4) {
+                      lines.push('\u00A0');
+                    }
+                    
+                    inspectTerminal.textContent = lines.slice(0, 4).join('\n');
+                    console.log(`🔍 Inspecting cargo: ${cargoItem.type} from slot ${draggedSlotIndex}`);
+                  }
+                }
+              } else {
+                // Regular cargo slot - swap
+                const targetIndex = Array.from(cargoHoldSlots).indexOf(targetSlot);
+                
+                if (targetIndex !== -1 && targetIndex !== draggedSlotIndex) {
+                  console.log(`📱 Swapping slot ${draggedSlotIndex} with slot ${targetIndex}`);
+                  tradingSystem.swapCargo(draggedSlotIndex, targetIndex);
+                  updateCargoHoldUI();
+                  saveSystem.save();
+                }
+              }
+            }
+          }
+          
+          draggedSlotIndex = null;
+          touchDraggedSlot = null;
+        });
+        
+        slot.addEventListener('touchcancel', (e) => {
+          // Clean up on cancel
+          if (touchClone && touchClone.parentNode) {
+            touchClone.parentNode.removeChild(touchClone);
+          }
+          touchClone = null;
+          
+          if (touchDraggedSlot) {
+            touchDraggedSlot.classList.remove('dragging');
+          }
+          
+          cargoHoldSlots.forEach(s => s.classList.remove('drag-over'));
+          const inspectSlotEl = document.getElementById('inspect-slot');
+          if (inspectSlotEl) inspectSlotEl.classList.remove('drag-over');
+          
+          draggedSlotIndex = null;
+          touchDraggedSlot = null;
+          console.log(`📱 Touch cancelled`);
+        });
       });
 
       // ============================================================================
-      // INSPECT SLOT DRAG-AND-DROP HANDLER
+      // INSPECT SLOT DRAG-AND-DROP HANDLER (Mouse Only - Touch handled above)
       // ============================================================================
       
       const inspectSlot = document.getElementById('inspect-slot');
       const inspectTerminal = document.getElementById('inspect-terminal');
       
+      console.log(`🔍 Inspect slot found:`, inspectSlot);
+      console.log(`🔍 Inspect terminal found:`, inspectTerminal);
+      
       if (inspectSlot && inspectTerminal) {
+        // Add a capture phase listener to debug
+        document.addEventListener('drop', (e) => {
+          console.log(`🔍 CAPTURE: Drop event anywhere on document`, e.target);
+          if (inspectSlot.contains(e.target) || e.target === inspectSlot) {
+            console.log(`🔍 CAPTURE: Drop event IS over inspect slot area!`);
+          }
+        }, true); // Capture phase
+        
+        // Also add a global drop listener to see ALL drops
+        window.addEventListener('drop', (e) => {
+          console.log(`🌍 WINDOW: Drop event detected`, e.target);
+        });
+        
+        let dragEnterCounter = 0; // Track nested drag enter/leave
+        let lastDragOverTime = 0; // Track last dragover
+        let isOverInspectSlot = false; // Track if we've been over inspect slot recently
+        
         // Drag over (allow drop)
         inspectSlot.addEventListener('dragover', (e) => {
           e.preventDefault();
-          e.dataTransfer.dropEffect = 'copy'; // Visual feedback that it's a copy, not move
+          e.stopPropagation(); // Stop it from bubbling to parent
+          
+          // Always set dropEffect even if draggedSlotIndex is null
+          e.dataTransfer.dropEffect = 'copy';
+          
+          lastDragOverTime = Date.now();
+          isOverInspectSlot = true; // Mark that we're actively over the slot
           
           if (draggedSlotIndex !== null) {
             inspectSlot.classList.add('drag-over');
@@ -5094,23 +5309,105 @@ Auto-save  : Active</pre>
         // Drag enter
         inspectSlot.addEventListener('dragenter', (e) => {
           e.preventDefault();
+          e.stopPropagation();
+          dragEnterCounter++;
+          
           if (draggedSlotIndex !== null) {
             inspectSlot.classList.add('drag-over');
+            console.log(`🔍 Drag entered inspect slot (counter: ${dragEnterCounter})`);
           }
         });
         
-        // Drag leave
+        // Drag leave - use counter to track nested enter/leave
         inspectSlot.addEventListener('dragleave', (e) => {
-          inspectSlot.classList.remove('drag-over');
+          e.stopPropagation();
+          dragEnterCounter--;
+          
+          // Only remove drag-over when counter reaches 0 AND we're not actively dragging over
+          if (dragEnterCounter <= 0) {
+            dragEnterCounter = 0;
+            // Don't immediately clear isOverInspectSlot - let dragend handle cleanup
+            // This prevents race condition where dragleave fires right before drop
+            const timeSinceDragover = Date.now() - lastDragOverTime;
+            // Do not clear isOverInspectSlot here; keep until dragend decides
+            if (timeSinceDragover > 300) { // only remove highlight if user clearly moved away
+              inspectSlot.classList.remove('drag-over');
+              console.log(`🔍 Drag left inspect slot (counter: ${dragEnterCounter}, time: ${timeSinceDragover}ms)`);
+            } else {
+              console.log(`🔍 Dragleave too soon after dragover (${timeSinceDragover}ms), keeping drop zone active`);
+            }
+          } else {
+            console.log(`🔍 Dragleave on child (counter: ${dragEnterCounter}, ignoring)`);
+          }
+        });
+        
+        // Also clear drag-over on dragend of cargo slots
+        cargoHoldSlots.forEach(slot => {
+          slot.addEventListener('dragend', () => {
+            const timeSinceLastDragover = Date.now() - lastDragOverTime;
+            // Capture BEFORE it gets cleared; fallback to lastDraggedIndex if needed
+            const capturedDraggedIndex = (draggedSlotIndex !== null ? draggedSlotIndex : lastDraggedIndex);
+            console.log(`📦 Dragend - time since last dragover: ${timeSinceLastDragover}ms, counter: ${dragEnterCounter}, isOver: ${isOverInspectSlot}, draggedIndex: ${capturedDraggedIndex}`);
+            
+            // If we were recently over the inspect slot, trigger a synthetic drop
+            if (isOverInspectSlot && timeSinceLastDragover < 250 && capturedDraggedIndex !== null) {
+              console.log(`🔍 SYNTHETIC DROP: Was over inspect slot when released (${timeSinceLastDragover}ms ago), manually triggering inspection`);
+              
+              const cargoItem = tradingSystem.cargo[capturedDraggedIndex];
+              if (cargoItem) {
+                const typeInfo = tradingSystem.cargoTypes[cargoItem.type];
+                
+                // Update inspect slot visual
+                inspectSlot.classList.remove('empty');
+                inspectSlot.classList.add('full');
+                inspectSlot.style.background = typeInfo.color;
+                
+                let label = inspectSlot.querySelector('.cargo-label');
+                if (label) {
+                  label.textContent = typeInfo.code;
+                  label.style.fontSize = '56px';
+                  label.style.opacity = '0.4';
+                  label.style.animation = 'none';
+                }
+                
+                // Update terminal
+                const lines = [];
+                lines.push(`Type: ${cargoItem.type}`);
+                lines.push(`Code: ${typeInfo.code}`);
+                lines.push(`Purchase Price: ${cargoItem.purchasePrice}₵`);
+                lines.push(`Slot: ${capturedDraggedIndex + 1} of ${tradingSystem.cargoCapacity}`);
+                
+                while (lines.length < 4) {
+                  lines.push('\u00A0');
+                }
+                
+                inspectTerminal.textContent = lines.slice(0, 4).join('\n');
+                console.log(`🔍 Synthetic inspection complete: ${cargoItem.type} from slot ${capturedDraggedIndex}`);
+              }
+            }
+            
+            inspectSlot.classList.remove('drag-over');
+            dragEnterCounter = 0; // Reset counter
+            isOverInspectSlot = false; // Reset flag
+          });
         });
         
         // Drop - inspect the cargo without moving it
         inspectSlot.addEventListener('drop', (e) => {
+          console.log(`🔍 DROP EVENT HANDLER CALLED!`, e);
           e.preventDefault();
+          e.stopPropagation(); // Stop event from bubbling
           inspectSlot.classList.remove('drag-over');
           
+          console.log(`🔍 DROP EVENT FIRED ON INSPECT SLOT`);
+          console.log(`🔍 Event target:`, e.target);
+          console.log(`🔍 Current target:`, e.currentTarget);
+          
           const fromIndex = parseInt(e.dataTransfer.getData('text/plain'));
+          console.log(`🔍 From index: ${fromIndex}`);
+          
           const cargoItem = tradingSystem.cargo[fromIndex];
+          console.log(`🔍 Cargo item:`, cargoItem);
           
           if (cargoItem) {
             // Update inspect slot visual
@@ -5128,18 +5425,30 @@ Auto-save  : Active</pre>
               label.style.animation = 'none';
             }
             
-            // Update terminal with cargo info
+            // Update terminal with cargo info (always keep 4 lines)
             const lines = [];
             lines.push(`Type: ${cargoItem.type}`);
             lines.push(`Code: ${typeInfo.code}`);
             lines.push(`Purchase Price: ${cargoItem.purchasePrice}₵`);
             lines.push(`Slot: ${fromIndex + 1} of ${tradingSystem.cargoCapacity}`);
             
-            inspectTerminal.textContent = lines.join('\n');
+            // Ensure exactly 4 lines (pad with non-breaking spaces if needed)
+            while (lines.length < 4) {
+              lines.push('\u00A0'); // Non-breaking space
+            }
+            
+            inspectTerminal.textContent = lines.slice(0, 4).join('\n');
             
             console.log(`🔍 Inspecting cargo: ${cargoItem.type} from slot ${fromIndex}`);
+            console.log(`🔍 Terminal updated with:`, lines);
+          } else {
+            console.log(`🔍 No cargo item at index ${fromIndex}`);
           }
         });
+        
+        console.log(`🔍 Inspect slot handlers attached`);
+      } else {
+        console.error(`🔍 Inspect slot or terminal not found!`);
       }
 
       // Update save status UI periodically
