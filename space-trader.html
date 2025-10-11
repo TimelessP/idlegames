@@ -940,23 +940,23 @@ Standing: Neutral</pre>
 
       <h2 class="label">Cargo Hold</h2>
       <div class="cargo-grid">
-        <div class="cargo-slot full"></div>
-        <div class="cargo-slot full"></div>
-        <div class="cargo-slot empty"></div>
-        <div class="cargo-slot full"></div>
         <div class="cargo-slot empty"></div>
         <div class="cargo-slot empty"></div>
-        <div class="cargo-slot full"></div>
-        <div class="cargo-slot empty"></div>
-        <div class="cargo-slot full"></div>
-        <div class="cargo-slot empty"></div>
-        <div class="cargo-slot full"></div>
         <div class="cargo-slot empty"></div>
         <div class="cargo-slot empty"></div>
-        <div class="cargo-slot full"></div>
         <div class="cargo-slot empty"></div>
         <div class="cargo-slot empty"></div>
-        <div class="cargo-slot full"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
+        <div class="cargo-slot empty"></div>
         <div class="cargo-slot empty"></div>
         <div class="cargo-slot empty"></div>
         <div class="cargo-slot empty"></div>
@@ -1134,6 +1134,15 @@ Auto-save  : Active</pre>
           },
           power: {
             activeSystems: Array.from(powerSystem.activeSystems)
+          },
+          trading: {
+            cargo: tradingSystem.cargo.map(item => item ? {
+              id: item.id,
+              type: item.type,
+              purchasePrice: item.purchasePrice,
+              slotIndex: item.slotIndex
+            } : null),
+            nextCargoId: tradingSystem.nextCargoId
           }
         };
       }
@@ -2349,6 +2358,411 @@ Auto-save  : Active</pre>
     const fuelSystem = new FuelSystem();
 
     // ============================================================================
+    // TRADING SYSTEM - Manages cargo, traders, and economy
+    // ============================================================================
+    class TradingSystem {
+      constructor() {
+        this.cargoCapacity = 12; // 12 slots matching UI
+        this.cargo = new Array(this.cargoCapacity).fill(null); // Cargo slots (null = empty)
+        this.nextCargoId = 1; // For unique IDs
+        
+        // Current trader session
+        this.currentTrader = null;
+        this.currentPage = 0;
+        this.isBuying = true; // true = we're buying from trader, false = we're selling to trader
+        this.lastHaggleResult = null; // Track last haggle for display
+        
+        // Offer prices for selling mode - maps cargoId -> current offer price
+        this.offerPrices = {}; // When selling, track trader's offer for each cargo item
+        
+        // Cargo types and their base price ranges (based on fuel @ 1₵/L)
+        this.cargoTypes = {
+          'Food': { min: 150, max: 300, color: '#8fbc8f' },
+          'Medical Supplies': { min: 200, max: 400, color: '#ff6b6b' },
+          'Electronics': { min: 300, max: 500, color: '#4dabf7' },
+          'Rare Metals': { min: 400, max: 700, color: '#ffd43b' },
+          'Fuel Cells': { min: 250, max: 450, color: '#ff922b' },
+          'Textiles': { min: 100, max: 200, color: '#cc5de8' },
+          'Machinery': { min: 350, max: 600, color: '#868e96' },
+          'Gems': { min: 500, max: 1000, color: '#f783ac' },
+          'Spices': { min: 180, max: 350, color: '#d9480f' },
+          'Art Objects': { min: 600, max: 1200, color: '#845ef7' },
+          'Weapons': { min: 400, max: 800, color: '#343a40' },
+          'Tools': { min: 150, max: 300, color: '#74c0fc' },
+          'Computers': { min: 450, max: 750, color: '#4c6ef5' },
+          'Biomatter': { min: 200, max: 400, color: '#51cf66' },
+          'Alien Artifacts': { min: 800, max: 1500, color: '#be4bdb' }
+        };
+        
+        // Trader name components
+        this.traderTitles = ['Captain', 'Commander', 'Admiral', 'Merchant', 'Trader', 'Baron', 'Duchess'];
+        this.traderNames = ['Fingers', 'Rex', 'Nova', 'Blaze', 'Storm', 'Hawk', 'Viper', 'Phoenix', 
+                            'Drake', 'Wolf', 'Fox', 'Raven', 'Steel', 'Iron', 'Gold', 'Silver'];
+        this.shipAdjectives = ['Stellar', 'Cosmic', 'Void', 'Star', 'Galactic', 'Nebula', 'Solar',
+                               'Quantum', 'Astral', 'Celestial', 'Orbital', 'Lunar', 'Deep'];
+        this.shipNouns = ['Wanderer', 'Seeker', 'Voyager', 'Explorer', 'Drifter', 'Nomad', 'Pioneer',
+                          'Runner', 'Hauler', 'Trader', 'Merchant', 'Cruiser', 'Clipper', 'Banana'];
+      }
+
+      /**
+       * Generate a new trader with random inventory
+       */
+      generateNewTrader() {
+        const title = this.traderTitles[Math.floor(Math.random() * this.traderTitles.length)];
+        const name = this.traderNames[Math.floor(Math.random() * this.traderNames.length)];
+        const adjective = this.shipAdjectives[Math.floor(Math.random() * this.shipAdjectives.length)];
+        const noun = this.shipNouns[Math.floor(Math.random() * this.shipNouns.length)];
+        
+        const availableTypes = Object.keys(this.cargoTypes);
+        const shuffled = [...availableTypes].sort(() => Math.random() - 0.5);
+        
+        // Generate items they're SELLING (2-4 items with quantity 1-5)
+        const sellInventory = [];
+        const sellCount = 2 + Math.floor(Math.random() * 3); // 2-4 items
+        
+        for (let i = 0; i < sellCount; i++) {
+          const type = shuffled[i];
+          const priceRange = this.cargoTypes[type];
+          const quantity = 1 + Math.floor(Math.random() * 5); // 1-5 units
+          const basePrice = priceRange.min + Math.random() * (priceRange.max - priceRange.min);
+          
+          sellInventory.push({
+            type,
+            quantity,
+            basePrice: Math.round(basePrice),
+            currentPrice: Math.round(basePrice) // Will be modified by haggling
+          });
+        }
+        
+        // Generate items they're BUYING (demand) - 2-3 different types
+        const demandList = [];
+        const demandCount = 2 + Math.floor(Math.random() * 2); // 2-3 items
+        const demandStartIndex = sellCount; // Don't overlap with sell items
+        
+        for (let i = 0; i < demandCount && (demandStartIndex + i) < shuffled.length; i++) {
+          const type = shuffled[demandStartIndex + i];
+          demandList.push(type);
+        }
+        
+        this.currentTrader = {
+          name: `${title} ${name}`,
+          ship: `${adjective} ${noun}`,
+          personality: ['Friendly', 'Suspicious', 'Greedy', 'Honest', 'Eccentric'][Math.floor(Math.random() * 5)],
+          haggleSkill: 1 + Math.floor(Math.random() * 10), // 1-10
+          inventory: sellInventory, // Items they're selling
+          demand: demandList, // Item types they want to buy
+          reputation: 50 + Math.floor(Math.random() * 50) // 50-100 for neutral-good
+        };
+        
+        this.currentPage = 0;
+        this.lastHaggleResult = null;
+        
+        // Generate offer prices for all cargo items that match trader's demand
+        this.offerPrices = {};
+        this.cargo.forEach(item => {
+          if (item && demandList.includes(item.type)) {
+            const priceRange = this.cargoTypes[item.type];
+            const offerPrice = Math.round(priceRange.min + Math.random() * (priceRange.max - priceRange.min));
+            this.offerPrices[item.id] = offerPrice;
+          }
+        });
+        
+        console.log(`📡 New trader: ${this.currentTrader.name} on ${this.currentTrader.ship}`);
+        console.log(`   Selling: ${sellInventory.map(i => i.type).join(', ')}`);
+        console.log(`   Buying: ${demandList.join(', ')}`);
+      }
+
+      /**
+       * Haggle with current trader
+       * Returns { success: boolean, priceChange: number, message: string }
+       */
+      haggle() {
+        if (!this.currentTrader) {
+          return { success: false, priceChange: 0, message: 'No active trader!' };
+        }
+        
+        const currentItem = this.getCurrentItem();
+        if (!currentItem) {
+          return { success: false, priceChange: 0, message: 'No item to haggle!' };
+        }
+        
+        // Haggle success is influenced by trader's skill and random luck
+        // Player has base 50% chance, modified by trader's haggle skill
+        const playerRoll = Math.random() * 100;
+        const traderModifier = this.currentTrader.haggleSkill * 5; // 5-50 penalty
+        const success = playerRoll > (50 + traderModifier);
+        
+        if (this.isBuying) {
+          // Buying from trader - modify their inventory item's current price
+          const changePercent = 0.05 + Math.random() * 0.15;
+          const priceChange = Math.round(currentItem.currentPrice * changePercent);
+          
+          if (success) {
+            currentItem.currentPrice = Math.max(1, currentItem.currentPrice - priceChange);
+            this.lastHaggleResult = { success: true, priceChange };
+            return { 
+              success: true, 
+              priceChange, 
+              message: `Success! Price reduced by ${priceChange}₵` 
+            };
+          } else {
+            currentItem.currentPrice += priceChange;
+            this.lastHaggleResult = { success: false, priceChange };
+            return { 
+              success: false, 
+              priceChange, 
+              message: `Failed! Price increased by ${priceChange}₵` 
+            };
+          }
+        } else {
+          // Selling to trader - modify the offer price for our cargo
+          const currentOfferPrice = this.offerPrices[currentItem.id] || 0;
+          const changePercent = 0.05 + Math.random() * 0.15;
+          const priceChange = Math.round(currentOfferPrice * changePercent);
+          
+          if (success) {
+            this.offerPrices[currentItem.id] = currentOfferPrice + priceChange;
+            this.lastHaggleResult = { success: true, priceChange };
+            return { 
+              success: true, 
+              priceChange, 
+              message: `Success! Offer increased by ${priceChange}₵` 
+            };
+          } else {
+            this.offerPrices[currentItem.id] = Math.max(1, currentOfferPrice - priceChange);
+            this.lastHaggleResult = { success: false, priceChange };
+            return { 
+              success: false, 
+              priceChange, 
+              message: `Failed! Offer reduced by ${priceChange}₵` 
+            };
+          }
+        }
+      }
+
+      /**
+       * Execute a trade (buy or sell)
+       */
+      executeTrade() {
+        if (!this.currentTrader) {
+          return { success: false, message: 'No active trader!' };
+        }
+        
+        const currentItem = this.getCurrentItem();
+        if (!currentItem) {
+          return { success: false, message: 'No items available!' };
+        }
+        
+        if (this.isBuying) {
+          // We're buying from trader
+          const cost = currentItem.currentPrice;
+          
+          if (fuelSystem.credits < cost) {
+            return { success: false, message: `Insufficient credits! Need ${cost}₵, have ${fuelSystem.credits}₵` };
+          }
+          
+          // Find empty cargo slot
+          const emptySlotIndex = this.cargo.findIndex(slot => slot === null);
+          if (emptySlotIndex === -1) {
+            return { success: false, message: 'Cargo hold full!' };
+          }
+          
+          // Execute purchase
+          fuelSystem.credits -= cost;
+          currentItem.quantity -= 1;
+          
+          // Add to cargo
+          const cargoItem = {
+            id: this.nextCargoId++,
+            type: currentItem.type,
+            purchasePrice: cost,
+            slotIndex: emptySlotIndex
+          };
+          this.cargo[emptySlotIndex] = cargoItem;
+          
+          // Remove item from trader inventory if quantity reaches 0
+          if (currentItem.quantity <= 0) {
+            this.currentTrader.inventory.splice(this.currentPage, 1);
+            // Adjust current page if needed
+            if (this.currentPage >= this.currentTrader.inventory.length && this.currentPage > 0) {
+              this.currentPage--;
+            }
+          }
+          
+          console.log(`✅ Purchased ${cargoItem.type} for ${cost}₵`);
+          return { success: true, message: `Purchased ${currentItem.type} for ${cost}₵` };
+          
+        } else {
+          // We're selling to trader
+          if (this.getCargoCount() === 0) {
+            return { success: false, message: 'No cargo to sell!' };
+          }
+          
+          // Get current cargo item
+          const ourCargoItems = this.cargo.filter(item => item !== null);
+          
+          if (this.currentPage >= ourCargoItems.length) {
+            return { success: false, message: 'Invalid selection!' };
+          }
+          
+          const cargoToSell = ourCargoItems[this.currentPage];
+          
+          // Check if trader wants this item
+          if (this.currentTrader?.demand && this.currentTrader.demand.length > 0) {
+            if (!this.currentTrader.demand.includes(cargoToSell.type)) {
+              return { success: false, message: `Trader doesn't want ${cargoToSell.type}!` };
+            }
+          }
+          
+          const salePrice = this.getSellingPrice(cargoToSell);
+          const profit = salePrice - cargoToSell.purchasePrice;
+          
+          // Execute sale
+          fuelSystem.credits += salePrice;
+          this.cargo[cargoToSell.slotIndex] = null;
+          
+          console.log(`✅ Sold ${cargoToSell.type} for ${salePrice}₵ (profit: ${profit > 0 ? '+' : ''}${profit}₵)`);
+          return { 
+            success: true, 
+            message: `Sold ${cargoToSell.type} for ${salePrice}₵ (${profit > 0 ? '+' : ''}${profit}₵)` 
+          };
+        }
+      }
+
+      /**
+       * Calculate selling price for a cargo item
+       * Uses the current offer price from offerPrices map
+       */
+      getSellingPrice(cargoItem) {
+        // Return the trader's current offer price for this cargo item
+        return this.offerPrices[cargoItem.id] || 0;
+      }
+
+      /**
+       * Get current item (buying from trader) or cargo (selling to trader)
+       */
+      getCurrentItem() {
+        if (this.isBuying) {
+          // Buying from trader - show their inventory
+          return this.currentTrader?.inventory[this.currentPage] || null;
+        } else {
+          // Selling to trader - show ALL our cargo (one per page)
+          const ourCargo = this.cargo.filter(item => item !== null);
+          return ourCargo[this.currentPage] || null;
+        }
+      }
+
+      /**
+       * Navigate to next page
+       */
+      nextPage() {
+        const maxPage = this.getMaxPage();
+        this.currentPage = Math.min(this.currentPage + 1, maxPage - 1);
+        this.lastHaggleResult = null; // Reset haggle on page change
+      }
+
+      /**
+       * Navigate to previous page
+       */
+      prevPage() {
+        this.currentPage = Math.max(0, this.currentPage - 1);
+        this.lastHaggleResult = null; // Reset haggle on page change
+      }
+
+      /**
+       * Get maximum page count
+       */
+      getMaxPage() {
+        if (this.isBuying) {
+          return Math.max(1, this.currentTrader?.inventory.length || 0);
+        } else {
+          // Count ALL cargo items (one page per item)
+          return Math.max(1, this.getCargoCount());
+        }
+      }
+
+      /**
+       * Set trading mode (buying/selling)
+       */
+      setMode(isBuying) {
+        if (this.isBuying !== isBuying) {
+          this.isBuying = isBuying;
+          this.currentPage = 0;
+          this.lastHaggleResult = null;
+          // Generate new trader when switching modes
+          this.generateNewTrader();
+        }
+      }
+
+      /**
+       * Get count of cargo items
+       */
+      getCargoCount() {
+        return this.cargo.filter(item => item !== null).length;
+      }
+
+      /**
+       * Get cargo items as array
+       */
+      getCargoItems() {
+        return this.cargo.filter(item => item !== null);
+      }
+
+      /**
+       * Generate starting cargo for new game (5 random items)
+       */
+      generateStartingCargo() {
+        // Clear existing cargo
+        this.cargo = new Array(this.cargoCapacity).fill(null);
+        this.nextCargoId = 1;
+        
+        // Generate 5 random cargo items
+        const availableTypes = Object.keys(this.cargoTypes);
+        
+        for (let i = 0; i < 5; i++) {
+          // Pick random cargo type
+          const type = availableTypes[Math.floor(Math.random() * availableTypes.length)];
+          const priceRange = this.cargoTypes[type];
+          
+          // Purchase price is somewhere in the range (simulating we bought it previously)
+          const purchasePrice = Math.round(priceRange.min + Math.random() * (priceRange.max - priceRange.min));
+          
+          // Add to cargo in slot i
+          this.cargo[i] = {
+            id: this.nextCargoId++,
+            type,
+            purchasePrice,
+            slotIndex: i
+          };
+        }
+        
+        console.log('📦 Generated 5 starting cargo items');
+      }
+
+      /**
+       * Get status for display
+       */
+      getStatus() {
+        const currentItem = this.getCurrentItem();
+        const maxPage = this.getMaxPage();
+        
+        return {
+          trader: this.currentTrader,
+          isBuying: this.isBuying,
+          currentPage: this.currentPage,
+          maxPage,
+          currentItem,
+          cargoCount: this.getCargoCount(),
+          cargoCapacity: this.cargoCapacity,
+          lastHaggleResult: this.lastHaggleResult
+        };
+      }
+    }
+
+    // Create trading system
+    const tradingSystem = new TradingSystem();
+
+    // ============================================================================
     // BATTERY SYSTEM - Manages all batteries
     // ============================================================================
     class BatterySystem {
@@ -2607,6 +3021,9 @@ Auto-save  : Active</pre>
       fuelSystem.currentFuel = 280; // Start with 280L fuel (28%)
       fuelSystem.credits = 123456; // Starting credits
 
+      // Initialize trading system with starting cargo
+      tradingSystem.generateStartingCargo();
+
       // Update all UI
       updateAllUI();
 
@@ -2675,6 +3092,26 @@ Auto-save  : Active</pre>
       // Restore power systems
       if (saveData.power) {
         powerSystem.activeSystems = new Set(saveData.power.activeSystems);
+      }
+
+      // Restore trading/cargo
+      if (saveData.trading) {
+        tradingSystem.cargo = new Array(tradingSystem.cargoCapacity).fill(null);
+        if (saveData.trading.cargo) {
+          saveData.trading.cargo.forEach((item, index) => {
+            if (item) {
+              tradingSystem.cargo[index] = {
+                id: item.id,
+                type: item.type,
+                purchasePrice: item.purchasePrice,
+                slotIndex: item.slotIndex
+              };
+            }
+          });
+        }
+        if (saveData.trading.nextCargoId) {
+          tradingSystem.nextCargoId = saveData.trading.nextCargoId;
+        }
       }
 
       // Update all UI
@@ -2845,15 +3282,145 @@ Auto-save  : Active</pre>
     function updateTraderCommsUI() {
       const traderCommsSection = document.querySelectorAll('.panel')[5]; // Trader Comms panel
       const traderCommsPowerToggle = traderCommsSection.querySelectorAll('.toggle input[type="checkbox"]')[0];
+      const tradeDetailsDisplay = traderCommsSection.querySelector('.crt pre');
+      const radioCommsDisplay = traderCommsSection.querySelectorAll('.crt pre')[1];
       
       const isTraderCommsEnabled = powerSystem.activeSystems.has('traderComms');
       const isPowerAvailable = powerSystem.isPowerAvailable();
       const isPowered = isTraderCommsEnabled && isPowerAvailable;
       
+      // Update power toggle
       if (traderCommsPowerToggle) {
         traderCommsPowerToggle.checked = isTraderCommsEnabled;
         traderCommsPowerToggle.disabled = !isPowerAvailable; // Disable toggle if no power
       }
+      
+      // Update terminals based on power state
+      if (!isPowered) {
+        // Powered off - clear both terminals
+        if (tradeDetailsDisplay) {
+          tradeDetailsDisplay.textContent = '\u00A0\n\u00A0\n\u00A0\n\u00A0\n\u00A0\n\u00A0\n\u00A0\n\u00A0\n\u00A0\n\u00A0'; // 10 nbsp lines
+        }
+        if (radioCommsDisplay) {
+          radioCommsDisplay.textContent = '\u00A0'; // 1 nbsp line
+        }
+      } else {
+        // Powered on - show trade details
+        const status = tradingSystem.getStatus();
+        
+        if (!status.trader) {
+          // No trader yet - pad to 10 lines
+          const lines = [];
+          lines.push('No trader signal detected...');
+          lines.push('Enable comms to scan for traders.');
+          while (lines.length < 10) lines.push('\u00A0');
+          
+          if (tradeDetailsDisplay) {
+            tradeDetailsDisplay.textContent = lines.join('\n');
+          }
+          if (radioCommsDisplay) {
+            radioCommsDisplay.textContent = '...';
+          }
+        } else {
+          // Show current trade details
+          const currentItem = status.currentItem;
+          const mode = status.isBuying ? 'BUYING' : 'SELLING';
+          const page = `(page ${status.currentPage + 1} of ${status.maxPage})`;
+          
+          const lines = [];
+          lines.push(`${mode} ${page}`);
+          lines.push(`Trader: ${status.trader.name}`);
+          lines.push(`Ship  : ${status.trader.ship}`);
+          lines.push(`Mood  : ${status.trader.personality}`);
+          
+          if (currentItem) {
+            if (status.isBuying) {
+              // Buying from trader
+              lines.push('');
+              lines.push(`Item  : ${currentItem.type}`);
+              lines.push(`Qty   : ${currentItem.quantity}`);
+              lines.push(`Price : ${currentItem.currentPrice}₵`);
+              lines.push(`Credits: ${fuelSystem.credits}₵`);
+            } else {
+              // Selling to trader - show our cargo with trader's offer
+              const offerPrice = tradingSystem.getSellingPrice(currentItem);
+              const profit = offerPrice - currentItem.purchasePrice;
+              
+              // Check if trader wants this item
+              const traderWants = status.trader.demand && status.trader.demand.includes(currentItem.type);
+              
+              lines.push('');
+              lines.push(`Item  : ${currentItem.type}`);
+              lines.push(`Bought: ${currentItem.purchasePrice}₵`);
+              
+              if (traderWants) {
+                lines.push(`Offer : ${offerPrice}₵`);
+                lines.push(`Profit: ${profit > 0 ? '+' : ''}${profit}₵`);
+              } else {
+                lines.push(`Offer : NO DEMAND`);
+                lines.push(`Status: Won't buy this`);
+              }
+            }
+          } else {
+            lines.push('');
+            if (status.isBuying) {
+              lines.push('No items available');
+            } else {
+              // Show what trader wants when we have no matching cargo
+              lines.push('Trader wants:');
+              if (status.trader.demand && status.trader.demand.length > 0) {
+                status.trader.demand.forEach(type => {
+                  if (lines.length < 10) {
+                    lines.push(`  - ${type}`);
+                  }
+                });
+              } else {
+                lines.push('  (nothing specific)');
+              }
+            }
+          }
+          
+          // Pad to exactly 10 lines
+          while (lines.length < 10) lines.push('\u00A0');
+          
+          if (tradeDetailsDisplay) {
+            tradeDetailsDisplay.textContent = lines.slice(0, 10).join('\n');
+          }
+          
+          // Update Radio Comms with last message or trader greeting
+          if (radioCommsDisplay) {
+            radioCommsDisplay.textContent = `${status.trader.name}: "Ready to trade!"`;
+          }
+        }
+      }
+      
+      // Update cargo hold display
+      updateCargoHoldUI();
+    }
+    
+    function updateCargoHoldUI() {
+      const cargoSection = document.querySelectorAll('.panel')[6]; // Cargo Hold panel
+      const cargoSlots = cargoSection.querySelectorAll('.cargo-slot');
+      
+      // Update cargo slots based on tradingSystem.cargo
+      cargoSlots.forEach((slot, index) => {
+        if (index < tradingSystem.cargo.length) {
+          const cargoItem = tradingSystem.cargo[index];
+          if (cargoItem) {
+            slot.classList.remove('empty');
+            slot.classList.add('full');
+            // Optionally set color based on cargo type
+            const typeInfo = tradingSystem.cargoTypes[cargoItem.type];
+            if (typeInfo && typeInfo.color) {
+              slot.style.background = typeInfo.color;
+            }
+          } else {
+            slot.classList.remove('full');
+            slot.classList.add('empty');
+            slot.style.background = '';
+          }
+        }
+      });
     }
 
     // Subscribe to battery events for UI updates
@@ -3016,6 +3583,11 @@ Auto-save  : Active</pre>
         loadGameFromSave(savedGame);
       } else {
         initializeNewGame();
+      }
+
+      // Generate trader if Trader Comms is enabled on page load
+      if (powerSystem.activeSystems.has('traderComms')) {
+        tradingSystem.generateNewTrader();
       }
 
       // Start auto-save
@@ -3192,11 +3764,15 @@ Auto-save  : Active</pre>
       const traderCommsPowerToggle = traderCommsSection.querySelectorAll('.toggle input[type="checkbox"]')[0];
       const traderCommsModeToggle = traderCommsSection.querySelectorAll('.toggle input[type="checkbox"]')[1];
       const tradeButtons = traderCommsSection.querySelectorAll('.btn');
-      const tradeButton = Array.from(tradeButtons).find(btn => btn.textContent === 'TRADE');
+      const prevPageBtn = tradeButtons[0]; // PREVIOUS PAGE
+      const nextPageBtn = tradeButtons[1]; // NEXT PAGE
+      const haggleBtn = tradeButtons[2]; // HAGGLE
+      const tradeBtn = tradeButtons[3]; // TRADE
       
       // Get cargo hold elements
       const cargoSection = document.querySelectorAll('.panel')[6]; // Cargo Hold panel
       const cargoSlots = cargoSection.querySelectorAll('.cargo-slot');
+      const radioCommsDisplay = traderCommsSection.querySelectorAll('.crt pre')[1];
       
       if (traderCommsPowerToggle) {
         // Initialize toggle state
@@ -3213,15 +3789,63 @@ Auto-save  : Active</pre>
               return;
             }
             powerSystem.enableSystem('traderComms');
+            // Generate new trader when power turned on
+            tradingSystem.generateNewTrader();
+            console.log('📡 Trader Comms ONLINE - Scanning for traders...');
           } else {
             powerSystem.disableSystem('traderComms');
+            console.log('📡 Trader Comms OFFLINE');
           }
           updateTraderCommsUI(); // Update UI immediately
         });
       }
-
-      if (tradeButton) {
-        tradeButton.addEventListener('click', () => {
+      
+      if (traderCommsModeToggle) {
+        // Initialize mode (checked = SELLING, unchecked = BUYING)
+        traderCommsModeToggle.checked = !tradingSystem.isBuying;
+        
+        traderCommsModeToggle.addEventListener('change', () => {
+          const newMode = !traderCommsModeToggle.checked; // unchecked = buying
+          tradingSystem.setMode(newMode);
+          console.log(`🔄 Switched to ${newMode ? 'BUYING' : 'SELLING'} mode`);
+          updateTraderCommsUI();
+        });
+      }
+      
+      if (prevPageBtn) {
+        prevPageBtn.addEventListener('click', () => {
+          if (!powerSystem.activeSystems.has('traderComms')) return;
+          tradingSystem.prevPage();
+          updateTraderCommsUI();
+        });
+      }
+      
+      if (nextPageBtn) {
+        nextPageBtn.addEventListener('click', () => {
+          if (!powerSystem.activeSystems.has('traderComms')) return;
+          tradingSystem.nextPage();
+          updateTraderCommsUI();
+        });
+      }
+      
+      if (haggleBtn) {
+        haggleBtn.addEventListener('click', () => {
+          if (!powerSystem.activeSystems.has('traderComms')) {
+            console.warn('⚠️ Trader Comms must be ONLINE to haggle');
+            return;
+          }
+          
+          const result = tradingSystem.haggle();
+          if (radioCommsDisplay) {
+            radioCommsDisplay.textContent = result.message;
+          }
+          console.log(`💬 Haggle: ${result.message}`);
+          updateTraderCommsUI();
+        });
+      }
+      
+      if (tradeBtn) {
+        tradeBtn.addEventListener('click', () => {
           // Check if Trader Comms is online
           if (!powerSystem.activeSystems.has('traderComms')) {
             console.warn('⚠️ Trader Comms must be ONLINE to trade');
@@ -3234,52 +3858,33 @@ Auto-save  : Active</pre>
             return;
           }
 
-          // Determine if we're buying or selling
-          const isBuying = traderCommsModeToggle ? !traderCommsModeToggle.checked : true; // Unchecked = buying
-          
-          // Find appropriate cargo slot
-          let targetSlot = null;
-          if (isBuying) {
-            // Find first empty slot
-            targetSlot = Array.from(cargoSlots).find(slot => slot.classList.contains('empty'));
-            if (!targetSlot) {
-              console.warn('⚠️ No empty cargo slots available!');
-              return;
-            }
-          } else {
-            // Find first full slot
-            targetSlot = Array.from(cargoSlots).find(slot => slot.classList.contains('full'));
-            if (!targetSlot) {
-              console.warn('⚠️ No cargo to sell!');
-              return;
-            }
-          }
-
           // Start teleportation sequence (5% of one battery = 100 Wh over 3 seconds)
           const teleportEnergy = 100; // Wh (5% of 2000 Wh battery)
           const success = powerSystem.startTeleportation('Cargo Teleportation', teleportEnergy);
           
           if (success) {
-            // Add teleportation visual effect
-            targetSlot.classList.add('teleporting');
+            console.log(`📦 Trade initiated! Teleporting cargo...`);
             
-            console.log(`📦 Trade initiated! ${isBuying ? 'Buying' : 'Selling'} cargo...`);
-            
-            // After teleportation completes, toggle the slot
+            // After teleportation completes, execute trade
             const completeHandler = () => {
-              // Remove teleporting effect
-              targetSlot.classList.remove('teleporting');
+              // Execute the trade
+              const tradeResult = tradingSystem.executeTrade();
               
-              // Toggle slot state
-              if (isBuying) {
-                targetSlot.classList.remove('empty');
-                targetSlot.classList.add('full');
-                console.log('✅ Cargo received!');
+              if (tradeResult.success) {
+                console.log(`✅ ${tradeResult.message}`);
+                if (radioCommsDisplay) {
+                  radioCommsDisplay.textContent = tradeResult.message;
+                }
               } else {
-                targetSlot.classList.remove('full');
-                targetSlot.classList.add('empty');
-                console.log('✅ Cargo sold!');
+                console.warn(`⚠️ ${tradeResult.message}`);
+                if (radioCommsDisplay) {
+                  radioCommsDisplay.textContent = `Trade failed: ${tradeResult.message}`;
+                }
               }
+              
+              // Update UI
+              updateTraderCommsUI();
+              updateFuelUI(); // Update credits display
               
               // Clean up event listener
               eventBus.off('power:teleport-complete', completeHandler);
@@ -3288,6 +3893,9 @@ Auto-save  : Active</pre>
             eventBus.once('power:teleport-complete', completeHandler);
           } else {
             console.warn('⚠️ Trade failed: Insufficient power for teleportation');
+            if (radioCommsDisplay) {
+              radioCommsDisplay.textContent = 'Trade failed: Insufficient power';
+            }
           }
         });
       }
