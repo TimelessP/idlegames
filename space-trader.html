@@ -307,6 +307,28 @@
         inset 0 0 30px rgba(0,0,0,.8);         /* recessed depth */
     }
     
+    /* Warp burst overlay - hidden by default, shown during warp phase */
+    .window .viewport .warp-burst {
+      position: absolute;
+      inset: 0;
+      display: none; /* Hidden by default */
+      pointer-events: none;
+    }
+    
+    .window .viewport .warp-burst.active {
+      display: block;
+    }
+    
+    .window .viewport .warp-burst svg {
+      width: 100%;
+      height: 100%;
+    }
+    
+    .window .viewport .warp-burst .star-streak {
+      filter: blur(0.5px) drop-shadow(0 0 3px currentColor);
+      mix-blend-mode: screen; /* Additive blending for glow */
+    }
+    
     /* Starfield will be generated dynamically via JavaScript */
     
     /* Figure-8 movement for starfield - identical to planet movement */
@@ -363,6 +385,27 @@
       75% { transform: translate(-60px, 0); }
       87.5% { transform: translate(-40px, -20px); }
       100% { transform: translate(0, 0); }
+    }
+    
+    /* Travel animation: Departure phase - planet and stars move down (ship goes up) */
+    @keyframes travelDeparture {
+      0% { transform: translate(0, 0); }
+      100% { transform: translate(0, 300px); }
+    }
+    
+    /* Travel animation: Arrival phase - planet grows from small to normal size */
+    @keyframes travelArrival {
+      0% { 
+        transform: translate(0, -300px) scale(0.01);
+        opacity: 0;
+      }
+      50% {
+        opacity: 1;
+      }
+      100% { 
+        transform: translate(0, 0) scale(1);
+        opacity: 1;
+      }
     }
     
     @keyframes moon { from { transform: translateX(0); } to { transform: translateX(-40%); } }
@@ -709,6 +752,7 @@
       <h2 class="label">Cockpit Window</h2>
       <div class="window">
         <div class="viewport">
+          <div class="warp-burst"></div>
           <div class="planet"></div>
           <div class="moon"></div>
           <div class="glass"></div>
@@ -1629,11 +1673,70 @@ Auto-save  : Active</pre>
       }
 
       /**
+       * Show travel blocked message in navigation terminal for 5 seconds
+       */
+      showTravelBlockedMessage(message) {
+        const lines = message.split('\n');
+        
+        // Store original state so we can restore it
+        if (!this.blockedMessageTimeout) {
+          this.savedViewMode = this.viewMode;
+          this.savedCursorIndex = this.cursorIndex;
+        }
+        
+        // Set a flag to show blocked message
+        this.showingBlockedMessage = true;
+        this.blockedMessageLines = lines;
+        
+        // Clear any existing timeout
+        if (this.blockedMessageTimeout) {
+          clearTimeout(this.blockedMessageTimeout);
+        }
+        
+        // Update UI immediately
+        eventBus.emit('navigation:update-ui');
+        
+        // Restore after 5 seconds
+        this.blockedMessageTimeout = setTimeout(() => {
+          this.showingBlockedMessage = false;
+          this.blockedMessageLines = null;
+          this.blockedMessageTimeout = null;
+          eventBus.emit('navigation:update-ui');
+        }, 5000);
+      }
+
+      /**
        * Start travel to selected destination
        */
       beginTravel() {
         if (this.traveling) {
           return { success: false, message: 'Already traveling!' };
+        }
+
+        // Check solar panel safety requirements
+        const safetyIssues = [];
+        
+        // Check if solar panels are fully retracted (extension must be 0)
+        if (solarSystem.extension > 0) {
+          safetyIssues.push('Panels extended');
+        }
+        
+        // Check if solar panels are stopped (panelState must be 1)
+        // 0=retracting, 1=stopped, 2=extending
+        if (solarSystem.panelState !== 1) {
+          safetyIssues.push('Panels moving');
+        }
+        
+        // Check if solar panels are disconnected from bus
+        if (solarSystem.connectedToBus) {
+          safetyIssues.push('Panels connected');
+        }
+        
+        // If there are safety issues, show them and prevent travel
+        if (safetyIssues.length > 0) {
+          const message = 'BLOCKED:\n' + safetyIssues.map(issue => `• ${issue}`).join('\n');
+          this.showTravelBlockedMessage(message);
+          return { success: false, message };
         }
 
         if (this.viewMode === 'system') {
@@ -1688,6 +1791,7 @@ Auto-save  : Active</pre>
 
           const target = neighbors[this.cursorIndex];
           const fuelCost = Math.ceil(parseFloat(target.distance) * this.fuelCostPerUnit);
+          const travelTime = parseFloat(target.distance) * 1.5; // 1.5 seconds per unit distance
 
           if (fuelSystem.currentFuel < fuelCost) {
             return { success: false, message: 'Insufficient fuel!' };
@@ -1696,9 +1800,10 @@ Auto-save  : Active</pre>
           // Start travel
           this.traveling = true;
           this.travelStartTime = performance.now() / 1000;
+          this.travelDuration = travelTime;
           this.travelTarget = target;
           
-          eventBus.emit('navigation:travel-started', { type: 'system', target, fuelCost });
+          eventBus.emit('navigation:travel-started', { type: 'system', target, fuelCost, travelTime });
           
           return { success: true, type: 'system', fuelCost, target };
         }
@@ -3432,6 +3537,15 @@ Auto-save  : Active</pre>
             lines.push('\u00A0'); // Non-breaking space
           }
           navTerminal.textContent = lines.join('\n');
+        } else if (navigationSystem.showingBlockedMessage) {
+          // Show travel blocked message (always 9 lines)
+          const lines = [];
+          navigationSystem.blockedMessageLines.forEach(line => {
+            lines.push(line);
+          });
+          // Pad to exactly 9 lines with non-breaking spaces
+          while (lines.length < 9) lines.push('\u00A0');
+          navTerminal.textContent = lines.slice(0, 9).join('\n');
         } else {
           // Power on: show normal navigation info
           const system = navigationSystem.getCurrentSystem();
@@ -3602,6 +3716,326 @@ Auto-save  : Active</pre>
         }
       `;
     }
+
+    /**
+     * Travel Animation System
+     * Manages the cinematic travel sequence:
+     * 1. Departure: Planet/stars move down (ship goes up)
+     * 2. Warp: Burst effect during travel
+     * 3. Arrival: New planet grows into view
+     */
+    const travelAnimationSystem = {
+      isAnimating: false,
+      travelDuration: 0,
+      warpAnimationFrame: null,
+      
+      /**
+       * Generate procedural warp streaks emanating from center
+       */
+      generateWarpStreaks(warpBurst, streakCount = 60) {
+        // Clear existing content
+        warpBurst.innerHTML = '';
+        
+        // Create SVG
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('height', '100%');
+        svg.setAttribute('viewBox', '0 0 400 220'); // Match viewport aspect ratio
+        
+        // Store streaks data for continuous spawning
+        svg.dataset.centerX = '200';
+        svg.dataset.centerY = '110';
+        svg.dataset.nextSpawnTime = '0';
+        svg.dataset.streakIdCounter = '0';
+        
+        warpBurst.appendChild(svg);
+      },
+      
+      /**
+       * Create a single new warp streak at the center
+       */
+      createWarpStreak(svg, angle, rng) {
+        const centerX = parseFloat(svg.dataset.centerX);
+        const centerY = parseFloat(svg.dataset.centerY);
+        
+        const speed = 150 + rng.next() * 200; // Pixels per second
+        const length = 30 + rng.next() * 50; // 30-80 units long
+        const width = 0.8 + rng.next() * 1.8; // Vary thickness
+        
+        // Create polygon element
+        const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        polygon.setAttribute('class', 'star-streak');
+        
+        // Color: cyan-white spectrum for hyperspace feel
+        const brightness = 0.6 + rng.next() * 0.4;
+        const cyan = Math.floor(150 + brightness * 105); // 150-255
+        const white = Math.floor(200 + brightness * 55); // 200-255
+        const color = `rgb(${cyan}, ${white}, 255)`;
+        
+        polygon.setAttribute('fill', color);
+        polygon.setAttribute('opacity', 0.5 + brightness * 0.3);
+        
+        // Store animation data
+        polygon.dataset.angle = angle;
+        polygon.dataset.speed = speed;
+        polygon.dataset.length = length;
+        polygon.dataset.innerWidth = width * 0.3;
+        polygon.dataset.outerWidth = width * 1.5;
+        polygon.dataset.currentDist = '0'; // Start at center
+        polygon.dataset.birthTime = performance.now();
+        
+        svg.appendChild(polygon);
+        return polygon;
+      },
+      
+      /**
+       * Update a streak's visual position
+       */
+      updateStreakPosition(streak, centerX, centerY) {
+        const angle = parseFloat(streak.dataset.angle);
+        const currentDist = parseFloat(streak.dataset.currentDist);
+        const length = parseFloat(streak.dataset.length);
+        const innerWidth = parseFloat(streak.dataset.innerWidth);
+        const outerWidth = parseFloat(streak.dataset.outerWidth);
+        
+        const startDist = currentDist;
+        const endDist = currentDist + length;
+        
+        const startX = centerX + Math.cos(angle) * startDist;
+        const startY = centerY + Math.sin(angle) * startDist;
+        const endX = centerX + Math.cos(angle) * endDist;
+        const endY = centerY + Math.sin(angle) * endDist;
+        
+        const perpAngle = angle + Math.PI / 2;
+        
+        // Inner edge (near center/tail of streak)
+        const x1 = startX + Math.cos(perpAngle) * innerWidth;
+        const y1 = startY + Math.sin(perpAngle) * innerWidth;
+        const x2 = startX - Math.cos(perpAngle) * innerWidth;
+        const y2 = startY - Math.sin(perpAngle) * innerWidth;
+        
+        // Outer edge (far from center/head of streak)
+        const x3 = endX - Math.cos(perpAngle) * outerWidth;
+        const y3 = endY - Math.sin(perpAngle) * outerWidth;
+        const x4 = endX + Math.cos(perpAngle) * outerWidth;
+        const y4 = endY + Math.sin(perpAngle) * outerWidth;
+        
+        streak.setAttribute('points', `${x1},${y1} ${x2},${y2} ${x3},${y3} ${x4},${y4}`);
+        
+        // Fade in when spawning, fade out when leaving viewport
+        let opacity = parseFloat(streak.getAttribute('opacity'));
+        if (startDist < 10) {
+          // Fade in
+          opacity *= (startDist / 10);
+        } else if (startDist > 250) {
+          // Fade out as leaving viewport
+          opacity *= Math.max(0, 1 - ((startDist - 250) / 100));
+        }
+        streak.setAttribute('opacity', opacity);
+      },
+      
+      /**
+       * Animate warp streaks radiating outward continuously
+       */
+      animateWarpStreaks(warpBurst) {
+        const svg = warpBurst.querySelector('svg');
+        if (!svg) return;
+        
+        const centerX = parseFloat(svg.dataset.centerX);
+        const centerY = parseFloat(svg.dataset.centerY);
+        const maxDist = 350; // Distance beyond which streaks are removed
+        
+        let lastTime = performance.now();
+        const rng = new SeededRNG(Date.now()); // Random for varied angles
+        let nextSpawnTime = 0;
+        const spawnInterval = 80; // Spawn new streak every 80ms
+        
+        const animate = () => {
+          const currentTime = performance.now();
+          const deltaTime = (currentTime - lastTime) / 1000; // Convert to seconds
+          lastTime = currentTime;
+          
+          const streaks = svg.querySelectorAll('.star-streak');
+          
+          // Update existing streaks
+          const streaksToRemove = [];
+          streaks.forEach(streak => {
+            const speed = parseFloat(streak.dataset.speed);
+            let currentDist = parseFloat(streak.dataset.currentDist);
+            
+            // Move streak outward
+            currentDist += speed * deltaTime;
+            streak.dataset.currentDist = currentDist;
+            
+            // Update visual position
+            this.updateStreakPosition(streak, centerX, centerY);
+            
+            // Mark for removal if too far
+            if (currentDist > maxDist) {
+              streaksToRemove.push(streak);
+            }
+          });
+          
+          // Remove old streaks
+          streaksToRemove.forEach(streak => streak.remove());
+          
+          // Spawn new streaks periodically
+          nextSpawnTime -= deltaTime * 1000;
+          if (nextSpawnTime <= 0) {
+            // Spawn a batch of 2-4 streaks at random angles
+            const batchSize = 2 + Math.floor(rng.next() * 3);
+            for (let i = 0; i < batchSize; i++) {
+              const angle = rng.next() * Math.PI * 2; // Random angle
+              this.createWarpStreak(svg, angle, rng);
+            }
+            nextSpawnTime = spawnInterval;
+          }
+          
+          if (this.isAnimating && warpBurst.classList.contains('active')) {
+            this.warpAnimationFrame = requestAnimationFrame(animate);
+          }
+        };
+        
+        animate();
+      },
+      
+      /**
+       * Start travel animation sequence
+       */
+      startTravelAnimation(durationSeconds) {
+        this.isAnimating = true;
+        this.travelDuration = durationSeconds;
+        
+        const planetElement = document.querySelector('.window .planet');
+        const viewport = document.querySelector('.window .viewport');
+        const warpBurst = document.querySelector('.window .viewport .warp-burst');
+        
+        if (!planetElement || !viewport || !warpBurst) return;
+        
+        // Calculate timing for each phase
+        const departureDuration = Math.min(1.5, durationSeconds * 0.2); // 20% of travel or max 1.5s
+        const warpDuration = durationSeconds - (departureDuration * 2); // Middle section
+        const arrivalDuration = departureDuration; // Same as departure
+        
+        // Phase 1: Departure - planet and stars move down
+        this.runDeparturePhase(planetElement, viewport, departureDuration);
+        
+        // Phase 2: Warp burst - starts after departure
+        setTimeout(() => {
+          this.runWarpPhase(planetElement, warpBurst, viewport, warpDuration);
+        }, departureDuration * 1000);
+        
+        // Phase 3: Arrival - new planet grows in (handled by travel-complete event)
+      },
+      
+      /**
+       * Departure phase: Planet and stars exit downward
+       */
+      runDeparturePhase(planetElement, viewport, duration) {
+        // Stop the normal figure-8 animation
+        planetElement.style.animation = 'none';
+        
+        // Apply departure animation to both planet and starfield
+        planetElement.style.animation = `travelDeparture ${duration}s ease-in forwards`;
+        
+        // Also animate starfield via dynamic CSS update
+        const styleId = 'starfield-travel-style';
+        let styleEl = document.getElementById(styleId);
+        if (!styleEl) {
+          styleEl = document.createElement('style');
+          styleEl.id = styleId;
+          document.head.appendChild(styleEl);
+        }
+        
+        styleEl.textContent = `
+          .window .viewport::before {
+            animation: travelDeparture ${duration}s ease-in forwards !important;
+          }
+        `;
+      },
+      
+      /**
+       * Warp phase: Show burst effect, hide planet
+       */
+      runWarpPhase(planetElement, warpBurst, viewport, duration) {
+        // Hide planet during warp
+        planetElement.style.opacity = '0';
+        
+        // Generate warp streaks
+        this.generateWarpStreaks(warpBurst, 60);
+        
+        // Show warp burst overlay
+        warpBurst.classList.add('active');
+        
+        // Start animating the streaks
+        this.animateWarpStreaks(warpBurst);
+        
+        // Hide starfield during warp by modifying its opacity
+        const styleId = 'starfield-travel-style';
+        let styleEl = document.getElementById(styleId);
+        if (styleEl) {
+          styleEl.textContent = `
+            .window .viewport::before {
+              opacity: 0 !important;
+            }
+          `;
+        }
+      },
+      
+      /**
+       * Arrival phase: New planet grows into view, resume normal animations
+       */
+      runArrivalPhase(planetElement, warpBurst, viewport, duration) {
+        // Stop warp animation
+        if (this.warpAnimationFrame) {
+          cancelAnimationFrame(this.warpAnimationFrame);
+          this.warpAnimationFrame = null;
+        }
+        
+        // Hide warp burst
+        warpBurst.classList.remove('active');
+        
+        // Update planet visual for new location BEFORE animating it in
+        updatePlanetVisual();
+        
+        // Animate planet growing in from small/above
+        planetElement.style.opacity = '1';
+        planetElement.style.animation = `travelArrival ${duration}s ease-out forwards`;
+        
+        // Fade starfield back in with arrival
+        const styleId = 'starfield-travel-style';
+        let styleEl = document.getElementById(styleId);
+        if (styleEl) {
+          styleEl.textContent = `
+            .window .viewport::before {
+              animation: travelArrival ${duration}s ease-out forwards !important;
+            }
+          `;
+        }
+        
+        // After arrival completes, resume normal figure-8 idle animation
+        setTimeout(() => {
+          this.resumeIdleAnimation(planetElement);
+        }, duration * 1000);
+      },
+      
+      /**
+       * Resume normal idle figure-8 animation
+       */
+      resumeIdleAnimation(planetElement) {
+        this.isAnimating = false;
+        
+        // Resume planet's figure-8 idle animation
+        planetElement.style.animation = 'planetFigureEight 120s ease-in-out infinite';
+        
+        // Resume starfield's figure-8 idle animation
+        const styleId = 'starfield-travel-style';
+        let styleEl = document.getElementById(styleId);
+        if (styleEl) {
+          styleEl.remove(); // Remove override, let normal styles take over
+        }
+      }
+    };
 
     function updateTraderCommsUI() {
       const traderCommsSection = document.querySelectorAll('.panel')[5]; // Trader Comms panel
@@ -3784,7 +4218,24 @@ Auto-save  : Active</pre>
     });
 
     // Subscribe to navigation events
+    eventBus.on('navigation:travel-started', (data) => {
+      // Start the cinematic travel animation
+      const travelTime = data.travelTime || data.target.time || 5; // Use provided time or default
+      travelAnimationSystem.startTravelAnimation(travelTime);
+      console.log(`🚀 Travel started to ${data.target.name || data.target} | Duration: ${travelTime.toFixed(1)}s`);
+    });
+    
     eventBus.on('navigation:travel-complete', (data) => {
+      // Run arrival animation before updating UI
+      const planetElement = document.querySelector('.window .planet');
+      const warpBurst = document.querySelector('.window .viewport .warp-burst');
+      const viewport = document.querySelector('.window .viewport');
+      
+      if (planetElement && warpBurst && viewport) {
+        const arrivalDuration = Math.min(1.5, travelAnimationSystem.travelDuration * 0.2);
+        travelAnimationSystem.runArrivalPhase(planetElement, warpBurst, viewport, arrivalDuration);
+      }
+      
       const system = navigationSystem.getCurrentSystem();
       const planet = system.planets[data.planetIndex];
       console.log(`🌟 Arrived at ${system.name} > ${planet} (${data.x}, ${data.y})`);
@@ -3813,6 +4264,10 @@ Auto-save  : Active</pre>
     });
 
     eventBus.on('navigation:view-changed', (data) => {
+      updateNavigationUI();
+    });
+
+    eventBus.on('navigation:update-ui', () => {
       updateNavigationUI();
     });
 
