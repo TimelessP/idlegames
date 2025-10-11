@@ -1243,6 +1243,9 @@ Auto-save  : Active</pre>
         this.temperature = config.temperature || 20; // Celsius
         this.cycleCount = config.cycleCount || 0;
         
+        // Teleportation energy tracking
+        this.teleportEnergyDrawn = 0;
+        
         // Degradation parameters
         this.degradationRate = 0.0001; // per cycle
         this.optimalTempMin = 15;
@@ -1274,14 +1277,22 @@ Auto-save  : Active</pre>
           return 0;
         }
 
+        // During teleportation, allow higher discharge rates (capacitor assist)
+        const maxRate = powerSystem.teleportInProgress ? watts : this.maxDischargeRate;
+        
         // Limit by max discharge rate
-        const actualWatts = Math.min(watts, this.maxDischargeRate);
+        const actualWatts = Math.min(watts, maxRate);
         
         // Calculate energy in watt-hours for this time step
         const energyRequested = (actualWatts * deltaTime) / 3600;
         
         // Can't draw more than current charge
         const energyDrawn = Math.min(energyRequested, this.currentCharge);
+        
+        // Track teleportation energy if teleport is in progress
+        if (powerSystem.teleportInProgress) {
+          this.teleportEnergyDrawn += energyDrawn;
+        }
         
         // Update charge
         const previousCharge = this.currentCharge;
@@ -1648,9 +1659,19 @@ Auto-save  : Active</pre>
           navigation: 20,
           sensors: 15,
           communications: 10,
-          lifeSupportExtra: 30
+          lifeSupportExtra: 30,
+          traderComms: 800 // High-power radio, signal processing, AI translation, computing
         };
         this.activeSystems = new Set(['navigation', 'sensors', 'communications']);
+        
+        // Teleportation state
+        this.teleportInProgress = false;
+        this.teleportStartTime = 0;
+        this.teleportDuration = 3.0; // 3 seconds to complete teleportation
+        this.teleportPowerDraw = 12000; // 12 kW during teleportation (12kW × 3s / 3600 = 10Wh per second × 3s = 30Wh... wait)
+        // Actually: 100Wh over 3 seconds = 33.33Wh per second = 120,000W
+        // Let's use 10 seconds for more dramatic effect: 100Wh / 10s = 10Wh/s = 36,000W
+        this.teleportTotalEnergy = 100; // Wh total
       }
 
       /**
@@ -1667,6 +1688,12 @@ Auto-save  : Active</pre>
         // Add solar panel motor draw
         total += solarSystem.currentMotorDraw;
         
+        // Add teleportation draw if active
+        if (this.teleportInProgress) {
+          // Convert Wh to W for the duration
+          total += (this.teleportTotalEnergy / this.teleportDuration) * 3600; // Wh → W
+        }
+        
         return total;
       }
 
@@ -1676,6 +1703,7 @@ Auto-save  : Active</pre>
       enableSystem(systemName) {
         this.activeSystems.add(systemName);
         eventBus.emit('power:system-enabled', { system: systemName });
+        console.log(`⚡ System '${systemName}' enabled (${this.systemLoads[systemName]}W)`);
       }
 
       /**
@@ -1684,12 +1712,60 @@ Auto-save  : Active</pre>
       disableSystem(systemName) {
         this.activeSystems.delete(systemName);
         eventBus.emit('power:system-disabled', { system: systemName });
+        console.log(`⚡ System '${systemName}' disabled`);
       }
 
       /**
-       * Update power draw on the main bus
+       * Start teleportation sequence
+       * @param {string} eventName - Name of the event
+       * @param {number} energyWh - Energy required in watt-hours
+       * @returns {boolean} - True if started, false if insufficient power or already in progress
+       */
+      startTeleportation(eventName, energyWh) {
+        if (this.teleportInProgress) {
+          console.warn('⚠️ Teleportation already in progress');
+          return false;
+        }
+
+        const availablePower = batterySystem.getTotalAvailablePower();
+        
+        if (availablePower < energyWh) {
+          console.error(`❌ Insufficient power for ${eventName}: need ${energyWh}Wh, have ${availablePower.toFixed(1)}Wh`);
+          eventBus.emit('power:teleport-failed', { event: eventName, required: energyWh, available: availablePower });
+          return false;
+        }
+
+        this.teleportInProgress = true;
+        this.teleportStartTime = performance.now() / 1000; // Convert to seconds
+        this.teleportTotalEnergy = energyWh;
+        
+        console.log(`🌀 ${eventName} initiated: ${energyWh}Wh over ${this.teleportDuration}s (${((energyWh / this.teleportDuration) * 3600).toFixed(0)}W)`);
+        eventBus.emit('power:teleport-started', { event: eventName, energy: energyWh, duration: this.teleportDuration });
+        
+        return true;
+      }
+
+      /**
+       * Update power draw on the main bus and handle teleportation
        */
       update(deltaTime) {
+        // Check if teleportation is complete
+        if (this.teleportInProgress) {
+          const currentTime = performance.now() / 1000;
+          const elapsed = currentTime - this.teleportStartTime;
+          
+          if (elapsed >= this.teleportDuration) {
+            this.teleportInProgress = false;
+            const totalEnergyDrawn = batterySystem.batteries.reduce((sum, b) => sum + b.teleportEnergyDrawn, 0);
+            console.log(`✅ Teleportation complete! Total energy consumed: ${totalEnergyDrawn.toFixed(1)}Wh`);
+            
+            // Reset tracking
+            batterySystem.batteries.forEach(b => b.teleportEnergyDrawn = 0);
+            
+            eventBus.emit('power:teleport-complete', {});
+          }
+        }
+
         mainBus.currentDraw = this.getTotalDraw();
       }
     }
@@ -2007,9 +2083,21 @@ Auto-save  : Active</pre>
       // Update solar panel UI
       updateSolarPanelUI();
       updatePowerDrawUI();
+      
+      // Update Trader Comms UI
+      updateTraderCommsUI();
 
       // Update other UI elements here
       updateSaveStatusUI();
+    }
+
+    function updateTraderCommsUI() {
+      const traderCommsSection = document.querySelectorAll('.panel')[5]; // Trader Comms panel
+      const traderCommsPowerToggle = traderCommsSection.querySelectorAll('.toggle input[type="checkbox"]')[0];
+      
+      if (traderCommsPowerToggle) {
+        traderCommsPowerToggle.checked = powerSystem.activeSystems.has('traderComms');
+      }
     }
 
     // Subscribe to battery events for UI updates
@@ -2113,7 +2201,12 @@ Auto-save  : Active</pre>
       const drawGauge = gauges[4]; // Second gauge in solar panel section
       
       if (drawGauge) {
-        const totalDraw = powerSystem.getTotalDraw();
+        // Only show draw if we have power supply available
+        // If no batteries and no solar, we can't supply power
+        const hasPower = batterySystem.getConnectedBatteries().length > 0 || 
+                        (solarSystem.connectedToBus && solarSystem.extension > 0);
+        
+        const totalDraw = hasPower ? powerSystem.getTotalDraw() : 0;
         const drawPercent = (totalDraw / mainBus.getMaxPower()) * 100;
         // Use decimal for smooth gauge movement
         drawGauge.style.setProperty('--value', drawPercent.toFixed(1));
@@ -2198,6 +2291,55 @@ Auto-save  : Active</pre>
         });
       }
 
+      // Wire up Trader Comms controls
+      const traderCommsSection = document.querySelectorAll('.panel')[5]; // Trader Comms panel
+      const traderCommsPowerToggle = traderCommsSection.querySelectorAll('.toggle input[type="checkbox"]')[0];
+      const tradeButtons = traderCommsSection.querySelectorAll('.btn');
+      const tradeButton = Array.from(tradeButtons).find(btn => btn.textContent === 'TRADE');
+      
+      if (traderCommsPowerToggle) {
+        // Initialize toggle state
+        const isCommsActive = powerSystem.activeSystems.has('traderComms');
+        traderCommsPowerToggle.checked = isCommsActive;
+        
+        // Handle toggle changes
+        traderCommsPowerToggle.addEventListener('change', () => {
+          if (traderCommsPowerToggle.checked) {
+            powerSystem.enableSystem('traderComms');
+          } else {
+            powerSystem.disableSystem('traderComms');
+          }
+        });
+      }
+
+      if (tradeButton) {
+        tradeButton.addEventListener('click', () => {
+          // Check if Trader Comms is online
+          if (!powerSystem.activeSystems.has('traderComms')) {
+            console.warn('⚠️ Trader Comms must be ONLINE to trade');
+            return;
+          }
+
+          // Check if teleportation already in progress
+          if (powerSystem.teleportInProgress) {
+            console.warn('⚠️ Teleportation already in progress, please wait...');
+            return;
+          }
+
+          // Start teleportation sequence (5% of one battery = 100 Wh over 10 seconds)
+          const teleportEnergy = 100; // Wh (5% of 2000 Wh battery)
+          const success = powerSystem.startTeleportation('Cargo Teleportation', teleportEnergy);
+          
+          if (success) {
+            console.log('📦 Trade initiated! Teleportation sequence started...');
+            // Visual feedback could go here
+          } else {
+            console.warn('⚠️ Trade failed: Insufficient power for teleportation');
+            // Visual feedback for failure
+          }
+        });
+      }
+
       // Wire up new game controls
       const newGameArm = document.getElementById('new-game-arm');
       const newGameBtn = document.getElementById('new-game-btn');
@@ -2277,10 +2419,23 @@ Auto-save  : Active</pre>
       // Debug logging every 5 seconds (300 frames at 60fps)
       if (frameCounter % 300 === 0) {
         const motorDraw = solarSystem.currentMotorDraw;
-        const baseDraw = systemDraw - motorDraw;
-        console.log(`[POWER] Solar: ${solarPower.toFixed(1)}W | Draw: ${baseDraw.toFixed(1)}W + Motor: ${motorDraw.toFixed(1)}W = ${systemDraw.toFixed(1)}W | Balance: ${powerBalance.toFixed(1)}W`);
+        const teleportDraw = powerSystem.teleportInProgress ? ((powerSystem.teleportTotalEnergy / powerSystem.teleportDuration) * 3600) : 0;
+        const baseDraw = systemDraw - motorDraw - teleportDraw;
+        
+        let drawBreakdown = `Draw: ${baseDraw.toFixed(1)}W`;
+        if (motorDraw > 0) drawBreakdown += ` + Motor: ${motorDraw.toFixed(1)}W`;
+        if (teleportDraw > 0) drawBreakdown += ` + TELEPORT: ${teleportDraw.toFixed(0)}W`;
+        drawBreakdown += ` = ${systemDraw.toFixed(1)}W`;
+        
+        console.log(`[POWER] Solar: ${solarPower.toFixed(1)}W | ${drawBreakdown} | Balance: ${powerBalance.toFixed(1)}W`);
         console.log(`[BATTERY] A: ${batterySystem.batteries[0]?.currentCharge.toFixed(1)}Wh (${batterySystem.batteries[0]?.getChargePercentage().toFixed(1)}%) | B: ${batterySystem.batteries[1]?.currentCharge.toFixed(1)}Wh (${batterySystem.batteries[1]?.getChargePercentage().toFixed(1)}%)`);
         console.log(`[SOLAR] Extension: ${(solarSystem.extension * 100).toFixed(1)}% | State: ${['RETRACT', 'STOP', 'EXTEND'][solarSystem.panelState]} | Bus: ${solarSystem.connectedToBus ? 'CONNECTED' : 'DISCONNECTED'}`);
+        
+        if (powerSystem.teleportInProgress) {
+          const elapsed = (performance.now() / 1000) - powerSystem.teleportStartTime;
+          const remaining = powerSystem.teleportDuration - elapsed;
+          console.log(`[TELEPORT] In progress: ${remaining.toFixed(1)}s remaining`);
+        }
       }
       
       if (powerBalance > 0) {
