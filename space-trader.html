@@ -651,8 +651,11 @@
     }
     @keyframes blink { 0%, 50% { opacity: .0 } 50.01%, 100% { opacity: .9 } }
 
-    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(140px, 1fr)); gap: 12px; }
-    @media (max-width: 720px){ .grid-2 { grid-template-columns: 1fr; } }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(140px, 1fr)); gap: 12px; }
+  @media (max-width: 720px){ .grid-2 { grid-template-columns: 1fr; } }
+  /* 3-column grid utility for scanner controls when adding an extra button */
+  .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 12px; }
+  @media (max-width: 720px){ .grid-3 { grid-template-columns: 1fr; } }
 
     /* Cargo slot - physical storage slot with optional crate */
     .cargo-grid {
@@ -858,6 +861,8 @@
         </div>
       </div>
     </section>
+
+    
 
     <!-- Navigation -->
     <section class="panel section">
@@ -1170,6 +1175,49 @@ Standing: Neutral</pre>
         <div class="cargo-slot empty"></div>
         <div class="cargo-slot empty"></div>
         <div class="cargo-slot empty"></div>
+      </div>
+    </section>
+
+    <!-- Scanner -->
+    <section class="panel section" id="scanner-panel">
+      <div class="rivet tl"></div><div class="rivet tr"></div><div class="rivet bl"></div><div class="rivet br"></div>
+
+      <h2 class="label">Scanner</h2>
+
+      <div class="row">
+        <div>
+          <div class="label">Power</div>
+          <label class="toggle">
+            <input type="checkbox" id="scanner-power-toggle">
+            <span class="track"><span class="thumb"></span></span>
+            <span>ONLINE</span>
+          </label>
+        </div>
+        <div>
+          <div class="label">Controls</div>
+          <div class="grid-3">
+            <button type="button" class="btn" id="scanner-scan-btn" disabled>SCAN</button>
+            <button type="button" class="btn" id="scanner-capture-btn" disabled>CAPTURE PHOTO</button>
+            <button type="button" class="btn" id="scanner-infographic-btn" disabled>PRINT INFOGRAPHIC</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <div class="label">Camera View</div>
+          <div class="crt" style="position:relative; min-height: 140px; display:flex; align-items:center; justify-content:center;">
+            <div id="scanner-viewport" style="position:relative; width: 160px; height: 160px;">
+              <div class="planet" id="scanner-planet" style="position:absolute; inset:0; margin:0; width:100%; height:100%; border-radius:50%; background:#123; box-shadow: 0 0 24px rgba(0,0,0,0.35);"></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="label">Scan Results</div>
+          <div class="crt" style="padding:8px;">
+            <pre id="scanner-terminal" style="font-size: 11px; line-height: 1.4; min-height: 140px;"></pre>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -2588,8 +2636,9 @@ Auto-save  : Active</pre>
           return 0;
         }
 
-        // During teleportation, allow higher discharge rates (capacitor assist)
-        const maxRate = powerSystem.teleportInProgress ? watts : this.maxDischargeRate;
+        // During teleportation or short bursts, allow higher discharge rates (capacitor assist)
+        const peakDischarge = powerSystem.teleportInProgress || powerSystem.burstInProgress;
+        const maxRate = peakDischarge ? watts : this.maxDischargeRate;
         
         // Limit by max discharge rate
         const actualWatts = Math.min(watts, maxRate);
@@ -2981,6 +3030,11 @@ Auto-save  : Active</pre>
         // Actually: 100Wh over 3 seconds = 33.33Wh per second = 120,000W
         // Let's use 10 seconds for more dramatic effect: 100Wh / 10s = 10Wh/s = 36,000W
         this.teleportTotalEnergy = 100; // Wh total
+
+        // Generic short bursts (e.g., scanner scan/capture). Each item: { name, energyWh, duration, startSec }
+        this.bursts = [];
+        // Indicates there is an active burst that requires peak discharge beyond per-battery nominal limits
+        this.burstInProgress = false;
       }
 
       /**
@@ -3001,6 +3055,14 @@ Auto-save  : Active</pre>
         if (this.teleportInProgress) {
           // Convert Wh to W for the duration
           total += (this.teleportTotalEnergy / this.teleportDuration) * 3600; // Wh → W
+        }
+
+        // Add any active burst draws (sum of Wh over their durations converted to W)
+        if (this.bursts.length > 0) {
+          for (const b of this.bursts) {
+            // Each burst contributes a constant draw during its active duration
+            total += (b.energyWh / b.duration) * 3600;
+          }
         }
         
         return total;
@@ -3084,10 +3146,31 @@ Auto-save  : Active</pre>
       }
 
       /**
+       * Start a generic short power burst (battery-backed), e.g., scanner scan/capture
+       * @param {string} name - Name of the burst event
+       * @param {number} energyWh - Total energy in Wh
+       * @param {number} durationSec - Duration over which to draw the energy
+       * @returns {boolean} True if started, false if insufficient power or no batteries
+       */
+      startBurst(name, energyWh, durationSec) {
+        // Require at least one connected battery and enough total charge
+        const connected = batterySystem.getConnectedBatteries();
+        const availableWh = connected.reduce((s,b)=>s+b.currentCharge, 0);
+        if (connected.length === 0 || availableWh < energyWh) {
+          eventBus.emit('power:burst-failed', { name, required: energyWh, available: availableWh });
+          return false;
+        }
+        const startSec = performance.now() / 1000;
+        this.bursts.push({ name, energyWh, duration: durationSec, startSec });
+        eventBus.emit('power:burst-started', { name, energy: energyWh, duration: durationSec });
+        return true;
+      }
+
+      /**
        * Update power draw on the main bus and handle teleportation
        */
       update(deltaTime) {
-        // Check if teleportation is complete
+        // Check if teleportation is complete (battery draw handled in main loop)
         if (this.teleportInProgress) {
           const currentTime = performance.now() / 1000;
           const elapsed = currentTime - this.teleportStartTime;
@@ -3103,7 +3186,41 @@ Auto-save  : Active</pre>
           }
         }
 
+        // Update active bursts (battery draw handled in main loop)
+        if (this.bursts.length > 0) {
+          const now = performance.now() / 1000;
+          // Remove finished bursts and emit complete events
+          const remaining = [];
+          for (const b of this.bursts) {
+            if ((now - b.startSec) >= b.duration) {
+              eventBus.emit('power:burst-complete', { name: b.name });
+            } else {
+              remaining.push(b);
+            }
+          }
+          this.bursts = remaining;
+        }
+
+        // Set burst flag for this frame
+        this.burstInProgress = this.bursts.length > 0;
+
         mainBus.currentDraw = this.getTotalDraw();
+      }
+
+      /**
+       * Compute current watts consumed by bursts and teleportation (for balancing only)
+       */
+      getBurstAndTeleportWatts() {
+        let watts = 0;
+        if (this.teleportInProgress) {
+          watts += (this.teleportTotalEnergy / this.teleportDuration) * 3600;
+        }
+        if (this.bursts.length > 0) {
+          for (const b of this.bursts) {
+            watts += (b.energyWh / b.duration) * 3600;
+          }
+        }
+        return watts;
       }
     }
 
@@ -3181,6 +3298,600 @@ Auto-save  : Active</pre>
         };
       }
     }
+
+    // ==========================================================================
+    // SCANNER SYSTEM
+    // ==========================================================================
+    const scannerSystem = {
+      powered: false,
+      loadWatts: 350, // Scanner power draw when ON
+      canPowerOn() {
+        // Can power on if: solar connected to bus and output > 0 OR any battery connected with charge
+        if (solarSystem.connectedToBus && solarSystem.getPowerOutput() > 0) return true;
+        const connected = batterySystem.getConnectedBatteries();
+        return connected.some(b => b.currentCharge > 0);
+      },
+      setPowered(on) {
+        const prev = this.powered;
+        if (on) {
+          if (!this.canPowerOn()) {
+            this.powered = false;
+          } else {
+            this.powered = true;
+            powerSystem.systemLoads.scanner = this.loadWatts;
+            powerSystem.enableSystem('scanner');
+          }
+        } else {
+          this.powered = false;
+          delete powerSystem.systemLoads.scanner;
+          powerSystem.disableSystem('scanner');
+        }
+        if (prev !== this.powered) eventBus.emit('scanner:power-changed', { powered: this.powered });
+      }
+    };
+
+    function updateScannerUI() {
+      const panel = document.getElementById('scanner-panel');
+      if (!panel) return;
+      const powerToggle = document.getElementById('scanner-power-toggle');
+  const scanBtn = document.getElementById('scanner-scan-btn');
+  const captureBtn = document.getElementById('scanner-capture-btn');
+  const infoBtn = document.getElementById('scanner-infographic-btn');
+      const term = document.getElementById('scanner-terminal');
+      const hasPowerAvailable = powerSystem.isPowerAvailable();
+      const scannerEnabled = powerSystem.activeSystems.has('scanner');
+
+      // Enable toggle always, but enforce power gating on set
+      powerToggle.checked = scannerEnabled; // persist toggle state from saved activeSystems
+      powerToggle.disabled = !hasPowerAvailable; // mirror Trader Comms behavior
+      const enabled = scannerEnabled && hasPowerAvailable; // actual powered state
+
+      // Keep scannerSystem.powered in sync with effective state
+      scannerSystem.powered = enabled;
+
+      // Ensure system load is present when enabled, removed when disabled
+      if (scannerEnabled) {
+        powerSystem.systemLoads.scanner = scannerSystem.loadWatts;
+      } else {
+        delete powerSystem.systemLoads.scanner;
+      }
+  scanBtn.disabled = !enabled;
+  captureBtn.disabled = !enabled;
+  if (infoBtn) infoBtn.disabled = !enabled;
+      if (!enabled) {
+        // Clear terminal (no offline text) and camera
+        term.textContent = '';
+        const cam = document.getElementById('scanner-planet');
+        if (cam) {
+          cam.style.backgroundImage = '';
+          cam.style.boxShadow = 'none';
+          cam.style.backgroundColor = 'transparent';
+        }
+      }
+
+      // Update viewport planet sprite only when powered
+      if (enabled) {
+        renderScannerViewport();
+      }
+    }
+
+    function renderScannerViewport() {
+      const el = document.getElementById('scanner-planet');
+      if (!el) return;
+  if (!powerSystem.activeSystems.has('scanner') || !powerSystem.isPowerAvailable()) return; // keep blank when unpowered
+      const planetIdx = navigationSystem.currentPlanetIndex;
+      const info = getPlanetColor(navigationSystem.currentX, navigationSystem.currentY, planetIdx);
+      try {
+        const url = getPlanetSprite(navigationSystem.currentX, navigationSystem.currentY, planetIdx, 160, info.type, info.color);
+        el.style.backgroundImage = `url(${url})`;
+        el.style.backgroundSize = '100% 100%';
+        el.style.backgroundRepeat = 'no-repeat';
+        el.style.backgroundPosition = 'center center';
+        el.style.boxShadow = `0 0 24px ${info.color}44`;
+        el.style.backgroundColor = 'transparent';
+      } catch {
+        el.style.background = `radial-gradient(circle at 30% 30%, ${info.color}, ${darkenColor(info.color,0.4)} 60%, ${darkenColor(info.color,0.1)})`;
+      }
+    }
+
+    function scanCurrentPlanet() {
+      const term = document.getElementById('scanner-terminal');
+      if (!powerSystem.activeSystems.has('scanner') || !powerSystem.isPowerAvailable()) {
+        term.textContent = '';
+        return;
+      }
+      const x = navigationSystem.currentX, y = navigationSystem.currentY, i = navigationSystem.currentPlanetIndex;
+      const info = getPlanetColor(x, y, i);
+      const rng = seededRandom(hash32('SPR', x|0, y|0, i|0));
+      const profile = (function(r){ return choosePlanetProfile(r, info.type); })(rng);
+
+      const lines = [];
+      lines.push(`System: (${x}, ${y})  Planet: #${i+1}`);
+      lines.push(`Type  : ${profile.key}`);
+      lines.push(`Oceans: ${profile.hasOceans ? 'Yes' : 'No'}  Atmosphere: ${profile.atmosphere ? 'Yes' : 'No'}`);
+      if (profile.gasBands) lines.push(`Bands : Yes  Scale: ${Math.round((profile.bandScale||0)*10)/10}`);
+      if (profile.hasCraters) lines.push(`Craters: Yes  Chance: ${(profile.craterChance*100|0)}%`);
+      lines.push(`Clouds: ${(Math.round((profile.cloudCover||0)*100))}%`);
+      if (profile.glowLava) lines.push('Lava  : Active fissures');
+      if (profile.cityLights) lines.push('Cities: Detected night-side emissions');
+      term.textContent = lines.join('\n');
+    }
+
+    function capturePlanetPhoto() {
+      if (!powerSystem.activeSystems.has('scanner') || !powerSystem.isPowerAvailable()) {
+        return Promise.resolve();
+      }
+      // Determine target resolution
+      const targetW = Math.max(1920, (window.innerWidth || 0) || 1920);
+      const targetH = Math.max(1080, (window.innerHeight || 0) || 1080);
+      const minDim = Math.min(targetW, targetH);
+      const planetSize = Math.floor(minDim * 0.8);
+
+      // Render planet sprite at full size
+      const x = navigationSystem.currentX, y = navigationSystem.currentY, i = navigationSystem.currentPlanetIndex;
+      const info = getPlanetColor(x, y, i);
+      const spriteUrl = getPlanetSprite(x, y, i, planetSize, info.type, info.color);
+
+      // Composite on a large offscreen canvas
+      const cnv = document.createElement('canvas');
+      cnv.width = targetW; cnv.height = targetH;
+      const ctx = cnv.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0,0,targetW,targetH);
+
+      // Background starfield (full coverage): base micro-stars grid + foreground glow stars
+      (function drawStarfield(){
+        const rnd = seededRandom(hash32('PHOTO-STARS', x|0, y|0, i|0));
+        const prevOp = ctx.globalCompositeOperation;
+        ctx.globalCompositeOperation = 'lighter';
+
+        // 1) Base micro-stars grid to guarantee coverage across the entire canvas
+        const cell = 48; // px cell size
+        const jitter = 0.4; // jitter within cell
+        for (let gy = 0; gy <= Math.ceil(targetH / cell); gy++) {
+          for (let gx = 0; gx <= Math.ceil(targetW / cell); gx++) {
+            // Multiple tiny stars per cell with low probability, deterministic per cell index
+            const localRnd = seededRandom(hash32('PHOTO-STARS-CELL', x|0, y|0, i|0, gx|0, gy|0));
+            const tries = 1 + (localRnd() < 0.25 ? 1 : 0); // sometimes 2 tiny stars
+            for (let t = 0; t < tries; t++) {
+              if (localRnd() < 0.5) continue; // 50% chance per try
+              const sx = Math.floor(gx * cell + (localRnd()*2 - 1) * jitter * cell);
+              const sy = Math.floor(gy * cell + (localRnd()*2 - 1) * jitter * cell);
+              if (sx < 0 || sx >= targetW || sy < 0 || sy >= targetH) continue;
+              const size = 0.5 + localRnd()*0.8; // 0.5-1.3 px
+              const base = 0.35 + localRnd()*0.35; // dimmer base
+              // Slight color temperature variance
+              const tint = localRnd();
+              let r=255, g=255, b=255;
+              if (tint < 0.33) { r = Math.floor(210 + 45*base); g = Math.floor(220 + 35*base); b = 255; }
+              else if (tint < 0.66) { r = 255; g = Math.floor(220 + 35*base); b = Math.floor(180 + 60*base); }
+              // A tiny glow so they read, but very subtle
+              const glowR = size * (2.0 + localRnd()*1.5);
+              const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, glowR);
+              grad.addColorStop(0, `rgba(${r},${g},${b},${(0.25*base).toFixed(3)})`);
+              grad.addColorStop(1, 'rgba(0,0,0,0)');
+              ctx.fillStyle = grad;
+              ctx.beginPath(); ctx.arc(sx, sy, glowR, 0, Math.PI*2); ctx.fill();
+            }
+          }
+        }
+
+        // 2) Foreground glow stars with slight overdraw beyond edges
+        const area = targetW * targetH;
+        const density = 0.00008 + rnd()*0.00005; // keep a bit lower due to base layer
+        const starCount = Math.max(150, Math.min(1600, Math.floor(area * density)));
+        const marginX = Math.max(40, Math.floor(targetW * 0.03));
+        const marginY = Math.max(40, Math.floor(targetH * 0.03));
+        for (let s=0; s<starCount; s++) {
+          const sx = Math.floor(rnd()*(targetW + 2*marginX)) - marginX;
+          const sy = Math.floor(rnd()*(targetH + 2*marginY)) - marginY;
+          const base = 0.6 + rnd()*0.4;
+          const size = 0.8 + rnd()*2.2;
+          const tint = rnd();
+          let r=255, g=255, b=255;
+          if (tint < 0.33) { r = Math.floor(210 + 45*base); g = Math.floor(220 + 35*base); b = 255; }
+          else if (tint < 0.66) { r = 255; g = Math.floor(220 + 35*base); b = Math.floor(180 + 60*base); }
+          const glowR = size * (3.5 + rnd()*3.0);
+          const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, glowR);
+          grad.addColorStop(0, `rgba(${r},${g},${b},${(0.35*base).toFixed(3)})`);
+          grad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath(); ctx.arc(sx, sy, glowR, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = `rgba(${r},${g},${b},${(0.7*base).toFixed(3)})`;
+          ctx.beginPath(); ctx.arc(sx, sy, size, 0, Math.PI*2); ctx.fill();
+        }
+        ctx.globalCompositeOperation = prevOp;
+      })();
+
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const cx = targetW/2, cy = targetH/2;
+          const x0 = Math.floor(cx - planetSize/2);
+          const y0 = Math.floor(cy - planetSize/2);
+          // Draw planet
+          ctx.drawImage(img, x0, y0, planetSize, planetSize);
+
+          // Halo and planetshine
+          const R = planetSize/2;
+          const prof = (function(r){ return choosePlanetProfile(r, info.type); })(seededRandom(hash32('SPR', x|0, y|0, i|0)));
+          const [hr,hg,hb] = hexToRgb(prof.hazeColor || info.color);
+          const prevOp2 = ctx.globalCompositeOperation;
+          ctx.globalCompositeOperation = 'lighter';
+          const haloInner = R*0.92, haloOuter = R*1.35;
+          const haloGrad = ctx.createRadialGradient(cx, cy, haloInner, cx, cy, haloOuter);
+          const haloAlpha = 0.20;
+          haloGrad.addColorStop(0, `rgba(${hr},${hg},${hb},0)`);
+          haloGrad.addColorStop(0.15, `rgba(${hr},${hg},${hb},${prof.atmosphere?haloAlpha:haloAlpha*0.4})`);
+          haloGrad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = haloGrad;
+          ctx.beginPath(); ctx.arc(cx, cy, haloOuter, 0, Math.PI*2); ctx.fill();
+
+          const dirX = -0.6, dirY = -0.6;
+          const offX = cx + dirX * R*0.35;
+          const offY = cy + dirY * R*0.35;
+          const shineGrad = ctx.createRadialGradient(offX, offY, R*0.6, offX, offY, R*1.6);
+          const shineAlpha = 0.18;
+          shineGrad.addColorStop(0, `rgba(${hr},${hg},${hb},${shineAlpha})`);
+          shineGrad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = shineGrad;
+          ctx.beginPath(); ctx.arc(offX, offY, R*1.6, 0, Math.PI*2); ctx.fill();
+          ctx.globalCompositeOperation = prevOp2;
+
+          const out = cnv.toDataURL('image/png');
+          const a = document.createElement('a');
+          a.href = out;
+          const systemName = generateSolarSystemName(x, y).replace(/[^a-z0-9]+/gi, '_');
+          const planetName = generatePlanetName(x, y, i).replace(/[^a-z0-9]+/gi, '_');
+          const utcTs = Math.floor(Date.now() / 1000);
+          a.download = `space_trader-${x}-${y}-${systemName}-${planetName}-${utcTs}.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          resolve();
+        };
+        img.src = spriteUrl;
+      });
+    }
+
+    async function printInfographic() {
+      if (!powerSystem.activeSystems.has('scanner') || !powerSystem.isPowerAvailable()) return;
+
+      const targetW = Math.max(1920, (window.innerWidth || 0) || 1920);
+      const targetH = Math.max(1080, (window.innerHeight || 0) || 1080);
+      const minDim = Math.min(targetW, targetH);
+      const planetSize = Math.floor(minDim * 0.72);
+
+      const x = navigationSystem.currentX, y = navigationSystem.currentY, i = navigationSystem.currentPlanetIndex;
+      const systemName = generateSolarSystemName(x, y);
+      const planetName = generatePlanetName(x, y, i);
+      const info = getPlanetColor(x, y, i);
+      const rng = seededRandom(hash32('SPR', x|0, y|0, i|0));
+      const profile = (function(r){ return choosePlanetProfile(r, info.type); })(rng);
+
+      const spriteUrl = getPlanetSprite(x, y, i, planetSize, info.type, info.color);
+
+      const cnv = document.createElement('canvas');
+      cnv.width = targetW; cnv.height = targetH;
+      const ctx = cnv.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0,0,targetW,targetH);
+
+      // Starfield background
+      (function drawStarfield(){
+        const rnd = seededRandom(hash32('PHOTO-STARS', x|0, y|0, i|0));
+        const prevOp = ctx.globalCompositeOperation;
+        ctx.globalCompositeOperation = 'lighter';
+        const cell = 48, jitter = 0.4;
+        for (let gy = 0; gy <= Math.ceil(targetH / cell); gy++) {
+          for (let gx = 0; gx <= Math.ceil(targetW / cell); gx++) {
+            const localRnd = seededRandom(hash32('PHOTO-STARS-CELL', x|0, y|0, i|0, gx|0, gy|0));
+            const tries = 1 + (localRnd() < 0.25 ? 1 : 0);
+            for (let t = 0; t < tries; t++) {
+              if (localRnd() < 0.5) continue;
+              const sx = Math.floor(gx * cell + (localRnd()*2 - 1) * jitter * cell);
+              const sy = Math.floor(gy * cell + (localRnd()*2 - 1) * jitter * cell);
+              if (sx < 0 || sx >= targetW || sy < 0 || sy >= targetH) continue;
+              const size = 0.5 + localRnd()*0.8;
+              const base = 0.35 + localRnd()*0.35;
+              const tint = localRnd();
+              let r=255,g=255,b=255;
+              if (tint < 0.33) { r=Math.floor(210+45*base); g=Math.floor(220+35*base); b=255; }
+              else if (tint < 0.66) { r=255; g=Math.floor(220+35*base); b=Math.floor(180+60*base); }
+              const glowR = size * (2.0 + localRnd()*1.5);
+              const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, glowR);
+              grad.addColorStop(0, `rgba(${r},${g},${b},${(0.25*base).toFixed(3)})`);
+              grad.addColorStop(1, 'rgba(0,0,0,0)');
+              ctx.fillStyle = grad;
+              ctx.beginPath(); ctx.arc(sx, sy, glowR, 0, Math.PI*2); ctx.fill();
+            }
+          }
+        }
+        const area = targetW * targetH;
+        const density = 0.00008 + rnd()*0.00005;
+        const starCount = Math.max(150, Math.min(1600, Math.floor(area * density)));
+        const marginX = Math.max(40, Math.floor(targetW * 0.03));
+        const marginY = Math.max(40, Math.floor(targetH * 0.03));
+        for (let s=0; s<starCount; s++) {
+          const sx = Math.floor(rnd()*(targetW + 2*marginX)) - marginX;
+          const sy = Math.floor(rnd()*(targetH + 2*marginY)) - marginY;
+          const base = 0.6 + rnd()*0.4;
+          const size = 0.8 + rnd()*2.2;
+          const tint = rnd();
+          let r=255,g=255,b=255;
+          if (tint < 0.33) { r=Math.floor(210+45*base); g=Math.floor(220+35*base); b=255; }
+          else if (tint < 0.66) { r=255; g=Math.floor(220+35*base); b=Math.floor(180+60*base); }
+          const glowR = size * (3.5 + rnd()*3.0);
+          const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, glowR);
+          grad.addColorStop(0, `rgba(${r},${g},${b},${(0.35*base).toFixed(3)})`);
+          grad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath(); ctx.arc(sx, sy, glowR, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = `rgba(${r},${g},${b},${(0.7*base).toFixed(3)})`;
+          ctx.beginPath(); ctx.arc(sx, sy, size, 0, Math.PI*2); ctx.fill();
+        }
+        ctx.globalCompositeOperation = prevOp;
+      })();
+
+      await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const cx = targetW/2, cy = targetH/2;
+          const x0 = Math.floor(cx - planetSize/2);
+          const y0 = Math.floor(cy - planetSize/2);
+          ctx.drawImage(img, x0, y0, planetSize, planetSize);
+          const R = planetSize/2;
+          const prof = (function(r){ return choosePlanetProfile(r, info.type); })(seededRandom(hash32('SPR', x|0, y|0, i|0)));
+          const [hr,hg,hb] = hexToRgb(prof.hazeColor || info.color);
+          const prevOp2 = ctx.globalCompositeOperation;
+          ctx.globalCompositeOperation = 'lighter';
+          const haloInner = R*0.92, haloOuter = R*1.35;
+          const haloGrad = ctx.createRadialGradient(cx, cy, haloInner, cx, cy, haloOuter);
+          const haloAlpha = 0.20;
+          haloGrad.addColorStop(0, `rgba(${hr},${hg},${hb},0)`);
+          haloGrad.addColorStop(0.15, `rgba(${hr},${hg},${hb},${prof.atmosphere?haloAlpha:haloAlpha*0.4})`);
+          haloGrad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = haloGrad;
+          ctx.beginPath(); ctx.arc(cx, cy, haloOuter, 0, Math.PI*2); ctx.fill();
+          const dirX = -0.6, dirY = -0.6;
+          const offX = cx + dirX * R*0.35;
+          const offY = cy + dirY * R*0.35;
+          const shineGrad = ctx.createRadialGradient(offX, offY, R*0.6, offX, offY, R*1.6);
+          const shineAlpha = 0.18;
+          shineGrad.addColorStop(0, `rgba(${hr},${hg},${hb},${shineAlpha})`);
+          shineGrad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = shineGrad;
+          ctx.beginPath(); ctx.arc(offX, offY, R*1.6, 0, Math.PI*2); ctx.fill();
+          ctx.globalCompositeOperation = prevOp2;
+          resolve();
+        };
+        img.src = spriteUrl;
+      });
+
+      const pad = Math.floor(minDim * 0.03);
+      const panelBg = `rgba(0,0,0,0.5)`;
+      const textColor = '#ffffff';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      function drawPanel(x0, y0, w, h) { ctx.fillStyle = panelBg; ctx.fillRect(x0, y0, w, h); }
+      function drawHeading(x0, y0, text) { ctx.fillStyle = textColor; ctx.font = `700 ${Math.floor(minDim*0.035)}px system-ui, sans-serif`; ctx.fillText(text, x0, y0); }
+      function drawBody(x0, y0, lines, lineH) { ctx.fillStyle = textColor; ctx.font = `${Math.floor(minDim*0.022)}px system-ui, sans-serif`; let yy = y0; for (const l of lines) { ctx.fillText(l, x0, yy); yy += lineH; } }
+
+      // Left info panel
+      const leftW = Math.floor(targetW * 0.36);
+      const leftH = Math.floor(targetH * 0.40);
+      const leftX = pad, leftY = pad;
+      drawPanel(leftX, leftY, leftW, leftH);
+      drawHeading(leftX+pad, leftY+pad, `${systemName}`);
+      const body1 = [
+        `Coordinates: (${x}, ${y})`,
+        `Planet #${i+1}: ${planetName}`,
+        `Profile: ${profile.key}`,
+        `Oceans: ${profile.hasOceans ? 'Yes' : 'No'}  Atmosphere: ${profile.atmosphere ? 'Yes' : 'No'}`,
+        ...(profile.gasBands ? [`Bands: Yes  Scale: ${Math.round((profile.bandScale||0)*10)/10}`] : []),
+        ...(profile.hasCraters ? [`Craters: Yes  Chance: ${(profile.craterChance*100|0)}%`] : []),
+        `Cloud Cover: ${Math.round((profile.cloudCover||0)*100)}%`,
+        ...(profile.glowLava ? ['Lava Activity: Yes'] : []),
+        ...(profile.cityLights ? ['City Lights: Detected'] : [])
+      ];
+      drawBody(leftX+pad, leftY+pad+Math.floor(minDim*0.05), body1, Math.floor(minDim*0.028));
+
+      // Right-top: QR code
+      const qrSize = Math.floor(minDim * 0.20);
+      const qrPad = pad;
+      const qrPanelW = qrSize + qrPad*2;
+      const qrPanelH = qrSize + qrPad*2 + Math.floor(minDim*0.04);
+      const qrX = targetW - qrPanelW - pad;
+      const qrY = pad;
+      drawPanel(qrX, qrY, qrPanelW, qrPanelH);
+      let qrCanvas = null;
+      try {
+        if (typeof QRious !== 'undefined') {
+          const temp = document.createElement('canvas');
+          const qr = new QRious({ element: temp, value: window.location.href, size: qrSize, level: 'H' });
+          const srcCtx = temp.getContext('2d');
+          const imgData = srcCtx.getImageData(0,0,temp.width,temp.height);
+          let minX=temp.width, minY=temp.height, maxX=0, maxY=0, found=false;
+          for (let yy=0; yy<temp.height; yy++) {
+            for (let xx=0; xx<temp.width; xx++) {
+              const idx=(yy*temp.width+xx)*4;
+              const r=imgData.data[idx], g=imgData.data[idx+1], b=imgData.data[idx+2];
+              if (r<240||g<240||b<240) { found=true; if (xx<minX) minX=xx; if (xx>maxX) maxX=xx; if (yy<minY) minY=yy; if (yy>maxY) maxY=yy; }
+            }
+          }
+          qrCanvas = document.createElement('canvas');
+          qrCanvas.width = qrCanvas.height = qrSize;
+          const qctx = qrCanvas.getContext('2d');
+          qctx.imageSmoothingEnabled = false;
+          qctx.fillStyle = '#fff';
+          qctx.fillRect(0,0,qrSize,qrSize);
+          if (found) {
+            const qrBox = Math.max(maxX-minX+1, maxY-minY+1);
+            const quiet = Math.floor(qrSize*0.08);
+            const renderSize = qrSize - quiet*2;
+            qctx.drawImage(temp, minX, minY, qrBox, qrBox, quiet, quiet, renderSize, renderSize);
+          } else {
+            qctx.drawImage(temp, 0,0,qrSize,qrSize);
+          }
+        }
+      } catch {}
+      if (qrCanvas) {
+        ctx.drawImage(qrCanvas, qrX+qrPad, qrY+qrPad, qrSize, qrSize);
+        ctx.fillStyle = textColor;
+        ctx.font = `${Math.floor(minDim*0.022)}px system-ui, sans-serif`;
+        ctx.fillText('Play Space Trader', qrX+qrPad, qrY+qrPad+qrSize+Math.floor(minDim*0.01));
+      } else {
+        drawBody(qrX+qrPad, qrY+qrPad, ['Scan to play:', window.location.href], Math.floor(minDim*0.028));
+      }
+
+      // Bottom panel: Trader and crates
+      const bottomH = Math.floor(targetH * 0.26);
+      const bottomY = targetH - bottomH - pad;
+      drawPanel(pad, bottomY, targetW - pad*2, bottomH);
+      const trader = tradingSystem.currentTrader;
+      const tX = pad*2, tY = bottomY + pad;
+      drawHeading(tX, tY, trader ? `${trader.name} — ${trader.ship}` : 'No active trader');
+      const wants = trader?.demand || [];
+      const lines = ['Trader always buys:'];
+      for (let k=0; k<Math.min(8, wants.length); k++) lines.push(` • ${wants[k].type} (${wants[k].quantity})`);
+      drawBody(tX, tY + Math.floor(minDim*0.05), lines, Math.floor(minDim*0.028));
+
+      // Crates
+      const crateSize = Math.floor(minDim * 0.06);
+      const perRow = 6;
+      const gap = Math.floor(crateSize*0.3);
+      let cx = targetW - pad - (perRow*crateSize + (perRow-1)*gap);
+      const rowY = bottomY + pad + Math.floor(minDim*0.08);
+      function drawCrate(x0, y0, size, typeName) {
+        const typeInfo = tradingSystem.cargoTypes[typeName] || { color: '#888', code: '??' };
+        const grd = ctx.createLinearGradient(x0, y0, x0, y0+size);
+        grd.addColorStop(0, '#b5b8bf');
+        grd.addColorStop(1, '#8a8f99');
+        ctx.fillStyle = grd;
+        ctx.strokeStyle = '#565b64';
+        ctx.lineWidth = Math.max(2, Math.floor(size*0.04));
+        ctx.fillRect(x0, y0, size, size);
+        ctx.strokeRect(x0, y0, size, size);
+        ctx.strokeStyle = '#6d727c';
+        ctx.lineWidth = Math.max(3, Math.floor(size*0.06));
+        ctx.beginPath();
+        ctx.moveTo(x0, y0); ctx.lineTo(x0+size, y0+size);
+        ctx.moveTo(x0+size, y0); ctx.lineTo(x0, y0+size);
+        ctx.stroke();
+        const bandH = Math.floor(size*0.22);
+        const bandY = y0 + Math.floor(size*0.39);
+        ctx.fillStyle = typeInfo.color || '#555';
+        ctx.fillRect(x0, bandY, size, bandH);
+        ctx.fillStyle = '#111';
+        ctx.font = `700 ${Math.floor(size*0.36)}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(typeInfo.code || '??', x0 + size/2, bandY + bandH/2 + 1);
+      }
+      for (let idx=0; idx<Math.min(perRow, wants.length); idx++) {
+        const x0 = cx + idx*(crateSize+gap);
+        drawCrate(x0, rowY, crateSize, wants[idx].type);
+        ctx.fillStyle = textColor;
+        ctx.font = `${Math.floor(minDim*0.018)}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(wants[idx].type, x0 + crateSize/2, rowY + crateSize + Math.floor(minDim*0.012));
+      }
+
+      // Save
+      const out = cnv.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = out;
+      const systemSlug = systemName.replace(/[^a-z0-9]+/gi, '_');
+      const planetSlug = planetName.replace(/[^a-z0-9]+/gi, '_');
+      const utcTs = Math.floor(Date.now() / 1000);
+      a.download = `space_trader-${x}-${y}-${systemSlug}-${planetSlug}-infographic-${utcTs}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    // Hook up Scanner UI events after DOM content is set
+    document.addEventListener('DOMContentLoaded', () => {
+  const powerToggle = document.getElementById('scanner-power-toggle');
+  const scanBtn = document.getElementById('scanner-scan-btn');
+  const captureBtn = document.getElementById('scanner-capture-btn');
+  const infoBtn = document.getElementById('scanner-infographic-btn');
+      if (powerToggle) {
+        powerToggle.addEventListener('change', () => {
+          scannerSystem.setPowered(powerToggle.checked);
+          if (scannerSystem.powered) {
+            // If power conditions fail, revert toggle and notify terminal
+            if (!scannerSystem.canPowerOn()) {
+              scannerSystem.setPowered(false);
+              powerToggle.checked = false;
+              const term = document.getElementById('scanner-terminal');
+              if (term) term.textContent = '';
+            }
+          }
+          updateScannerUI();
+        });
+      }
+      if (scanBtn) {
+        scanBtn.addEventListener('click', () => {
+          if (!scannerSystem.powered || !powerSystem.isPowerAvailable()) return;
+          // Draw extra power like teleportation but shorter
+          const burstName = 'Scanner Scan';
+          const ok = powerSystem.startBurst(burstName, 10, 1.5); // 10Wh over 1.5s
+          if (!ok) return;
+          scanBtn.disabled = true;
+          const onComplete = ({ name }) => {
+            if (name !== burstName) return;
+            scanCurrentPlanet();
+            scanBtn.disabled = false;
+            eventBus.off('power:burst-complete', onComplete);
+          };
+          eventBus.on('power:burst-complete', onComplete);
+        });
+      }
+      if (captureBtn) {
+        captureBtn.addEventListener('click', async () => {
+          if (!scannerSystem.powered || !powerSystem.isPowerAvailable()) return;
+          const burstName = 'Scanner Capture';
+          const ok = powerSystem.startBurst(burstName, 30, 2.0); // 30Wh over 2s
+          if (!ok) return;
+          captureBtn.disabled = true;
+          const onComplete = async ({ name }) => {
+            if (name !== burstName) return;
+            await capturePlanetPhoto();
+            captureBtn.disabled = false;
+            eventBus.off('power:burst-complete', onComplete);
+          };
+          eventBus.on('power:burst-complete', onComplete);
+        });
+      }
+      if (infoBtn) {
+        infoBtn.addEventListener('click', async () => {
+          if (!scannerSystem.powered || !powerSystem.isPowerAvailable()) return;
+          const burstName = 'Scanner Infographic';
+          const ok = powerSystem.startBurst(burstName, 40, 2.5); // 40Wh over 2.5s
+          if (!ok) return;
+          infoBtn.disabled = true;
+          const onComplete = async ({ name }) => {
+            if (name !== burstName) return;
+            await printInfographic();
+            infoBtn.disabled = false;
+            eventBus.off('power:burst-complete', onComplete);
+          };
+          eventBus.on('power:burst-complete', onComplete);
+        });
+      }
+      // Initial draw
+      updateScannerUI();
+    });
+
+    // Keep scanner viewport in sync with navigation
+    eventBus.on('navigation:view-changed', renderScannerViewport);
+    eventBus.on('navigation:cursor-moved', renderScannerViewport);
+    eventBus.on('navigation:travel-complete', renderScannerViewport);
+    eventBus.on('navigation:travel-progress', renderScannerViewport);
+  eventBus.on('solar:state-changed', () => updateScannerUI());
+  eventBus.on('battery:charge-changed', () => updateScannerUI());
 
     // Create fuel system
     const fuelSystem = new FuelSystem();
@@ -4071,6 +4782,12 @@ Auto-save  : Active</pre>
       // Restore power systems
       if (saveData.power) {
         powerSystem.activeSystems = new Set(saveData.power.activeSystems);
+        // If scanner was saved as active, ensure its load entry exists
+        if (powerSystem.activeSystems.has('scanner')) {
+          powerSystem.systemLoads.scanner = scannerSystem.loadWatts;
+        } else {
+          delete powerSystem.systemLoads.scanner;
+        }
       }
 
       // Restore trading/cargo
@@ -4128,6 +4845,8 @@ Auto-save  : Active</pre>
 
       // Update other UI elements here
       updateSaveStatusUI();
+      // Update Scanner UI
+      updateScannerUI();
     }
 
     function updateFuelUI() {
@@ -5096,6 +5815,7 @@ Auto-save  : Active</pre>
             battery.toggleBus();
             updateNavigationUI(); // Check power availability immediately
             updateTraderCommsUI(); // Update Trader Comms UI immediately
+            updateScannerUI(); // Update Scanner UI immediately
           });
         }
       });
@@ -5124,6 +5844,7 @@ Auto-save  : Active</pre>
           solarSystem.connectedToBus = solarBusToggle.checked;
           updateNavigationUI(); // Check power availability immediately
           updateTraderCommsUI(); // Update Trader Comms UI immediately
+          updateScannerUI(); // Update Scanner UI immediately
         });
       }
 
@@ -5957,27 +6678,42 @@ Auto-save  : Active</pre>
           updateTraderCommsUI(); // Update UI to reflect power toggle off
           console.warn('⚠️ Trader Comms auto-disabled: No power available');
         }
+        // Force disable scanner if it's on
+        if (powerSystem.activeSystems.has('scanner')) {
+          powerSystem.disableSystem('scanner');
+          scannerSystem.powered = false;
+          updateScannerUI();
+        }
       }
 
       // Power flow management
       const solarPower = solarSystem.currentOutput;
       const systemDraw = powerSystem.getTotalDraw();
+  // Battery-only events (teleport/bursts) should be sourced from batteries even if solar has surplus
+  const batteryOnlyWatts = powerSystem.getBurstAndTeleportWatts();
+  const nonBatteryDraw = Math.max(0, systemDraw - batteryOnlyWatts);
       
       // Calculate power balance
-      const powerBalance = solarPower - systemDraw;
+  const powerBalance = solarPower - nonBatteryDraw;
       
       
       
       if (powerBalance > 0) {
-        // Surplus power - charge batteries
+        // Surplus power - charge batteries, but do not negate battery-only bursts in same frame
         const actualCharged = batterySystem.chargeBatteries(powerBalance, deltaTime);
+        // Also draw battery-only watts explicitly from batteries
+        if (batteryOnlyWatts > 0) {
+          batterySystem.drawPower(batteryOnlyWatts, deltaTime);
+        }
         mainBus.currentSupply = solarPower;
-        
-        
       } else if (powerBalance < 0) {
-        // Deficit - draw from batteries
+        // Deficit - draw from batteries for non-battery draw deficit
         const deficit = Math.abs(powerBalance);
-        const actualDrawn = batterySystem.drawPower(deficit, deltaTime);
+        let actualDrawn = batterySystem.drawPower(deficit, deltaTime);
+        // Plus battery-only watts
+        if (batteryOnlyWatts > 0) {
+          actualDrawn += batterySystem.drawPower(batteryOnlyWatts, deltaTime);
+        }
         mainBus.currentSupply = solarPower + actualDrawn;
         
         // Check if we couldn't meet demand
@@ -5986,8 +6722,13 @@ Auto-save  : Active</pre>
           // In future: trigger brownout, disable non-critical systems
         }
       } else {
-        // Perfect balance (rare)
-        mainBus.currentSupply = solarPower;
+        // Perfect balance (rare): still must draw battery-only watts
+        if (batteryOnlyWatts > 0) {
+          const actualDrawn = batterySystem.drawPower(batteryOnlyWatts, deltaTime);
+          mainBus.currentSupply = solarPower + actualDrawn;
+        } else {
+          mainBus.currentSupply = solarPower;
+        }
       }
 
       // Update UI at 10 Hz (every 6 frames at 60 FPS)
