@@ -1597,6 +1597,438 @@ Auto-save  : Active</pre>
       };
     }
 
+    // --------------------------------------------------------------------------
+    // Seeded planet sprite renderer
+    // --------------------------------------------------------------------------
+    const planetSpriteCache = new Map(); // key -> dataURL
+
+  function getPlanetSprite(x, y, planetIndex, size = 192, typeOverride, baseColorOverride) {
+      const key = `${x}|${y}|${planetIndex}|${size}`;
+      const cached = planetSpriteCache.get(key);
+      if (cached) return cached;
+
+      // Seed derived from hashed coordinates + type discriminator
+      const seedU32 = hash32('SPR', x | 0, y | 0, planetIndex | 0);
+      const rng = seededRandom(seedU32);
+
+      // Choose a planet profile deterministically
+      const profile = choosePlanetProfile(rng, typeOverride);
+
+  // Colors
+  const baseHex = baseColorOverride || profile.baseColor;
+  const baseRGB = hexToRgb(baseHex);
+  const oceanRGB = hexToRgb(profile.oceanColor || '#204a87');
+  const landRGB = hexToRgb(profile.landColor || '#8f7e5b');
+  const iceRGB = hexToRgb(profile.iceColor || '#dfefff');
+  const hazeRGB = hexToRgb(profile.hazeColor || '#b4d2ff');
+  const cloudRGB = hexToRgb(profile.cloudColor || '#ffffff');
+  const cityRGB = hexToRgb(profile.cityColor || '#ffd080');
+  const lavaRGB = hexToRgb(profile.lavaColor || '#ff5a1f');
+  const gasPalette = (profile.gasPalette || []).map(hexToRgb);
+
+      // Noise generators (hash-seeded)
+      const nSeed0 = hash32('N0', seedU32);
+      const nSeed1 = hash32('N1', seedU32);
+      const nSeed2 = hash32('N2', seedU32);
+      const noise0 = makeFractalNoise3D(nSeed0, 4, 0.5); // base terrain
+      const noise1 = makeFractalNoise3D(nSeed1, 5, 0.5); // detail/roughness
+      const noise2 = makeFractalNoise3D(nSeed2, 3, 0.6); // clouds/bands
+
+      // Offscreen canvas
+      const cnv = document.createElement('canvas');
+      cnv.width = size; cnv.height = size;
+      const ctx = cnv.getContext('2d', { willReadFrequently: true });
+
+      // Precompute lighting
+      const lightDir = normalize([ -0.6, -0.6, 0.5 ]); // light from top-left-front
+  const atmosphereThickness = profile.atmosphere ? 0.9 : 0.0;
+
+      // Render sphere by raymarching the screen-space circle and sampling mapped 3D noise
+      const radius = (size * 0.5) - 1;
+      const cx = size * 0.5, cy = size * 0.5;
+      const img = ctx.createImageData(size, size);
+      const data = img.data;
+
+      // Axial tilt/band rotation
+      const tilt = (rng() * 0.6 - 0.3) * Math.PI; // -0.3..0.3 rad
+      const rot = rng() * Math.PI * 2; // rotation around axis
+      const rotMat = composeRotation(tilt, rot);
+
+      // Profile parameters
+  const seaLevel = profile.seaLevel;
+  const mountainAmp = profile.mountainAmp;
+  const craterChance = profile.craterChance;
+  const cloudCover = profile.cloudCover;
+  const gasBands = profile.gasBands;
+  const bandScale = profile.bandScale || 25;
+  const bandWarp = profile.bandWarp || 0.0;
+  const specular = profile.specular || 0.0;
+  const shininess = profile.shininess || 32;
+  const cityLights = !!profile.cityLights;
+  const glowLava = !!profile.glowLava;
+
+      // Simple crater field helper (sample sparse circular dimples in tangent space)
+      const craterPRNG = seededRandom(hash32('CRT', seedU32));
+      const craters = [];
+      const craterCount = profile.hasCraters ? Math.floor(craterPRNG() * 120) + 40 : 0;
+      for (let i = 0; i < craterCount; i++) {
+        // random point on sphere via uniform sampling
+        const u = craterPRNG();
+        const v = craterPRNG();
+        const theta = 2 * Math.PI * u;
+        const phi = Math.acos(2 * v - 1);
+        const p = [
+          Math.sin(phi) * Math.cos(theta),
+          Math.sin(phi) * Math.sin(theta),
+          Math.cos(phi)
+        ];
+        const r = 0.01 + craterPRNG() * 0.05; // crater radius in sphere units
+        craters.push({ p, r });
+      }
+
+      // Per-pixel render
+      for (let y0 = 0, idx = 0; y0 < size; y0++) {
+        const dy = y0 - cy;
+        for (let x0 = 0; x0 < size; x0++, idx += 4) {
+          const dx = x0 - cx;
+          const d2 = dx*dx + dy*dy;
+          if (d2 > radius*radius) {
+            // Outside sphere
+            data[idx+3] = 0;
+            continue;
+          }
+          const dz = Math.sqrt(radius*radius - d2);
+          // Map to unit sphere normal (N)
+          let nx = dx / radius, ny = dy / radius, nz = dz / radius;
+          // Rotate to give different band/orientation per planet
+          const nRot = applyMat(rotMat, [nx, ny, nz]);
+          nx = nRot[0]; ny = nRot[1]; nz = nRot[2];
+
+          // Sample base terrain using 3D noise on sphere coordinates to avoid polar pinching
+          // Use different scales for broad continents and details
+          const cont = noise0(nx*1.2, ny*1.2, nz*1.2);
+          const detail = noise1(nx*6.0, ny*6.0, nz*6.0);
+          let height = cont * 0.7 + detail * 0.3;
+
+          // Gas giants: band coordinate based on latitude with noise warp
+          let bandT = 0;
+          if (gasBands) {
+            const s = ny * bandScale + noise2(nx*1.2, ny*1.2, nz*1.2) * bandWarp;
+            bandT = 0.5 + 0.5 * Math.sin(s);
+          }
+
+          // Crater deformation for airless rocky/ice worlds
+          if (profile.hasCraters) {
+            let craterDepth = 0;
+            for (let c = 0; c < craters.length; c++) {
+              const cp = craters[c];
+              const dot = nx*cp.p[0] + ny*cp.p[1] + nz*cp.p[2]; // cos(angle)
+              const ang = Math.acos(Math.max(-1, Math.min(1, dot)));
+              const s = ang / cp.r;
+              if (s < 1.0) {
+                // smooth bowl profile
+                const t = 1 - s;
+                craterDepth += t*t * 0.25; // depth
+              }
+            }
+            height -= craterDepth * craterChance;
+          }
+
+          // Surface classification
+          let surfaceRGB = baseRGB;
+          if (!gasBands) {
+            if (profile.hasOceans && height < seaLevel) {
+              // Ocean color with depth-based darkening
+              const depth = (seaLevel - height) / Math.max(1e-5, seaLevel + 1);
+              surfaceRGB = lerpRgb(oceanRGB, baseRGB, 0.2 + 0.5 * Math.min(1, depth));
+            } else {
+              // Land: blend base and land, add mountain highlights
+              let t = Math.max(0, height - seaLevel) * mountainAmp;
+              t = Math.min(1, t);
+              surfaceRGB = lerpRgb(landRGB, baseRGB, 0.4 + 0.6 * t);
+              if (profile.polarCaps) {
+                const pole = Math.pow(Math.abs(nz), 4);
+                surfaceRGB = lerpRgb(surfaceRGB, iceRGB, 0.25 * pole);
+              }
+            }
+          } else {
+            // Gas giant palette blending across bands using provided palette
+            if (gasPalette.length >= 2) {
+              surfaceRGB = samplePalette(gasPalette, bandT);
+            } else {
+              surfaceRGB = lerpRgb(landRGB, baseRGB, bandT);
+            }
+          }
+
+          // Clouds layer (if atmosphere exists)
+          let outRGB = surfaceRGB;
+          if (profile.atmosphere && cloudCover > 0) {
+            const cloud = 0.5 + 0.5 * noise2(nx*3.5 + 20, ny*3.5 + 20, nz*3.5 + 20);
+            const swirl = noise1(nx*1.5 - ny*1.5, ny*1.5 + nz*1.5, nz*1.5 - nx*1.5);
+            const clouds = Math.max(0, cloud * 0.8 + swirl * 0.2 - (1.0 - cloudCover));
+            outRGB = lerpRgb(outRGB, cloudRGB, 0.35 * Math.min(1, clouds));
+          }
+
+          // Lambert lighting
+          const ndotl = Math.max(0, nx*lightDir[0] + ny*lightDir[1] + nz*lightDir[2]);
+          const ambient = 0.25;
+          let litRGB = scaleRgb(outRGB, ambient + ndotl * 0.9);
+
+          // Specular highlight (simple Blinn-Phong approx with viewer ~ +Z)
+          if (specular > 0) {
+            const L = lightDir;
+            const N = [nx, ny, nz];
+            const V = [0, 0, 1];
+            const Hx = (L[0]+V[0]);
+            const Hy = (L[1]+V[1]);
+            const Hz = (L[2]+V[2]);
+            const Hn = normalize([Hx,Hy,Hz]);
+            const ndoth = Math.max(0, N[0]*Hn[0] + N[1]*Hn[1] + N[2]*Hn[2]);
+            const spec = Math.pow(ndoth, shininess) * specular;
+            litRGB = lerpRgb(litRGB, [255,255,255], Math.min(1, spec));
+          }
+
+          // Rim atmosphere scattering (simple fresnel-style brighten at edge on lit side)
+          if (profile.atmosphere) {
+            const viewNdot = Math.max(0, nz); // facing viewer
+            const fres = Math.pow(1 - viewNdot, 3);
+            const atm = 0.6 * atmosphereThickness * ndotl * fres;
+            litRGB = lerpRgb(litRGB, hazeRGB, atm * 0.5);
+          }
+
+          // City lights emission on night side
+          if (cityLights) {
+            const night = 1 - ndotl;
+            if (night > 0.2) {
+              const v = 0.5 + 0.5 * noise1(nx*50, ny*50, nz*50);
+              if (v > 0.7) {
+                const e = (v - 0.7) / 0.3 * night * 0.7;
+                litRGB = [
+                  litRGB[0] + cityRGB[0] * e,
+                  litRGB[1] + cityRGB[1] * e,
+                  litRGB[2] + cityRGB[2] * e
+                ];
+              }
+            }
+          }
+
+          // Lava glow fissures
+          if (glowLava && !gasBands) {
+            const fiss = 0.5 + 0.5 * noise2(nx*12.0, ny*12.0, nz*12.0);
+            if (fiss > 0.82) {
+              const e = (fiss - 0.82) / 0.18;
+              litRGB = [
+                litRGB[0] + lavaRGB[0] * e * 0.35,
+                litRGB[1] + lavaRGB[1] * e * 0.35,
+                litRGB[2] + lavaRGB[2] * e * 0.35
+              ];
+            }
+          }
+
+          // Write pixel
+          data[idx] = clamp255(litRGB[0]);
+          data[idx+1] = clamp255(litRGB[1]);
+          data[idx+2] = clamp255(litRGB[2]);
+          data[idx+3] = 255;
+        }
+      }
+
+      // Soft outer rim to blend with background (antialias edge)
+      ctx.putImageData(img, 0, 0);
+      ctx.globalCompositeOperation = 'destination-in';
+      const g = ctx.createRadialGradient(cx, cy, radius-2, cx, cy, radius+1);
+      g.addColorStop(0, 'rgba(255,255,255,1)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, radius+1, 0, Math.PI*2); ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+
+      const url = cnv.toDataURL('image/png');
+      planetSpriteCache.set(key, url);
+      return url;
+    }
+
+    function choosePlanetProfile(rng, typeOverride) {
+      // Types and groups for diverse looks
+      const baseProfiles = [
+        // Terran-like groups
+        { key: 'Rocky', group: 'Rocky', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.6, seaLevel: -0.15, mountainAmp: 2.0, cloudCover: 0.2, polarCaps: true, baseColor: '#8B6F47', landColor: '#9b8060', oceanColor: '#2a4b7c', iceColor: '#e6f2ff', hazeColor: '#c9ddff', specular: 0.05, shininess: 24 },
+        { key: 'Barren', group: 'Rocky', hasOceans: false, atmosphere: false, hasCraters: true, craterChance: 0.9, seaLevel: -0.5, mountainAmp: 1.1, cloudCover: 0.0, polarCaps: false, baseColor: '#9a8a78', landColor: '#a5937f', iceColor: '#f6f6f6' },
+        { key: 'Desert', group: 'Desert', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.4, seaLevel: -0.3, mountainAmp: 1.4, cloudCover: 0.05, polarCaps: false, baseColor: '#C9A66B', landColor: '#d4b57d', iceColor: '#f6faff', hazeColor: '#ffd9a6' },
+        { key: 'Dune', group: 'Desert', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.3, seaLevel: -0.45, mountainAmp: 1.0, cloudCover: 0.02, polarCaps: false, baseColor: '#c9b07a', landColor: '#e0c890', iceColor: '#fffbe6', hazeColor: '#ffe3b3' },
+        { key: 'Ocean', group: 'Ocean', hasOceans: true, atmosphere: true, hasCraters: false, craterChance: 0.0, seaLevel: 0.25, mountainAmp: 0.8, cloudCover: 0.45, polarCaps: true, baseColor: '#3B7BBF', landColor: '#6aa56a', oceanColor: '#1f4f8f', iceColor: '#f0fbff', hazeColor: '#b4d2ff', specular: 0.12, shininess: 64 },
+        { key: 'Life', group: 'Life', hasOceans: true, atmosphere: true, hasCraters: false, craterChance: 0.1, seaLevel: 0.05, mountainAmp: 1.2, cloudCover: 0.35, polarCaps: true, baseColor: '#4E8E5E', landColor: '#74b36d', oceanColor: '#1e4b7f', iceColor: '#f0fbff', hazeColor: '#cbe8d5' },
+        { key: 'Jungle', group: 'Life', hasOceans: true, atmosphere: true, hasCraters: false, craterChance: 0.1, seaLevel: 0.15, mountainAmp: 1.0, cloudCover: 0.55, polarCaps: true, baseColor: '#3f7a49', landColor: '#6fb36a', oceanColor: '#1b4a78', iceColor: '#edfaff', hazeColor: '#cfe9d2' },
+        { key: 'Swamp', group: 'Life', hasOceans: true, atmosphere: true, hasCraters: false, craterChance: 0.2, seaLevel: 0.3, mountainAmp: 0.7, cloudCover: 0.5, polarCaps: false, baseColor: '#3a6a42', landColor: '#5e8a54', oceanColor: '#264f4a', iceColor: '#e9fff9', hazeColor: '#bde6d1', cloudColor: '#dcead9' },
+        { key: 'Tundra', group: 'Frozen', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.5, seaLevel: -0.1, mountainAmp: 1.3, cloudCover: 0.2, polarCaps: true, baseColor: '#d3e8f3', landColor: '#eef9ff', iceColor: '#ffffff', hazeColor: '#e7f6ff' },
+        { key: 'Ice World', group: 'Frozen', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.7, seaLevel: -0.25, mountainAmp: 1.2, cloudCover: 0.15, polarCaps: true, baseColor: '#BFD9E8', landColor: '#dbeaf2', iceColor: '#ffffff', hazeColor: '#e7f6ff' },
+        { key: 'Frozen', group: 'Frozen', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.7, seaLevel: -0.3, mountainAmp: 1.0, cloudCover: 0.1, polarCaps: true, baseColor: '#D6EEF7', landColor: '#e8f6fc', iceColor: '#ffffff', hazeColor: '#ecfbff' },
+        { key: 'Volcanic', group: 'Volcanic', hasOceans: false, atmosphere: true, hasCraters: false, craterChance: 0.2, seaLevel: -0.4, mountainAmp: 2.8, cloudCover: 0.1, polarCaps: false, baseColor: '#7A1E10', landColor: '#b2451b', iceColor: '#ffeeee', hazeColor: '#ffccb3', glowLava: true, lavaColor: '#ff5a1f' },
+        { key: 'Lava Ocean', group: 'Volcanic', hasOceans: true, atmosphere: true, hasCraters: false, craterChance: 0.1, seaLevel: 0.35, mountainAmp: 0.3, cloudCover: 0.05, polarCaps: false, baseColor: '#66210f', landColor: '#7a2a12', oceanColor: '#ff3b00', iceColor: '#ffeeee', hazeColor: '#ffb199', glowLava: true, lavaColor: '#ff3b00' },
+        { key: 'Sulfur', group: 'Sulfur', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.5, seaLevel: -0.35, mountainAmp: 1.6, cloudCover: 0.05, polarCaps: false, baseColor: '#C1B433', landColor: '#e0d24a', iceColor: '#ffffee', hazeColor: '#ffe573' },
+        { key: 'Carbon', group: 'Carbon', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.6, seaLevel: -0.2, mountainAmp: 2.2, cloudCover: 0.05, polarCaps: false, baseColor: '#3a3a3a', landColor: '#575757', iceColor: '#e6e6e6', hazeColor: '#cfd6e0', specular: 0.2, shininess: 48 },
+        { key: 'Metallic', group: 'Metallic', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.4, seaLevel: -0.2, mountainAmp: 1.1, cloudCover: 0.02, polarCaps: false, baseColor: '#6c6f77', landColor: '#8c8f99', iceColor: '#eff2f7', hazeColor: '#d6e0ff', specular: 0.35, shininess: 96 },
+        { key: 'Crystal', group: 'Metallic', hasOceans: false, atmosphere: true, hasCraters: false, craterChance: 0.2, seaLevel: -0.3, mountainAmp: 1.4, cloudCover: 0.02, polarCaps: false, baseColor: '#86c5ff', landColor: '#a6d6ff', iceColor: '#f3fbff', hazeColor: '#cbe5ff', specular: 0.5, shininess: 128 },
+        { key: 'MegaCity', group: 'Life', hasOceans: false, atmosphere: true, hasCraters: false, craterChance: 0.1, seaLevel: -0.2, mountainAmp: 0.9, cloudCover: 0.25, polarCaps: false, baseColor: '#6d6d6d', landColor: '#7a7a7a', iceColor: '#e6f2ff', hazeColor: '#d9e3ff', cityLights: true, cityColor: '#ffd080', specular: 0.18, shininess: 56 },
+        { key: 'Toxic', group: 'Toxic', hasOceans: false, atmosphere: true, hasCraters: true, craterChance: 0.6, seaLevel: -0.3, mountainAmp: 1.3, cloudCover: 0.35, polarCaps: false, baseColor: '#6d7f2a', landColor: '#829640', iceColor: '#f6ffe6', hazeColor: '#bde34f', cloudColor: '#d9f266' },
+        { key: 'Methane', group: 'Toxic', hasOceans: true, atmosphere: true, hasCraters: true, craterChance: 0.5, seaLevel: 0.2, mountainAmp: 0.7, cloudCover: 0.2, polarCaps: true, baseColor: '#5b7f86', landColor: '#6e8f96', oceanColor: '#2e4a66', iceColor: '#e9f8ff', hazeColor: '#9fd0ff', cloudColor: '#cfe6ff' },
+
+        // Gas giants and variants (group 'Gas Giant')
+        { key: 'Gas Giant', group: 'Gas Giant', hasOceans: false, atmosphere: true, hasCraters: false, craterChance: 0.0, seaLevel: -1.0, mountainAmp: 0.0, cloudCover: 0.0, polarCaps: false, baseColor: '#7BA5D6', landColor: '#d6c08b', iceColor: '#e6f2ff', gasBands: true, bandScale: 35, bandWarp: 2.0, gasPalette: ['#a5c4e6','#d8c49a','#e9d7b7','#88a7cf'] },
+        { key: 'Ice Giant', group: 'Gas Giant', hasOceans: false, atmosphere: true, hasCraters: false, craterChance: 0.0, seaLevel: -1.0, mountainAmp: 0.0, cloudCover: 0.0, polarCaps: false, baseColor: '#7FC6FF', landColor: '#9ed1ff', iceColor: '#e6f2ff', gasBands: true, bandScale: 28, bandWarp: 1.2, gasPalette: ['#a6e1ff','#7fc6ff','#4aa6e0','#b9ecff'] },
+        { key: 'Hot Jupiter', group: 'Gas Giant', hasOceans: false, atmosphere: true, hasCraters: false, craterChance: 0.0, seaLevel: -1.0, mountainAmp: 0.0, cloudCover: 0.0, polarCaps: false, baseColor: '#e6a36a', landColor: '#f0c48a', iceColor: '#ffe9cc', gasBands: true, bandScale: 22, bandWarp: 3.5, gasPalette: ['#f2c185','#e89054','#c65f3a','#ffe1a6'] }
+      ];
+
+      let candidates = baseProfiles;
+      if (typeOverride) {
+        // Prefer matching group to allow subtypes (e.g., Gas Giant variants)
+        const byGroup = baseProfiles.filter(p => p.group === typeOverride);
+        if (byGroup.length) {
+          candidates = byGroup;
+        } else {
+          const byKey = baseProfiles.filter(p => p.key === typeOverride);
+          if (byKey.length) candidates = byKey;
+        }
+      }
+
+      let chosen = candidates[Math.floor(rng() * candidates.length)];
+      // Create a tweaked copy for per-planet variation
+      chosen = { ...chosen };
+      // Jitter numeric params slightly for diversity
+      const jitter = (v, amt) => v + (rng()*2-1)*amt;
+      if (typeof chosen.seaLevel === 'number') chosen.seaLevel = jitter(chosen.seaLevel, 0.08);
+      if (typeof chosen.mountainAmp === 'number') chosen.mountainAmp = Math.max(0, jitter(chosen.mountainAmp, 0.3));
+      if (typeof chosen.cloudCover === 'number') chosen.cloudCover = Math.max(0, Math.min(1, jitter(chosen.cloudCover, 0.08)));
+      if (typeof chosen.craterChance === 'number') chosen.craterChance = Math.max(0, Math.min(1, jitter(chosen.craterChance, 0.1)));
+      if (typeof chosen.bandScale === 'number') chosen.bandScale = Math.max(12, jitter(chosen.bandScale, 4));
+      if (typeof chosen.bandWarp === 'number') chosen.bandWarp = Math.max(0, jitter(chosen.bandWarp, 0.6));
+      if (typeof chosen.specular === 'number') chosen.specular = Math.max(0, jitter(chosen.specular, 0.05));
+      if (typeof chosen.shininess === 'number') chosen.shininess = Math.max(8, jitter(chosen.shininess, 12));
+
+      // Slight color variation
+      const varyHex = (hex, strength=0.06) => {
+        if (!hex) return hex;
+        const rgb = hexToRgb(hex);
+        const t = strength*(rng()*2-1);
+        const mixed = [
+          clamp255(rgb[0] + rgb[0]*t),
+          clamp255(rgb[1] + rgb[1]*t),
+          clamp255(rgb[2] + rgb[2]*t)
+        ];
+        return `#${mixed[0].toString(16).padStart(2,'0')}${mixed[1].toString(16).padStart(2,'0')}${mixed[2].toString(16).padStart(2,'0')}`;
+      };
+      chosen.baseColor = varyHex(chosen.baseColor);
+      if (chosen.landColor) chosen.landColor = varyHex(chosen.landColor, 0.08);
+      if (chosen.oceanColor) chosen.oceanColor = varyHex(chosen.oceanColor, 0.08);
+      if (chosen.hazeColor) chosen.hazeColor = varyHex(chosen.hazeColor, 0.04);
+      if (chosen.cloudColor) chosen.cloudColor = varyHex(chosen.cloudColor, 0.05);
+      if (Array.isArray(chosen.gasPalette)) {
+        // Randomly rotate palette for variety
+        const rot = Math.floor(rng()*chosen.gasPalette.length);
+        chosen.gasPalette = chosen.gasPalette.slice(rot).concat(chosen.gasPalette.slice(0,rot));
+      }
+      return chosen;
+    }
+
+    // Utility: RGB/HEX and math helpers
+    function hexToRgb(hex) {
+      const h = hex.replace('#','');
+      const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+      return [r,g,b];
+    }
+    function lerp(a,b,t){ return a + (b-a)*t; }
+    function lerpRgb(a,b,t){ return [ lerp(a[0],b[0],t), lerp(a[1],b[1],t), lerp(a[2],b[2],t) ]; }
+    function scaleRgb(c, s){ return [ c[0]*s, c[1]*s, c[2]*s ]; }
+    function clamp255(x){ return Math.max(0, Math.min(255, Math.round(x))); }
+    function normalize(v){ const l = Math.hypot(v[0],v[1],v[2])||1; return [v[0]/l,v[1]/l,v[2]/l]; }
+    function samplePalette(palette, t){
+      if (!palette || palette.length === 0) return [255,255,255];
+      if (palette.length === 1) return palette[0];
+      t = Math.max(0, Math.min(1, t));
+      const scaled = t * (palette.length - 1);
+      const i = Math.floor(scaled);
+      const f = scaled - i;
+      const c0 = palette[i];
+      const c1 = palette[Math.min(palette.length - 1, i + 1)];
+      return lerpRgb(c0, c1, f);
+    }
+
+    // Rotation helpers: rotate around X (tilt) then Z (longitude rotation)
+    function composeRotation(ax, az){
+      const sx = Math.sin(ax), cx = Math.cos(ax);
+      const sz = Math.sin(az), cz = Math.cos(az);
+      // Combined matrix Rz * Rx
+      return [
+        [cz, -sz*cx,  sz*sx],
+        [sz,  cz*cx, -cz*sx],
+        [0 ,     sx,     cx]
+      ];
+    }
+    function applyMat(m, v){
+      return [
+        m[0][0]*v[0] + m[0][1]*v[1] + m[0][2]*v[2],
+        m[1][0]*v[0] + m[1][1]*v[1] + m[1][2]*v[2],
+        m[2][0]*v[0] + m[2][1]*v[1] + m[2][2]*v[2]
+      ];
+    }
+
+    // 3D Value noise + fractal Brownian motion to avoid polar pinching (sampled in 3D)
+    function makeValueNoise3D(seedU32){
+      const rnd = seededRandom(seedU32);
+      // Permutation table
+      const P = new Uint16Array(512);
+      for (let i=0;i<256;i++) P[i] = i;
+      // Fisher-Yates
+      for (let i=255;i>0;i--){
+        const j = Math.floor(rnd()*(i+1));
+        const t = P[i]; P[i] = P[j]; P[j] = t;
+      }
+      for (let i=0;i<256;i++) P[i+256] = P[i];
+
+      function fade(t){ return t*t*t*(t*(t*6-15)+10); }
+      function lerp(a,b,t){ return a + (b-a)*t; }
+      function grad(hash, x,y,z){
+        // 12 gradients
+        switch(hash & 0xF){
+          case 0x0: return  x + y; case 0x1: return -x + y; case 0x2: return  x - y; case 0x3: return -x - y;
+          case 0x4: return  x + z; case 0x5: return -x + z; case 0x6: return  x - z; case 0x7: return -x - z;
+          case 0x8: return  y + z; case 0x9: return -y + z; case 0xA: return  y - z; case 0xB: return -y - z;
+          case 0xC: return  y + x; case 0xD: return -y + x; case 0xE: return  y - x; case 0xF: return -y - x;
+          default: return 0; }
+      }
+
+      return function perlin3(x,y,z){
+        const X = Math.floor(x) & 255;
+        const Y = Math.floor(y) & 255;
+        const Z = Math.floor(z) & 255;
+        x -= Math.floor(x); y -= Math.floor(y); z -= Math.floor(z);
+        const u = fade(x), v = fade(y), w = fade(z);
+        const A  = P[X]+Y, AA = P[A]+Z, AB = P[A+1]+Z;
+        const B  = P[X+1]+Y, BA = P[B]+Z, BB = P[B+1]+Z;
+        return lerp(
+          lerp(
+            lerp(grad(P[AA], x, y, z), grad(P[BA], x-1, y, z), u),
+            lerp(grad(P[AB], x, y-1, z), grad(P[BB], x-1, y-1, z), u), v
+          ),
+          lerp(
+            lerp(grad(P[AA+1], x, y, z-1), grad(P[BA+1], x-1, y, z-1), u),
+            lerp(grad(P[AB+1], x, y-1, z-1), grad(P[BB+1], x-1, y-1, z-1), u), v
+          ), w
+        );
+      };
+    }
+
+    function makeFractalNoise3D(seedU32, octaves=4, persistence=0.5){
+      const base = makeValueNoise3D(seedU32);
+      return function(x,y,z){
+        let amp = 1, freq = 1, sum = 0, norm = 0;
+        for (let i=0;i<octaves;i++){
+          sum += base(x*freq, y*freq, z*freq) * amp;
+          norm += amp; amp *= persistence; freq *= 2;
+        }
+        return sum / (norm || 1);
+      };
+    }
+
     /**
      * Generate solar system name based on grid position
      * Uses consonant-vowel patterns with varying lengths
@@ -3842,21 +4274,44 @@ Auto-save  : Active</pre>
       const system = navigationSystem.getCurrentSystem();
       const planetIndex = navigationSystem.currentPlanetIndex;
       
-      // Get planet color based on seeded generation
+      // Get base planet color/type from seeded generation
       const planetInfo = getPlanetColor(
-        navigationSystem.currentX, 
-        navigationSystem.currentY, 
+        navigationSystem.currentX,
+        navigationSystem.currentY,
         planetIndex
       );
-      
+
       const baseColor = planetInfo.color;
-      const darkColor = darkenColor(baseColor, 0.4);
-      const darkestColor = darkenColor(baseColor, 0.1);
-      
-      // Apply beautiful gradient like version 1
-      planetElement.style.background = `radial-gradient(circle at 30% 30%, ${baseColor}, ${darkColor} 60%, ${darkestColor})`;
-      planetElement.style.boxShadow = `0 0 40px ${baseColor}44`;
-      
+
+      // Render or fetch cached sprite for this planet
+      try {
+        const spriteUrl = getPlanetSprite(
+          navigationSystem.currentX,
+          navigationSystem.currentY,
+          planetIndex,
+          192, // internal render size for quality (downscaled to element)
+          planetInfo.type,
+          baseColor
+        );
+
+        // Apply sprite as background image; maintain size and animation
+        planetElement.style.background = 'transparent';
+        planetElement.style.backgroundImage = `url(${spriteUrl})`;
+        planetElement.style.backgroundSize = '100% 100%';
+        planetElement.style.backgroundRepeat = 'no-repeat';
+        planetElement.style.backgroundPosition = 'center center';
+        planetElement.style.boxShadow = `0 0 40px ${baseColor}44`;
+      } catch (e) {
+        // Fallback to gradient if sprite generation fails
+        const darkColor = darkenColor(baseColor, 0.4);
+        const darkestColor = darkenColor(baseColor, 0.1);
+        planetElement.style.background = `radial-gradient(circle at 30% 30%, ${baseColor}, ${darkColor} 60%, ${darkestColor})`;
+        planetElement.style.backgroundImage = '';
+        planetElement.style.boxShadow = `0 0 40px ${baseColor}44`;
+        // eslint-disable-next-line no-console
+        console.warn('Planet sprite fallback:', e);
+      }
+
       // Update starfield
       updateStarfield(navigationSystem.currentX, navigationSystem.currentY, planetIndex);
     }
