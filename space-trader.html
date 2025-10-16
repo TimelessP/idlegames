@@ -3858,7 +3858,62 @@ Auto-save  : Active</pre>
   const bottomPanelWidth = bottomPanelW;
   let cx = tX;
       const rowY = bottomY + pad + Math.floor(minDim*0.08);
-      function drawCrate(x0, y0, size, typeName) {
+      // Ensure Orbitron font is loaded at the target size to avoid first-crate metrics mismatch
+      const codeFont = `900 ${Math.floor(crateSize*0.7)}px Orbitron, monospace`;
+      let codeBaselineOffset = 0; // (ascent - descent)/2 when available
+      if (document.fonts && document.fonts.load) {
+        try {
+          await document.fonts.load(codeFont, 'AA');
+          if (document.fonts.ready) await document.fonts.ready;
+        } catch (e) { /* ignore */ }
+      }
+      // Precompute baseline offset using a representative uppercase sample
+      try {
+        ctx.save();
+        ctx.font = codeFont;
+        const m = ctx.measureText('AA');
+        const asc = m.actualBoundingBoxAscent || 0;
+        const desc = m.actualBoundingBoxDescent || 0;
+        if (asc || desc) codeBaselineOffset = (asc - desc) / 2;
+        ctx.restore();
+      } catch (e) { /* ignore */ }
+      // Precise visual vertical-centering per code using offscreen measurement
+      const codeYOffsetCache = new Map();
+      function getVisualYOffsetForText(text, fontPx) {
+        const key = `${text}|${fontPx}`;
+        if (codeYOffsetCache.has(key)) return codeYOffsetCache.get(key);
+        const W = Math.max(8, Math.ceil(fontPx * 2));
+        const H = Math.max(8, Math.ceil(fontPx * 2));
+        const tmp = document.createElement('canvas');
+        tmp.width = W; tmp.height = H;
+        const tctx = tmp.getContext('2d');
+        tctx.clearRect(0,0,W,H);
+        tctx.font = codeFont;
+        tctx.textAlign = 'center';
+        tctx.textBaseline = 'middle';
+        tctx.fillStyle = '#fff';
+        tctx.fillText(text, W/2, H/2);
+        const data = tctx.getImageData(0,0,W,H).data;
+        let minY = H, maxY = -1;
+        for (let y=0; y<H; y++) {
+          for (let x=0; x<W; x++) {
+            const a = data[(y*W + x)*4 + 3];
+            if (a > 8) { // ignore near-transparent AA
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+              break;
+            }
+          }
+        }
+        let offset = 0;
+        if (maxY >= minY && maxY >= 0 && minY < H) {
+          const mid = (minY + maxY) / 2;
+          offset = (H/2 - mid);
+        }
+        codeYOffsetCache.set(key, offset);
+        return offset;
+      }
+  function drawCrate(x0, y0, size, typeName, index) {
         const typeInfo = tradingSystem.cargoTypes[typeName] || { color: '#888', code: '??' };
         // Full-crate color tint with shaded gradient based on cargo color
         const [cr,cg,cb] = hexToRgb(typeInfo.color || '#888');
@@ -3888,21 +3943,17 @@ Auto-save  : Active</pre>
         // Code text (match cargo label color/opacity style), centered
         ctx.fillStyle = 'rgba(255,255,255,0.4)';
         const codeText = typeInfo.code || '??';
-        ctx.font = `900 ${Math.floor(size*0.7)}px Orbitron, monospace`;
+        ctx.font = codeFont;
         ctx.textAlign = 'center';
-        // Compute vertical center using text metrics to truly center the glyph box
-        const metrics = ctx.measureText(codeText);
-        const ascent = metrics.actualBoundingBoxAscent || 0;
-        const descent = metrics.actualBoundingBoxDescent || 0;
-        const centerY = y0 + size/2;
-        // With textBaseline alphabetic, y is baseline; center baseline by offsetting with (ascent - descent)/2
-        const baselineY = centerY + (ascent - descent) / 2;
-        ctx.textBaseline = 'alphabetic';
-        ctx.fillText(codeText, x0 + size/2, baselineY);
+        // Vertically center using measured visual offset for this code
+        ctx.textBaseline = 'middle';
+        const fontPx = Math.floor(size * 0.7);
+        const yOff = getVisualYOffsetForText(codeText, fontPx);
+        ctx.fillText(codeText, x0 + size/2, y0 + size/2 + yOff);
       }
       for (let idx=0; idx<Math.min(perRow, seededTrader.demand.length); idx++) {
         const x0 = cx + idx*(crateSize+gap);
-        drawCrate(x0, rowY, crateSize, seededTrader.demand[idx].type);
+        drawCrate(x0, rowY, crateSize, seededTrader.demand[idx].type, idx);
       }
 
       // Save
