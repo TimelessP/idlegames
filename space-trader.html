@@ -397,17 +397,18 @@
       mix-blend-mode: screen;
     }
     .window .planet {
-      position: absolute; 
-      left: 50%; 
-      top: 50%; 
-      width: 140px; 
-      height: 140px; 
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 140px;
+      height: 140px;
       margin-left: -70px; /* Half of width to center */
       margin-top: -70px; /* Half of height to center */
       border-radius: 50%;
-      background: radial-gradient(circle at 30% 30%, #4488cc, #1155aa 60%, #001a44);
-      box-shadow: 0 0 40px rgba(68,136,204,.35);
-      animation: planetFigureEight 120s ease-in-out infinite;
+      background: transparent;
+      box-shadow: none;
+      /* Sprite removed; element serves as a placeholder for sizing only */
+      animation: none;
     }
     .window .moon {
       display: none; /* Hidden - not rendering moons */
@@ -1208,7 +1209,7 @@ Standing: Neutral</pre>
           <div class="label">Camera View</div>
           <div class="crt" style="position:relative; min-height: 140px; display:flex; align-items:center; justify-content:center;">
             <div id="scanner-viewport" style="position:relative; width: 160px; height: 160px;">
-              <div class="planet" id="scanner-planet" style="position:absolute; inset:0; margin:0; width:100%; height:100%; border-radius:50%; background:#123; box-shadow: 0 0 24px rgba(0,0,0,0.35);"></div>
+              <div class="planet" id="scanner-planet" style="position:absolute; inset:0; margin:0; width:100%; height:100%; border-radius:50%; background:#123; overflow:visible;"></div>
             </div>
           </div>
         </div>
@@ -1651,13 +1652,26 @@ Auto-save  : Active</pre>
       };
     }
 
+    // Seeded sunlight direction per-planet with phase clamp (<=40% of visible disk in shadow)
+    function getSeededLightDir(x, y, planetIndex) {
+      const r = seededRandom(hash32('LGT', x|0, y|0, planetIndex|0));
+      const phi = r() * Math.PI * 2; // azimuth
+      const cosA = 0.2 + r() * 0.8;  // ensure cos >= 0.2 => shadowed area <= ~40%
+      const sinA = Math.sqrt(Math.max(0, 1 - cosA*cosA));
+      const lx = sinA * Math.cos(phi);
+      const ly = sinA * Math.sin(phi);
+      const lz = cosA; // viewer direction is +Z
+      const L = Math.hypot(lx, ly, lz) || 1;
+      return [ lx/L, ly/L, lz/L ];
+    }
+
     // --------------------------------------------------------------------------
     // Seeded planet sprite renderer
     // --------------------------------------------------------------------------
     const planetSpriteCache = new Map(); // key -> dataURL
 
   function getPlanetSprite(x, y, planetIndex, size = 192, typeOverride, baseColorOverride) {
-      const key = `${x}|${y}|${planetIndex}|${size}`;
+    const key = `${x}|${y}|${planetIndex}|${size}|${typeOverride||''}|${baseColorOverride||''}`;
       const cached = planetSpriteCache.get(key);
       if (cached) return cached;
 
@@ -1693,15 +1707,122 @@ Auto-save  : Active</pre>
       cnv.width = size; cnv.height = size;
       const ctx = cnv.getContext('2d', { willReadFrequently: true });
 
-      // Precompute lighting
-      const lightDir = normalize([ -0.6, -0.6, 0.5 ]); // light from top-left-front
-  const atmosphereThickness = profile.atmosphere ? 0.9 : 0.0;
+  // Precompute lighting (seeded per-planet, with phase clamp so <=40% of disk shadowed)
+  const lightDir = getSeededLightDir(x, y, planetIndex);
+  const atmosphereThickness = (profile.atmosphere || profile.group === 'Ocean') ? 0.9 : 0.0;
+
+      // --- Seeded planetary rings parameters ---
+  const ringRnd = seededRandom(hash32('RING', seedU32));
+  const hasRings = false; // rings disabled for now
+      // Predeclare for closures used by drawRingHalf
+      let ringAngle = 0, ringOpenScale = 1, ringInner = 0, ringOuter = 0, ringPalette = null, ringPhase = 0, ringFreq = 0.2;
+      let ringInnerRatio = 0, ringOuterRatio = 0;
+  if (hasRings) {
+        // Inclination (rotation in screen plane)
+        ringAngle = ringRnd() * Math.PI; // 0..pi
+        // Opening (tilt) -> ellipse minor/major ratio (avoid edge-on)
+        ringOpenScale = 0.35 + ringRnd() * 0.55; // 0.35..0.9
+        // Inner/outer radii as ratios of planet radius (resolved later)
+        ringInnerRatio = 1.12 + ringRnd() * 0.55; // 1.12R .. 1.67R
+        ringOuterRatio = Math.min(2.6, ringInnerRatio + (0.5 + ringRnd() * 0.9)); // cap outer
+        // Seeded band colors: derive from planet base color and a seeded neutral mix
+        const neutralA = [200, 182, 150];
+        const neutralB = [120, 110, 100];
+        const mixT = 0.35 + ringRnd() * 0.3;
+        const seedColor = lerpRgb(baseRGB, lerpRgb(neutralA, neutralB, ringRnd()), mixT);
+        const lightenRgb = (c, t) => [ lerp(c[0], 255, t), lerp(c[1], 255, t), lerp(c[2], 255, t) ];
+        const darkenRgb  = (c, t) => [ c[0]*(1-t), c[1]*(1-t), c[2]*(1-t) ];
+        ringPalette = [
+          lightenRgb(seedColor, 0.25),
+          lightenRgb(seedColor, 0.08),
+          darkenRgb(seedColor, 0.06),
+          darkenRgb(seedColor, 0.18)
+        ];
+        // Banding globals reused for both halves
+        ringPhase = ringRnd() * Math.PI * 2;
+        ringFreq = 0.12 + ringRnd() * 0.35;
+      }
+
+      // Helper to draw ring half ("far" drawn before planet, "near" after planet)
+      function drawRingHalf(half) {
+        if (!hasRings) return;
+        const currentRadius = radius;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(ringAngle);
+        ctx.scale(1, ringOpenScale);
+        // Clip to half-plane in ring-local space
+        ctx.beginPath();
+        const pad = ringOuter * 1.1 + 8;
+        if (half === 'far') {
+          ctx.rect(-pad, -pad, pad*2, pad); // y < 0
+        } else {
+          ctx.rect(-pad, 0, pad*2, pad); // y >= 0
+        }
+        ctx.clip();
+
+        // Draw matte banded texture using concentric arcs (transformed to ellipse)
+        let r = ringInner;
+        ctx.globalCompositeOperation = 'source-over';
+        while (r < ringOuter) {
+          // Vary band thickness with a smooth function for natural groupings
+          const w = 0.8 + 2.4 * Math.max(0, Math.sin(r * ringFreq * 0.2 + ringPhase));
+          const t = Math.max(0, Math.min(1, (r - ringInner) / Math.max(1e-5, (ringOuter - ringInner))));
+          // Choose palette index with slight variation across radius
+          const idx = Math.floor((t * (ringPalette.length - 1)) + (Math.sin(r * 0.08 + ringPhase) * 0.5 + 0.5) * 0.4);
+          const c = ringPalette[Math.max(0, Math.min(ringPalette.length - 1, idx))];
+          const alpha = 0.65 + 0.2 * Math.sin(r * 0.12 + ringPhase * 0.7);
+          ctx.strokeStyle = `rgba(${clamp255(c[0])},${clamp255(c[1])},${clamp255(c[2])},${Math.max(0.05, Math.min(0.95, alpha))})`;
+          ctx.lineWidth = Math.max(0.75, w);
+          ctx.beginPath();
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.stroke();
+          r += w;
+        }
+
+        // Planet shadow cast on rings (aligned with light direction)
+        // Use multiply with a radial gradient offset opposite light
+  const lx = lightDir[0], ly = lightDir[1];
+        ctx.globalCompositeOperation = 'multiply';
+  const g = ctx.createRadialGradient(-lx * currentRadius * 0.25, -ly * currentRadius * 0.25, currentRadius * 0.2,
+             -lx * currentRadius * 0.85, -ly * currentRadius * 0.85, ringOuter);
+        g.addColorStop(0.0, 'rgba(0,0,0,0.28)');
+        g.addColorStop(0.4, 'rgba(0,0,0,0.16)');
+        g.addColorStop(1.0, 'rgba(0,0,0,0.0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(0, 0, ringOuter, 0, Math.PI * 2);
+        ctx.moveTo(ringInner, 0);
+        ctx.arc(0, 0, ringInner, 0, Math.PI * 2, true);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.restore();
+      }
 
       // Render sphere by raymarching the screen-space circle and sampling mapped 3D noise
-      const radius = (size * 0.5) - 1;
+      let radius = (size * 0.5) - 1;
       const cx = size * 0.5, cy = size * 0.5;
       const img = ctx.createImageData(size, size);
       const data = img.data;
+
+      // If rings exist, shrink planet radius slightly so the full ring fits inside the sprite
+      if (hasRings) {
+        // Compute maximum ellipse extents in x/y due to rotation+tilt
+        const Rx = 1, Ry = ringOpenScale;
+        const cosA = Math.cos(ringAngle), sinA = Math.sin(ringAngle);
+        const shapeX = Math.sqrt((Rx*cosA)**2 + (Ry*sinA)**2);
+        const shapeY = Math.sqrt((Rx*sinA)**2 + (Ry*cosA)**2);
+        const padding = 2;
+        const halfCap = (size * 0.5) - padding;
+        const needX = ringOuterRatio * shapeX;
+        const needY = ringOuterRatio * shapeY;
+        const haloFrac = profile.atmosphere ? 0.10 : 0.04;
+        const rMax = Math.min(halfCap / (needX + haloFrac), halfCap / (needY + haloFrac), halfCap / (1 + haloFrac));
+        radius = Math.min(radius, rMax);
+        ringInner = radius * ringInnerRatio;
+        ringOuter = radius * ringOuterRatio;
+      }
 
       // Axial tilt/band rotation
       const tilt = (rng() * 0.6 - 0.3) * Math.PI; // -0.3..0.3 rad
@@ -1740,7 +1861,12 @@ Auto-save  : Active</pre>
         craters.push({ p, r });
       }
 
-      // Per-pixel render
+      // Draw far half of ring behind the planet
+      if (hasRings) {
+        drawRingHalf('far');
+      }
+
+      // Per-pixel render (planet body)
       for (let y0 = 0, idx = 0; y0 < size; y0++) {
         const dy = y0 - cy;
         for (let x0 = 0; x0 < size; x0++, idx += 4) {
@@ -1828,6 +1954,19 @@ Auto-save  : Active</pre>
           const ambient = 0.25;
           let litRGB = scaleRgb(outRGB, ambient + ndotl * 0.9);
 
+          // Ring shadow onto planet (attenuate only the direct component, only on day side)
+          if (hasRings && ndotl > 0) {
+            const cosA = Math.cos(ringAngle), sinA = Math.sin(ringAngle);
+            const rx =  (dx)*cosA + (dy)*sinA;
+            const ry = ((-dx)*sinA + (dy)*cosA) / Math.max(1e-5, ringOpenScale);
+            const rr = Math.hypot(rx, ry);
+            if (rr >= ringInner && rr <= ringOuter) {
+              const t = Math.max(0, Math.min(1, (rr - ringInner) / Math.max(1e-5, (ringOuter - ringInner))));
+              const atten = 1 - (0.35 * (0.7 + 0.3 * (1 - t)));
+              litRGB = scaleRgb(litRGB, atten);
+            }
+          }
+
           // Specular highlight (simple Blinn-Phong approx with viewer ~ +Z)
           if (specular > 0) {
             const L = lightDir;
@@ -1850,13 +1989,13 @@ Auto-save  : Active</pre>
             litRGB = lerpRgb(litRGB, hazeRGB, atm * 0.5);
           }
 
-          // City lights emission on night side
+          // City lights emission on night side (slightly more permissive near-terminator)
           if (cityLights) {
             const night = 1 - ndotl;
-            if (night > 0.2) {
+            if (night > 0.15) {
               const v = 0.5 + 0.5 * noise1(nx*50, ny*50, nz*50);
-              if (v > 0.7) {
-                const e = (v - 0.7) / 0.3 * night * 0.7;
+              if (v > 0.68) {
+                const e = (v - 0.68) / 0.32 * night * 0.8;
                 litRGB = [
                   litRGB[0] + cityRGB[0] * e,
                   litRGB[1] + cityRGB[1] * e,
@@ -1890,6 +2029,31 @@ Auto-save  : Active</pre>
   // Draw with a crisp limb (no inner alpha feather) to avoid inner-ring artifacts when compositing halos
   // Pixels outside the sphere are already alpha=0; inside are opaque from per-pixel write above.
   ctx.putImageData(img, 0, 0);
+
+      // Atmosphere halo outside limb (renderer-based, not CSS)
+      if ((profile.atmosphere || profile.group === 'Ocean') && profile.group !== 'Gas Giant') {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        const haloOuter = radius * 1.12;
+        const haze = hazeRGB || [180,210,255];
+        const grad = ctx.createRadialGradient(cx, cy, radius * 0.98, cx, cy, haloOuter);
+        const haloAlpha = (profile.group === 'Ocean') ? 0.24 : 0.18;
+        grad.addColorStop(0, `rgba(${clamp255(haze[0])},${clamp255(haze[1])},${clamp255(haze[2])},0.0)`);
+        grad.addColorStop(1, `rgba(${clamp255(haze[0])},${clamp255(haze[1])},${clamp255(haze[2])},${haloAlpha})`);
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, haloOuter, 0, Math.PI*2);
+        ctx.moveTo(cx + radius, cy);
+        ctx.arc(cx, cy, radius, 0, Math.PI*2, true);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Draw near half of ring in front of the planet
+      if (hasRings) {
+        drawRingHalf('near');
+      }
 
       const url = cnv.toDataURL('image/png');
       planetSpriteCache.set(key, url);
@@ -1979,6 +2143,13 @@ Auto-save  : Active</pre>
     }
 
     // Utility: RGB/HEX and math helpers
+    const FOUR_PALETTES = {
+      Desert: ['#3A2D20', '#A77A46', '#D7B37A', '#F6E7C9'],
+      Dune:   ['#3C2F1F', '#9F7E4E', '#D8C28E', '#F8EDD2'],
+      Rocky:  ['#2E2A26', '#6E5C4A', '#9E8C76', '#D2C6B6'], // Barren/Rocky
+      VolcanicLand: ['#1E1412', '#3E2A26', '#6A4A3E', '#A07866'], // for non-lava surfaces
+      Frozen: ['#63788A', '#B9D3E8', '#EFF7FF', '#FFFFFF']
+    };
     function hexToRgb(hex) {
       const h = hex.replace('#','');
       const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
@@ -1986,9 +2157,40 @@ Auto-save  : Active</pre>
     }
     function lerp(a,b,t){ return a + (b-a)*t; }
     function lerpRgb(a,b,t){ return [ lerp(a[0],b[0],t), lerp(a[1],b[1],t), lerp(a[2],b[2],t) ]; }
+    function lightenRgb(c, t){ return [ clamp255(lerp(c[0], 255, t)), clamp255(lerp(c[1], 255, t)), clamp255(lerp(c[2], 255, t)) ]; }
+    function darkenRgb(c, t){ return [ clamp255(c[0]*(1-t)), clamp255(c[1]*(1-t)), clamp255(c[2]*(1-t)) ]; }
     function scaleRgb(c, s){ return [ c[0]*s, c[1]*s, c[2]*s ]; }
     function clamp255(x){ return Math.max(0, Math.min(255, Math.round(x))); }
+    // Scalar helpers
+    function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+    function smoothstep(edge0, edge1, x){
+      if (edge0 === edge1) return x >= edge1 ? 1 : 0;
+      const t = clamp01((x - edge0) / (edge1 - edge0));
+      return t * t * (3 - 2 * t);
+    }
+    function sample4(pal, t){
+      // Discrete 4-step palette with narrow blend for crisp separation
+      t = clamp01(t);
+      const x = t * 3.0;
+      let i = Math.floor(x);
+      let f = x - i;
+      i = Math.max(0, Math.min(3, i));
+      const j = Math.min(3, i+1);
+      const w = smoothstep(0.35, 0.65, f);
+      return [
+        lerp(pal[i][0], pal[j][0], w),
+        lerp(pal[i][1], pal[j][1], w),
+        lerp(pal[i][2], pal[j][2], w)
+      ];
+    }
     function normalize(v){ const l = Math.hypot(v[0],v[1],v[2])||1; return [v[0]/l,v[1]/l,v[2]/l]; }
+    function angleDiff(a,b){
+      let d = a - b;
+      while (d > Math.PI) d -= 2*Math.PI;
+      while (d < -Math.PI) d += 2*Math.PI;
+      return d;
+    }
+    function smoothstep01(x){ x = Math.max(0, Math.min(1, x)); return x*x*(3.0 - 2.0*x); }
     function samplePalette(palette, t){
       if (!palette || palette.length === 0) return [255,255,255];
       if (palette.length === 1) return palette[0];
@@ -3379,15 +3581,18 @@ Auto-save  : Active</pre>
       }
     }
 
-    function renderScannerViewport() {
+  async function renderScannerViewport() {
       const el = document.getElementById('scanner-planet');
       if (!el) return;
   if (!powerSystem.activeSystems.has('scanner') || !powerSystem.isPowerAvailable()) return; // keep blank when unpowered
       const planetIdx = navigationSystem.currentPlanetIndex;
       const info = getPlanetColor(navigationSystem.currentX, navigationSystem.currentY, planetIdx);
       try {
-        const url = getPlanetSprite(navigationSystem.currentX, navigationSystem.currentY, planetIdx, 160, info.type, info.color);
-        el.style.backgroundImage = `url(${url})`;
+    // Ensure cockpit 3D is current so snapshot matches seed
+    updateCockpit3D(navigationSystem.currentX, navigationSystem.currentY, planetIdx, info.type, info.color);
+    // Snapshot from offscreen renderer for consistent square capture
+    const url = await snapshotPlanet3D(160);
+    el.style.backgroundImage = url ? `url(${url})` : '';
         el.style.backgroundSize = '100% 100%';
         el.style.backgroundRepeat = 'no-repeat';
         el.style.backgroundPosition = 'center center';
@@ -3402,15 +3607,17 @@ Auto-save  : Active</pre>
           const b = parseInt(isShort ? h[2] + h[2] : h.slice(4,6), 16);
           return `rgba(${r}, ${g}, ${b}, ${a})`;
         };
-        el.style.boxShadow = `0 0 24px ${hexToRgba(amberHex, 0.35)}`;
+  // No sprite halo; 3D snapshot contains halo naturally
+  el.style.boxShadow = 'none';
         el.style.backgroundColor = 'transparent';
         // Apply true single-hue amber by preserving luminance only
         // First, reduce to luminance (grayscale) and gently tune levels
   // Slight gamma-like curve: reduce contrast then lift mids; prevents blown whites under tint
-  el.style.filter = 'grayscale(1) brightness(0.95) contrast(0.95) brightness(1.05)';
+  // Slightly brighter so the 3D snapshot doesn't appear too dark under CRT effect
+  el.style.filter = 'grayscale(1) brightness(1.12) contrast(1.02)';
 
         // Add a color overlay that forces hue/saturation to amber while keeping underlying luminance
-        const vpEl = document.getElementById('scanner-viewport');
+  const vpEl = document.getElementById('scanner-viewport');
         const crtEl = vpEl ? (vpEl.closest('.crt') || vpEl) : null;
         if (crtEl && !crtEl.querySelector('.amber-tint')) {
           const tint = document.createElement('div');
@@ -3457,7 +3664,8 @@ Auto-save  : Active</pre>
           const b = parseInt(isShort ? h[2] + h[2] : h.slice(4,6), 16);
           return `rgba(${r}, ${g}, ${b}, ${a})`;
         };
-        el.style.boxShadow = `0 0 24px ${hexToRgba2(amberHex2, 0.35)}`;
+  // Halo handled in the sprite; avoid CSS glow that would clip rings
+  el.style.boxShadow = 'none';
   el.style.filter = 'grayscale(1) brightness(0.95) contrast(0.95) brightness(1.05)';
         const vpEl2 = document.getElementById('scanner-viewport');
         const crtEl2 = vpEl2 ? (vpEl2.closest('.crt') || vpEl2) : null;
@@ -3542,7 +3750,10 @@ Auto-save  : Active</pre>
       // Render planet sprite at full size
       const x = navigationSystem.currentX, y = navigationSystem.currentY, i = navigationSystem.currentPlanetIndex;
       const info = getPlanetColor(x, y, i);
-      const spriteUrl = getPlanetSprite(x, y, i, planetSize, info.type, info.color);
+  // Refresh cockpit 3D to ensure correct target planet and take a full-res snapshot while temporarily scaling renderer.
+  updateCockpit3D(x, y, i, info.type, info.color);
+      return (async () => {
+        const spriteUrl = await snapshotPlanet3D(planetSize);
 
       // Composite on a large offscreen canvas
       const cnv = document.createElement('canvas');
@@ -3615,43 +3826,14 @@ Auto-save  : Active</pre>
         ctx.globalCompositeOperation = prevOp;
       })();
 
-      return new Promise((resolve) => {
+        return new Promise((resolve) => {
         const img = new Image();
         img.onload = () => {
           const cx = targetW/2, cy = targetH/2;
           const x0 = Math.floor(cx - planetSize/2);
           const y0 = Math.floor(cy - planetSize/2);
-          // Halo and planetshine (drawn UNDER the planet to avoid any thin dark rim)
+          // Draw planet image only; 3D render already contains atmosphere/halo
           const R = planetSize/2;
-          const prof = (function(r){ return choosePlanetProfile(r, info.type); })(seededRandom(hash32('SPR', x|0, y|0, i|0)));
-          const [hr,hg,hb] = hexToRgb(prof.hazeColor || info.color);
-          // Relaxed gradient and normal compositing beneath the planet
-          const haloInner = R * 0.92; // start slightly under limb to soften edge
-          const haloOuter = R * 1.45; // extend a bit farther
-          const haloGrad = ctx.createRadialGradient(cx, cy, haloInner, cx, cy, haloOuter);
-          const haloAlpha = 0.26;
-          haloGrad.addColorStop(0, `rgba(${hr},${hg},${hb},${(prof.atmosphere?haloAlpha*0.55:haloAlpha*0.25).toFixed(3)})`);
-          haloGrad.addColorStop(0.5, `rgba(${hr},${hg},${hb},${(prof.atmosphere?haloAlpha*0.35:haloAlpha*0.18).toFixed(3)})`);
-          haloGrad.addColorStop(1, 'rgba(0,0,0,0)');
-          // Paint halo as a soft disc and then punch out the inner disc to avoid inside brightening
-          ctx.save();
-          ctx.fillStyle = haloGrad;
-          ctx.beginPath(); ctx.arc(cx, cy, haloOuter, 0, Math.PI*2); ctx.fill();
-          // Carve the interior so nothing overlays the planet interior
-          ctx.globalCompositeOperation = 'destination-out';
-          ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI*2); ctx.fill();
-          ctx.restore();
-
-          const dirX = -0.6, dirY = -0.6;
-          const offX = cx + dirX * R*0.35;
-          const offY = cy + dirY * R*0.35;
-          const shineGrad = ctx.createRadialGradient(offX, offY, R*0.6, offX, offY, R*1.6);
-          const shineAlpha = 0.18;
-          shineGrad.addColorStop(0, `rgba(${hr},${hg},${hb},${shineAlpha})`);
-          shineGrad.addColorStop(1, 'rgba(0,0,0,0)');
-          ctx.fillStyle = shineGrad;
-          ctx.beginPath(); ctx.arc(offX, offY, R*1.6, 0, Math.PI*2); ctx.fill();
-          // Finally, draw the planet above halo and planetshine
           ctx.drawImage(img, x0, y0, planetSize, planetSize);
 
           const out = cnv.toDataURL('image/png');
@@ -3667,7 +3849,8 @@ Auto-save  : Active</pre>
           resolve();
         };
         img.src = spriteUrl;
-      });
+        });
+      })();
     }
 
     async function printInfographic() {
@@ -3686,7 +3869,8 @@ Auto-save  : Active</pre>
       const rng = seededRandom(hash32('SPR', x|0, y|0, i|0));
       const profile = (function(r){ return choosePlanetProfile(r, info.type); })(rng);
 
-      const spriteUrl = getPlanetSprite(x, y, i, planetSize, info.type, info.color);
+  updateCockpit3D(x, y, i, info.type, info.color);
+  const spriteUrl = await snapshotPlanet3D(planetSize);
 
       const cnv = document.createElement('canvas');
       cnv.width = targetW; cnv.height = targetH;
@@ -3757,33 +3941,7 @@ Auto-save  : Active</pre>
           const x0 = Math.floor(cx - planetSize/2);
           const y0 = Math.floor(cy - planetSize/2);
           const R = planetSize/2;
-          const prof = (function(r){ return choosePlanetProfile(r, info.type); })(seededRandom(hash32('SPR', x|0, y|0, i|0)));
-          const [hr,hg,hb] = hexToRgb(prof.hazeColor || info.color);
-          // Halo under the planet to avoid outer dark ring; relaxed gradient
-          const haloInner = R * 0.92;
-          const haloOuter = R * 1.45;
-          const haloGrad = ctx.createRadialGradient(cx, cy, haloInner, cx, cy, haloOuter);
-          const haloAlpha = 0.26;
-          haloGrad.addColorStop(0, `rgba(${hr},${hg},${hb},${(prof.atmosphere?haloAlpha*0.55:haloAlpha*0.25).toFixed(3)})`);
-          haloGrad.addColorStop(0.5, `rgba(${hr},${hg},${hb},${(prof.atmosphere?haloAlpha*0.35:haloAlpha*0.18).toFixed(3)})`);
-          haloGrad.addColorStop(1, 'rgba(0,0,0,0)');
-          ctx.save();
-          ctx.fillStyle = haloGrad;
-          ctx.beginPath(); ctx.arc(cx, cy, haloOuter, 0, Math.PI*2); ctx.fill();
-          // Punch out the inner disc so no fill overlays inside
-          ctx.globalCompositeOperation = 'destination-out';
-          ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI*2); ctx.fill();
-          ctx.restore();
-          const dirX = -0.6, dirY = -0.6;
-          const offX = cx + dirX * R*0.35;
-          const offY = cy + dirY * R*0.35;
-          const shineGrad = ctx.createRadialGradient(offX, offY, R*0.6, offX, offY, R*1.6);
-          const shineAlpha = 0.18;
-          shineGrad.addColorStop(0, `rgba(${hr},${hg},${hb},${shineAlpha})`);
-          shineGrad.addColorStop(1, 'rgba(0,0,0,0)');
-          ctx.fillStyle = shineGrad;
-          ctx.beginPath(); ctx.arc(offX, offY, R*1.6, 0, Math.PI*2); ctx.fill();
-          // Draw the planet above halo and planetshine
+          // Draw planet image only; 3D render already contains atmosphere/halo
           ctx.drawImage(img, x0, y0, planetSize, planetSize);
           resolve();
         };
@@ -5287,9 +5445,6 @@ Auto-save  : Active</pre>
      * Update the planet visual in the viewport based on current location
      */
     function updatePlanetVisual() {
-      const planetElement = document.querySelector('.window .planet');
-      if (!planetElement) return;
-
       const system = navigationSystem.getCurrentSystem();
       const planetIndex = navigationSystem.currentPlanetIndex;
       
@@ -5300,39 +5455,896 @@ Auto-save  : Active</pre>
         planetIndex
       );
 
-      const baseColor = planetInfo.color;
-
-      // Render or fetch cached sprite for this planet
+      // Initialize/Update cockpit 3D progressive enhancement
       try {
-        const spriteUrl = getPlanetSprite(
+        updateCockpit3D(
           navigationSystem.currentX,
           navigationSystem.currentY,
           planetIndex,
-          192, // internal render size for quality (downscaled to element)
           planetInfo.type,
-          baseColor
+          planetInfo.color
         );
-
-        // Apply sprite as background image; maintain size and animation
-        planetElement.style.background = 'transparent';
-        planetElement.style.backgroundImage = `url(${spriteUrl})`;
-        planetElement.style.backgroundSize = '100% 100%';
-        planetElement.style.backgroundRepeat = 'no-repeat';
-        planetElement.style.backgroundPosition = 'center center';
-        planetElement.style.boxShadow = `0 0 40px ${baseColor}44`;
       } catch (e) {
-        // Fallback to gradient if sprite generation fails
-        const darkColor = darkenColor(baseColor, 0.4);
-        const darkestColor = darkenColor(baseColor, 0.1);
-        planetElement.style.background = `radial-gradient(circle at 30% 30%, ${baseColor}, ${darkColor} 60%, ${darkestColor})`;
-        planetElement.style.backgroundImage = '';
-        planetElement.style.boxShadow = `0 0 40px ${baseColor}44`;
-        // eslint-disable-next-line no-console
-        console.warn('Planet sprite fallback:', e);
+        // If 3D fails, nothing to render here
       }
 
       // Update starfield
       updateStarfield(navigationSystem.currentX, navigationSystem.currentY, planetIndex);
+    }
+
+    // --- Three.js-based cockpit renderer ---
+    // Rendering quality (hard-coded for now)
+    const RENDER_QUALITY = {
+      textureSize: 256,
+      sphereSegments: { width: 64, height: 48 },
+      cloudSegments: { width: 48, height: 36 },
+      fps: 20
+    };
+
+    let cockpit3D = null;
+  const planet3DTextureCache = new Map(); // key -> {albedoTex,bumpTex,roughTex,emissTex,cloudTex}
+    function ensureThreeLoaded(cb) {
+      if (window.THREE) { cb(); return; }
+      // Load ESM build only to avoid multiple-instance warnings
+      (async () => {
+        try {
+          const mod = await import('https://unpkg.com/three@0.160.0/build/three.module.js');
+          // Cache the module namespace on window for downstream code
+          window.THREE = mod;
+        } catch (e) {
+          console.warn('Three.js ESM failed to load; 3D cockpit will be disabled in this session.', e);
+        } finally {
+          cb();
+        }
+      })();
+    }
+
+    function initCockpit3D() {
+      const viewport = document.querySelector('.window .viewport');
+      if (!viewport) return null;
+      if (!window.THREE) return null;
+      const width = viewport.clientWidth;
+      const height = viewport.clientHeight;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(width, height);
+  // Enable soft shadow maps (kept modest for performance)
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.domElement.style.position = 'absolute';
+      renderer.domElement.style.inset = '0';
+      // Insert just above the warp-burst and below glass
+  viewport.insertBefore(renderer.domElement, viewport.querySelector('.glass'));
+  renderer.domElement.classList.add('renderer-canvas');
+  // 3D canvas follows lemniscate to stay lockstep with starfield; no parallax
+  renderer.domElement.style.animation = 'planetFigureEight 120s ease-in-out infinite';
+  // Make 3D renderer move in lockstep with starfield and 2D planet (lemniscate)
+  renderer.domElement.style.animation = 'planetFigureEight 120s ease-in-out infinite';
+
+      const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(35, width/height, 1.0, 2000);
+      camera.position.set(0, 0, 260);
+
+      // Lights
+      scene.add(new THREE.AmbientLight(0x222222));
+  const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+      dir.position.set(-200, -200, 150);
+  dir.castShadow = true;
+  dir.shadow.mapSize.set(512, 512);
+  // Shadow tuning: larger radius for softer penumbra; mild bias to avoid acne
+  dir.shadow.radius = 3;
+      dir.shadow.camera.near = 50;
+      dir.shadow.camera.far = 800;
+      dir.shadow.camera.left = -250;
+      dir.shadow.camera.right = 250;
+      dir.shadow.camera.top = 250;
+      dir.shadow.camera.bottom = -250;
+  dir.shadow.bias = -0.0003;
+  dir.shadow.normalBias = 0.04;
+      scene.add(dir);
+
+      const group = new THREE.Group();
+      scene.add(group);
+
+  cockpit3D = { viewport, renderer, scene, camera, group, planet: null, clouds: null, atmosphere: null, moons: [], rings: null, light: dir, currentKey: null, rotationSpeed: 0.00015, cloudRotationSpeed: 0.00025, timeAcc: 0 };
+
+      window.addEventListener('resize', () => {
+        const w = viewport.clientWidth, h = viewport.clientHeight;
+        renderer.setSize(w, h);
+        camera.aspect = w/h; camera.updateProjectionMatrix();
+      });
+
+      let lastRender = 0;
+  const frameInterval = 1000 / RENDER_QUALITY.fps; // FPS cap
+      function loop(ts) {
+        requestAnimationFrame(loop);
+        if (document.hidden) return;
+        if (ts - lastRender < frameInterval) return; // skip to cap FPS
+        const dt = Math.min(0.05, (ts - lastRender) / 1000) || 0.05; // seconds, clamp
+        lastRender = ts;
+        if (cockpit3D) {
+          cockpit3D.timeAcc += dt;
+          if (cockpit3D.planet) {
+            cockpit3D.planet.rotation.y += cockpit3D.rotationSpeed;
+          }
+          if (cockpit3D.clouds) {
+            cockpit3D.clouds.rotation.y += cockpit3D.cloudRotationSpeed;
+          }
+          // Moons and rings removed for now
+        }
+        renderer.render(scene, camera);
+      }
+      requestAnimationFrame(loop);
+      return cockpit3D;
+    }
+
+    // Capture a snapshot of the current 3D scene using the existing renderer and a temporary render target
+    let __snapshotTargets = new Map();
+    let __snapshotInFlight = false;
+    async function snapshotPlanet3D(size = 256) {
+      return new Promise((resolve) => {
+        try {
+          if (!window.THREE) { resolve(''); return; }
+          if (!cockpit3D || !cockpit3D.renderer) { initCockpit3D(); }
+          if (!cockpit3D || !cockpit3D.renderer) { resolve(''); return; }
+          const THREE = window.THREE;
+
+          let rt = __snapshotTargets.get(size);
+          if (!rt) {
+            rt = new THREE.WebGLRenderTarget(size, size, { depthBuffer: true, stencilBuffer: false });
+            // Ensure output from target is sRGB-encoded to avoid manual gamma steps
+            if (rt.texture && 'colorSpace' in rt.texture) {
+              rt.texture.colorSpace = THREE.SRGBColorSpace;
+            }
+            __snapshotTargets.set(size, rt);
+          }
+          const prevTarget = cockpit3D.renderer.getRenderTarget();
+
+          // Use a cloned camera with aspect 1 to avoid distortion
+          const cam = cockpit3D.camera.clone();
+          cam.aspect = 1;
+          cam.updateProjectionMatrix();
+
+          // Render scene to target (next animation frame to avoid mid-draw read)
+          const doRender = () => {
+            cockpit3D.renderer.setRenderTarget(rt);
+            cockpit3D.renderer.render(cockpit3D.scene, cam);
+
+            // Read pixels and convert to PNG via 2D canvas
+            const buffer = new Uint8Array(size * size * 4);
+            cockpit3D.renderer.readRenderTargetPixels(rt, 0, 0, size, size, buffer);
+
+            const cnv = document.createElement('canvas');
+            cnv.width = size; cnv.height = size;
+            const ctx = cnv.getContext('2d');
+            const imgData = ctx.createImageData(size, size);
+            // Flip Y while copying (pixels already sRGB-encoded by target)
+            for (let y = 0; y < size; y++) {
+              const srcY = size - 1 - y;
+              const srcOff = srcY * size * 4;
+              const dstOff = y * size * 4;
+              imgData.data.set(buffer.subarray(srcOff, srcOff + size * 4), dstOff);
+            }
+            ctx.putImageData(imgData, 0, 0);
+            const url = cnv.toDataURL('image/png');
+
+            // Restore target
+            cockpit3D.renderer.setRenderTarget(prevTarget);
+            resolve(url || '');
+          };
+          if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(doRender);
+          } else {
+            doRender();
+          }
+        } catch (e) {
+          resolve('');
+        }
+      });
+    }
+    // Capture a snapshot of the 3D renderer and set it as the 2D planet's background image
+    function setPlanetSpriteFrom3DForViewportPlanet() {
+      try {
+        const planetElement = document.querySelector('.window .planet');
+        if (!planetElement) return false;
+        if (!window.cockpit3D || !cockpit3D.renderer || !cockpit3D.renderer.domElement) return false;
+        // Use current frame from 3D canvas
+        const dataUrl = cockpit3D.renderer.domElement.toDataURL('image/png');
+        planetElement.style.background = 'transparent';
+        planetElement.style.backgroundImage = `url(${dataUrl})`;
+        planetElement.style.backgroundSize = '100% 100%';
+        planetElement.style.backgroundRepeat = 'no-repeat';
+        planetElement.style.backgroundPosition = 'center center';
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function updateCockpit3D(x, y, planetIndex, typeOverride, baseHex) {
+      ensureThreeLoaded(() => {
+        if (!cockpit3D) initCockpit3D();
+        if (!cockpit3D) return; // failed to init
+
+        const THREE = window.THREE;
+        const { group, light } = cockpit3D;
+        const key = `${x}|${y}|${planetIndex}|${typeOverride||''}|${baseHex||''}`;
+        if (cockpit3D.currentKey === key) return; // already up to date
+        cockpit3D.currentKey = key;
+        // Clear previous meshes
+        if (cockpit3D.rings) { group.remove(cockpit3D.rings); cockpit3D.rings.geometry.dispose(); cockpit3D.rings.material.map && cockpit3D.rings.material.map.dispose(); cockpit3D.rings.material.dispose(); cockpit3D.rings = null; }
+        if (cockpit3D.atmosphere) { group.remove(cockpit3D.atmosphere); cockpit3D.atmosphere.geometry.dispose(); cockpit3D.atmosphere.material.dispose(); cockpit3D.atmosphere = null; }
+        if (cockpit3D.clouds) { group.remove(cockpit3D.clouds); cockpit3D.clouds.geometry.dispose(); cockpit3D.clouds.material.dispose(); cockpit3D.clouds = null; }
+        if (cockpit3D.moons && cockpit3D.moons.length) {
+          for (const m of cockpit3D.moons) {
+            if (m.parent) m.parent.remove(m);
+            m.geometry.dispose();
+            m.material.dispose();
+          }
+          cockpit3D.moons = [];
+        }
+        if (cockpit3D.planet) { group.remove(cockpit3D.planet); cockpit3D.planet.geometry.dispose(); cockpit3D.planet.material.dispose(); cockpit3D.planet = null; }
+
+        // Seeded RNG
+        const seedU32 = hash32('3D', x|0, y|0, planetIndex|0);
+        const rnd = seededRandom(seedU32);
+
+        // Planet
+        const baseRGB = hexToRgb(baseHex);
+  const radius = 70; // match CSS 140px diameter
+  const geo = new THREE.SphereGeometry(radius, RENDER_QUALITY.sphereSegments.width, RENDER_QUALITY.sphereSegments.height);
+        // Generate or fetch PBR-like texture set (reduced size for perf)
+        let cached = planet3DTextureCache.get(key);
+        if (!cached) {
+          const texSet = generatePlanetTextureSet(x, y, planetIndex, typeOverride, baseHex, RENDER_QUALITY.textureSize);
+          cached = {
+            albedoTex: createTextureFromCanvas(texSet.albedoCanvas, cockpit3D.renderer, { sRGB: true, anisotropy: 8 }),
+            bumpTex: createTextureFromCanvas(texSet.bumpCanvas, cockpit3D.renderer, { anisotropy: 4 }),
+            normalTex: createTextureFromCanvas(texSet.normalCanvas, cockpit3D.renderer, { anisotropy: 4 }),
+            roughTex: createTextureFromCanvas(texSet.roughnessCanvas, cockpit3D.renderer, { anisotropy: 2 }),
+            metalTex: createTextureFromCanvas(texSet.metalnessCanvas, cockpit3D.renderer, { anisotropy: 2 }),
+            emissTex: createTextureFromCanvas(texSet.emissiveCanvas, cockpit3D.renderer, { anisotropy: 2 }),
+            cloudTex: createTextureFromCanvas(texSet.cloudCanvas, cockpit3D.renderer, { anisotropy: 4 })
+          };
+          planet3DTextureCache.set(key, cached);
+        }
+  const { albedoTex, bumpTex, normalTex, roughTex, metalTex, emissTex, cloudTex } = cached;
+  const profile = choosePlanetProfile(seededRandom(hash32('TEX', x|0, y|0, planetIndex|0)), typeOverride);
+  let bumpScale = (profile.group === 'Ocean') ? -0.8 : 0.8; // flip for ocean to ensure waves out-dent toward light
+  if (profile.group === 'Desert' || profile.key === 'Dune') {
+    bumpScale = 1.2;
+  }
+  const mat = new THREE.MeshStandardMaterial({ map: albedoTex, roughnessMap: roughTex, metalnessMap: metalTex, metalness: 0.0, normalMap: normalTex, normalScale: new THREE.Vector2(1,-1), bumpMap: bumpTex, bumpScale, emissiveMap: emissTex, emissiveIntensity: 1.1, emissive: 0xffffff, roughness: 0.9 });
+  const planet = new THREE.Mesh(geo, mat);
+        planet.castShadow = false; planet.receiveShadow = true;
+        group.add(planet);
+        cockpit3D.planet = planet;
+
+  // Cloud layer (slightly larger sphere with transparent texture)
+  const cloudGeo = new THREE.SphereGeometry(radius*1.015, RENDER_QUALITY.cloudSegments.width, RENDER_QUALITY.cloudSegments.height);
+  const cloudMat = new THREE.MeshStandardMaterial({ map: cloudTex, transparent: true, opacity: 0.85, depthWrite: false, roughness: 1.0, metalness: 0.0 });
+  cloudMat.polygonOffset = true; cloudMat.polygonOffsetFactor = -1; cloudMat.polygonOffsetUnits = -1;
+  const clouds = new THREE.Mesh(cloudGeo, cloudMat);
+  clouds.renderOrder = 2;
+  clouds.receiveShadow = false; clouds.castShadow = false;
+  clouds.rotation.y = Math.PI * 2 * rnd();
+  group.add(clouds);
+  cockpit3D.clouds = clouds;
+
+        // Atmosphere halo (if atmosphere) — always enable for Ocean worlds (no halos on Gas Giants)
+        if ((profile.atmosphere || profile.group === 'Ocean') && profile.group !== 'Gas Giant') {
+          const haze = hexToRgb(profile.hazeColor || '#b4d2ff');
+          const atmGeo = new THREE.SphereGeometry(radius*1.025, 48, 36);
+          const atmMat = new THREE.ShaderMaterial({
+            side: THREE.BackSide,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            uniforms: {
+              uColor: { value: new THREE.Color(`rgb(${clamp255(haze[0])},${clamp255(haze[1])},${clamp255(haze[2])})`) },
+              uLightDir: { value: new THREE.Vector3(0,0,1) },
+              uIntensity: { value: (profile.group === 'Ocean') ? 0.48 : 0.38 },
+              uPower: { value: 2.6 }
+            },
+            vertexShader: `
+              varying vec3 vWorldNormal;
+              varying vec3 vWorldPos;
+              void main(){
+                vec4 wp = modelMatrix * vec4(position,1.0);
+                vWorldPos = wp.xyz;
+                vWorldNormal = normalize(mat3(modelMatrix) * normal);
+                gl_Position = projectionMatrix * viewMatrix * wp;
+              }
+            `,
+            fragmentShader: `
+              precision highp float;
+              varying vec3 vWorldNormal;
+              varying vec3 vWorldPos;
+              uniform vec3 uColor;
+              uniform vec3 uLightDir;
+              uniform float uIntensity;
+              uniform float uPower;
+              void main(){
+                vec3 N = normalize(vWorldNormal);
+                vec3 V = normalize(cameraPosition - vWorldPos);
+                float fres = pow(max(0.0, 1.0 - dot(N, V)), uPower);
+                float lit = dot(N, normalize(uLightDir));
+                // Allow slight over-horizon scattering: permit a small negative lit range
+                float lightGate = smoothstep(-0.10, 0.30, lit);
+                float alpha = uIntensity * fres * lightGate;
+                gl_FragColor = vec4(uColor, alpha);
+              }
+            `
+          });
+          const atmosphere = new THREE.Mesh(atmGeo, atmMat);
+          atmosphere.renderOrder = 3;
+          group.add(atmosphere);
+          cockpit3D.atmosphere = atmosphere;
+        }
+
+        // Rings removed for now
+
+        // Seeded directional light per-planet with phase clamp (<=40% shadowed)
+        const L = getSeededLightDir(x, y, planetIndex);
+        // Place light far enough out along direction
+        light.position.set(L[0]*300, L[1]*300, L[2]*300);
+        if (cockpit3D.atmosphere) {
+          cockpit3D.atmosphere.material.uniforms.uLightDir.value.set(L[0], L[1], L[2]);
+        }
+
+        // Seed slow rotation speeds per-planet
+        cockpit3D.rotationSpeed = 0.00005 + rnd()*0.00012;
+        cockpit3D.cloudRotationSpeed = cockpit3D.rotationSpeed * (1.3 + rnd()*0.6);
+
+        // Moons removed for now
+      });
+    }
+
+    // Rings removed: helper functions deleted
+
+    function createTextureFromCanvas(cnv, renderer, opts={}){
+      const THREE = window.THREE;
+      const tex = new THREE.CanvasTexture(cnv);
+      tex.generateMipmaps = opts.generateMipmaps ?? true;
+      tex.minFilter = opts.minFilter ?? THREE.LinearMipmapLinearFilter;
+      tex.magFilter = opts.magFilter ?? THREE.LinearFilter;
+      tex.wrapS = opts.wrapS ?? THREE.ClampToEdgeWrapping;
+      tex.wrapT = opts.wrapT ?? THREE.ClampToEdgeWrapping;
+      if (opts.sRGB) tex.colorSpace = THREE.SRGBColorSpace;
+      const maxAniso = renderer?.capabilities?.getMaxAnisotropy?.() || 8;
+      tex.anisotropy = Math.min(maxAniso, opts.anisotropy ?? maxAniso);
+      tex.needsUpdate = true;
+      return tex;
+    }
+
+    function generatePlanetTextureSet(x, y, planetIndex, typeOverride, baseHex, size=RENDER_QUALITY.textureSize) {
+      const THREE = window.THREE;
+      const seedU32 = hash32('TEX', x|0, y|0, planetIndex|0);
+      const rng = seededRandom(seedU32);
+      const profile = choosePlanetProfile(rng, typeOverride);
+      const baseRGB = hexToRgb(baseHex || profile.baseColor);
+      const oceanRGB = hexToRgb(profile.oceanColor || '#204a87');
+      const landRGB = hexToRgb(profile.landColor || '#8f7e5b');
+      const iceRGB = hexToRgb(profile.iceColor || '#dfefff');
+      const cloudRGB = hexToRgb(profile.cloudColor || '#ffffff');
+      const lavaRGB = hexToRgb(profile.lavaColor || '#ff5a1f');
+      const n0 = makeFractalNoise3D(hash32('TN0', seedU32), 4, 0.5);
+      const n1 = makeFractalNoise3D(hash32('TN1', seedU32), 5, 0.5);
+      const n2 = makeFractalNoise3D(hash32('TN2', seedU32), 3, 0.6);
+
+  const cnvA = document.createElement('canvas'); cnvA.width = size; cnvA.height = size;
+      const cnvB = document.createElement('canvas'); cnvB.width = size; cnvB.height = size;
+      const cnvR = document.createElement('canvas'); cnvR.width = size; cnvR.height = size;
+      const cnvE = document.createElement('canvas'); cnvE.width = size; cnvE.height = size;
+      const cnvC = document.createElement('canvas'); cnvC.width = size; cnvC.height = size;
+  const cnvM = document.createElement('canvas'); cnvM.width = size; cnvM.height = size; // metalness
+      const ctxA = cnvA.getContext('2d'); const imgA = ctxA.createImageData(size, size);
+      const ctxB = cnvB.getContext('2d'); const imgB = ctxB.createImageData(size, size);
+      const ctxR = cnvR.getContext('2d'); const imgR = ctxR.createImageData(size, size);
+      const ctxE = cnvE.getContext('2d'); const imgE = ctxE.createImageData(size, size);
+      const ctxC = cnvC.getContext('2d'); const imgC = ctxC.createImageData(size, size);
+  const ctxM = cnvM.getContext('2d'); const imgM = ctxM.createImageData(size, size);
+
+      const seaLevel = profile.seaLevel;
+      const mountainAmp = profile.mountainAmp;
+      const cloudCover = profile.cloudCover;
+  const gasBands = profile.gasBands;
+      const bandScale = profile.bandScale || 25;
+      const bandWarp = profile.bandWarp || 0.0;
+  const glowLava = !!profile.glowLava;
+  // Extra seeded features per-planet
+  const featSeed = hash32('FEA', seedU32);
+  const featRng = seededRandom(featSeed);
+  const hasLavaLakes = (!gasBands && (profile.group === 'Volcanic' || (profile.group === 'Rocky' && featRng() < 0.15)));
+  const hasCityLights = (!!profile.cityLights);
+  const hasGiantStorms = (profile.group === 'Gas Giant');
+
+      const tilt = (rng() * 0.6 - 0.3) * Math.PI; // -0.3..0.3 rad
+      const rot = rng() * Math.PI * 2;
+      const rotMat = composeRotation(tilt, rot);
+
+      // Seeded crater field
+      const craterRng = seededRandom(hash32('TCR', seedU32));
+      const craterCount = profile.hasCraters ? Math.floor(craterRng()*40)+20 : 0; // 20..60
+      const craters = [];
+      for (let i=0;i<craterCount;i++){
+        const u = craterRng();
+        const v = craterRng();
+        const theta = 2*Math.PI*u;
+        const phi = Math.acos(2*v - 1);
+        const p = [ Math.sin(phi)*Math.cos(theta), Math.sin(phi)*Math.sin(theta), Math.cos(phi) ];
+        const r = (0.008 + craterRng()*0.035) * (profile.group === 'Frozen' ? 1.2 : 1.0);
+        craters.push({ p, r });
+      }
+
+  // Desert dunes: locally oriented, noise-driven ridges (no planet-wide bands)
+  const duneFreq = 38 + rng()*26;       // ridge frequency in local coords
+  const duneAmp  = 0.10 + rng()*0.10;   // bump contribution from dunes
+  const duneWarp = 0.6 + rng()*0.6;     // warp strength for jittering ridges
+  const dunePatchiness = 0.45 + rng()*0.25; // controls where dunes occur
+
+      // Seeded scars
+      const scarRng = seededRandom(hash32('SCR', seedU32));
+      const scarCount = (profile.group === 'Rocky' || profile.group === 'Desert') ? Math.floor(scarRng()*3)+1 : 0;
+      const scars = [];
+      for (let i=0;i<scarCount;i++){
+        const u = scarRng(); const v = scarRng();
+        const theta = 2*Math.PI*u;
+        const phi = Math.acos(2*v - 1);
+        const p = [ Math.sin(phi)*Math.cos(theta), Math.sin(phi)*Math.sin(theta), Math.cos(phi) ];
+        const r = 0.15 + scarRng()*0.25; // large blotches
+        scars.push({ p, r });
+      }
+
+      // Polar cap variability (seeded per-planet)
+    const capRng = seededRandom(hash32('CAP', seedU32));
+    const capsEnabled = !!profile.polarCaps;
+  // Fixed cap extent: extend 15° from the pole toward the equator => latitude 75° => |ny| threshold = sin(75°)
+  const capExtent = capsEnabled ? Math.sin(75 * Math.PI/180) : 1.0;
+      const capRoughTarget = 0.30 + capRng()*0.10; // slightly shinier ice target roughness
+
+      for (let y0=0, idx=0; y0<size; y0++){
+        const v = (y0 / (size-1)) * Math.PI - Math.PI/2; // -pi/2..pi/2
+        for (let x0=0; x0<size; x0++, idx+=4){
+          const u = (x0 / (size-1)) * 2*Math.PI - Math.PI; // -pi..pi
+          // unit sphere normal from equirectangular
+          let nx = Math.cos(v) * Math.cos(u);
+          let ny = Math.sin(v);
+          let nz = Math.cos(v) * Math.sin(u);
+          const nRot = applyMat(rotMat, [nx, ny, nz]);
+          nx = nRot[0]; ny = nRot[1]; nz = nRot[2];
+
+          const cont = n0(nx*1.2, ny*1.2, nz*1.2);
+          const detail = n1(nx*6.0, ny*6.0, nz*6.0);
+          let height = cont * 0.7 + detail * 0.3;
+          let bandT = 0;
+          if (gasBands) {
+            const s = ny * bandScale + n2(nx*1.2, ny*1.2, nz*1.2) * bandWarp;
+            bandT = 0.5 + 0.5 * Math.sin(s);
+          }
+
+          let albedo = baseRGB;
+          let rough = 0.8; // default land
+          let bump = 0.5;
+          let emiss = [0,0,0];
+          let clouds = 0;
+          if (!gasBands) {
+            if (profile.hasOceans && height < seaLevel) {
+              const depth = (seaLevel - height) / Math.max(1e-5, seaLevel + 1);
+              albedo = lerpRgb(oceanRGB, baseRGB, 0.2 + 0.5 * Math.min(1, depth));
+              // oceans a bit less specular (higher roughness), subtle bump
+              rough = 0.35; bump = 0.15;
+            } else {
+              let t = Math.max(0, height - seaLevel) * mountainAmp;
+              t = Math.min(1, t);
+              // Four-color palette sampling to increase definition
+              const isDesert = (profile.group === 'Desert');
+              const isBarren = (profile.key === 'Barren' || profile.group === 'Rocky');
+              const isVolcanicLand = (profile.group === 'Volcanic' && profile.key !== 'Lava Ocean');
+              const isFrozen = (profile.group === 'Frozen');
+              const palKey = isDesert ? (profile.key === 'Dune' ? 'Dune' : 'Desert') : (isBarren ? 'Rocky' : (isVolcanicLand ? 'VolcanicLand' : (isFrozen ? 'Frozen' : null)));
+              if (palKey) {
+                const pal = FOUR_PALETTES[palKey].map(hexToRgb);
+                // Elevation-based index with valley emphasis via negative detail noise
+                const valley = 0.5 + 0.5 * (-Math.abs(n1(nx*2.5+7, ny*2.5-9, nz*2.5+3)) + 1.0);
+                const idxT = clamp01(0.25 * valley + 0.75 * t);
+                albedo = sample4(pal, idxT);
+              } else {
+                albedo = lerpRgb(landRGB, baseRGB, 0.4 + 0.6 * t);
+              }
+              rough = 0.82; bump = 0.6;
+              if (isFrozen) {
+                // Snow/ice reflect more light: slightly brighten and lower base roughness
+                albedo = lerpRgb(albedo, [255,255,255], 0.06);
+                rough = Math.min(rough, 0.65);
+              }
+              // Volcanic world base (non-lava-ocean): basalt and ash variety
+              if (profile.group === 'Volcanic' && profile.key !== 'Lava Ocean') {
+                // Blend toward dark basalt
+                albedo = lerpRgb(albedo, [45,42,48], 0.5);
+                // Ashy deposits
+                const ashField = 0.5 + 0.5 * n1(nx*3.0 + 5.2, ny*3.0 - 1.1, nz*3.0 + 2.7);
+                const ashMask = Math.max(0, ashField - 0.35);
+                albedo = lerpRgb(albedo, [110,104,98], Math.min(0.35, ashMask*0.35));
+                bump = Math.min(1.0, bump + ashMask*0.12);
+                rough = Math.max(0.78, rough);
+              }
+              // Ice near poles with variability and noisy edge (latitude-based)
+              if (capsEnabled) {
+                const poleLat = Math.abs(ny); // 0 at equator, 1 at pole
+                // base edge: starts near capExtent, then ramps to 1
+                const edgeBase = Math.max(0, (poleLat - capExtent) / Math.max(1e-5, (1.0 - capExtent)));
+                const edgeNoise = Math.max(0, n1(nx*2.5+11, ny*2.5-7, nz*2.5+3) * 0.18);
+                let cap = Math.max(0, Math.min(1, Math.pow(edgeBase + edgeNoise, 2.2)));
+                if (cap > 0) {
+                  // Use Frozen palette bright tones for snowcaps
+                  const palF = FOUR_PALETTES.Frozen.map(hexToRgb);
+                  const snowCol = sample4(palF, 0.88 + 0.12 * cap);
+                  // Stronger blend for visibility
+                  albedo = lerpRgb(albedo, snowCol, Math.min(0.85, 0.85 * cap));
+                  // Snow reflects: lower roughness aggressively on caps
+                  rough = lerp(rough, Math.min(0.28, capRoughTarget), cap*0.9);
+                  // Sastrugi/ridged snow detail
+                  const ridged = 1.0 - Math.abs(n2(nx*12.0+31, ny*12.0-17, nz*12.0+13));
+                  const sMask = Math.max(0, (ridged - 0.72) / 0.20);
+                  if (sMask > 0) {
+                    bump = Math.min(1.0, bump + sMask * 0.10 * cap);
+                  }
+                  // Edge accent for definition
+                  const edge = cap * (1 - cap);
+                  bump = Math.min(1.0, bump + edge * 0.06);
+                }
+              }
+              // Deserts sunlit bias: very subtle to avoid washing out palette separation
+              if (profile.group === 'Desert') {
+                albedo = lerpRgb(albedo, [255, 244, 220], 0.06);
+                rough = Math.max(0.7, rough - 0.03);
+              }
+            }
+            // Terrain feature overlays
+            // Dunes: use local equirectangular (u,v) with warped orientation and patch mask to avoid global ribs
+            if (profile.group === 'Desert' || profile.key === 'Dune') {
+              // Convert to local 0..1 uv (reuse u,v computed earlier)
+              const U = (Math.atan2(nz, nx) + Math.PI) / (2*Math.PI); // 0..1
+              const V = (Math.asin(ny) + Math.PI/2) / Math.PI;       // 0..1
+              // Orientation field from low-frequency noise
+              const ori = n0(nx*0.8+13, ny*0.8-7, nz*0.8+5) * Math.PI; // 0..pi
+              const sU = Math.cos(ori), sV = Math.sin(ori);
+              // Warped ridge coordinate
+              const wU = U + duneWarp * n1(nx*2.2+3, ny*2.2-1, nz*2.2+7) * 0.02;
+              const wV = V + duneWarp * n1(nx*2.0-4, ny*2.0+6, nz*2.0-2) * 0.02;
+              const coord = (wU*sU + wV*sV);
+              const ridge = Math.sin(coord * duneFreq * 6.283185307179586);
+              // Patch mask: where dunes exist vs. flats/rock
+              let patch = n0(nx*1.6+21, ny*1.6-11, nz*1.6+9);
+              patch = smoothstep(dunePatchiness-0.15, dunePatchiness+0.10, patch);
+              // Primary dune contribution (shaped to be mostly positive heights)
+              const ridgePos = Math.max(0.0, ridge);
+              const duneStrength = duneAmp * 1.8; // stronger relief on deserts
+              const dMask = ridgePos * patch;
+              bump += dMask * duneStrength;
+
+              // Macro undulations (longer-wavelength sets of dunes)
+              const macroFreq = duneFreq * 0.22;
+              const macroRidge = Math.sin(coord * macroFreq * 6.283185307179586 + n0(nx*0.7-5, ny*0.7+2, nz*0.7-3)*1.57);
+              const macroMask = smoothstep(0.35, 0.75, n1(nx*0.9+17, ny*0.9-9, nz*0.9+4));
+              const macro = Math.max(0, macroRidge) * macroMask;
+              bump += macro * 0.12;
+
+              // Fine ripples to catch light at grazing angles
+              const ripple = 0.5 + 0.5 * n2(nx*18.0+9, ny*18.0-13, nz*18.0+5);
+              bump += Math.max(0, ripple - 0.7) * 0.05;
+
+              // Slight albedo lift with desaturation toward sand color
+              const sandTint = [248, 236, 210];
+              albedo = lerpRgb(albedo, sandTint, dMask*0.06 + macro*0.04);
+              // Blotchy albedo variation: wind-blown pale sand and darker rocky patches
+              // Domain-warped FBM-style masks to avoid defined shapes
+              {
+                // Light sand blotches
+                const w1x = n1(nx*1.3+31, ny*1.3-19, nz*1.3+7) * 0.25;
+                const w1y = n1(nx*1.1-23, ny*1.1+17, nz*1.1-5) * 0.25;
+                const w1z = n1(nx*1.2+11, ny*1.2+13, nz*1.2-9) * 0.25;
+                const lBase = 0.5 + 0.5 * n0(nx*1.6 + w1x + 9, ny*1.6 + w1y - 4, nz*1.6 + w1z + 3);
+                const lMod  = 0.5 + 0.5 * n2(nx*2.8 - 6, ny*2.8 + 8, nz*2.8 + 1);
+                let lMask = lBase * lMod;
+                // Sharper, less blurred mask
+                lMask = smoothstep(0.60, 0.74, lMask);
+                lMask = Math.pow(lMask, 1.6);
+                if (lMask > 0) {
+                  const lightTint = [252, 240, 215];
+                  const li = Math.min(0.26, 0.26 * lMask);
+                  albedo = lerpRgb(albedo, lightTint, li);
+                  // Edge accent to add definition (small positive relief at boundaries)
+                  const lEdge = lMask * (1 - lMask);
+                  bump = Math.max(0, bump + lEdge * 0.05 - 0.02 * lMask);
+                  rough = Math.max(0.68, rough - 0.025 * lMask);
+                }
+                // Dark rock blotches (e.g., lava remnants, rocky plateaus)
+                const w2x = n2(nx*1.0-17, ny*1.0+21, nz*1.0+15) * 0.30;
+                const w2y = n2(nx*1.2+27, ny*1.2-15, nz*1.2-11) * 0.30;
+                const w2z = n2(nx*1.1+19, ny*1.1+13, nz*1.1-17) * 0.30;
+                const dBase = 0.5 + 0.5 * n0(nx*1.4 + w2x - 5, ny*1.4 + w2y + 6, nz*1.4 + w2z - 2);
+                const dMod  = 0.5 + 0.5 * n1(nx*3.0 + 3, ny*3.0 - 9, nz*3.0 + 7);
+                let dMask = dBase * dMod;
+                dMask = smoothstep(0.64, 0.80, dMask);
+                dMask = Math.pow(dMask, 1.5);
+                if (dMask > 0) {
+                  const darkTint = [110, 95, 85];
+                  const di = Math.min(0.22, 0.22 * dMask);
+                  albedo = lerpRgb(albedo, darkTint, di);
+                  // Darker rocky areas: slightly rougher and higher relief, with edge accent
+                  const dEdge = dMask * (1 - dMask);
+                  bump = Math.min(1.0, bump + 0.12 * dMask + 0.05 * dEdge);
+                  rough = Math.min(1.0, rough + 0.06 * dMask);
+                }
+              }
+            }
+            // Crater rims and floors
+            if (profile.hasCraters && craters.length){
+              let rimAccum = 0, floorAccum = 0;
+              for (let i=0;i<craters.length;i++){
+                const cp = craters[i].p; const cr = craters[i].r;
+                const dot = nx*cp[0] + ny*cp[1] + nz*cp[2];
+                const ang = Math.acos(Math.max(-1, Math.min(1, dot)));
+                const sC = ang / cr;
+                if (sC < 1.0) {
+                  const tC = 1.0 - sC;
+                  // Rim ring around sC~1: emphasize at 0.8..1 region
+                  const rim = Math.max(0, Math.min(1, (sC>0.75? (sC-0.75)/0.25 : 0)));
+                  rimAccum = Math.max(rimAccum, rim);
+                  // Floor darkening at center
+                  floorAccum = Math.max(floorAccum, tC*tC);
+                }
+              }
+              if (rimAccum > 0){
+                bump += rimAccum * 0.35; // elevated rim
+                albedo = lerpRgb(albedo, [230, 220, 210], rimAccum*0.12);
+              }
+              if (floorAccum > 0){
+                albedo = lerpRgb(albedo, [60, 60, 60], floorAccum*0.15);
+                rough = Math.min(0.95, rough + floorAccum*0.05);
+              }
+            }
+            // Scars (ink-blot)
+            if (scars.length){
+              let scarMask = 0;
+              for (let i=0;i<scars.length;i++){
+                const sp = scars[i].p; const sr = scars[i].r;
+                const dot = nx*sp[0] + ny*sp[1] + nz*sp[2];
+                const ang = Math.acos(Math.max(-1, Math.min(1, dot)));
+                const sS = ang / sr;
+                if (sS < 1.0){
+                  const tS = 1.0 - sS;
+                  scarMask = Math.max(scarMask, Math.pow(tS, 1.5));
+                }
+              }
+              if (scarMask > 0) {
+                albedo = lerpRgb(albedo, [90, 80, 75], scarMask*0.25);
+                bump += scarMask * 0.15;
+                rough = Math.min(1.0, rough + scarMask*0.1);
+              }
+            }
+            // clouds
+            if (profile.atmosphere && cloudCover > 0) {
+              const cloud = 0.5 + 0.5 * n2(nx*3.5 + 20, ny*3.5 + 20, nz*3.5 + 20);
+              const swirl = n1(nx*1.5 - ny*1.5, ny*1.5 + nz*1.5, nz*1.5 - nx*1.5);
+              clouds = Math.max(0, cloud * 0.8 + swirl * 0.2 - (1.0 - cloudCover));
+            }
+
+            // Ice world extras: cracks/chasms and equatorial melt pools
+            if (profile.group === 'Frozen') {
+              // crack network using ridged noise
+              const ridged = 1.0 - Math.abs(n2(nx*9.0+31, ny*9.0-17, nz*9.0+13));
+              const crackMask = Math.max(0, Math.min(1, (ridged - 0.78) / 0.06));
+              if (crackMask > 0) {
+                const c = Math.pow(crackMask, 1.3);
+                albedo = lerpRgb(albedo, [120,130,140], c*0.25);
+                bump = Math.min(1.0, bump + c*0.12);
+                rough = Math.min(1.0, rough + c*0.05);
+              }
+              // equatorial melt pools (dark, smoother, lower bump)
+              const latAbs = Math.abs(ny);
+              if (latAbs < 0.35) {
+                const poolNoise = 0.5 + 0.5 * n1(nx*6.0+57, ny*6.0-21, nz*6.0+8);
+                const bias = 0.75 - 0.25 * (1.0 - (latAbs/0.35));
+                const poolMask = Math.max(0, poolNoise - bias);
+                if (poolMask > 0) {
+                  const melt = Math.min(1, poolMask * 0.8);
+                  const poolRGB = [70, 90, 105];
+                  albedo = lerpRgb(albedo, poolRGB, melt*0.4);
+                  rough = lerp(rough, 0.25, melt*0.6);
+                  bump = Math.max(0, bump - melt*0.1);
+                }
+              }
+            }
+            // Lava lakes: pool-like emissive patches near low elevations
+            if (hasLavaLakes) {
+              const basin = 0.5 + 0.5 * n2(nx*4.5 + 77.3, ny*4.5 - 13.2, nz*4.5 + 5.1);
+              const pool = Math.max(0, (seaLevel - height) * 0.8 + (basin - 0.75));
+              if (pool > 0.0) {
+                const e = Math.min(1, pool * 2.0);
+                emiss = [ Math.max(emiss[0], lavaRGB[0]*e), Math.max(emiss[1], lavaRGB[1]*e), Math.max(emiss[2], lavaRGB[2]*e) ];
+                albedo = lerpRgb(albedo, [60, 30, 20], Math.min(0.5, e*0.3));
+                rough = Math.max(rough, 0.7);
+              }
+            }
+            // City lights on night side (for MegaCity): subtle emissive speckle based on lat-long
+            if (hasCityLights) {
+              // Day-night via seeded light direction matching cockpit 3D
+              const L = getSeededLightDir(x, y, planetIndex);
+              const N = normalize([nx, ny, nz]);
+              const ndotl = N[0]*L[0] + N[1]*L[1] + N[2]*L[2];
+              if (ndotl < 0.0) {
+                const grid = 0.5 + 0.5 * Math.sin(u * 28.0 + 9.0 * Math.sin(v * 17.0));
+                const dens = 0.5 + 0.5 * n1(nx*10.0 + 3.1, ny*10.0 - 1.7, nz*10.0 + 2.3);
+                const lights = Math.max(0, grid * dens - 0.65);
+                if (lights > 0) {
+                  const e = lights * 1.0;
+                  const cc = hexToRgb(profile.cityColor || '#ffd080');
+                  emiss = [ Math.max(emiss[0], cc[0]*e), Math.max(emiss[1], cc[1]*e), Math.max(emiss[2], cc[2]*e) ];
+                  rough = Math.min(1.0, rough + lights*0.05);
+                }
+              }
+            }
+            if (glowLava) {
+              // dark solidified rock base, with emissive seams only
+              albedo = lerpRgb(albedo, [60, 35, 25], 0.5);
+              rough = Math.max(rough, 0.75);
+              const fissVal = 0.5 + 0.5 * n2(nx*12.0, ny*12.0, nz*12.0);
+              // Soot darkening near hot seams
+              const soot = Math.max(0, Math.min(1, (fissVal - 0.7) / 0.15));
+              if (soot > 0) {
+                albedo = lerpRgb(albedo, [35, 30, 28], soot * 0.4);
+                rough = Math.min(1.0, rough + soot*0.05);
+              }
+              if (fissVal > 0.84) {
+                const e = (fissVal - 0.84) / 0.16;
+                emiss = [ Math.max(emiss[0], lavaRGB[0]*e), Math.max(emiss[1], lavaRGB[1]*e), Math.max(emiss[2], lavaRGB[2]*e) ];
+                bump = Math.max(bump, 0.55);
+              }
+            }
+          } else {
+            // Gas giant: variable-width meandering bands with palette and storms
+            const paletteHex = Array.isArray(profile.gasPalette) ? profile.gasPalette : [];
+            let gasPal = paletteHex.length ? paletteHex.map(hexToRgb) : [
+              lightenRgb(baseRGB, 0.2), lightenRgb(baseRGB, 0.05), darkenRgb(baseRGB, 0.08), darkenRgb(baseRGB, 0.2)
+            ];
+            // Palette diversity with seeded accents
+            const gRnd = seededRandom(hash32('GPL', seedU32));
+            if (gRnd() < 0.7) {
+              const accents = [ [180,220,240], [200,170,220], [240,190,160], [180,210,180], [160,210,200], [220,200,140], [190,200,230], [210,180,200] ];
+              const pick = () => accents[Math.floor(gRnd()*accents.length)];
+              const a1 = pick();
+              const a2 = pick();
+              const mix = (c,d,t)=>[ lerp(c[0],d[0],t), lerp(c[1],d[1],t), lerp(c[2],d[2],t) ];
+              const p0 = lightenRgb(baseRGB, 0.18);
+              const p1 = mix(baseRGB, a1, 0.35 + gRnd()*0.25);
+              const p2 = mix(baseRGB, a2, 0.25 + gRnd()*0.25);
+              const p3 = darkenRgb(baseRGB, 0.22);
+              gasPal = [p0,p1,p2,p3];
+            }
+            // Meander bands with longitude-dependent phase and variable width
+            const lon = u; // -pi..pi
+            const lat = ny; // -1..1
+            const phase = lat * bandScale + n2(nx*1.2, ny*1.2, nz*1.2) * bandWarp + 0.8 * Math.sin(lon * (2.0 + 0.6 * n1(nx*0.7, ny*0.7, nz*0.7)) + 3.14 * n1(nx*0.3+10, ny*0.3-7, nz*0.3+5));
+            const wave = 0.5 + 0.5 * Math.sin(phase);
+            const widthVar = 0.22 + 0.55 * (0.5 + 0.5 * n2(nx*0.9+21, ny*0.9-13, nz*0.9+7)); // variable stripe thickness
+            const stripe = smoothstep01((wave - (0.5 - widthVar)) / (widthVar*2.0));
+            // Secondary family to create splits/merges
+            const phase2 = lat * (bandScale*0.62) + 0.6 * Math.sin(lon*1.3 + n1(nx*0.5+3, ny*0.5-2, nz*0.5+4));
+            const wave2 = 0.5 + 0.5 * Math.sin(phase2);
+            const widthVar2 = 0.18 + 0.45 * (0.5 + 0.5 * n1(nx*0.8+1, ny*0.8+2, nz*0.8-1));
+            const stripe2 = smoothstep01((wave2 - (0.5 - widthVar2)) / (widthVar2*2.0));
+            const bandMix = Math.max(stripe, stripe2) * (0.7 + 0.3 * (0.5 + 0.5*Math.sin(lon*0.7)));
+            // Color from palette along latitude with slight longitudinal drift
+            const tColor = Math.max(0, Math.min(1, 0.5 + 0.5 * Math.sin(lat * (bandScale*0.33) + lon*0.08)));
+            const cA = samplePalette(gasPal, tColor);
+            const cB = samplePalette(gasPal, Math.max(0, Math.min(1, tColor + 0.18*(0.5 + 0.5*Math.sin(lon*0.3)))));
+            let bandBase = lerpRgb(cB, cA, bandMix);
+            // Desaturate slightly to avoid toy-like bands
+            bandBase = lerpRgb(bandBase, [200,200,200], 0.18);
+            albedo = bandBase;
+            // Multiple cyclones/ovals
+            if (hasGiantStorms) {
+              const stormCount = 1 + Math.floor(featRng()*3); // 1..3
+              for (let si=0; si<stormCount; si++) {
+                const sx = (featRng()*2.0 - 1.0) * Math.PI;
+                const sy = (featRng()*1.8 - 0.9) * (Math.PI/2);
+                const dx = angleDiff(u, sx);
+                const dy = angleDiff(v, sy);
+                const radX = 0.18 + featRng()*0.35;
+                const radY = 0.10 + featRng()*0.25;
+                const e = Math.max(0, 1.0 - Math.hypot(dx/radX, dy/radY));
+                if (e > 0) {
+                  const edge = smoothstep01(e);
+                  const bright = featRng() < 0.6;
+                  const tint = bright ? [240,240,240] : [150,135,120];
+                  albedo = lerpRgb(albedo, tint, 0.22 * edge);
+                }
+              }
+            }
+            // High clouds layer to break stripes
+            const hCloud = Math.max(0, (0.5 + 0.5 * n2(nx*4.0+20, ny*4.0+20, nz*4.0+20)) * 0.9 - 0.45);
+            clouds = Math.max(clouds, hCloud * 0.8);
+            // Slightly glossier to reflect more on lit side
+            rough = 0.45; bump = 0.15;
+          }
+
+          // Metallic/Crystal tweak
+          let metal = 0;
+          if (profile.group === 'Metallic') {
+            metal = 0.6;
+            rough = Math.max(0.3, rough - 0.25);
+          }
+          if (profile.key === 'Crystal') {
+            metal = 0.2;
+            rough = Math.max(0.2, rough - 0.2);
+          }
+
+          // write albedo (sRGB)
+          imgA.data[idx] = clamp255(albedo[0]);
+          imgA.data[idx+1] = clamp255(albedo[1]);
+          imgA.data[idx+2] = clamp255(albedo[2]);
+          imgA.data[idx+3] = 255;
+          // bump (grayscale)
+          const b = clamp255(bump*255);
+          imgB.data[idx] = b; imgB.data[idx+1] = b; imgB.data[idx+2] = b; imgB.data[idx+3] = 255;
+          // roughness (grayscale)
+          const r = clamp255(rough*255);
+          imgR.data[idx] = r; imgR.data[idx+1] = r; imgR.data[idx+2] = r; imgR.data[idx+3] = 255;
+          // metalness (grayscale)
+          const m = clamp255(metal*255);
+          imgM.data[idx] = m; imgM.data[idx+1] = m; imgM.data[idx+2] = m; imgM.data[idx+3] = 255;
+          // emissive (RGB)
+          imgE.data[idx] = clamp255(emiss[0]);
+          imgE.data[idx+1] = clamp255(emiss[1]);
+          imgE.data[idx+2] = clamp255(emiss[2]);
+          imgE.data[idx+3] = 255;
+          // clouds alpha
+          const ca = clamp255(Math.max(0, Math.min(1, clouds)) * 255);
+          imgC.data[idx] = 255; imgC.data[idx+1] = 255; imgC.data[idx+2] = 255; imgC.data[idx+3] = ca;
+        }
+      }
+      ctxA.putImageData(imgA, 0, 0);
+      ctxB.putImageData(imgB, 0, 0);
+      ctxR.putImageData(imgR, 0, 0);
+      ctxE.putImageData(imgE, 0, 0);
+      ctxC.putImageData(imgC, 0, 0);
+
+      // Generate normal map from bump
+      const cnvN = generateNormalMapFromHeightCanvas(cnvB);
+
+      return { albedoCanvas: cnvA, bumpCanvas: cnvB, normalCanvas: cnvN, roughnessCanvas: cnvR, metalnessCanvas: cnvM, emissiveCanvas: cnvE, cloudCanvas: cnvC };
+    }
+
+    function generateNormalMapFromHeightCanvas(heightCanvas) {
+      const w = heightCanvas.width, h = heightCanvas.height;
+      const ctx = heightCanvas.getContext('2d');
+      const src = ctx.getImageData(0,0,w,h).data;
+      const dstCanvas = document.createElement('canvas'); dstCanvas.width = w; dstCanvas.height = h;
+      const dctx = dstCanvas.getContext('2d');
+      const out = dctx.createImageData(w,h);
+      const getH = (x,y) => {
+        x = (x + w) % w; y = Math.max(0, Math.min(h-1, y));
+        const i = (y*w + x) * 4;
+        return src[i] / 255; // grayscale
+      };
+      for (let y=0;y<h;y++){
+        for (let x=0;x<w;x++){
+          const sx = (getH(x+1,y) - getH(x-1,y));
+          const sy = (getH(x,y+1) - getH(x,y-1));
+          const nx = -sx, ny = -sy, nz = 1.0;
+          const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+          const r = Math.round((nx/len*0.5 + 0.5)*255);
+          const g = Math.round((ny/len*0.5 + 0.5)*255);
+          const b = Math.round((nz/len*0.5 + 0.5)*255);
+          const i = (y*w + x) * 4;
+          out.data[i] = r; out.data[i+1] = g; out.data[i+2] = b; out.data[i+3] = 255;
+        }
+      }
+      dctx.putImageData(out, 0, 0);
+      return dstCanvas;
     }
 
     /**
@@ -5398,6 +6410,21 @@ Auto-save  : Active</pre>
       isAnimating: false,
       travelDuration: 0,
       warpAnimationFrame: null,
+      // Helpers to toggle 3D canvas visibility
+      hide3D() {
+        try {
+          if (window.cockpit3D && cockpit3D.renderer && cockpit3D.renderer.domElement) {
+            cockpit3D.renderer.domElement.style.display = 'none';
+          }
+        } catch (_) {}
+      },
+      show3D() {
+        try {
+          if (window.cockpit3D && cockpit3D.renderer && cockpit3D.renderer.domElement) {
+            cockpit3D.renderer.domElement.style.display = '';
+          }
+        } catch (_) {}
+      },
       
       /**
        * Generate procedural warp streaks emanating from center
@@ -5581,6 +6608,8 @@ Auto-save  : Active</pre>
         const warpBurst = document.querySelector('.window .viewport .warp-burst');
         
         if (!planetElement || !viewport || !warpBurst) return;
+        // Ensure 3D canvas is visible for departure; we animate it in lockstep with starfield
+        this.show3D();
         
         // Calculate timing for each phase
         const departureDuration = Math.min(1.5, durationSeconds * 0.2); // 20% of travel or max 1.5s
@@ -5602,8 +6631,14 @@ Auto-save  : Active</pre>
        * Departure phase: Planet and stars exit downward
        */
       runDeparturePhase(planetElement, viewport, duration) {
-        // Stop the normal figure-8 animation
+        // Stop the 2D sprite animation (not used) and let 3D canvas move with starfield
         planetElement.style.animation = 'none';
+        // Move starfield and 3D renderer down (ship up) to exit frame
+        try {
+          if (window.cockpit3D && cockpit3D.renderer && cockpit3D.renderer.domElement) {
+            cockpit3D.renderer.domElement.style.animation = `travelDeparture ${duration}s ease-in forwards`;
+          }
+        } catch (_) {}
         
         // Apply departure animation to both planet and starfield
         planetElement.style.animation = `travelDeparture ${duration}s ease-in forwards`;
@@ -5621,6 +6656,9 @@ Auto-save  : Active</pre>
           .window .viewport::before {
             animation: travelDeparture ${duration}s ease-in forwards !important;
           }
+          .window .viewport .renderer-canvas {
+            animation: travelDeparture ${duration}s ease-in forwards !important;
+          }
         `;
       },
       
@@ -5628,8 +6666,8 @@ Auto-save  : Active</pre>
        * Warp phase: Show burst effect, hide planet
        */
       runWarpPhase(planetElement, warpBurst, viewport, duration) {
-        // Hide planet during warp
-        planetElement.style.opacity = '0';
+        // Hide 3D during warp to show burst cleanly and prevent reappearing at center
+        this.hide3D();
         
         // Generate warp streaks
         this.generateWarpStreaks(warpBurst, 60);
@@ -5648,6 +6686,9 @@ Auto-save  : Active</pre>
             .window .viewport::before {
               opacity: 0 !important;
             }
+            .window .viewport .renderer-canvas {
+              opacity: 0 !important;
+            }
           `;
         }
       },
@@ -5655,7 +6696,7 @@ Auto-save  : Active</pre>
       /**
        * Arrival phase: New planet grows into view, resume normal animations
        */
-      runArrivalPhase(planetElement, warpBurst, viewport, duration) {
+  runArrivalPhase(planetElement, warpBurst, viewport, duration) {
         // Stop warp animation
         if (this.warpAnimationFrame) {
           cancelAnimationFrame(this.warpAnimationFrame);
@@ -5665,12 +6706,29 @@ Auto-save  : Active</pre>
         // Hide warp burst
         warpBurst.classList.remove('active');
         
-        // Update planet visual for new location BEFORE animating it in
+        // Update planet visual for new location BEFORE showing 3D again
         updatePlanetVisual();
         
-        // Animate planet growing in from small/above
-        planetElement.style.opacity = '1';
-        planetElement.style.animation = `travelArrival ${duration}s ease-out forwards`;
+        // Show 3D and perform arrival motion with starfield via CSS keyframes on the renderer
+        this.show3D();
+        try {
+          const styleId = 'starfield-travel-style';
+          let styleEl = document.getElementById(styleId);
+          if (styleEl) {
+            styleEl.textContent = styleEl.textContent.replace('opacity: 0 !important;', '');
+          }
+          const canvas = cockpit3D && cockpit3D.renderer && cockpit3D.renderer.domElement;
+          if (canvas) canvas.style.opacity = '';
+        } catch(_){}
+        try {
+          if (window.cockpit3D && cockpit3D.renderer && cockpit3D.renderer.domElement) {
+            cockpit3D.renderer.domElement.style.animation = `travelArrival ${duration}s ease-out forwards`;
+            // After animation, restore lemniscate
+            setTimeout(() => {
+              cockpit3D.renderer.domElement.style.animation = 'planetFigureEight 120s ease-in-out infinite';
+            }, duration * 1000);
+          }
+        } catch (_) {}
         
         // Fade starfield back in with arrival
         const styleId = 'starfield-travel-style';
@@ -5678,6 +6736,9 @@ Auto-save  : Active</pre>
         if (styleEl) {
           styleEl.textContent = `
             .window .viewport::before {
+              animation: travelArrival ${duration}s ease-out forwards !important;
+            }
+            .window .viewport .renderer-canvas {
               animation: travelArrival ${duration}s ease-out forwards !important;
             }
           `;
@@ -5695,8 +6756,14 @@ Auto-save  : Active</pre>
       resumeIdleAnimation(planetElement) {
         this.isAnimating = false;
         
-        // Resume planet's figure-8 idle animation
-        planetElement.style.animation = 'planetFigureEight 120s ease-in-out infinite';
+  // Ensure no 2D planet animation (sprite removed); 3D canvas handles lemniscate
+  planetElement.style.animation = 'none';
+        // Ensure 3D canvas follows the same idle figure-8 path
+        try {
+          if (window.cockpit3D && cockpit3D.renderer && cockpit3D.renderer.domElement) {
+            cockpit3D.renderer.domElement.style.animation = 'planetFigureEight 120s ease-in-out infinite';
+          }
+        } catch (_) {}
         
         // Resume starfield's figure-8 idle animation
         const styleId = 'starfield-travel-style';
@@ -5706,6 +6773,9 @@ Auto-save  : Active</pre>
         }
       }
     };
+
+    // Expose for cross-module checks (e.g., updatePlanetVisual)
+    window.travelAnimationSystem = travelAnimationSystem;
 
     function updateTraderCommsUI() {
       const traderCommsSection = document.querySelectorAll('.panel')[5]; // Trader Comms panel
