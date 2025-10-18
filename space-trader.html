@@ -5480,6 +5480,7 @@ Auto-save  : Active</pre>
 
   let cockpit3D = null;
   let scanner3D = null;
+  let snapshot3D = null;
   const planet3DTextureCache = new Map(); // key -> {albedoTex,bumpTex,roughTex,emissTex,cloudTex}
 
     function createPlanetRenderContext({ width, height, canvas, pixelRatio = Math.min(window.devicePixelRatio || 1, 2), autoAnimate = false, preserveDrawingBuffer = true }) {
@@ -5581,9 +5582,27 @@ Auto-save  : Active</pre>
         isAnimating() {
           return requestId !== null;
         },
-        dispose() {
+        dispose(options = {}) {
+          const { forceContextLoss = false } = options;
           ctx.stopAnimation();
+          if (forceContextLoss && renderer) {
+            try {
+              const gl = renderer.getContext();
+              const lose = gl && (gl.getExtension('WEBGL_lose_context') || gl.getExtension('WEBKIT_WEBGL_lose_context'));
+              if (lose && typeof lose.loseContext === 'function') {
+                lose.loseContext();
+              }
+            } catch (e) {
+              console.warn('Failed to force WebGL context loss during dispose.', e);
+            }
+          }
           renderer.dispose();
+          ctx.currentKey = null;
+          ctx.planet = null;
+          ctx.clouds = null;
+          ctx.atmosphere = null;
+          ctx.rings = null;
+          ctx.moons = [];
         }
       };
 
@@ -5681,13 +5700,12 @@ Auto-save  : Active</pre>
           const baseHex = params.baseHex ?? info.color;
 
           try {
-            const ctx = createPlanetRenderContext({ width: size, height: size, autoAnimate: false, preserveDrawingBuffer: true });
+            const ctx = ensureSnapshotRenderContext(size);
             if (!ctx) { resolve(''); return; }
             populatePlanetRenderContext(ctx, x, y, planetIndex, typeOverride, baseHex);
             ctx.renderOnce();
             const canvas = ctx.renderer.domElement;
             const url = canvas.toDataURL('image/png');
-            ctx.dispose();
             resolve(url || '');
           } catch (err) {
             console.warn('Snapshot render failed', err);
@@ -5940,7 +5958,7 @@ Auto-save  : Active</pre>
     function disposeScannerContext() {
       if (!scanner3D) return;
       const canvasEl = scanner3D.renderer?.domElement;
-      scanner3D.dispose();
+      scanner3D.dispose({ forceContextLoss: true });
       if (canvasEl && canvasEl.parentNode) {
         canvasEl.parentNode.removeChild(canvasEl);
       }
@@ -5983,6 +6001,46 @@ Auto-save  : Active</pre>
       scanner3D.container = container;
       return scanner3D;
     }
+
+    function ensureSnapshotRenderContext(size) {
+      if (!window.THREE) return null;
+      const clamped = Math.max(1, size | 0);
+      if (!snapshot3D) {
+        snapshot3D = createPlanetRenderContext({ width: clamped, height: clamped, autoAnimate: false, preserveDrawingBuffer: true });
+      } else if (snapshot3D.width !== clamped || snapshot3D.height !== clamped) {
+        snapshot3D.setSize(clamped, clamped);
+      }
+      return snapshot3D;
+    }
+
+    function disposeSnapshotRenderContext() {
+      if (!snapshot3D) return;
+      snapshot3D.dispose({ forceContextLoss: true });
+      snapshot3D = null;
+    }
+
+    const releaseContexts = () => {
+      try { disposeSnapshotRenderContext(); } catch (e) { console.warn('Snapshot context cleanup failed', e); }
+      try {
+        if (scanner3D) {
+          const canvasEl = scanner3D.renderer?.domElement;
+          scanner3D.dispose({ forceContextLoss: true });
+          if (canvasEl && canvasEl.parentNode) {
+            canvasEl.parentNode.removeChild(canvasEl);
+          }
+          scanner3D = null;
+        }
+        if (cockpit3D) {
+          cockpit3D.dispose({ forceContextLoss: true });
+          cockpit3D = null;
+        }
+      } catch (e) {
+        console.warn('Context cleanup error', e);
+      }
+    };
+
+    window.addEventListener('pagehide', releaseContexts, { once: true });
+    window.addEventListener('beforeunload', releaseContexts, { once: true });
 
     function updateCockpit3D(x, y, planetIndex, typeOverride, baseHex) {
       ensureThreeLoaded(() => {
