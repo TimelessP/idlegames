@@ -12,7 +12,10 @@ A curated collection of relaxing idle and puzzle games built with HTML5, CSS3, a
 
 The complete collection is hosted on GitHub Pages with a beautiful launcher interface.
 
-## 🎯 Games (Single-Page HTML)
+### 🚚 [Space Trader](https://timelessp.github.io/idlegames/space-trader.html)
+Retro space trading adventure in a deterministic procedural galaxy. Trade at outposts, haggle, refuel, and travel across systems with maps and a 15s cinematic jump.
+- Features: Deterministic procedural galaxy, dynamic supply/demand trading with haggle, fuel management & refueling, cargo management and commodity prices, power management, navigation, warp travel animation, persistent saves (LocalStorage, seeded universe), keyboard & touch-friendly controls, responsive UI, export photos and infographics
+- Tags: Simulation, Sci-Fi, Procedural
 
 ### 🧩 [Fit the Shapes](https://timelessp.github.io/idlegames/fit-the-shapes.html)
 Tetris-inspired placement puzzle with special Diamond and Lava pieces. Clear rows/columns and manage economy-like tradeoffs.
@@ -158,6 +161,7 @@ Simply visit [https://timelessp.github.io/idlegames/](https://timelessp.github.i
 - 🧩 Puzzle/Casual: Fit the Shapes, Jigsaw Puzzle, Yahtzee, Maze Balls, Garden Grower
 - 🧪 Physics/Toys: Magic Potion, Physics Toy, Cyber Deck
 - 🎯 Action/Arcade: Space Scroller
+- 🚀 Simulation/Sci-Fi: Space Trader
 - 🛠️ Utilities/Extras: Dictaphone, QR Loop, Feed Cycle, Personal Organiser
 
 ## 🤝 Contributing
