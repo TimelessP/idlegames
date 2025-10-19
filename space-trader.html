@@ -6319,6 +6319,45 @@ Auto-save  : Active</pre>
         ];
       }
 
+      function alignGroupToAnchorPlane(group, anchor, gap = 0) {
+        if (!group || !anchor || !anchor.normal || !anchor.position) return;
+        const normal = anchor.normal.clone();
+        if (normal.lengthSq() === 0) return;
+        normal.normalize();
+        const planePoint = anchor.position.clone();
+        group.updateMatrixWorld(true);
+        const corner = new THREE.Vector3();
+        const worldPoint = new THREE.Vector3();
+        const relative = new THREE.Vector3();
+        let closest = Infinity;
+        group.traverse(child => {
+          if (!child.isMesh || !child.geometry) return;
+          const geometry = child.geometry;
+          if (!geometry.boundingBox) geometry.computeBoundingBox();
+          const bbox = geometry.boundingBox;
+          for (let ix = 0; ix < 2; ix++) {
+            for (let iy = 0; iy < 2; iy++) {
+              for (let iz = 0; iz < 2; iz++) {
+                corner.set(
+                  ix ? bbox.max.x : bbox.min.x,
+                  iy ? bbox.max.y : bbox.min.y,
+                  iz ? bbox.max.z : bbox.min.z
+                );
+                worldPoint.copy(corner).applyMatrix4(child.matrixWorld);
+                relative.copy(worldPoint).sub(planePoint);
+                const projection = relative.dot(normal);
+                if (projection < closest) closest = projection;
+              }
+            }
+          }
+        });
+        if (!isFinite(closest)) return;
+        const delta = gap - closest;
+        if (Math.abs(delta) < 1e-3) return;
+        group.position.addScaledVector(normal, delta);
+        group.updateMatrixWorld(true);
+      }
+
       function buildHullCore() {
         const hullGroup = new THREE.Group();
         hullGroup.name = 'Module:HullCore';
@@ -6590,6 +6629,7 @@ Auto-save  : Active</pre>
   const builders = [buildNeedleNose, buildSurveyNose, buildHammerNose, buildBladeNose];
         const builder = chooseFrom(builders, moduleRng) || buildNeedleNose;
         const nose = builder(anchor);
+  alignGroupToAnchorPlane(nose.group, anchor, 0);
         assemblyGroup.add(nose.group);
         pushMeshes(...nose.meshes);
         pushGeometries(...nose.geometries);
@@ -6770,6 +6810,7 @@ Auto-save  : Active</pre>
   const builders = [buildConeTail, buildVentedTail, buildRingTail];
         const builder = chooseFrom(builders, moduleRng) || buildConeTail;
         const tail = builder(anchor);
+  alignGroupToAnchorPlane(tail.group, anchor, 0);
         assemblyGroup.add(tail.group);
         pushMeshes(...tail.meshes);
         pushGeometries(...tail.geometries);
@@ -7118,6 +7159,7 @@ Auto-save  : Active</pre>
         if (!sourceAnchors.length) return;
         const anchor = chooseFrom(sourceAnchors, moduleRng) || sourceAnchors[Math.floor(sourceAnchors.length / 2)];
         const fin = builder(anchor);
+  alignGroupToAnchorPlane(fin.group, anchor, 0);
         assemblyGroup.add(fin.group);
         pushMeshes(...fin.meshes);
         pushGeometries(...fin.geometries);
@@ -7204,6 +7246,7 @@ Auto-save  : Active</pre>
         group.position.copy(anchor.position);
         group.add(mesh);
         group.add(frame);
+        alignGroupToAnchorPlane(group, anchor, 0);
         assemblyGroup.add(group);
 
         pushMeshes(mesh, frame);
@@ -7294,6 +7337,48 @@ Auto-save  : Active</pre>
 
       attachSensorModule();
 
+      function attachWhitePanels() {
+        if (!materials.white) return;
+        const candidateAnchors = [];
+        ['port', 'starboard', 'dorsal'].forEach(side => {
+          const list = hull.anchors[side];
+          if (Array.isArray(list)) {
+            list.forEach(anchor => {
+              if (anchor) candidateAnchors.push(anchor);
+            });
+          }
+        });
+        if (!candidateAnchors.length) return;
+        const panelCount = 1 + Math.floor(moduleRng() * 3);
+        for (let i = 0; i < panelCount; i++) {
+          const anchor = candidateAnchors[Math.floor(moduleRng() * candidateAnchors.length)];
+          if (!anchor || !anchor.normal || !anchor.position) continue;
+          const width = anchor.radius * (0.7 + moduleRng() * 0.5);
+          const height = anchor.radius * (0.45 + moduleRng() * 0.55);
+          const inset = Math.max(0.18, anchor.radius * 0.08);
+          const panelGeo = new THREE.PlaneGeometry(width, height, 1, 1);
+          const panel = new THREE.Mesh(panelGeo, materials.white);
+          const normal = anchor.normal.clone().normalize();
+          panel.position.copy(anchor.position).addScaledVector(normal, inset);
+          panel.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+
+          if (moduleRng() < 0.55) {
+            const stripeGeo = new THREE.PlaneGeometry(width * (0.22 + moduleRng() * 0.2), height * 0.2, 1, 1);
+            const stripe = new THREE.Mesh(stripeGeo, materials.trim);
+            stripe.position.set(0, (moduleRng() - 0.5) * height * 0.5, 0.01);
+            panel.add(stripe);
+            pushMeshes(stripe);
+            pushGeometries(stripeGeo);
+          }
+
+          assemblyGroup.add(panel);
+          pushMeshes(panel);
+          pushGeometries(panelGeo);
+        }
+      }
+
+      attachWhitePanels();
+
       function attachEngineCluster() {
         const anchor = hull.anchors.rear;
         if (!anchor) return;
@@ -7312,14 +7397,33 @@ Auto-save  : Active</pre>
           offsets.push(-engineSpacing * spread * 1.5, -engineSpacing * spread * 0.5, engineSpacing * spread * 0.5, engineSpacing * spread * 1.5);
         }
 
-        offsets.forEach(offset => {
-          const mountOffset = profile.engineMountOffset;
-          const engineLength = profile.engineLength;
-          const verticalOffset = -profile.engineRadius * 0.38;
+        const engineLength = profile.engineLength;
+        const glowLength = profile.engineGlowLength;
+        const rawMountOffset = Math.max(0, profile.engineMountOffset || 0);
+        const mountClearance = Math.min(rawMountOffset, Math.max(1.2, engineLength * 0.35));
+        const verticalOffset = -profile.engineRadius * 0.32;
 
+        if (offsets.length) {
+          const minOffset = Math.min(...offsets);
+          const maxOffset = Math.max(...offsets);
+          const clusterWidth = Math.max(profile.engineRadius * 2.2, (maxOffset - minOffset) + profile.engineRadius * 1.6);
+          const blockHeight = mountClearance + profile.engineRadius * 1.1;
+          const blockDepth = profile.engineRadius * (1.4 + Math.min(0.6, profile.engineSpread * 0.35));
+          const blockGeo = new THREE.BoxGeometry(clusterWidth, blockHeight, blockDepth);
+          const block = new THREE.Mesh(blockGeo, materials.base);
+          block.position.set((minOffset + maxOffset) * 0.5, -blockHeight * 0.5, verticalOffset);
+          engineGroup.add(block);
+          assignContactPlanes(block, [
+            { id: 'mount', origin: new THREE.Vector3(0, blockHeight / 2, 0), normal: new THREE.Vector3(0, 1, 0), size: clusterWidth }
+          ]);
+          pushMeshes(block);
+          pushGeometries(blockGeo);
+        }
+
+        offsets.forEach(offset => {
           const engineGeo = new THREE.CylinderGeometry(profile.engineRadius * 1.05, profile.engineRadius * 1.18, engineLength, 22, 1, false);
           const engine = new THREE.Mesh(engineGeo, materials.engine);
-          engine.position.set(offset, -(mountOffset + engineLength * 0.5), verticalOffset);
+          engine.position.set(offset, -(mountClearance + engineLength * 0.5), verticalOffset);
           engineGroup.add(engine);
           pushMeshes(engine);
           pushGeometries(engineGeo);
@@ -7327,20 +7431,30 @@ Auto-save  : Active</pre>
             { id: 'mount', origin: new THREE.Vector3(0, engineLength / 2, 0), normal: new THREE.Vector3(0, 1, 0), radius: profile.engineRadius }
           ]);
 
-          const exhaustGeo = new THREE.ConeGeometry(profile.engineRadius * 0.82, profile.engineGlowLength, 22, 1, true);
+          if (mountClearance > 0.35) {
+            const strutGeo = new THREE.CylinderGeometry(profile.engineRadius * 0.26, profile.engineRadius * 0.22, mountClearance, 12, 1, false);
+            const strut = new THREE.Mesh(strutGeo, materials.trim);
+            strut.position.set(offset, -mountClearance / 2, verticalOffset);
+            engineGroup.add(strut);
+            pushMeshes(strut);
+            pushGeometries(strutGeo);
+          }
+
+          const exhaustGeo = new THREE.ConeGeometry(profile.engineRadius * 0.82, glowLength, 22, 1, true);
           const exhaust = new THREE.Mesh(exhaustGeo, materials.engineGlow);
           exhaust.rotation.x = Math.PI;
-          exhaust.position.set(offset, -(mountOffset + engineLength) - profile.engineGlowLength * 0.5, verticalOffset);
+          exhaust.position.set(offset, -(mountClearance + engineLength) - glowLength * 0.5, verticalOffset);
           engineGroup.add(exhaust);
           pushMeshes(exhaust);
           pushGeometries(exhaustGeo);
 
-          const engineLight = new THREE.PointLight(profile.palette.glow, 0.9, profile.engineGlowLength * 4, 2.2);
-          engineLight.position.set(offset, -(mountOffset + engineLength * 0.65), verticalOffset * 0.82);
+          const engineLight = new THREE.PointLight(profile.palette.glow, 0.9, glowLength * 4, 2.2);
+          engineLight.position.set(offset, -(mountClearance + engineLength) - glowLength * 0.25, verticalOffset * 0.82);
           engineGroup.add(engineLight);
           pushLights(engineLight);
         });
 
+        alignGroupToAnchorPlane(engineGroup, anchor, 0);
         assemblyGroup.add(engineGroup);
       }
 
@@ -7418,6 +7532,44 @@ Auto-save  : Active</pre>
         const y = Math.floor(patternRng() * cnv.height);
         ctx.fillRect(x, y, 1, 1);
       }
+
+      const whitePanelCount = 1 + Math.floor(patternRng() * 3);
+      for (let i = 0; i < whitePanelCount; i++) {
+        const panelWidth = 18 + patternRng() * 44;
+        const panelHeight = 10 + patternRng() * 28;
+        const x = 2 + patternRng() * (cnv.width - panelWidth - 4);
+        const y = 8 + patternRng() * (cnv.height - panelHeight - 16);
+        ctx.fillStyle = 'rgba(248,248,255,0.92)';
+        ctx.fillRect(x, y, panelWidth, panelHeight);
+        ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, panelWidth - 1, panelHeight - 1);
+        if (patternRng() < 0.55) {
+          ctx.fillStyle = 'rgba(220,220,240,0.8)';
+          const barHeight = Math.max(3, panelHeight * 0.24);
+          ctx.fillRect(x, y + panelHeight - barHeight, panelWidth, barHeight);
+        }
+      }
+
+      const codeAlphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+      const letterA = codeAlphabet[Math.floor(patternRng() * codeAlphabet.length)] || 'A';
+      const letterB = codeAlphabet[Math.floor(patternRng() * codeAlphabet.length)] || 'Z';
+      const code = `${letterA}${letterB}`;
+      const codeSize = 20 + patternRng() * 14;
+      const codeX = 12 + patternRng() * (cnv.width - codeSize * 2 - 18);
+      const codeY = 16 + patternRng() * (cnv.height - codeSize - 32);
+      ctx.save();
+      ctx.translate(codeX, codeY);
+      ctx.rotate((patternRng() - 0.5) * 0.28);
+      ctx.font = `bold ${Math.round(codeSize)}px sans-serif`;
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+      ctx.lineWidth = Math.max(1, Math.floor(codeSize / 12));
+      ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.strokeText(code, 0, 0);
+      ctx.fillText(code, 0, 0);
+      ctx.restore();
 
       return cnv;
     }
@@ -7558,6 +7710,13 @@ Auto-save  : Active</pre>
       });
       materials.push(baseMaterial);
 
+      const whitePaintMaterial = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(0xf4f6ff),
+        metalness: 0.2,
+        roughness: 0.36
+      });
+      materials.push(whitePaintMaterial);
+
       const accentMaterial = new THREE.MeshStandardMaterial({
         color: new THREE.Color(profile.palette.accent),
         metalness: 0.34,
@@ -7602,6 +7761,7 @@ Auto-save  : Active</pre>
 
       const assembly = buildTraderShipAssembly(THREE, profile, {
         base: baseMaterial,
+        white: whitePaintMaterial,
         accent: accentMaterial,
         trim: trimMaterial,
         glass: glassMaterial,
