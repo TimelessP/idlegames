@@ -4074,14 +4074,14 @@ Auto-save  : Active</pre>
       const shipMaxH = Math.floor(targetH * 0.6);
       let traderShipSprite = '';
       if (seededTrader && typeof seededTrader.shipSeed === 'number' && shipMaxW > 0 && shipMaxH > 0) {
-        const desiredSize = Math.floor(minDim * 0.42);
-        const shipRenderSize = Math.max(240, Math.min(desiredSize, shipMaxW, shipMaxH));
-        if (shipRenderSize > 0) {
+        const renderWidth = Math.max(320, Math.min(Math.floor(shipMaxW * 1.12), targetW));
+        const renderHeight = Math.max(320, Math.min(Math.floor(shipMaxH * 1.12), targetH));
+        if (renderWidth > 0 && renderHeight > 0) {
           try {
             traderShipSprite = await snapshotTraderShip3D({
               seed: seededTrader.shipSeed,
-              width: shipRenderSize,
-              height: shipRenderSize
+              width: renderWidth,
+              height: renderHeight
             });
           } catch (err) {
             console.warn('Infographic trader ship render failed', err);
@@ -6641,13 +6641,24 @@ Auto-save  : Active</pre>
       function buildNeedleNose(anchor) {
         const length = profile.noseLength * (0.78 + moduleRng() * 0.42);
         const baseRadius = anchor.radius * (0.92 + moduleRng() * 0.08);
-        const tipRadius = Math.max(1.2, baseRadius * 0.12);
-        const geometry = new THREE.ConeGeometry(baseRadius, length, 30, 1, false);
-        const mesh = new THREE.Mesh(geometry, materials.accent);
-        mesh.position.y = length / 2;
-        assignContactPlanes(mesh, [
-          { id: 'base', origin: new THREE.Vector3(0, 0, 0), normal: new THREE.Vector3(0, -1, 0), radius: baseRadius },
-          { id: 'tip', origin: new THREE.Vector3(0, length, 0), normal: new THREE.Vector3(0, 1, 0), radius: tipRadius }
+        const tipRadius = Math.max(1.2, baseRadius * 0.18);
+        const bodyLength = length * 0.82;
+        const capLength = length - bodyLength;
+
+        const bodyGeo = new THREE.CylinderGeometry(Math.max(tipRadius * 1.05, 1.1), baseRadius, bodyLength, 30, 1, false);
+        const body = new THREE.Mesh(bodyGeo, materials.accent);
+        body.position.y = bodyLength / 2;
+        assignContactPlanes(body, [
+          { id: 'base', origin: new THREE.Vector3(0, 0, 0), normal: new THREE.Vector3(0, -1, 0), radius: baseRadius }
+        ]);
+
+        const capGeo = new THREE.SphereGeometry(Math.max(tipRadius * 1.05, 1.1), 20, 14);
+        const cap = new THREE.Mesh(capGeo, materials.accent);
+        cap.scale.set(1.05, 0.55, 1.05);
+        cap.position.y = bodyLength + capLength * 0.5;
+        const capTipOffset = (capGeo.parameters?.radius || tipRadius) * 0.55;
+        assignContactPlanes(cap, [
+          { id: 'tip', origin: new THREE.Vector3(0, capTipOffset, 0), normal: new THREE.Vector3(0, 1, 0), radius: tipRadius }
         ]);
 
         const stripeGeo = new THREE.CylinderGeometry(baseRadius * 1.02, baseRadius * 1.02, length * 0.14, 30, 1, true);
@@ -6657,20 +6668,21 @@ Auto-save  : Active</pre>
           opacity: 0.45
         });
         const stripe = new THREE.Mesh(stripeGeo, stripeMat);
-        stripe.position.y = length * 0.3;
+        stripe.position.y = bodyLength * 0.55;
 
         const group = new THREE.Group();
         group.name = 'Module:NoseNeedle';
         group.position.copy(anchor.position);
-        group.add(mesh);
+        group.add(body);
+        group.add(cap);
         group.add(stripe);
 
         return {
           group,
           length,
           tipRadius,
-          meshes: [mesh, stripe],
-          geometries: [geometry, stripeGeo],
+          meshes: [body, cap, stripe],
+          geometries: [bodyGeo, capGeo, stripeGeo],
           materials: [stripeMat],
           lights: []
         };
@@ -6688,15 +6700,52 @@ Auto-save  : Active</pre>
           { id: 'base', origin: new THREE.Vector3(0, 0, 0), normal: new THREE.Vector3(0, -1, 0), radius: baseRadius }
         ]);
 
-        const dishGeo = new THREE.ConeGeometry(midRadius * 0.9, length * 0.6, 24, 1, true);
+        const dishDepth = length * 0.32;
+        const rimRadius = midRadius * (0.95 + moduleRng() * 0.1);
+        const dishProfile = [];
+        for (let i = 0; i <= 14; i++) {
+          const t = i / 14;
+          const eased = Math.pow(t, 1.4);
+          const radius = THREE.MathUtils.lerp(tipRadius * 0.6, rimRadius, eased);
+          const y = -Math.pow(t, 1.8) * dishDepth;
+          dishProfile.push(new THREE.Vector2(radius, y));
+        }
+        const dishGeo = new THREE.LatheGeometry(dishProfile, 36);
         const dish = new THREE.Mesh(dishGeo, materials.trim);
         dish.rotation.x = Math.PI;
-        dish.position.y = length;
+        dish.position.y = length + dishDepth * 0.28;
         assignContactPlanes(dish, [
           { id: 'tip', origin: new THREE.Vector3(0, 0, 0), normal: new THREE.Vector3(0, 1, 0), radius: tipRadius }
         ]);
 
-        const sensorGeo = new THREE.SphereGeometry(midRadius * 0.55, 16, 12);
+        const rimGeo = new THREE.TorusGeometry(rimRadius * 0.98, midRadius * 0.07, 10, 32);
+        const rim = new THREE.Mesh(rimGeo, materials.accent);
+        rim.rotation.x = Math.PI / 2;
+        rim.position.y = length + dishDepth * 0.32;
+
+        const feedGeo = new THREE.SphereGeometry(tipRadius * 0.6, 16, 12);
+        const feed = new THREE.Mesh(feedGeo, materials.glass);
+        feed.scale.set(1, 0.6, 1);
+        feed.position.y = length + dishDepth * 0.18;
+
+        const strutGeo = new THREE.BoxGeometry(tipRadius * 0.25, dishDepth * 0.6, tipRadius * 0.25);
+        const struts = [];
+        const strutCount = 3;
+        for (let i = 0; i < strutCount; i++) {
+          const angle = (i / strutCount) * Math.PI * 2;
+          const radius = rimRadius * 0.45;
+          const strut = new THREE.Mesh(strutGeo, materials.trim);
+          strut.position.set(
+            Math.cos(angle) * radius,
+            length + dishDepth * 0.05,
+            Math.sin(angle) * radius
+          );
+          strut.rotation.y = angle;
+          strut.rotation.x = Math.PI / 12;
+          struts.push(strut);
+        }
+
+        const sensorGeo = new THREE.SphereGeometry(midRadius * 0.48, 16, 12);
         const sensor = new THREE.Mesh(sensorGeo, materials.glass);
         sensor.position.y = length * 0.82;
 
@@ -6705,14 +6754,17 @@ Auto-save  : Active</pre>
         group.position.copy(anchor.position);
         group.add(cylinder);
         group.add(dish);
+        group.add(rim);
+        struts.forEach(strut => group.add(strut));
+        group.add(feed);
         group.add(sensor);
 
         return {
           group,
           length,
           tipRadius,
-          meshes: [cylinder, dish, sensor],
-          geometries: [cylinderGeo, dishGeo, sensorGeo],
+          meshes: [cylinder, dish, rim, ...struts, feed, sensor],
+          geometries: [cylinderGeo, dishGeo, rimGeo, strutGeo, feedGeo, sensorGeo],
           materials: [],
           lights: []
         };
@@ -6821,28 +6873,49 @@ Auto-save  : Active</pre>
       function buildConeTail(anchor) {
         const length = profile.tailLength * (0.7 + moduleRng() * 0.4);
         const baseRadius = anchor.radius * (1.0 + moduleRng() * 0.12);
-        const tipRadius = Math.max(1.4, baseRadius * 0.3);
-        const geometry = new THREE.ConeGeometry(baseRadius, length, 26, 1, false);
-        const mesh = new THREE.Mesh(geometry, materials.trim);
-        mesh.rotation.x = Math.PI;
-        mesh.position.y = -length / 2;
-        assignContactPlanes(mesh, [
-          { id: 'base', origin: new THREE.Vector3(0, 0, 0), normal: new THREE.Vector3(0, 1, 0), radius: baseRadius },
-          { id: 'tip', origin: new THREE.Vector3(0, -length, 0), normal: new THREE.Vector3(0, -1, 0), radius: tipRadius }
+        const chokeRadius = Math.max(1.6, baseRadius * 0.46);
+        const collarHeight = length * 0.18;
+        const collarGeo = new THREE.CylinderGeometry(baseRadius * 1.02, baseRadius * 1.02, collarHeight, 28, 1, false);
+        const collar = new THREE.Mesh(collarGeo, materials.trim);
+        collar.position.y = -collarHeight / 2;
+        assignContactPlanes(collar, [
+          { id: 'base', origin: new THREE.Vector3(0, collarHeight / 2, 0), normal: new THREE.Vector3(0, 1, 0), radius: baseRadius }
         ]);
+
+        const taperLength = length * 0.55;
+        const taperGeo = new THREE.CylinderGeometry(chokeRadius * 1.05, baseRadius * 0.94, taperLength, 28, 1, false);
+        const taper = new THREE.Mesh(taperGeo, materials.accent);
+        taper.position.y = -collarHeight - taperLength / 2;
+
+        const ventLength = length - collarHeight - taperLength;
+        const ventHeight = Math.max(ventLength, 1.2);
+        const ventGeo = new THREE.CylinderGeometry(chokeRadius * 0.9, chokeRadius, ventHeight, 22, 1, false);
+        const vent = new THREE.Mesh(ventGeo, materials.engine);
+        vent.position.y = -collarHeight - taperLength - ventHeight / 2;
+        assignContactPlanes(vent, [
+          { id: 'tip', origin: new THREE.Vector3(0, -ventHeight / 2, 0), normal: new THREE.Vector3(0, -1, 0), radius: chokeRadius }
+        ]);
+
+        const baffleGeo = new THREE.TorusGeometry(chokeRadius * 0.85, Math.max(0.4, chokeRadius * 0.18), 12, 32);
+        const baffle = new THREE.Mesh(baffleGeo, materials.trim);
+        baffle.rotation.x = Math.PI / 2;
+        baffle.position.y = -collarHeight - taperLength - ventHeight * 0.8;
 
         const group = new THREE.Group();
         group.name = 'Module:TailCone';
         group.position.copy(anchor.position);
-        group.add(mesh);
+        group.add(collar);
+        group.add(taper);
+        group.add(vent);
+        group.add(baffle);
 
         return {
           group,
           length,
-          meshes: [mesh],
-          geometries: [geometry],
+          meshes: [collar, taper, vent, baffle],
+          geometries: [collarGeo, taperGeo, ventGeo, baffleGeo],
           materials: [],
-          newRadius: tipRadius
+          newRadius: chokeRadius
         };
       }
 
@@ -7083,11 +7156,13 @@ Auto-save  : Active</pre>
         leftWing.rotation.z = profile.wingDihedral * 1.4;
         rightWing.rotation.z = -profile.wingDihedral * 1.4;
 
-        const stabilizerGeo = new THREE.ConeGeometry(chord * 0.18, thickness * 4, 12, 1);
+  const stabilizerGeo = new THREE.CylinderGeometry(chord * 0.14, chord * 0.22, thickness * 4, 16, 1, false);
         const stabilizerLeft = new THREE.Mesh(stabilizerGeo, materials.accent);
         const stabilizerRight = new THREE.Mesh(stabilizerGeo, materials.accent);
-        stabilizerLeft.rotation.x = Math.PI / 2;
-        stabilizerRight.rotation.x = Math.PI / 2;
+  stabilizerLeft.rotation.x = Math.PI / 2;
+  stabilizerLeft.rotation.z = Math.PI / 10;
+  stabilizerRight.rotation.x = Math.PI / 2;
+  stabilizerRight.rotation.z = -Math.PI / 10;
         stabilizerLeft.position.set(pair.port.position.x - span * 0.55, pair.port.position.y, pair.port.position.z - chord * 0.35);
         stabilizerRight.position.set(pair.starboard.position.x + span * 0.55, pair.starboard.position.y, pair.starboard.position.z - chord * 0.35);
 
@@ -7129,13 +7204,15 @@ Auto-save  : Active</pre>
           { id: 'root', origin: new THREE.Vector3(-span / 2, 0, 0), normal: new THREE.Vector3(-1, 0, 0), size: chord }
         ]);
 
-        const canardGeo = new THREE.ConeGeometry(chord * 0.12, span * 0.25, 12, 1);
-        const canardLeft = new THREE.Mesh(canardGeo, materials.trim);
-        const canardRight = new THREE.Mesh(canardGeo, materials.trim);
-        canardLeft.rotation.z = Math.PI / 2;
-        canardRight.rotation.z = -Math.PI / 2;
-        canardLeft.position.set(pair.port.position.x - span * 0.18, pair.port.position.y + moduleRng() * 2, pair.port.position.z - chord * 0.38);
-        canardRight.position.set(pair.starboard.position.x + span * 0.18, pair.starboard.position.y + moduleRng() * 2, pair.starboard.position.z - chord * 0.38);
+  const canardGeo = new THREE.CylinderGeometry(chord * 0.1, chord * 0.14, span * 0.22, 14, 1, false);
+  const canardLeft = new THREE.Mesh(canardGeo, materials.trim);
+  const canardRight = new THREE.Mesh(canardGeo, materials.trim);
+  canardLeft.rotation.z = Math.PI / 2;
+  canardLeft.rotation.y = Math.PI / 10;
+  canardRight.rotation.z = -Math.PI / 2;
+  canardRight.rotation.y = -Math.PI / 10;
+  canardLeft.position.set(pair.port.position.x - span * 0.18, pair.port.position.y + moduleRng() * 2, pair.port.position.z - chord * 0.38);
+  canardRight.position.set(pair.starboard.position.x + span * 0.18, pair.starboard.position.y + moduleRng() * 2, pair.starboard.position.z - chord * 0.38);
 
         const group = new THREE.Group();
         group.name = 'Module:WingForward';
@@ -7169,23 +7246,28 @@ Auto-save  : Active</pre>
       function buildDorsalFin(anchor) {
         const height = profile.dorsalFinHeight * (0.8 + moduleRng() * 0.6);
         const base = Math.max(2.4, anchor.radius * 0.45);
-        const geometry = new THREE.ConeGeometry(base, height, 16, 1, false);
-        const mesh = new THREE.Mesh(geometry, materials.trim);
-        mesh.rotation.x = Math.PI / 2;
-        mesh.position.z = -height / 2;
-        assignContactPlanes(mesh, [
+        const finGeo = new THREE.CylinderGeometry(base * 0.35, base * 0.58, height, 18, 1, false);
+        const fin = new THREE.Mesh(finGeo, materials.trim);
+        fin.rotation.x = Math.PI / 2;
+        fin.position.z = -height / 2;
+        assignContactPlanes(fin, [
           { id: 'root', origin: new THREE.Vector3(0, 0, 0), normal: new THREE.Vector3(0, 0, 1), size: base }
         ]);
+
+        const braceGeo = new THREE.BoxGeometry(base * 0.4, height * 0.2, base * 0.25);
+        const brace = new THREE.Mesh(braceGeo, materials.accent);
+        brace.position.z = -height * 0.35;
 
         const group = new THREE.Group();
         group.name = 'Module:FinDorsal';
         group.position.copy(anchor.position);
-        group.add(mesh);
+        group.add(fin);
+        group.add(brace);
 
         return {
           group,
-          meshes: [mesh],
-          geometries: [geometry],
+          meshes: [fin, brace],
+          geometries: [finGeo, braceGeo],
           materials: []
         };
       }
@@ -7193,23 +7275,28 @@ Auto-save  : Active</pre>
       function buildVentralFin(anchor) {
         const height = profile.ventralFinHeight * (0.8 + moduleRng() * 0.6);
         const base = Math.max(2.2, anchor.radius * 0.4);
-        const geometry = new THREE.ConeGeometry(base, height, 14, 1, false);
-        const mesh = new THREE.Mesh(geometry, materials.trim);
-        mesh.rotation.x = -Math.PI / 2;
-        mesh.position.z = height / 2;
-        assignContactPlanes(mesh, [
+        const finGeo = new THREE.CylinderGeometry(base * 0.32, base * 0.5, height, 16, 1, false);
+        const fin = new THREE.Mesh(finGeo, materials.trim);
+        fin.rotation.x = -Math.PI / 2;
+        fin.position.z = height / 2;
+        assignContactPlanes(fin, [
           { id: 'root', origin: new THREE.Vector3(0, 0, 0), normal: new THREE.Vector3(0, 0, -1), size: base }
         ]);
+
+        const braceGeo = new THREE.BoxGeometry(base * 0.36, height * 0.18, base * 0.22);
+        const brace = new THREE.Mesh(braceGeo, materials.accent);
+        brace.position.z = height * 0.35;
 
         const group = new THREE.Group();
         group.name = 'Module:FinVentral';
         group.position.copy(anchor.position);
-        group.add(mesh);
+        group.add(fin);
+        group.add(brace);
 
         return {
           group,
-          meshes: [mesh],
-          geometries: [geometry],
+          meshes: [fin, brace],
+          geometries: [finGeo, braceGeo],
           materials: []
         };
       }
@@ -7316,23 +7403,58 @@ Auto-save  : Active</pre>
         boom.position.y = anchor.position.y + moduleRng() * 6 - 3;
         boom.position.z = anchor.position.z - moduleRng() * 3;
 
-        const dishGeo = new THREE.CylinderGeometry(profile.hullRadiusFront * 0.45, profile.hullRadiusFront * 0.2, profile.hullRadiusFront * 0.4, 20, 1, true);
-        const dish = new THREE.Mesh(dishGeo, materials.glass);
-        dish.rotation.z = Math.PI / 2;
-        dish.position.set(boom.position.x + boomLength * 0.5, boom.position.y, boom.position.z);
+        const dishRadius = profile.hullRadiusFront * 0.44;
+        const dishDepth = dishRadius * 0.6;
+        const dishProfile = [];
+        for (let i = 0; i <= 12; i++) {
+          const t = i / 12;
+          const eased = Math.pow(t, 1.5);
+          const radius = THREE.MathUtils.lerp(dishRadius * 0.3, dishRadius, eased);
+          const y = -Math.pow(t, 1.7) * dishDepth;
+          dishProfile.push(new THREE.Vector2(radius, y));
+        }
+        const dishGeo = new THREE.LatheGeometry(dishProfile, 28);
+        const dish = new THREE.Mesh(dishGeo, materials.accent);
+        dish.rotation.y = Math.PI / 2;
+        dish.position.set(boom.position.x + boomLength * 0.55, boom.position.y, boom.position.z);
+
+        const dishRimGeo = new THREE.TorusGeometry(dishRadius * 0.96, Math.max(0.35, dishRadius * 0.08), 10, 28);
+        const dishRim = new THREE.Mesh(dishRimGeo, materials.trim);
+        dishRim.rotation.y = Math.PI / 2;
+        dishRim.position.copy(dish.position).add(new THREE.Vector3(0, 0, -dishDepth * 0.05));
+
+        const feedGeo = new THREE.SphereGeometry(dishRadius * 0.22, 12, 10);
+        const feed = new THREE.Mesh(feedGeo, materials.glass);
+        feed.scale.set(1, 0.7, 1);
+        feed.position.set(dish.position.x - dishDepth * 0.32, dish.position.y, dish.position.z);
+
+        const strutGeo = new THREE.BoxGeometry(dishDepth * 0.5, dishRadius * 0.1, dishRadius * 0.1);
+        const struts = [];
+        for (let i = 0; i < 3; i++) {
+          const strut = new THREE.Mesh(strutGeo, materials.trim);
+          const angle = (i / 3) * Math.PI * 2;
+          const offset = new THREE.Vector3(0, Math.cos(angle) * dishRadius * 0.32, Math.sin(angle) * dishRadius * 0.32);
+          strut.position.copy(dish.position).add(offset).add(new THREE.Vector3(-dishDepth * 0.22, 0, 0));
+          strut.rotation.x = Math.PI / 12;
+          strut.rotation.y = angle;
+          struts.push(strut);
+        }
 
         const group = new THREE.Group();
         group.name = 'Module:SensorArray';
         group.add(boom);
         group.add(dish);
+        group.add(dishRim);
+        struts.forEach(strut => group.add(strut));
+        group.add(feed);
         assemblyGroup.add(group);
 
         assignContactPlanes(boom, [
           { id: 'mount', origin: new THREE.Vector3(-boomLength / 2, 0, 0), normal: new THREE.Vector3(-1, 0, 0), size: boomLength }
         ]);
 
-        pushMeshes(boom, dish);
-        pushGeometries(boomGeo, dishGeo);
+        pushMeshes(boom, dish, dishRim, feed, ...struts);
+        pushGeometries(boomGeo, dishGeo, dishRimGeo, feedGeo, strutGeo);
       }
 
       attachSensorModule();
@@ -7669,6 +7791,7 @@ Auto-save  : Active</pre>
       }
       ctx.shipCleanup = null;
       ctx.shipGroup = null;
+      ctx.shipModel = null;
       ctx.shipAnimationState = null;
       ctx.currentShipKey = null;
     }
@@ -7769,11 +7892,23 @@ Auto-save  : Active</pre>
         engineGlow: engineGlowMaterial
       });
 
-  const shipGroup = assembly.group;
-  shipGroup.position.set(0, 0, 0);
-  shipGroup.rotation.y = Math.PI / 6;
-  ctx.group.add(shipGroup);
-  ctx.shipGroup = shipGroup;
+  const shipModel = assembly.group;
+  shipModel.position.set(0, 0, 0);
+  shipModel.rotation.set(0, 0, 0);
+
+  const shipPivot = new THREE.Group();
+  shipPivot.name = 'TraderShipPivot';
+  shipPivot.position.set(0, 0, 0);
+  shipPivot.rotation.set(0, 0, 0);
+
+  const pitch = THREE.MathUtils.degToRad(-12);
+  const yaw = THREE.MathUtils.degToRad(32);
+  const roll = Math.PI / 2;
+  shipModel.rotation.set(pitch, yaw, roll);
+  shipPivot.add(shipModel);
+  ctx.group.add(shipPivot);
+  ctx.shipGroup = shipPivot;
+  ctx.shipModel = shipModel;
 
       assembly.meshes.forEach(mesh => {
         if (mesh) objects.push(mesh);
@@ -7801,30 +7936,47 @@ Auto-save  : Active</pre>
         materials.forEach(mat => {
           if (mat?.dispose) mat.dispose();
         });
-        if (shipGroup.parent) {
-          shipGroup.parent.remove(shipGroup);
+        if (shipPivot.parent) {
+          shipPivot.parent.remove(shipPivot);
         }
+        ctx.shipModel = null;
       };
 
-      if (frameMode === 'snapshot') {
-        frameTraderShipInContext(ctx, profile, { padScale });
-      } else {
-        const baseY = -profile.hullLength * 0.08;
-        shipGroup.position.set(0, baseY, 0);
-        ctx.camera.position.set(0, 36, 210);
-        ctx.camera.lookAt(0, baseY, 0);
-        ctx.camera.near = 0.1;
-        ctx.camera.far = 2000;
-        ctx.camera.updateProjectionMatrix();
+      ctx.shipGroup.position.set(0, 0, 0);
+      ctx.shipGroup.rotation.set(0, 0, 0);
 
-        const wobbleAmount = profile.wobbleAmount * 0.25;
-        ctx.shipAnimationState = {
-          wobblePhase: 0,
-          wobbleRate: profile.wobbleRate,
-          wobbleAmount,
-          baseY,
-          spinRate: profile.spinRate
-        };
+      const deg = THREE.MathUtils.degToRad;
+      if (frameMode === 'snapshot') {
+        frameTraderShipInContext(ctx, profile, {
+          padScale: typeof padScale === 'number' ? padScale : 1.04,
+          centerYOffsetFactor: 0.34,
+          centerXOffsetFactor: 0,
+          azimuth: deg(34),
+          elevation: deg(12),
+          distanceBias: 0.22,
+          heightBias: 0.05,
+          lookAtYOffsetFactor: 0.015,
+          rollAmplitude: 0,
+          spinMultiplier: 0,
+          wobbleMultiplier: 0,
+          wobbleRateMultiplier: 0
+        });
+      } else {
+        frameTraderShipInContext(ctx, profile, {
+          padScale: typeof padScale === 'number' ? padScale : 1.14,
+          centerYOffsetFactor: 0.26,
+          centerXOffsetFactor: 0,
+          azimuth: deg(30),
+          elevation: deg(18),
+          distanceBias: 0.28,
+          heightBias: 0.08,
+          lookAtYOffsetFactor: 0.02,
+          rollAmplitude: 0.035,
+          rollFrequency: 0.45,
+          spinMultiplier: 0.55,
+          wobbleMultiplier: 0.7,
+          wobbleRateMultiplier: 0.85
+        });
       }
       ctx.currentShipKey = cacheKey;
 
@@ -7836,7 +7988,9 @@ Auto-save  : Active</pre>
         }
         anim.wobblePhase += anim.wobbleRate * dt;
         ctx.shipGroup.rotation.y += anim.spinRate * dt;
-        ctx.shipGroup.rotation.z = Math.sin(anim.wobblePhase * 0.5) * 0.05;
+        const rollAmp = typeof anim.rollAmplitude === 'number' ? anim.rollAmplitude : 0.05;
+        const rollFreq = typeof anim.rollFrequency === 'number' ? anim.rollFrequency : 0.5;
+        ctx.shipGroup.rotation.z = Math.sin(anim.wobblePhase * rollFreq) * rollAmp;
         ctx.shipGroup.position.y = anim.baseY + Math.sin(anim.wobblePhase) * anim.wobbleAmount;
         ctx.renderer.render(ctx.scene, ctx.camera);
       });
@@ -7852,13 +8006,13 @@ Auto-save  : Active</pre>
       if (!THREE || !ctx || !ctx.shipGroup) return;
 
       const bbox = new THREE.Box3().setFromObject(ctx.shipGroup);
-      if (!isFinite(bbox.min.x) || !isFinite(bbox.max.x)) {
+      if (!Number.isFinite(bbox.min.x) || !Number.isFinite(bbox.max.x)) {
         return;
       }
 
-      const padScale = typeof options.padScale === 'number' && Number.isFinite(options.padScale) && options.padScale > 1
-        ? options.padScale
-        : 1.25;
+      const toFinite = (value, fallback) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback);
+
+      const padScale = Math.max(0.6, toFinite(options.padScale, 1.18));
 
       const size = new THREE.Vector3();
       const center = new THREE.Vector3();
@@ -7866,10 +8020,14 @@ Auto-save  : Active</pre>
       bbox.getCenter(center);
 
       ctx.shipGroup.position.sub(center);
-      const verticalBias = size.y * 0.18;
-      if (Number.isFinite(verticalBias)) {
-        ctx.shipGroup.position.y -= verticalBias;
-      }
+
+      const centerXFactor = toFinite(options.centerXOffsetFactor, 0);
+      const centerYFactor = toFinite(options.centerYOffsetFactor, 0.2);
+      const centerZFactor = toFinite(options.centerZOffsetFactor, 0);
+
+      ctx.shipGroup.position.x -= size.x * centerXFactor;
+      ctx.shipGroup.position.y -= size.y * centerYFactor;
+      ctx.shipGroup.position.z -= size.z * centerZFactor;
 
       const sphere = new THREE.Sphere();
       bbox.getBoundingSphere(sphere);
@@ -7878,27 +8036,52 @@ Auto-save  : Active</pre>
 
       const camera = ctx.camera;
       const vFov = THREE.MathUtils.degToRad(camera.fov);
-      const vDist = paddedRadius / Math.tan(vFov / 2);
+      const vDist = paddedRadius / Math.tan(Math.max(vFov / 2, 0.0001));
       const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
       const halfWidth = (size.x * padScale) / 2;
       const hDist = halfWidth / Math.tan(Math.max(hFov * 0.5, 0.0001));
-      const distance = Math.max(vDist, hDist);
+      const baseDistance = Math.max(vDist, hDist);
 
-      const cameraY = Math.min(paddedRadius * 0.35, paddedRadius);
-      const cameraZ = distance + paddedRadius * 0.35;
-      camera.position.set(0, cameraY, cameraZ);
-      camera.lookAt(0, -size.y * 0.05, 0);
-      camera.near = Math.max(0.1, cameraZ - paddedRadius * 3);
-      camera.far = cameraZ + paddedRadius * 3;
+      const distanceBias = toFinite(options.distanceBias, 0.28);
+      const orbitDistance = baseDistance + paddedRadius * distanceBias;
+
+      const azimuth = toFinite(options.azimuth, THREE.MathUtils.degToRad(28));
+      const elevation = toFinite(options.elevation, THREE.MathUtils.degToRad(14));
+
+      const planarDistance = Math.cos(elevation) * orbitDistance;
+      const cameraX = Math.sin(azimuth) * planarDistance;
+      const cameraZ = Math.cos(azimuth) * planarDistance;
+      const heightBias = toFinite(options.heightBias, 0);
+      const cameraY = Math.sin(elevation) * orbitDistance + paddedRadius * heightBias;
+
+      const worldCenter = center.clone().add(ctx.shipGroup.position);
+      const lookAtX = worldCenter.x + toFinite(options.lookAtXOffset, 0);
+      const lookAtYOffsetFactor = toFinite(options.lookAtYOffsetFactor, 0.05);
+      const lookAtY = worldCenter.y + toFinite(options.lookAtYOffset, -size.y * lookAtYOffsetFactor);
+      const lookAtZ = worldCenter.z + toFinite(options.lookAtZOffset, 0);
+
+      camera.position.set(cameraX, cameraY, cameraZ);
+      camera.lookAt(lookAtX, lookAtY, lookAtZ);
+      const range = paddedRadius * 3;
+      camera.near = Math.max(0.1, orbitDistance - range);
+      camera.far = orbitDistance + range;
       camera.updateProjectionMatrix();
 
-      const wobbleAmount = profile.wobbleAmount * 0.25;
+      const wobbleMultiplier = Math.max(0, toFinite(options.wobbleMultiplier, 1));
+      const wobbleRateMultiplier = Math.max(0, toFinite(options.wobbleRateMultiplier, 1));
+      const spinMultiplier = toFinite(options.spinMultiplier, 1);
+      const rollAmplitude = Math.max(0, toFinite(options.rollAmplitude, 0.05));
+      const rollFrequency = Math.max(0, toFinite(options.rollFrequency, 0.5));
+
+      const wobbleAmount = profile.wobbleAmount * 0.25 * wobbleMultiplier;
       ctx.shipAnimationState = {
         wobblePhase: 0,
-        wobbleRate: profile.wobbleRate,
+        wobbleRate: profile.wobbleRate * wobbleRateMultiplier,
         wobbleAmount,
         baseY: ctx.shipGroup.position.y,
-        spinRate: profile.spinRate
+        spinRate: profile.spinRate * spinMultiplier,
+        rollAmplitude,
+        rollFrequency
       };
     }
 
