@@ -396,6 +396,7 @@
         linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
       mix-blend-mode: screen;
     }
+    
     .window .planet {
       position: absolute;
       left: 50%;
@@ -3778,6 +3779,34 @@ Auto-save  : Active</pre>
       });
     }
 
+    function snapshotTraderShip3D(options = {}) {
+      const params = { width: 512, height: 512, seed: 0, ...options };
+      const width = Math.max(1, params.width | 0);
+      const height = Math.max(1, params.height | 0);
+      const shipSeed = typeof params.seed === 'number' ? params.seed >>> 0 : 0;
+
+      return new Promise((resolve) => {
+        ensureThreeLoaded(() => {
+          if (!window.THREE) { resolve(''); return; }
+
+          try {
+            const ctx = ensureTraderShipSnapshotContext(width, height);
+            if (!ctx) { resolve(''); return; }
+
+            populateTraderShipContext(ctx, { shipSeed });
+            ctx.stopAnimation?.();
+            ctx.renderOnce();
+            const canvas = ctx.renderer?.domElement;
+            const url = canvas ? canvas.toDataURL('image/png') : '';
+            resolve(url || '');
+          } catch (err) {
+            console.warn('Trader ship snapshot failed', err);
+            resolve('');
+          }
+        });
+      });
+    }
+
     function scanCurrentPlanet() {
       const term = document.getElementById('scanner-terminal');
       if (!powerSystem.activeSystems.has('scanner') || !powerSystem.isPowerAvailable()) {
@@ -3950,6 +3979,7 @@ Auto-save  : Active</pre>
       const planetName = generatePlanetName(x, y, i);
       const info = getPlanetColor(x, y, i);
       const profile = getPlanetProfile(x, y, i, info.type);
+        const seededTrader = generateSeededTraderMatchingComms(x, y, i);
 
       const spriteUrl = await snapshotPlanet3D({
         size: planetSize,
@@ -4039,6 +4069,50 @@ Auto-save  : Active</pre>
       const pad = Math.floor(minDim * 0.03);
       const panelBg = `rgba(0,0,0,0.5)`;
       const textColor = '#ffffff';
+      // Trader ship overlay rendered from the modular ship pipeline.
+      const shipMaxW = Math.floor(targetW * 0.5);
+      const shipMaxH = Math.floor(targetH * 0.6);
+      let traderShipSprite = '';
+      if (seededTrader && typeof seededTrader.shipSeed === 'number' && shipMaxW > 0 && shipMaxH > 0) {
+        const desiredSize = Math.floor(minDim * 0.42);
+        const shipRenderSize = Math.max(240, Math.min(desiredSize, shipMaxW, shipMaxH));
+        if (shipRenderSize > 0) {
+          try {
+            traderShipSprite = await snapshotTraderShip3D({
+              seed: seededTrader.shipSeed,
+              width: shipRenderSize,
+              height: shipRenderSize
+            });
+          } catch (err) {
+            console.warn('Infographic trader ship render failed', err);
+          }
+        }
+      }
+
+      if (traderShipSprite) {
+        await new Promise((resolve) => {
+          const shipImg = new Image();
+          shipImg.onload = () => {
+            const aspect = shipImg.height ? (shipImg.width / shipImg.height) : 1;
+            let drawW = Math.min(shipImg.width, shipMaxW);
+            let drawH = Math.round(drawW / Math.max(aspect, 0.0001));
+            if (drawH > shipMaxH) {
+              drawH = shipMaxH;
+              drawW = Math.round(drawH * Math.max(aspect, 0.0001));
+            }
+            if (drawW > shipMaxW) {
+              drawW = shipMaxW;
+              drawH = Math.round(drawW / Math.max(aspect, 0.0001));
+            }
+            const shipX = targetW - pad - drawW;
+            const shipY = targetH - pad - drawH;
+            ctx.drawImage(shipImg, shipX, shipY, drawW, drawH);
+            resolve();
+          };
+          shipImg.onerror = () => resolve();
+          shipImg.src = traderShipSprite;
+        });
+      }
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       function drawPanel(x0, y0, w, h) {
@@ -4206,7 +4280,7 @@ Auto-save  : Active</pre>
         }
         return { name: `${title} ${name}`, ship: `${adjective} ${noun}`, shipClass, shipSeed, demand: wants };
       }
-      const seededTrader = generateSeededTraderMatchingComms(x, y, i);
+      
   // Auto-size bottom panel to crates only (no text list, no labels)
   ctx.font = headingFont;
   const traderHeading = `Trader: ${seededTrader.name} — ${seededTrader.ship}`;
@@ -5590,6 +5664,7 @@ Auto-save  : Active</pre>
   let scanner3D = null;
   let snapshot3D = null;
   let traderShip3D = null;
+  let traderShipSnapshot3D = null;
   const planet3DTextureCache = new Map(); // key -> {albedoTex,bumpTex,roughTex,emissTex,cloudTex}
   const traderShipTextureCache = new Map();
   const TRADER_SHIP_PALETTES = [
@@ -7276,6 +7351,29 @@ Auto-save  : Active</pre>
       return traderShip3D;
     }
 
+    function ensureTraderShipSnapshotContext(width, height) {
+      if (!window.THREE) return null;
+      const w = Math.max(1, width | 0);
+      const h = Math.max(1, height | 0);
+
+      if (!traderShipSnapshot3D) {
+        traderShipSnapshot3D = createPlanetRenderContext({ width: w, height: h, autoAnimate: false, preserveDrawingBuffer: true });
+        if (!traderShipSnapshot3D) return null;
+        traderShipSnapshot3D.renderer.setPixelRatio(1);
+        traderShipSnapshot3D.renderer.setClearColor(0x000000, 0);
+        traderShipSnapshot3D.camera.position.set(0, 36, 210);
+        traderShipSnapshot3D.camera.lookAt(0, 0, 0);
+        traderShipSnapshot3D.light.intensity = 1.25;
+        traderShipSnapshot3D.light.position.set(140, 160, 220);
+      } else {
+        if (traderShipSnapshot3D.width !== w || traderShipSnapshot3D.height !== h) {
+          traderShipSnapshot3D.setSize(w, h);
+        }
+      }
+
+      return traderShipSnapshot3D;
+    }
+
     function clearTraderShipContext(ctx) {
       if (!ctx) return;
       if (typeof ctx.shipCleanup === 'function') {
@@ -7457,6 +7555,17 @@ Auto-save  : Active</pre>
       traderShip3D = null;
     }
 
+    function disposeTraderShipSnapshotContext() {
+      if (!traderShipSnapshot3D) return;
+      try {
+        clearTraderShipContext(traderShipSnapshot3D);
+        traderShipSnapshot3D.dispose?.({ forceContextLoss: true });
+      } catch (e) {
+        console.warn('Trader ship snapshot cleanup error', e);
+      }
+      traderShipSnapshot3D = null;
+    }
+
     function disposeScannerContext() {
       if (!scanner3D) return;
       const canvasEl = scanner3D.renderer?.domElement;
@@ -7523,6 +7632,7 @@ Auto-save  : Active</pre>
 
     const releaseContexts = () => {
       try { disposeSnapshotRenderContext(); } catch (e) { console.warn('Snapshot context cleanup failed', e); }
+      try { disposeTraderShipSnapshotContext(); } catch (e) { console.warn('Trader ship snapshot cleanup failed', e); }
       try {
         if (scanner3D) {
           const canvasEl = scanner3D.renderer?.domElement;
