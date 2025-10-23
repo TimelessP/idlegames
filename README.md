@@ -17,6 +17,11 @@ Retro space trading adventure in a deterministic procedural galaxy. Trade at out
 - Features: Deterministic procedural galaxy, dynamic supply/demand trading with haggle, fuel management & refueling, cargo management and commodity prices, power management, navigation, warp travel animation, persistent saves (LocalStorage, seeded universe), keyboard & touch-friendly controls, responsive UI, export photos and infographics
 - Tags: Simulation, Sci-Fi, Procedural
 
+### 🎯 [Ballistic Warfare](https://timelessp.github.io/idlegames/ballistic.html)
+Turn-based artillery duels across destructible terrain. Roll grenades down slopes, fire homing missiles, and manage shields while trading volleys in mobile-friendly head-to-head battles.
+- Features: Grenade rolling physics, muzzle-origin firing, homing missiles with cruise control, destructible terrain, shield power-ups, movement actions, round result modal, responsive controls for phones
+- Tags: Artillery, Physics, Strategy, Multiplayer
+
 ### 🧩 [Fit the Shapes](https://timelessp.github.io/idlegames/fit-the-shapes.html)
 Tetris-inspired placement puzzle with special Diamond and Lava pieces. Clear rows/columns and manage economy-like tradeoffs.
 - Features: Drag & drop, diamond refunds, lava burns, score animations, mobile-friendly
@@ -161,6 +166,7 @@ Simply visit [https://timelessp.github.io/idlegames/](https://timelessp.github.i
 - 🧩 Puzzle/Casual: Fit the Shapes, Jigsaw Puzzle, Yahtzee, Maze Balls, Garden Grower
 - 🧪 Physics/Toys: Magic Potion, Physics Toy, Cyber Deck
 - 🎯 Action/Arcade: Space Scroller
+- 🎯 Artillery/Strategy: Ballistic Warfare
 - 🚀 Simulation/Sci-Fi: Space Trader
 - 🛠️ Utilities/Extras: Dictaphone, QR Loop, Feed Cycle, Personal Organiser
 
