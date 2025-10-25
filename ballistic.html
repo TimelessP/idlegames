@@ -488,6 +488,16 @@
           shots: 4,
           spreadAngle: 2
         },
+        bomber: {
+          name: 'Bomber',
+          damage: 38,
+          radius: 48,
+          count: 2,
+          type: 'bomber',
+          dropCount: 6,
+          dropSpacingTime: 0.25,
+          planeSpeed: 160
+        },
         nuke: { 
           name: 'Nuke', 
           damage: 60, 
@@ -579,6 +589,7 @@
           this.selectedWeapon = 'shell';
           this.projectiles = [];
           this.explosions = [];
+          this.bomber = null;
           this.lastTime = 0;
           this.accumulator = 0;
           this.animating = false;
@@ -708,6 +719,7 @@
           this.generateTerrain();
           this.projectiles = [];
           this.explosions = [];
+          this.bomber = null;
           this.animating = false;
           
           // Random first player
@@ -1007,6 +1019,14 @@
           }
           
           this.animating = true;
+
+          if (weapon.type === 'bomber') {
+            this.launchBomber(weapon);
+            this.updateUI();
+            this.render();
+            return;
+          }
+
           const angleRad = (player.angle * Math.PI) / 180;
           const power = (player.power / 100) * 1200 * weapon.speed;
           
@@ -1100,6 +1120,8 @@
         }
 
         update(dt) {
+          this.updateBomber(dt);
+
           // Update projectiles
           for (let i = this.projectiles.length - 1; i >= 0; i--) {
             const proj = this.projectiles[i];
@@ -1198,7 +1220,7 @@
           }
           
           // Check if animation done
-          if (this.projectiles.length === 0 && this.explosions.length === 0 && this.animating) {
+          if (this.projectiles.length === 0 && this.explosions.length === 0 && this.animating && !this.bomber) {
             this.animating = false;
             this.endTurn();
           }
@@ -1458,6 +1480,7 @@
           this.animating = false;
           this.projectiles.length = 0;
           this.explosions.length = 0;
+          this.bomber = null;
           this.updateUI();
           this.showRoundModal(heading, message);
         }
@@ -1573,6 +1596,35 @@
             ctx.stroke();
           });
           
+          if (this.bomber) {
+            const bomber = this.bomber;
+            const bob = Math.sin((bomber.elapsed + bomber.wobblePhase) * 3) * 6;
+            const planeY = bomber.baseY + bob;
+            ctx.save();
+            ctx.translate(bomber.x, planeY);
+            ctx.scale(bomber.direction, 1);
+            ctx.fillStyle = '#d0d7de';
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 28, 9, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#b0bec5';
+            ctx.fillRect(-24, -3.5, 48, 7);
+            ctx.fillRect(-14, 5, 28, 5);
+
+            ctx.fillStyle = '#78909c';
+            ctx.fillRect(-6, -10, 12, 6);
+
+            ctx.fillStyle = '#ffeb3b';
+            ctx.beginPath();
+            ctx.moveTo(20, -2);
+            ctx.lineTo(28, 0);
+            ctx.lineTo(20, 2);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+          }
+          
           // Draw projectiles
           this.projectiles.forEach(proj => {
             const phase = Math.sin(Date.now() * 0.01) * 0.3 + 0.7;
@@ -1630,6 +1682,101 @@
           }
           
           this.render();
+        }
+
+  // Spawn a bomber plane that will sweep across the battlefield dropping bombs.
+  launchBomber(weapon) {
+          const direction = this.currentPlayer === 'a' ? 1 : -1;
+          const margin = Math.max(160, this.width * 0.18);
+          const startX = direction === 1 ? -margin : this.width + margin;
+          const exitX = direction === 1 ? this.width + margin : -margin;
+          const targetKey = this.currentPlayer === 'a' ? 'b' : 'a';
+          const target = this.players[targetKey];
+
+          const planeSpeed = Math.max(weapon.planeSpeed || 0, this.width * 0.12, 120);
+          let planeY = Math.min(this.height * 0.22, target.y - 140);
+          planeY = Math.max(60, Math.min(planeY, target.y - 80));
+
+          const dropCount = weapon.dropCount || 6;
+          const dropSpacingTime = weapon.dropSpacingTime || 0.25;
+          const fallDistance = Math.max(60, target.y - planeY);
+          const fallTime = Math.sqrt((2 * fallDistance) / GRAVITY);
+          const baseRelease = target.x - direction * planeSpeed * fallTime;
+          const spacing = planeSpeed * dropSpacingTime;
+          const centerIndex = (dropCount - 1) / 2;
+
+          const releasePositions = [];
+          for (let i = 0; i < dropCount; i++) {
+            const offsetIndex = i - centerIndex;
+            releasePositions.push(baseRelease + direction * offsetIndex * spacing);
+          }
+          releasePositions.sort((a, b) => direction === 1 ? a - b : b - a);
+
+          this.bomber = {
+            owner: this.currentPlayer,
+            direction,
+            x: startX,
+            y: planeY,
+            baseY: planeY,
+            speed: planeSpeed,
+            exitX,
+            dropPositions: releasePositions,
+            bombsDropped: 0,
+            weaponKey: 'bomber',
+            elapsed: 0,
+            wobblePhase: Math.random() * Math.PI * 2
+          };
+        }
+
+  // Advance the bomber across the screen and release bombs at scheduled points.
+  updateBomber(dt) {
+          if (!this.bomber) return;
+
+          const bomber = this.bomber;
+          bomber.elapsed += dt;
+          bomber.x += bomber.speed * dt * bomber.direction;
+
+          while (bomber.bombsDropped < bomber.dropPositions.length) {
+            const threshold = bomber.dropPositions[bomber.bombsDropped];
+            const pastThreshold = bomber.direction === 1
+              ? bomber.x >= threshold
+              : bomber.x <= threshold;
+            if (pastThreshold) {
+              this.dropBombFromPlane(bomber);
+            } else {
+              break;
+            }
+          }
+
+          const exited = bomber.direction === 1
+            ? bomber.x > bomber.exitX
+            : bomber.x < bomber.exitX;
+
+          if (exited && bomber.bombsDropped >= bomber.dropPositions.length) {
+            this.bomber = null;
+          }
+        }
+
+  dropBombFromPlane(bomber) {
+          const weaponKey = bomber.weaponKey;
+          const bomb = {
+            x: bomber.x,
+            y: bomber.baseY + 6,
+            vx: bomber.speed * bomber.direction,
+            vy: 0,
+            weapon: weaponKey,
+            owner: bomber.owner,
+            time: 0,
+            state: 'flight',
+            rollTimer: 0,
+            hasRolled: false,
+            tangentSpeed: 0,
+            radius: 6,
+            initialSpeed: Math.abs(bomber.speed)
+          };
+
+          this.projectiles.push(bomb);
+          bomber.bombsDropped++;
         }
       }
 
