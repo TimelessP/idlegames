@@ -381,6 +381,7 @@
 			position: relative;
 			perspective: 2200px;
 			perspective-origin: 50% 50%;
+			touch-action: pan-y;
 		}
 
 		.reader-book .book-frame {
@@ -399,6 +400,28 @@
 			filter: blur(40px);
 			opacity: 0.7;
 			pointer-events: none;
+		}
+
+		.reader-book.single-page {
+			perspective: 1600px;
+		}
+
+		.reader-book.single-page .page {
+			width: 100%;
+			left: 0;
+			right: 0;
+			transform: rotateY(0deg) translateZ(0);
+			margin: 0 auto;
+			box-shadow: 0 30px 70px rgba(0, 0, 0, 0.45);
+		}
+
+		.reader-book.single-page .page-left {
+			transform: rotateY(0deg) translateZ(0);
+		}
+
+		.reader-book.single-page .page-right,
+		.reader-book.single-page .page-turn {
+			display: none;
 		}
 
 		.reader-book .page {
@@ -530,6 +553,108 @@
 
 		.page-turn.turn-backward {
 			animation: page-flip-backward 0.9s var(--transition-snappy) forwards;
+		}
+
+		@media (max-width: 900px) {
+			main {
+				padding: 4vh 4vw 6vh;
+			}
+
+			header {
+				flex-direction: column;
+				align-items: flex-start;
+				gap: 0.8rem;
+			}
+
+			.shelf-structure {
+				gap: 3rem 1.5rem;
+				padding: 2.5rem 2rem 4rem;
+				transform: rotateX(5deg) rotateY(-3deg);
+			}
+
+			.book-slot {
+				height: 260px;
+			}
+
+			.book {
+				width: 120px;
+				height: 210px;
+			}
+
+			.reader-stage {
+				width: min(90vw, 720px);
+			}
+		}
+
+		@media (max-width: 720px) {
+			body {
+				font-size: 14px;
+			}
+
+			main {
+				padding: 3.5vh 3vw 5vh;
+			}
+
+			.shelf-wrapper {
+				perspective: 1200px;
+			}
+
+			.shelf-structure {
+				transform: none;
+				padding: 2.2rem 1.5rem 3.5rem;
+				gap: 2.5rem 1.25rem;
+				border-radius: 22px;
+			}
+
+			.book-slot {
+				height: 220px;
+			}
+
+			.book {
+				width: 110px;
+				height: 190px;
+				transform: translateZ(0) rotateY(-3deg) translateY(0);
+			}
+
+			.book:hover {
+				transform: translateZ(14px) rotateY(0deg) translateY(-4px);
+			}
+
+			body.layout-mobile main {
+				padding: 3vh 2.5vw 5vh;
+			}
+
+			body.layout-mobile .reader-header {
+				flex-direction: column;
+				align-items: flex-start;
+				gap: 0.4rem;
+			}
+
+			body.layout-mobile .reader-stage {
+				width: min(100vw, 540px);
+				aspect-ratio: unset;
+			}
+
+			body.layout-mobile .reader-book {
+				min-height: 65vh;
+			}
+
+			body.layout-mobile .reader-controls {
+				flex-wrap: wrap;
+				gap: 0.8rem;
+			}
+
+			body.layout-mobile .reader-controls button {
+				flex: 1 1 calc(50% - 0.6rem);
+				font-size: 0.78rem;
+				padding: 0.65rem 1rem;
+				letter-spacing: 0.18em;
+			}
+
+			body.layout-mobile .page-indicator {
+				width: 100%;
+				text-align: center;
+			}
 		}
 
 		@keyframes page-flip-forward {
@@ -809,7 +934,8 @@
 			readerOpen: false,
 			currentBook: null,
 			currentIndex: 0,
-			isTurning: false
+			isTurning: false,
+			spreadSize: 2
 		};
 
 		const shelfEl = document.getElementById("shelf");
@@ -826,11 +952,20 @@
 		const prevButton = document.getElementById("prevPage");
 		const nextButton = document.getElementById("nextPage");
 		const readerLoading = document.getElementById("readerLoading");
+		const readerBook = document.querySelector(".reader-book");
+		const viewportQuery = window.matchMedia("(max-width: 720px)");
 
 		const textures = createTextures();
 		applyTextures(textures);
 		buildShelf();
 		bindReader();
+		bindTouchNavigation();
+		configureViewportMode();
+		if (typeof viewportQuery.addEventListener === "function") {
+			viewportQuery.addEventListener("change", configureViewportMode);
+		} else if (typeof viewportQuery.addListener === "function") {
+			viewportQuery.addListener(configureViewportMode);
+		}
 
 		function createTextures() {
 			const noise = generateNoise(220, 42);
@@ -1059,23 +1194,47 @@
 		function updateSpread() {
 			const meta = state.currentBook;
 			if (!meta || !meta.pages) return;
-			const leftIndex = state.currentIndex;
-			const rightIndex = leftIndex + 1;
+			const total = meta.pages.length;
+			const stride = state.spreadSize || 2;
+			if (state.currentIndex >= total) {
+				state.currentIndex = Math.max(0, total - stride);
+			}
+			if (stride === 2 && state.currentIndex % 2 === 1) {
+				state.currentIndex = Math.max(0, state.currentIndex - 1);
+			}
+			const leftIndex = Math.max(0, Math.min(state.currentIndex, total - 1));
+			const rightIndex = stride > 1 ? leftIndex + 1 : null;
 			pageLeft.innerHTML = meta.pages[leftIndex] || "";
-			pageRight.innerHTML = meta.pages[rightIndex] || "";
+			if (stride > 1 && rightIndex !== null && rightIndex < total) {
+				pageRight.innerHTML = meta.pages[rightIndex] || "";
+			} else {
+				pageRight.innerHTML = "";
+			}
 			prevButton.disabled = leftIndex <= 0;
-			nextButton.disabled = rightIndex >= meta.pages.length;
-			const formattedLeft = leftIndex + 1;
-			const formattedRight = Math.min(meta.pages.length, rightIndex + 1);
-			pageIndicator.textContent = `${formattedLeft.toString().padStart(3, "0")}` +
-				" · " + `${formattedRight.toString().padStart(3, "0")}`;
+			nextButton.disabled = leftIndex + stride >= total;
+			const formattedLeft = (leftIndex + 1).toString().padStart(3, "0");
+			if (stride > 1) {
+				const indicatorRightIndex = rightIndex !== null ? Math.min(total - 1, rightIndex) : leftIndex;
+				const formattedRight = (indicatorRightIndex + 1).toString().padStart(3, "0");
+				pageIndicator.textContent = `${formattedLeft} · ${formattedRight}`;
+			} else {
+				pageIndicator.textContent = `${formattedLeft} / ${total.toString().padStart(3, "0")}`;
+			}
 		}
 
 		function turnPage(direction) {
 			const meta = state.currentBook;
 			if (!meta || !meta.pages || state.isTurning) return;
-			const target = state.currentIndex + direction * 2;
+			const stride = state.spreadSize || 2;
+			const target = state.currentIndex + direction * stride;
 			if (target < 0 || target >= meta.pages.length) return;
+
+			if (stride === 1) {
+				state.currentIndex = target;
+				updateSpread();
+				return;
+			}
+
 			state.isTurning = true;
 			pageTurn.classList.remove("turn-forward", "turn-backward", "turning");
 			void pageTurn.offsetWidth;
@@ -1098,9 +1257,11 @@
 			state.isTurning = false;
 			pageTurn.classList.remove("turn-forward", "turn-backward", "turning");
 			if (!meta) return;
+			const stride = state.spreadSize || 2;
 			const target = Number(pageTurn.dataset.targetIndex || state.currentIndex);
 			state.currentIndex = Math.max(0, Math.min(target, meta.pages.length - 1));
-			if (state.currentIndex % 2 === 1) state.currentIndex -= 1;
+			if (stride === 2 && state.currentIndex % 2 === 1) state.currentIndex -= 1;
+			pageTurn.dataset.targetIndex = "";
 			updateSpread();
 		}
 
@@ -1116,6 +1277,71 @@
 				event.preventDefault();
 				closeReader();
 			}
+		}
+
+		function configureViewportMode() {
+			const singlePage = viewportQuery.matches;
+			state.spreadSize = singlePage ? 1 : 2;
+			document.body.classList.toggle("layout-mobile", singlePage);
+			if (readerBook) {
+				readerBook.classList.toggle("single-page", singlePage);
+			}
+			if (state.readerOpen && state.currentBook && state.currentBook.pages) {
+				if (!singlePage && state.currentIndex % 2 === 1) {
+					state.currentIndex = Math.max(0, state.currentIndex - 1);
+				}
+				updateSpread();
+			}
+		}
+
+		function bindTouchNavigation() {
+			if (!readerBook || !window.PointerEvent) return;
+			let pointerId = null;
+			let startX = 0;
+			let startY = 0;
+
+			readerBook.addEventListener("pointerdown", event => {
+				if (!state.readerOpen) return;
+				if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+				pointerId = event.pointerId;
+				startX = event.clientX;
+				startY = event.clientY;
+				try {
+					readerBook.setPointerCapture(pointerId);
+				} catch (err) {
+					/* ignore */
+				}
+			});
+
+			readerBook.addEventListener("pointerup", event => {
+				if (pointerId === null || event.pointerId !== pointerId) return;
+				const deltaX = event.clientX - startX;
+				const deltaY = event.clientY - startY;
+				try {
+					readerBook.releasePointerCapture(pointerId);
+				} catch (err) {
+					/* ignore */
+				}
+				pointerId = null;
+				if (Math.abs(deltaX) > 48 && Math.abs(deltaX) > Math.abs(deltaY)) {
+					if (deltaX < 0) {
+						turnPage(1);
+					} else {
+						turnPage(-1);
+					}
+				}
+			});
+
+			readerBook.addEventListener("pointercancel", () => {
+				if (pointerId !== null) {
+					try {
+						readerBook.releasePointerCapture(pointerId);
+					} catch (err) {
+						/* ignore */
+					}
+					pointerId = null;
+				}
+			});
 		}
 	</script>
 </body>
