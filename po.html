@@ -3007,12 +3007,16 @@
                 const dpr = window.devicePixelRatio || 1;
                 const c = gid('tracker-chart-canvas');
                 const parent = c.parentElement;
-                // If hidden, temporarily measure parent by forcing a measurement path after next frame
-                const r = parent.getBoundingClientRect();
-                const w = Math.max(1, Math.floor(r.width * dpr));
-                const h = Math.max(1, Math.floor(r.height * dpr));
-                if (c.width !== w) c.width = w;
-                if (c.height !== h) c.height = h;
+                const rect = parent.getBoundingClientRect();
+                const displayW = Math.max(1, Math.round(rect.width));
+                const displayH = Math.max(1, Math.round(rect.height));
+                const internalW = Math.max(1, Math.round(displayW * dpr));
+                const internalH = Math.max(1, Math.round(displayH * dpr));
+                if (c.width !== internalW) c.width = internalW;
+                if (c.height !== internalH) c.height = internalH;
+                if (c.dataset?.dpr !== String(dpr)) c.dataset.dpr = String(dpr);
+                if (c.style.width !== `${displayW}px`) c.style.width = `${displayW}px`;
+                if (c.style.height !== `${displayH}px`) c.style.height = `${displayH}px`;
             }
             let trackerResizeTimer = null;
             let trackerInputRedrawTimer = null;
@@ -3023,7 +3027,12 @@
                 trackerResizeTimer = setTimeout(() => { requestAnimationFrame(() => { resizeTrackerChart(); drawChart(); }); }, 120);
             });
             function drawChart() {
-                const c = gid('tracker-chart-canvas'); const ctx = c.getContext('2d'); const W = c.width, H = c.height; ctx.clearRect(0, 0, W, H);
+                const c = gid('tracker-chart-canvas'); const ctx = c.getContext('2d');
+                const dpr = Number(c.dataset?.dpr) || (window.devicePixelRatio || 1);
+                const W = (c.width || 0) / dpr; const H = (c.height || 0) / dpr;
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
+                ctx.clearRect(0, 0, c.width, c.height);
+                ctx.scale(dpr, dpr);
                 // Stable ordered ids by metrics list to keep colors/series aligned
                 const sel = new Set(getSelectedMetrics());
                 const ids = (state.tracker.metrics || []).map(m => m.id).filter(id => sel.has(id));
@@ -3035,15 +3044,25 @@
                 const cs = getComputedStyle(gid('app'));
                 const textCol = cs.getPropertyValue('--text').trim() || '#111827';
                 const borderCol = cs.getPropertyValue('--border').trim() || '#e5e7eb';
+                const rootStyles = getComputedStyle(document.documentElement);
+                const baseFontPx = parseFloat(rootStyles.fontSize) || 16;
+                const axisFontPx = Math.max(14, Math.round(baseFontPx * 0.95));
+                const messageFontPx = Math.max(16, Math.round(baseFontPx * 1.15));
+                const axisFont = `${axisFontPx}px Inter`;
+                const messageFont = `${messageFontPx}px Inter`;
                 if (!dates.length || !ids.length) {
-                    ctx.fillStyle = textCol; ctx.globalAlpha = 0.65; ctx.font = '14px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    ctx.fillStyle = textCol; ctx.globalAlpha = 0.65; ctx.font = messageFont; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
                     const msg = !ids.length ? 'Select metrics to see the chart' : 'Add metrics and data to see the chart';
                     ctx.fillText(msg, W / 2, H / 2);
                     ctx.globalAlpha = 1; return;
                 }
                 const colors = getChartColors();
-                const xMargin = 48, yMargin = 24; const bottomMargin = 36; // extra space for x labels, tighten margins
-                const chartW = W - xMargin - 10, chartH = H - yMargin - bottomMargin;
+                const leftMargin = Math.max(48, axisFontPx * 3);
+                const topMargin = Math.max(24, axisFontPx * 1.8);
+                const rightMargin = Math.max(24, axisFontPx * 1.5);
+                const bottomMargin = Math.max(44, axisFontPx * 3); // extra space for x labels, tighten margins
+                const chartW = Math.max(10, W - leftMargin - rightMargin);
+                const chartH = Math.max(10, H - topMargin - bottomMargin);
                 const xVals = dates.length === 1 ? [0] : dates.map((d, i) => i / (dates.length - 1));
                 // Determine y scaling based on chart type
                 let max = 1; const chartType = state.tracker.chartType || 'stacked';
@@ -3055,44 +3074,44 @@
                     dates.forEach((ds) => { let sum = 0; ids.forEach(id => { sum += (state.tracker.data[ds]?.[id] || 0); }); max = Math.max(max, sum); });
                 }
                 // axes
-                ctx.strokeStyle = textCol; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(xMargin, yMargin); ctx.lineTo(xMargin, yMargin + chartH); ctx.lineTo(xMargin + chartW, yMargin + chartH); ctx.stroke();
+                ctx.strokeStyle = textCol; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(leftMargin, topMargin); ctx.lineTo(leftMargin, topMargin + chartH); ctx.lineTo(leftMargin + chartW, topMargin + chartH); ctx.stroke();
                 // grid + labels
-                ctx.fillStyle = textCol; ctx.font = '12px Inter'; ctx.textAlign = 'right';
+                ctx.fillStyle = textCol; ctx.font = axisFont; ctx.textAlign = 'right';
                 for (let i = 0; i <= 5; i++) {
-                    const y = yMargin + chartH - i / 5 * chartH; const v = (max * i / 5).toFixed(1);
-                    ctx.fillText(v, xMargin - 6, y);
+                    const y = topMargin + chartH - i / 5 * chartH; const v = (max * i / 5).toFixed(1);
+                    ctx.fillText(v, leftMargin - 6, y);
                     ctx.strokeStyle = borderCol; ctx.lineWidth = 1; ctx.globalAlpha = 0.6;
-                    ctx.beginPath(); ctx.moveTo(xMargin, y); ctx.lineTo(xMargin + chartW, y); ctx.stroke(); ctx.globalAlpha = 1;
+                    ctx.beginPath(); ctx.moveTo(leftMargin, y); ctx.lineTo(leftMargin + chartW, y); ctx.stroke(); ctx.globalAlpha = 1;
                 }
                 // X-axis date labels with stride to avoid overlap
-                ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+                ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.font = axisFont;
                 const maxLabels = Math.max(2, Math.floor(chartW / 70));
                 const stride = Math.max(1, Math.ceil(dates.length / maxLabels));
                 for (let i = 0; i < dates.length; i += stride) {
-                    const x = xMargin + xVals[i] * chartW;
+                    const x = leftMargin + xVals[i] * chartW;
                     const ds = dates[i];
                     // show as M/D or D Mon depending on locale
                     const lbl = new Date(ds).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-                    ctx.fillText(lbl, x, yMargin + chartH + 6);
+                    ctx.fillText(lbl, x, topMargin + chartH + 6);
                     // optional vertical tick
                     ctx.strokeStyle = borderCol; ctx.lineWidth = 1; ctx.globalAlpha = 0.4;
-                    ctx.beginPath(); ctx.moveTo(x, yMargin + chartH); ctx.lineTo(x, yMargin + chartH + 4); ctx.stroke(); ctx.globalAlpha = 1;
+                    ctx.beginPath(); ctx.moveTo(x, topMargin + chartH); ctx.lineTo(x, topMargin + chartH + 4); ctx.stroke(); ctx.globalAlpha = 1;
                 }
                 if (chartType === 'line') {
                     // draw independent lines (no stacking)
                     ids.forEach((id) => {
                         ctx.beginPath(); const col = getMetricColorById(id); ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.fillStyle = col;
                         for (let i = 0; i < dates.length; i++) {
-                            const x = xMargin + xVals[i] * chartW;
+                            const x = leftMargin + xVals[i] * chartW;
                             const v = (state.tracker.data[dates[i]]?.[id] || 0);
-                            const y = yMargin + chartH - (v / max) * chartH;
+                            const y = topMargin + chartH - (v / max) * chartH;
                             if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
                         }
                         ctx.stroke();
                         // optional small points
                         for (let i = 0; i < dates.length; i++) {
-                            const x = xMargin + xVals[i] * chartW; const v = (state.tracker.data[dates[i]]?.[id] || 0);
-                            const y = yMargin + chartH - (v / max) * chartH; ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+                            const x = leftMargin + xVals[i] * chartW; const v = (state.tracker.data[dates[i]]?.[id] || 0);
+                            const y = topMargin + chartH - (v / max) * chartH; ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
                         }
                     });
                 } else {
@@ -3101,21 +3120,21 @@
                     ids.forEach((id) => {
                         ctx.beginPath(); const col = getMetricColorById(id); ctx.fillStyle = col + '55'; ctx.strokeStyle = col; ctx.lineWidth = 2;
                         for (let i = 0; i < dates.length; i++) {
-                            const x = xMargin + xVals[i] * chartW;
+                            const x = leftMargin + xVals[i] * chartW;
                             const dayTotal = ids.reduce((s, j) => s + (state.tracker.data[dates[i]]?.[j] || 0), 0);
                             const val = (state.tracker.data[dates[i]]?.[id] || 0);
                             const base = (state.tracker.chartType === 'normalized' ? (stack[i] / Math.max(1e-9, dayTotal)) : stack[i] / max);
                             const top = (state.tracker.chartType === 'normalized' ? ((stack[i] + val) / Math.max(1e-9, dayTotal)) : ((stack[i] + val) / max));
-                            const y0 = yMargin + chartH - base * chartH;
-                            const y1 = yMargin + chartH - top * chartH;
+                            const y0 = topMargin + chartH - base * chartH;
+                            const y1 = topMargin + chartH - top * chartH;
                             if (i === 0) { ctx.moveTo(x, y0); } else { ctx.lineTo(x, y0); }
                         }
                         for (let i = dates.length - 1; i >= 0; i--) {
-                            const x = xMargin + xVals[i] * chartW;
+                            const x = leftMargin + xVals[i] * chartW;
                             const dayTotal = ids.reduce((s, j) => s + (state.tracker.data[dates[i]]?.[j] || 0), 0);
                             const val = (state.tracker.data[dates[i]]?.[id] || 0);
                             const top = (state.tracker.chartType === 'normalized' ? ((stack[i] + val) / Math.max(1e-9, dayTotal)) : ((stack[i] + val) / max));
-                            const y1 = yMargin + chartH - top * chartH;
+                            const y1 = topMargin + chartH - top * chartH;
                             ctx.lineTo(x, y1);
                         }
                         ctx.closePath(); ctx.fill(); ctx.stroke();
