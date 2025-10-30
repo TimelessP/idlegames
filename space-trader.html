@@ -855,6 +855,11 @@
       color: var(--ink);
     }
 
+    .fuel-control-label[data-power-limited="true"] span:last-child {
+      color: rgba(255, 154, 154, 0.88);
+      text-shadow: 0 0 8px rgba(255, 124, 124, 0.4);
+    }
+
     html[data-theme="dark"] .fuel-panel {
       --tank-rim: rgba(116, 166, 255, 0.42);
       --tank-glass:
@@ -4601,6 +4606,7 @@ Auto-save  : Active</pre>
         this.bursts = [];
         // Indicates there is an active burst that requires peak discharge beyond per-battery nominal limits
         this.burstInProgress = false;
+        this.fuelSystem = null;
       }
 
       /**
@@ -4616,6 +4622,10 @@ Auto-save  : Active</pre>
         
         // Add solar panel motor draw
         total += solarSystem.currentMotorDraw;
+
+        if (this.fuelSystem) {
+          total += this.fuelSystem.currentPumpDrawTotal || 0;
+        }
         
         // Add teleportation draw if active
         if (this.teleportInProgress) {
@@ -4632,6 +4642,10 @@ Auto-save  : Active</pre>
         }
         
         return total;
+      }
+
+      registerFuelSystem(system) {
+        this.fuelSystem = system || null;
       }
 
       /**
@@ -4824,6 +4838,19 @@ Auto-save  : Active</pre>
           aft: 0
         };
 
+        // Pump draw envelopes (watts) per pump type at 0% and 100% commanded flow
+        this.pumpSpecs = {
+          transfer: { minPower: 140, maxPower: 340 },
+          dump: { minPower: 90, maxPower: 240 }
+        };
+
+        this.actualTransferRates = { foreToAft: 0, aftToFore: 0 };
+        this.actualDumpRates = { fore: 0, aft: 0 };
+        this.currentPumpDraws = { foreToAft: 0, aftToFore: 0, foreDump: 0, aftDump: 0 };
+        this.currentPumpDrawTotal = 0;
+        this.pumpPowerScaling = 0;
+  this.pumpPowerLimited = false;
+
         this._dirty = true;
 
         Object.defineProperty(this, 'maxCapacity', {
@@ -4887,55 +4914,247 @@ Auto-save  : Active</pre>
         return this.dumpRates[tank === 'aft' ? 'aft' : 'fore'];
       }
 
+      _computePumpDemand(kind, normalized, loadFactor = 1) {
+        const spec = kind === 'transfer' ? this.pumpSpecs.transfer : this.pumpSpecs.dump;
+        if (!spec) return 0;
+        const clamped = Math.max(0, Math.min(1, normalized));
+        const base = spec.minPower;
+        const span = spec.maxPower - spec.minPower;
+        return (base + span * clamped) * Math.max(0.1, loadFactor);
+      }
+
+      _snapshotPumpPowerSources() {
+        const connected = batterySystem.getConnectedBatteries();
+        let availableWh = 0;
+        let dischargeLimit = 0;
+        connected.forEach((battery) => {
+          if (!battery.enabled || !battery.connectedToBus) {
+            return;
+          }
+          const charge = Math.max(0, battery.currentCharge);
+          if (charge <= 0) {
+            return;
+          }
+          availableWh += charge;
+          dischargeLimit += battery.maxDischargeRate || 0;
+        });
+        const solarOutput = solarSystem.connectedToBus ? solarSystem.getPowerOutput() : 0;
+        return {
+          availableWh,
+          dischargeLimit,
+          solarOutput,
+          hasBattery: dischargeLimit > 0 && availableWh > 0,
+          hasSolar: solarOutput > 0
+        };
+      }
+
+      _determinePumpPowerScaling(totalDemand, supply, deltaTime) {
+        if (totalDemand <= 0) {
+          return 0;
+        }
+        if (!supply.hasBattery && !supply.hasSolar) {
+          return 0;
+        }
+
+        let availableWatts = 0;
+        if (supply.hasBattery) {
+          availableWatts += supply.dischargeLimit;
+        }
+        if (supply.hasSolar) {
+          availableWatts += supply.solarOutput;
+        }
+
+        if (availableWatts <= 0) {
+          return 0;
+        }
+
+        let ratio = Math.min(1, availableWatts / totalDemand);
+
+        if (supply.hasBattery) {
+          const perFrameLimit = (supply.availableWh * 3600) / Math.max(deltaTime, 1e-3);
+          ratio = Math.min(ratio, perFrameLimit / totalDemand);
+        }
+
+        return Math.max(0, Math.min(1, ratio));
+      }
+
+      _applyPumpTelemetry(telemetry) {
+        const EPS = 0.0001;
+        const drawEps = 0.5;
+        const nextPowerLimited = telemetry.hasDemand && telemetry.powerScaling < 0.999;
+        const changed =
+          Math.abs(telemetry.transfer.foreToAft - this.actualTransferRates.foreToAft) > EPS ||
+          Math.abs(telemetry.transfer.aftToFore - this.actualTransferRates.aftToFore) > EPS ||
+          Math.abs(telemetry.dump.fore - this.actualDumpRates.fore) > EPS ||
+          Math.abs(telemetry.dump.aft - this.actualDumpRates.aft) > EPS ||
+          Math.abs(telemetry.totalDraw - this.currentPumpDrawTotal) > drawEps ||
+          Math.abs(telemetry.powerScaling - this.pumpPowerScaling) > 0.01;
+
+        if (changed || nextPowerLimited !== this.pumpPowerLimited) {
+          this._dirty = true;
+        }
+
+        this.actualTransferRates = { ...telemetry.transfer };
+        this.actualDumpRates = { ...telemetry.dump };
+        this.currentPumpDraws = { ...telemetry.draws };
+        this.currentPumpDrawTotal = telemetry.totalDraw;
+        this.pumpPowerScaling = telemetry.powerScaling;
+        this.pumpPowerLimited = nextPowerLimited;
+      }
+
+      getTransferTelemetry(direction) {
+        const key = direction === 'aftToFore' ? 'aftToFore' : 'foreToAft';
+        return {
+          commanded: this.transferRates[key] || 0,
+          actual: this.actualTransferRates[key] || 0,
+          draw: this.currentPumpDraws[key] || 0,
+          powerLimited: this.pumpPowerLimited
+        };
+      }
+
+      getDumpTelemetry(tank) {
+        const key = tank === 'aft' ? 'aft' : 'fore';
+        const drawKey = key === 'aft' ? 'aftDump' : 'foreDump';
+        return {
+          commanded: this.dumpRates[key] || 0,
+          actual: this.actualDumpRates[key] || 0,
+          draw: this.currentPumpDraws[drawKey] || 0,
+          powerLimited: this.pumpPowerLimited
+        };
+      }
+
       update(deltaTime) {
         const seconds = Math.max(0, Number(deltaTime) || 0);
         let changed = false;
 
         if (seconds > 0) {
           const litersPerMinute = 1000;
+          const powerSnapshot = this._snapshotPumpPowerSources();
 
-          const netTransferKlPerMin = this.transferRates.foreToAft - this.transferRates.aftToFore;
-          if (netTransferKlPerMin !== 0) {
-            const transferLiters = (netTransferKlPerMin * litersPerMinute / 60) * seconds;
-            if (transferLiters > 0) {
-              const available = Math.min(this.foreTank.current, transferLiters);
-              const space = this.aftTank.max - this.aftTank.current;
-              const moved = Math.min(available, space);
-              if (moved > 0) {
-                this.foreTank.current -= moved;
-                this.aftTank.current += moved;
-                changed = true;
-              }
-            } else {
-              const requested = -transferLiters;
-              const available = Math.min(this.aftTank.current, requested);
-              const space = this.foreTank.max - this.foreTank.current;
-              const moved = Math.min(available, space);
-              if (moved > 0) {
-                this.aftTank.current -= moved;
-                this.foreTank.current += moved;
-                changed = true;
-              }
+          const canForeToAft = this.transferRates.foreToAft > 0 && this.foreTank.current > 0 && this.aftTank.current < this.aftTank.max;
+          const canAftToFore = this.transferRates.aftToFore > 0 && this.aftTank.current > 0 && this.foreTank.current < this.foreTank.max;
+          const canForeDump = this.dumpRates.fore > 0 && this.foreTank.current > 0;
+          const canAftDump = this.dumpRates.aft > 0 && this.aftTank.current > 0;
+
+          const forePercent = this.foreTank.max > 0 ? (this.foreTank.current / this.foreTank.max) : 0;
+          const aftPercent = this.aftTank.max > 0 ? (this.aftTank.current / this.aftTank.max) : 0;
+
+          const foreToAftNorm = this.maxTransferRateKlPerMin > 0 ? this.transferRates.foreToAft / this.maxTransferRateKlPerMin : 0;
+          const aftToForeNorm = this.maxTransferRateKlPerMin > 0 ? this.transferRates.aftToFore / this.maxTransferRateKlPerMin : 0;
+          const foreDumpNorm = this.maxDumpRateKlPerMin > 0 ? this.dumpRates.fore / this.maxDumpRateKlPerMin : 0;
+          const aftDumpNorm = this.maxDumpRateKlPerMin > 0 ? this.dumpRates.aft / this.maxDumpRateKlPerMin : 0;
+
+          const pumps = {
+            foreToAft: {
+              commanded: this.transferRates.foreToAft,
+              canOperate: canForeToAft,
+              demand: canForeToAft
+                ? this._computePumpDemand('transfer', foreToAftNorm, 1 + Math.max(0, aftPercent - forePercent) * 0.3)
+                : 0
+            },
+            aftToFore: {
+              commanded: this.transferRates.aftToFore,
+              canOperate: canAftToFore,
+              demand: canAftToFore
+                ? this._computePumpDemand('transfer', aftToForeNorm, 1 + Math.max(0, forePercent - aftPercent) * 0.3)
+                : 0
+            },
+            foreDump: {
+              commanded: this.dumpRates.fore,
+              canOperate: canForeDump,
+              demand: canForeDump
+                ? this._computePumpDemand('dump', foreDumpNorm, 1 + forePercent * 0.25)
+                : 0
+            },
+            aftDump: {
+              commanded: this.dumpRates.aft,
+              canOperate: canAftDump,
+              demand: canAftDump
+                ? this._computePumpDemand('dump', aftDumpNorm, 1 + aftPercent * 0.25)
+                : 0
             }
-          }
+          };
 
-          const foreDumpLiters = (this.dumpRates.fore * litersPerMinute / 60) * seconds;
-          if (foreDumpLiters > 0) {
-            const dumped = Math.min(this.foreTank.current, foreDumpLiters);
-            if (dumped > 0) {
-              this.foreTank.current -= dumped;
+          const totalDemand = Object.values(pumps).reduce((sum, pump) => {
+            return pump.canOperate ? sum + pump.demand : sum;
+          }, 0);
+
+          const powerScaling = this._determinePumpPowerScaling(totalDemand, powerSnapshot, seconds);
+
+          const draws = { foreToAft: 0, aftToFore: 0, foreDump: 0, aftDump: 0 };
+          const transferActual = { foreToAft: 0, aftToFore: 0 };
+          const dumpActual = { fore: 0, aft: 0 };
+
+          const processTransfer = (pumpKey, sourceTank, targetTank, storeKey) => {
+            const pump = pumps[pumpKey];
+            if (!pump.canOperate || powerScaling <= 0) {
+              transferActual[storeKey] = 0;
+              draws[pumpKey] = 0;
+              return;
+            }
+
+            const powerLimitedRate = pump.commanded * powerScaling;
+            const powerLimitedDraw = pump.demand * powerScaling;
+
+            const litersPerSecond = (powerLimitedRate * litersPerMinute) / 60;
+            const requestedLiters = litersPerSecond * seconds;
+            const available = Math.max(0, sourceTank.current);
+            const capacity = Math.max(0, targetTank.max - targetTank.current);
+            const actualLiters = Math.min(requestedLiters, available, capacity);
+
+            if (actualLiters > 0) {
+              sourceTank.current -= actualLiters;
+              targetTank.current += actualLiters;
               changed = true;
             }
-          }
 
-          const aftDumpLiters = (this.dumpRates.aft * litersPerMinute / 60) * seconds;
-          if (aftDumpLiters > 0) {
-            const dumped = Math.min(this.aftTank.current, aftDumpLiters);
-            if (dumped > 0) {
-              this.aftTank.current -= dumped;
+            const flowScale = requestedLiters > 0 ? actualLiters / requestedLiters : 0;
+            transferActual[storeKey] = powerLimitedRate * flowScale;
+            draws[pumpKey] = powerLimitedDraw * flowScale;
+          };
+
+          processTransfer('foreToAft', this.foreTank, this.aftTank, 'foreToAft');
+          processTransfer('aftToFore', this.aftTank, this.foreTank, 'aftToFore');
+
+          const processDump = (pumpKey, tankKey, storeKey) => {
+            const pump = pumps[pumpKey];
+            const tank = tankKey === 'fore' ? this.foreTank : this.aftTank;
+            if (!pump.canOperate || powerScaling <= 0) {
+              dumpActual[storeKey] = 0;
+              draws[pumpKey] = 0;
+              return;
+            }
+
+            const powerLimitedRate = pump.commanded * powerScaling;
+            const powerLimitedDraw = pump.demand * powerScaling;
+
+            const litersPerSecond = (powerLimitedRate * litersPerMinute) / 60;
+            const requestedLiters = litersPerSecond * seconds;
+            const available = Math.max(0, tank.current);
+            const actualLiters = Math.min(requestedLiters, available);
+
+            if (actualLiters > 0) {
+              tank.current -= actualLiters;
               changed = true;
             }
-          }
+
+            const flowScale = requestedLiters > 0 ? actualLiters / requestedLiters : 0;
+            dumpActual[storeKey] = powerLimitedRate * flowScale;
+            draws[pumpKey] = powerLimitedDraw * flowScale;
+          };
+
+          processDump('foreDump', 'fore', 'fore');
+          processDump('aftDump', 'aft', 'aft');
+
+          const totalDraw = draws.foreToAft + draws.aftToFore + draws.foreDump + draws.aftDump;
+          this._applyPumpTelemetry({
+            transfer: transferActual,
+            dump: dumpActual,
+            draws,
+            totalDraw,
+            powerScaling,
+            hasDemand: totalDemand > 0
+          });
         }
 
         if (changed) {
@@ -4991,7 +5210,12 @@ Auto-save  : Active</pre>
           foreTank: { max: this.foreTank.max, current: this.foreTank.current },
           aftTank: { max: this.aftTank.max, current: this.aftTank.current },
           transferRates: { ...this.transferRates },
-          dumpRates: { ...this.dumpRates }
+          dumpRates: { ...this.dumpRates },
+          actualTransferRates: { ...this.actualTransferRates },
+          actualDumpRates: { ...this.actualDumpRates },
+          pumpDraws: { ...this.currentPumpDraws },
+          totalPumpDraw: this.currentPumpDrawTotal,
+          pumpPowerScaling: this.pumpPowerScaling
         };
       }
 
@@ -5938,7 +6162,8 @@ Auto-save  : Active</pre>
     eventBus.on('battery:charge-changed', () => updateScannerUI());
 
     // Create fuel system
-    const fuelSystem = new FuelSystem();
+  const fuelSystem = new FuelSystem();
+  powerSystem.registerFuelSystem(fuelSystem);
 
     // ============================================================================
     // TRADING SYSTEM - Manages cargo, traders, and economy
@@ -7055,18 +7280,35 @@ Auto-save  : Active</pre>
       setSliderFromRate(foreDumpSlider, fuelSystem.getDumpRate('fore'), maxDump);
       setSliderFromRate(aftDumpSlider, fuelSystem.getDumpRate('aft'), maxDump);
 
-      const setRateLabel = (selector, rate) => {
-        const label = transferPanel.querySelector(`[data-rate-display="${selector}"]`);
-        if (label) {
-          const precision = rate >= 10 ? 1 : 2;
-          label.textContent = `${rate.toFixed(precision)} KL/MIN`;
+      const setRateLabel = (selector, telemetry) => {
+        const readout = transferPanel.querySelector(`[data-rate-display="${selector}"]`);
+        if (!readout || !telemetry) {
+          return;
+        }
+
+        const commanded = telemetry.commanded ?? 0;
+        const actual = telemetry.actual ?? 0;
+        const precisionBase = Math.max(commanded, actual);
+        const precision = precisionBase >= 10 ? 1 : 2;
+        readout.textContent = `${actual.toFixed(precision)} KL/MIN`;
+
+        const labelEl = readout.closest('.fuel-control-label');
+        if (labelEl) {
+          const limited = telemetry.powerLimited && actual + 0.01 < commanded;
+          if (limited) {
+            labelEl.setAttribute('data-power-limited', 'true');
+            readout.title = `Commanded ${commanded.toFixed(precision)} KL/MIN (power limited)`;
+          } else {
+            labelEl.removeAttribute('data-power-limited');
+            readout.removeAttribute('title');
+          }
         }
       };
 
-      setRateLabel('fore-to-aft', fuelSystem.getTransferRate('foreToAft'));
-      setRateLabel('aft-to-fore', fuelSystem.getTransferRate('aftToFore'));
-      setRateLabel('fore-dump', fuelSystem.getDumpRate('fore'));
-      setRateLabel('aft-dump', fuelSystem.getDumpRate('aft'));
+      setRateLabel('fore-to-aft', fuelSystem.getTransferTelemetry('foreToAft'));
+      setRateLabel('aft-to-fore', fuelSystem.getTransferTelemetry('aftToFore'));
+      setRateLabel('fore-dump', fuelSystem.getDumpTelemetry('fore'));
+      setRateLabel('aft-dump', fuelSystem.getDumpTelemetry('aft'));
     }
 
     function updateFuelUI(force = false) {
@@ -12398,6 +12640,7 @@ Auto-save  : Active</pre>
       // Power flow management
       const solarPower = solarSystem.currentOutput;
       const systemDraw = powerSystem.getTotalDraw();
+    mainBus.currentDraw = systemDraw;
   // Battery-only events (teleport/bursts) should be sourced from batteries even if solar has surplus
   const batteryOnlyWatts = powerSystem.getBurstAndTeleportWatts();
   const nonBatteryDraw = Math.max(0, systemDraw - batteryOnlyWatts);
