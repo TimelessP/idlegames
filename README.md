@@ -17,6 +17,11 @@ Retro space trading adventure in a deterministic procedural galaxy. Trade at out
 - Features: Deterministic procedural galaxy, dynamic supply/demand trading with haggle, fuel management & refueling, cargo management and commodity prices, power management, navigation, warp travel animation, persistent saves (LocalStorage, seeded universe), keyboard & touch-friendly controls, responsive UI, export photos and infographics
 - Tags: Simulation, Sci-Fi, Procedural
 
+### 🏮 [Lumen Drift](https://timelessp.github.io/idlegames/lumen-drift.html)
+Guide a wandering lantern through luminous currents, collect glints, and soak in relaxing ambience while violet whispers grant temporary shields.
+- Features: Pointer/touch drift controls, collectible glints with energy management, shield-granting whisper orbs, fullscreen canvas rendering, responsive HUD, gentle particle effects, mobile-friendly play
+- Tags: Relaxing, Atmospheric, Arcade
+
 ### 🎯 [Ballistic Warfare](https://timelessp.github.io/idlegames/ballistic.html)
 Turn-based artillery duels across destructible terrain. Roll grenades down slopes, fire homing missiles, and manage shields while trading volleys in mobile-friendly head-to-head battles.
 - Features: Grenade rolling physics, muzzle-origin firing, homing missiles with cruise control, destructible terrain, shield power-ups, movement actions, round result modal, responsive controls for phones
@@ -82,7 +87,7 @@ Advanced file transfer via chunked QR codes. Transfer files of any size by autom
 - Features: Chunked transmission, automatic looping, URL-based QR codes, universal QR reader compatibility, 512-byte chunks, 1-second intervals
 - Tags: Utility, File Transfer, QR Codes, Chunked
 
-### �📔 [Personal Organiser](https://timelessp.github.io/idlegames/po.html)
+### 🗂️ [Personal Organiser](https://timelessp.github.io/idlegames/po.html)
 Adorable, mobile-first organiser with Notes, Calendar, Tasks, Flip Cards, and Calculator — all local-first.
 - Features: Scalable UI, drag-and-drop sorting (touch + mouse), fullscreen, JSON import/export, mode persistence, autosizing calculator
 - Tags: Utility, Productivity, Notes, Calendar, Tasks
@@ -165,7 +170,7 @@ Simply visit [https://timelessp.github.io/idlegames/](https://timelessp.github.i
 
 - 🧩 Puzzle/Casual: Fit the Shapes, Jigsaw Puzzle, Yahtzee, Maze Balls, Garden Grower
 - 🧪 Physics/Toys: Magic Potion, Physics Toy, Cyber Deck
-- 🎯 Action/Arcade: Space Scroller
+- 🎯 Action/Arcade: Lumen Drift, Space Scroller
 - 🎯 Artillery/Strategy: Ballistic Warfare
 - 🚀 Simulation/Sci-Fi: Space Trader
 - 🛠️ Utilities/Extras: Dictaphone, QR Loop, Feed Cycle, Personal Organiser
