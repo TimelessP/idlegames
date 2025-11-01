@@ -1,4 +1,4 @@
-/* Feed Cycle 2.0.0 (Early SPA Scaffold)
+/* Feed Cycle 2.0.1
   Overview
   --------
   This file is an initial implementation of the version 2 single‑page application redesign.
@@ -43,7 +43,7 @@
 (function(){
   'use strict';
 
-  const VERSION = '2.0.0';
+  const VERSION = '2.0.1';
   const LS_KEY = 'feedcycle-v2';
   const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{}, proxyScores:{}, proxyScoresResetAt:0 }; // posts ephemeral + tags mapping postId -> [tag]
   // state will be loaded after proxy scoring utilities are defined
@@ -274,6 +274,48 @@
       btn.title = `Theme: ${state.theme}`;
       btn.setAttribute('aria-label', `Theme ${state.theme} (toggle)`);
     }
+  }
+
+  // Set up accessible fullscreen toggle button and keep icon/labels in sync.
+  function setupFullscreenToggle(){
+    const btn = byId('btn-fullscreen');
+    if(!btn) return;
+    const iconUse = btn.querySelector('#fullscreenIconUse');
+    const getFullscreenElement = ()=> document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+    const updateUi = ()=>{
+      const active = !!getFullscreenElement();
+      const label = active ? 'Exit fullscreen' : 'Enter fullscreen';
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      btn.setAttribute('aria-label', label);
+      btn.title = label;
+      if(iconUse){ iconUse.setAttribute('href', active ? '#i-fullscreen-exit' : '#i-fullscreen'); }
+    };
+    const requestFullscreen = (target)=>{
+      if(!target) return;
+      const fn = target.requestFullscreen || target.webkitRequestFullscreen || target.mozRequestFullScreen || target.msRequestFullscreen;
+      if(typeof fn === 'function'){
+        try{
+          const result = fn.call(target);
+          if(result && typeof result.catch==='function'){ result.catch(()=>{}); }
+        }catch(e){ console.warn('Fullscreen request failed', e); }
+      }
+    };
+    const exitFullscreen = ()=>{
+      const fn = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+      if(typeof fn === 'function'){
+        try{
+          const result = fn.call(document);
+          if(result && typeof result.catch==='function'){ result.catch(()=>{}); }
+        }catch(e){ console.warn('Fullscreen exit failed', e); }
+      }
+    };
+    btn.addEventListener('click', ()=>{
+      if(getFullscreenElement()){ exitFullscreen(); }
+      else { requestFullscreen(document.documentElement); }
+    });
+    ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange'].forEach(evt=> document.addEventListener(evt, updateUi));
+    ['fullscreenerror','webkitfullscreenerror','mozfullscreenerror','MSFullscreenError'].forEach(evt=> document.addEventListener(evt, updateUi));
+    updateUi();
   }
 
   // ---------- Panel Stack ----------
@@ -2405,6 +2447,7 @@
         }
       }
       if(seconds==null) seconds = 0;
+      seconds *= 4;
       seconds = Math.min(900, seconds);
       return dir * Math.round(seconds);
     }
@@ -2506,6 +2549,7 @@
   function start(){
     applyTheme();
     initMediaPlayer();
+    setupFullscreenToggle();
     function computeStackOffset(){
       const header = document.querySelector('.fc-header');
       const mpEl = document.getElementById('media-player');
