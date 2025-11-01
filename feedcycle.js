@@ -2264,7 +2264,21 @@
   function download(name, content, type){ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([content],{type})); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1200); }
 
   // ---------- Sanitizer (minimal) ----------
-  function sanitizeHtml(html){ const t=document.createElement('div'); t.innerHTML=html||''; t.querySelectorAll('script,style,iframe,object,embed').forEach(n=>n.remove()); t.querySelectorAll('*').forEach(n=>{ [...n.attributes].forEach(a=>{ if(!['href','src','alt','title'].includes(a.name)) n.removeAttribute(a.name); }); if(n.nodeName==='A'){ n.setAttribute('target','_blank'); n.setAttribute('rel','noopener noreferrer'); } }); return t.innerHTML; }
+  function sanitizeHtml(html){
+    const t=document.createElement('div');
+    t.innerHTML=html||'';
+    t.querySelectorAll('script,style,iframe,object,embed,link,meta,noscript,template,base,title,head').forEach(n=>n.remove());
+    t.querySelectorAll('*').forEach(n=>{
+      [...n.attributes].forEach(a=>{
+        if(!['href','src','alt','title'].includes(a.name)) n.removeAttribute(a.name);
+      });
+      if(n.nodeName==='A'){
+        n.setAttribute('target','_blank');
+        n.setAttribute('rel','noopener noreferrer');
+      }
+    });
+    return t.innerHTML;
+  }
 
   // ---------- Infinite Scroll (basic incremental) ----------
   function setupInfiniteScroll(panel){
