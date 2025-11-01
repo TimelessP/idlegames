@@ -119,7 +119,13 @@ Adorable, mobile-first organiser with Notes, Calendar, Tasks, Flip Cards, and Ca
 - **Vanilla JavaScript** for game logic and interactivity
 - **LocalStorage** for persistent game data and preferences
 
-### 🖼️ Favicon on GitHub Pages
+### � Progressive Web App
+- Service worker precaches the entire collection for offline play.
+- `assets/js/pwa.js` detects new versions (via `<meta name="app-version">`) and prompts the user to refresh.
+- `manifest.webmanifest` and bundled icons enable installation on desktop and mobile.
+- All runtime dependencies (Three.js, QRious, jsQR, Transformers.js, Inter font) are vendored into `assets/vendor/` and `assets/fonts/` during the build so the experience is self-contained.
+
+### �🖼️ Favicon on GitHub Pages
 Each HTML page explicitly links `favicon.ico` so icons resolve correctly at `/idlegames/` on GitHub Pages instead of the site root.
 
 ### 🔒 Parental Controls
@@ -155,16 +161,21 @@ Simply visit [https://timelessp.github.io/idlegames/](https://timelessp.github.i
 1. Clone this repository:
    ```bash
    git clone https://github.com/TimelessP/idlegames.git
+   cd idlegames
    ```
-2. Open `index.html` in your web browser
-3. Or serve with a local HTTP server:
+2. Install tooling dependencies (Node.js 18+ recommended):
    ```bash
-   # Using Python 3
-   python -m http.server 8000
-   
-   # Using Node.js
-   npx serve
+   npm install
    ```
+3. Build the offline bundle into `dist/`:
+   ```bash
+   npm run build
+   ```
+4. Preview locally with caching behaviours intact:
+   ```bash
+   npm run serve
+   ```
+   This command rebuilds and serves `dist/` via a static server on port 4173. You can also deploy the contents of `dist/` directly to GitHub Pages or any static host.
 
 ## 🎮 Categories
 
