@@ -2299,6 +2299,9 @@
     const timeEl = byId('mp-time');
     const cueBtn = byId('cueBtn');
     const cueTrack = byId('cueTrack');
+  const preventLongPressMenu = evt=>{ evt.preventDefault(); evt.stopPropagation?.(); };
+  cueBtn?.addEventListener('contextmenu', preventLongPressMenu);
+  cueTrack?.addEventListener('contextmenu', preventLongPressMenu);
     // No inline track label — keep top controls compact. We'll repurpose favBtn as "View article" when media is active.
     const openCurrentArticle = ()=>{
       const current = mp.current;
@@ -2421,7 +2424,10 @@
     // Variable skip logic
     let originX=0;
     function computeSkip(pxDist){
-      const dir = Math.sign(pxDist)||0; const d = Math.abs(pxDist);
+      const half = Math.max(cueTrack.clientWidth/2, 1);
+      const dir = Math.sign(pxDist)||0;
+      const ratio = Math.min(1, Math.abs(pxDist)/half);
+      const d = ratio * 1000;
       const anchors = [
         [0,0],
         [120,4],
@@ -2463,9 +2469,10 @@
     }
     const REPEAT_INTERVAL_MS = 750;
     function updateVisual(px){
-      const skip = computeSkip(px);
-      cueBtn.style.setProperty('--dx', px+'px');
-      return skip;
+      const half = Math.max(cueTrack.clientWidth/2, 1);
+      const clamped = clamp(px, -half, half);
+      cueBtn.style.setProperty('--dx', clamped+'px');
+      return { skip: computeSkip(clamped), clamped };
     }
     function resetCue(){ cueBtn.classList.remove('dragging'); cueTrack.classList.remove('dragging'); cueBtn.style.removeProperty('--dx'); }
     function endDrag(finalPx){
@@ -2480,10 +2487,16 @@
       e.preventDefault(); cueBtn.focus(); originX = e.clientX; cueBtn.classList.add('dragging'); cueTrack.classList.add('dragging');
       cueBtn.style.removeProperty('--dx');
       let lastVisual=0;
-      const move = ev=>{ const dx = ev.clientX - originX; lastVisual = dx; const s = updateVisual(dx); if(mp.cue.pendingInterval) return; if(Math.abs(s)>=1){
-        mp.cue.pendingInterval = setInterval(()=>{ const s2=computeSkip(lastVisual); applySkip(s2); }, REPEAT_INTERVAL_MS); }
+      const move = ev=>{
+        const dx = ev.clientX - originX;
+        const { skip, clamped } = updateVisual(dx);
+        lastVisual = clamped;
+        if(mp.cue.pendingInterval) return;
+        if(Math.abs(skip)>=1){
+          mp.cue.pendingInterval = setInterval(()=>{ const s2=computeSkip(lastVisual); applySkip(s2); }, REPEAT_INTERVAL_MS);
+        }
       };
-      const up = ev=>{ window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); endDrag(ev.clientX-originX); };
+    const up = ()=>{ window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); endDrag(lastVisual); };
       window.addEventListener('pointermove',move); window.addEventListener('pointerup',up);
     });
     cueBtn.addEventListener('keydown', e=>{
