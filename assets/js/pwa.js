@@ -1,4 +1,4 @@
-import { APP_VERSION as SOURCE_APP_VERSION } from './version.js';
+const versionModulePromise = import(`./version.js?cache-bust=${Date.now().toString(36)}`);
 
 const appVersionMeta = document.querySelector('meta[name="app-version"]');
 const storedSwVersion = (() => {
@@ -9,9 +9,6 @@ const storedSwVersion = (() => {
     return null;
   }
 })();
-
-const APP_VERSION = SOURCE_APP_VERSION || appVersionMeta?.content || storedSwVersion || 'dev';
-const SW_PATH = `sw.js?v=${encodeURIComponent(APP_VERSION)}`;
 let refreshing = false;
 
 function promptReload(worker) {
@@ -25,11 +22,15 @@ function promptReload(worker) {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const registration = await navigator.serviceWorker.register(SW_PATH, {
+      const { APP_VERSION: moduleVersion } = await versionModulePromise;
+      const resolvedVersion = moduleVersion || appVersionMeta?.content || storedSwVersion || 'dev';
+      const swPath = `sw.js?v=${encodeURIComponent(resolvedVersion)}`;
+
+      const registration = await navigator.serviceWorker.register(swPath, {
         scope: './',
         updateViaCache: 'none'
       });
-      console.info(`IdleGames ${APP_VERSION} ready. Service worker scope:`, registration.scope);
+      console.info(`IdleGames ${resolvedVersion} ready. Service worker scope:`, registration.scope);
 
       const trackInstalling = (worker) => {
         if (!worker) return;
