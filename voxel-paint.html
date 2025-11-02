@@ -357,6 +357,11 @@
   const DEFAULT_SUN_COLOR = '#ffffff';
   const DEFAULT_SUN_INTENSITY = 1.0;
   const DEFAULT_FLOOR_SIZE = 16;
+  const MAX_DYNAMIC_LIGHTS = 12;
+  const LIGHT_DISTANCE = 18;
+  const LIGHT_INTENSITY = 1.35;
+  const LIGHT_DECAY = 1.25;
+  const LIGHT_EMISSIVE_INTENSITY = 1.15;
 
     const state = {
       tool: DEFAULT_TOOL,
@@ -459,6 +464,15 @@
 
     const lightGroup = new THREE.Group();
     scene.add(lightGroup);
+
+    const lightPool = Array.from({ length: MAX_DYNAMIC_LIGHTS }, () => {
+      const light = new THREE.PointLight(0xffffff, LIGHT_INTENSITY, LIGHT_DISTANCE, LIGHT_DECAY);
+      light.castShadow = false;
+      light.visible = false;
+      lightGroup.add(light);
+      return light;
+    });
+    const lightVoxels = new Set();
 
     function createGridLines(width, depth) {
       const vertices = [];
@@ -666,26 +680,26 @@
       }
       const size = 1;
       const geometry = new THREE.BoxGeometry(size, size, size);
-      const material = isLight
-        ? new THREE.MeshBasicMaterial({ color, toneMapped: false })
-        : new THREE.MeshStandardMaterial({ color, roughness: 0.92, metalness: 0.0, flatShading: true });
+      const materialOptions = {
+        color,
+        roughness: 0.92,
+        metalness: 0.0,
+        flatShading: true
+      };
+      if (isLight) {
+        materialOptions.emissive = color;
+        materialOptions.emissiveIntensity = LIGHT_EMISSIVE_INTENSITY;
+      }
+      const material = new THREE.MeshStandardMaterial(materialOptions);
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.copy(position);
       mesh.castShadow = !isLight;
       mesh.receiveShadow = !isLight;
-      mesh.userData = { color, isLight, position: position.clone(), light: null };
+      mesh.userData = { color, isLight, position: position.clone() };
       voxelGroup.add(mesh);
 
       if (isLight) {
-        const light = new THREE.PointLight(color, 1.6, 18, 0.8);
-        light.position.copy(position);
-        light.castShadow = true;
-        light.shadow.mapSize.set(512, 512);
-        light.shadow.bias = -0.001;
-        light.shadow.camera.near = 0.1;
-        light.shadow.camera.far = 28;
-        mesh.userData.light = light;
-        lightGroup.add(light);
+        lightVoxels.add(mesh);
       }
 
       state.voxels.set(key, mesh);
@@ -695,8 +709,8 @@
       const key = voxelKey(position.x, position.y, position.z);
       const mesh = state.voxels.get(key);
       if (!mesh) return;
-      if (mesh.userData.light) {
-        lightGroup.remove(mesh.userData.light);
+      if (mesh.userData.isLight) {
+        lightVoxels.delete(mesh);
       }
       mesh.geometry.dispose();
       mesh.material.dispose();
@@ -704,17 +718,44 @@
       state.voxels.delete(key);
     }
 
+    function updateDynamicLights() {
+      if (lightVoxels.size === 0) {
+        lightPool.forEach((light) => {
+          light.visible = false;
+        });
+        return;
+      }
+
+      const activeMeshes = Array.from(lightVoxels);
+      activeMeshes.sort((a, b) => (
+        a.position.distanceToSquared(camera.position) - b.position.distanceToSquared(camera.position)
+      ));
+
+      for (let i = 0; i < lightPool.length; i += 1) {
+        const light = lightPool[i];
+        const mesh = activeMeshes[i];
+        if (mesh) {
+          light.position.copy(mesh.position);
+          light.color.set(mesh.userData.color);
+          light.intensity = LIGHT_INTENSITY;
+          light.distance = LIGHT_DISTANCE;
+          light.decay = LIGHT_DECAY;
+          light.visible = true;
+        } else {
+          light.visible = false;
+        }
+      }
+    }
+
     function clearVoxels() {
       [...voxelGroup.children].forEach(mesh => {
-        if (mesh.userData.light) {
-          lightGroup.remove(mesh.userData.light);
-        }
         mesh.geometry.dispose();
         mesh.material.dispose();
         voxelGroup.remove(mesh);
       });
-      [...lightGroup.children].forEach(light => {
-        lightGroup.remove(light);
+      lightVoxels.clear();
+      lightPool.forEach(light => {
+        light.visible = false;
       });
       state.voxels.clear();
       state.floor.width = DEFAULT_FLOOR_SIZE;
@@ -1168,6 +1209,7 @@
 
     function animate() {
       requestAnimationFrame(animate);
+      updateDynamicLights();
       composer.render();
       navRenderer.render(navScene, navCamera);
     }
