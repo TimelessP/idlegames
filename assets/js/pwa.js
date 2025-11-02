@@ -1,5 +1,21 @@
 const versionModulePromise = import(`./version.js?cache-bust=${Date.now().toString(36)}`);
 
+const promptedVersions = new Set();
+
+function extractWorkerVersion(worker, fallback) {
+  if (!worker) return fallback ?? null;
+  try {
+    const url = new URL(worker.scriptURL, window.location.origin);
+    const versionParam = url.searchParams.get('v');
+    if (versionParam) {
+      return versionParam;
+    }
+  } catch (error) {
+    console.warn('Unable to parse service worker version from script URL', error);
+  }
+  return fallback ?? null;
+}
+
 const appVersionMeta = document.querySelector('meta[name="app-version"]');
 const storedSwVersion = (() => {
   try {
@@ -11,11 +27,20 @@ const storedSwVersion = (() => {
 })();
 let refreshing = false;
 
-function promptReload(worker) {
+function promptReload(worker, versionHint) {
   if (!worker) return;
-  const shouldReload = window.confirm('IdleGames has been updated. Reload now to use the latest version?');
+  const version = extractWorkerVersion(worker, versionHint) ?? 'latest';
+  if (promptedVersions.has(version)) {
+    return;
+  }
+  const versionLabel = version === 'latest' ? 'the latest version' : `v${version}`;
+  const shouldReload = window.confirm(`IdleGames has been updated to ${versionLabel}. Reload now to use the newest build?`);
   if (shouldReload) {
+    promptedVersions.add(version);
     worker.postMessage({ type: 'idle-games-skip-waiting' });
+  } else {
+    // Remember that we've already asked this session to avoid immediate repeat prompts.
+    promptedVersions.add(version);
   }
 }
 
@@ -36,7 +61,7 @@ if ('serviceWorker' in navigator) {
         if (!worker) return;
         worker.addEventListener('statechange', () => {
           if (worker.state === 'installed' && navigator.serviceWorker.controller) {
-            promptReload(worker);
+            promptReload(worker, resolvedVersion);
           }
         });
       };
@@ -50,7 +75,7 @@ if ('serviceWorker' in navigator) {
       });
 
       if (registration.waiting) {
-        promptReload(registration.waiting);
+        promptReload(registration.waiting, resolvedVersion);
       }
 
       navigator.serviceWorker.addEventListener('message', (event) => {
@@ -59,7 +84,7 @@ if ('serviceWorker' in navigator) {
           const incoming = event.data.appVersion || 'unknown';
           const stored = localStorage.getItem('idle-games-sw-version');
           if (stored && stored !== incoming && registration.waiting) {
-            promptReload(registration.waiting);
+            promptReload(registration.waiting, incoming);
           }
           localStorage.setItem('idle-games-sw-version', incoming);
         }
