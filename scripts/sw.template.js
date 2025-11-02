@@ -27,6 +27,26 @@ self.addEventListener('fetch', (event) => {
   const requestURL = new URL(event.request.url);
   if (requestURL.origin !== self.location.origin) return;
 
+  if (event.request.mode === 'navigate') {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
+      try {
+        const networkResponse = await fetch(event.request);
+        if (networkResponse && networkResponse.ok) {
+          cache.put(event.request, networkResponse.clone());
+        }
+        return networkResponse;
+      } catch (error) {
+        const cachedPage = await cache.match(event.request);
+        if (cachedPage) return cachedPage;
+        const fallback = await cache.match('./index.html');
+        if (fallback) return fallback;
+        throw error;
+      }
+    })());
+    return;
+  }
+
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
     const cached = await cache.match(event.request);
