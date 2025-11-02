@@ -367,6 +367,8 @@
   const LIGHT_INTENSITY = 1.35;
   const LIGHT_DECAY = 1.25;
   const LIGHT_EMISSIVE_INTENSITY = 1.15;
+  const STORAGE_KEY = 'voxel-paint-session-v1';
+  const PERSIST_DEBOUNCE_MS = 120;
 
     const state = {
       tool: DEFAULT_TOOL,
@@ -624,6 +626,64 @@
       return THREE.MathUtils.lerp(0.25, 1.4, luminance);
     }
 
+    let suppressPersistence = false;
+    let pendingSaveHandle = null;
+
+    function schedulePersistence() {
+      if (suppressPersistence) return;
+      if (typeof window === 'undefined' || !('localStorage' in window)) return;
+      if (pendingSaveHandle !== null) return;
+      pendingSaveHandle = window.setTimeout(() => {
+        pendingSaveHandle = null;
+        persistSession();
+      }, PERSIST_DEBOUNCE_MS);
+    }
+
+    function persistSession() {
+      try {
+        if (typeof window === 'undefined' || !('localStorage' in window)) return;
+        const voxels = [];
+        state.voxels.forEach((mesh) => {
+          voxels.push({
+            position: [mesh.userData.position.x, mesh.userData.position.y, mesh.userData.position.z],
+            color: mesh.userData.color,
+            light: mesh.userData.isLight
+          });
+        });
+        const payload = {
+          version: 1,
+          voxels,
+          tool: state.tool,
+          color: state.color,
+          isLightVoxel: state.isLightVoxel,
+          gridVisible: state.gridVisible,
+          floor: { ...state.floor },
+          bgGradient: { ...state.bgGradient },
+          ambientColor: state.ambientColor,
+          sunlightColor: state.sunlightColor,
+          sunlightIntensity: state.sunlightIntensity,
+          camera: {
+            position: camera.position.toArray(),
+            target: state.cameraTarget.toArray(),
+            up: camera.up.toArray(),
+            distance: state.cameraDistance
+          }
+        };
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      } catch (err) {
+        console.warn('Voxel Paint: failed to persist session', err);
+      }
+    }
+
+    function clearPersistedSession() {
+      try {
+        if (typeof window === 'undefined' || !('localStorage' in window)) return;
+        window.localStorage.removeItem(STORAGE_KEY);
+      } catch (err) {
+        console.warn('Voxel Paint: failed to clear persisted session', err);
+      }
+    }
+
     function formatTimestampedFileName(prefix, extension) {
       const ts = new Date();
       const pad = (value) => String(value).padStart(2, '0');
@@ -637,6 +697,136 @@
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+    }
+
+    function restorePersistedSession() {
+      if (typeof window === 'undefined' || !('localStorage' in window)) return;
+      let raw;
+      try {
+        raw = window.localStorage.getItem(STORAGE_KEY);
+      } catch (err) {
+        console.warn('Voxel Paint: failed to read persisted session', err);
+        return;
+      }
+      if (!raw) return;
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (err) {
+        console.warn('Voxel Paint: invalid persisted session payload', err);
+        return;
+      }
+      if (!parsed || parsed.version !== 1) return;
+
+      suppressPersistence = true;
+      try {
+        clearVoxels({ skipStorage: true });
+
+        if (parsed.floor) {
+          if (typeof parsed.floor.width === 'number') {
+            state.floor.width = THREE.MathUtils.clamp(parsed.floor.width, 6, 64);
+          }
+          if (typeof parsed.floor.depth === 'number') {
+            state.floor.depth = THREE.MathUtils.clamp(parsed.floor.depth, 6, 64);
+          }
+          updateFloor();
+        }
+
+        if (typeof parsed.gridVisible === 'boolean') {
+          state.gridVisible = parsed.gridVisible;
+          updateGridToggle();
+        }
+
+        if (parsed.bgGradient) {
+          if (typeof parsed.bgGradient.top === 'string') {
+            state.bgGradient.top = parsed.bgGradient.top;
+          }
+          if (typeof parsed.bgGradient.bottom === 'string') {
+            state.bgGradient.bottom = parsed.bgGradient.bottom;
+          }
+          setGradient(state.bgGradient.top, state.bgGradient.bottom);
+        }
+
+        if (typeof parsed.ambientColor === 'string') {
+          state.ambientColor = parsed.ambientColor;
+          ambient.color.set(state.ambientColor);
+          ambient.intensity = computeAmbientIntensity(state.ambientColor);
+        }
+
+        if (parsed.sunlightColor) {
+          state.sunlightColor = parsed.sunlightColor;
+          sunLight.color.set(state.sunlightColor);
+        }
+        if (typeof parsed.sunlightIntensity === 'number') {
+          state.sunlightIntensity = parsed.sunlightIntensity;
+          sunLight.intensity = state.sunlightIntensity;
+        }
+
+        if (Array.isArray(parsed.voxels)) {
+          parsed.voxels.forEach((voxel) => {
+            if (!voxel || !Array.isArray(voxel.position) || voxel.position.length !== 3) return;
+            const [x, y, z] = voxel.position.map((value) => quantizeToHalf(Number(value)));
+            if ([x, y, z].some((value) => Number.isNaN(value))) return;
+            const color = typeof voxel.color === 'string' ? voxel.color : '#ffffff';
+            const light = Boolean(voxel.light);
+            addVoxel(new THREE.Vector3(x, y, z), color, light);
+          });
+        }
+
+        if (typeof parsed.tool === 'string') {
+          updateToolSelection(parsed.tool);
+        }
+        if (typeof parsed.color === 'string') {
+          state.color = parsed.color;
+          updatePaletteSelection(state.color);
+        }
+        if (typeof parsed.isLightVoxel === 'boolean') {
+          state.isLightVoxel = parsed.isLightVoxel;
+          updateLightToggle();
+        }
+
+        if (parsed.camera) {
+          if (Array.isArray(parsed.camera.position) && parsed.camera.position.length === 3) {
+            camera.position.fromArray(parsed.camera.position);
+          }
+          if (Array.isArray(parsed.camera.target) && parsed.camera.target.length === 3) {
+            state.cameraTarget.fromArray(parsed.camera.target);
+          }
+          if (Array.isArray(parsed.camera.up) && parsed.camera.up.length === 3) {
+            camera.up.fromArray(parsed.camera.up);
+          }
+          if (typeof parsed.camera.distance === 'number') {
+            state.cameraDistance = THREE.MathUtils.clamp(parsed.camera.distance, 6, 140);
+          } else {
+            state.cameraDistance = camera.position.clone().sub(state.cameraTarget).length();
+          }
+          camera.lookAt(state.cameraTarget);
+          updateNavCamera();
+        }
+
+        const ambientInput = document.querySelector('.ambient-control input');
+        if (ambientInput) {
+          ambientInput.value = state.ambientColor;
+        }
+        const sunColorInput = document.querySelector('.sun-control input[data-sun="color"]');
+        if (sunColorInput) {
+          sunColorInput.value = state.sunlightColor;
+        }
+        const sunIntensityInput = document.querySelector('.sun-control input[data-sun="intensity"]');
+        if (sunIntensityInput) {
+          sunIntensityInput.value = Math.round(state.sunlightIntensity * 100);
+        }
+        const gradientInputs = document.querySelectorAll('.gradient-controls input');
+        gradientInputs.forEach((input) => {
+          const key = input.dataset.gradient;
+          if (key && state.bgGradient[key]) {
+            input.value = state.bgGradient[key];
+          }
+        });
+      } finally {
+        suppressPersistence = false;
+      }
+      schedulePersistence();
     }
 
     function voxelKey(x, y, z) {
@@ -723,6 +913,7 @@
       }
 
       state.voxels.set(key, mesh);
+      schedulePersistence();
     }
 
     function removeVoxel(position) {
@@ -736,6 +927,7 @@
       mesh.material.dispose();
       voxelGroup.remove(mesh);
       state.voxels.delete(key);
+      schedulePersistence();
     }
 
     function updateDynamicLights() {
@@ -767,7 +959,7 @@
       }
     }
 
-    function clearVoxels() {
+    function clearVoxels({ skipStorage = false } = {}) {
       [...voxelGroup.children].forEach(mesh => {
         mesh.geometry.dispose();
         mesh.material.dispose();
@@ -782,6 +974,11 @@
       state.floor.depth = DEFAULT_FLOOR_SIZE;
       updateFloor();
       resetCameraView();
+      if (skipStorage) {
+        schedulePersistence();
+      } else {
+        clearPersistedSession();
+      }
     }
 
     function getPointerIntersection(event) {
@@ -834,6 +1031,7 @@
       state.isLightVoxel = isLight;
       updatePaletteSelection(color);
       updateLightToggle();
+      schedulePersistence();
     }
 
     function updatePaletteSelection(color) {
@@ -841,7 +1039,10 @@
         btn.classList.toggle('active', btn.dataset.color === color);
       });
       const colorInput = document.querySelector('.color-picker input');
-      colorInput.value = color;
+      if (colorInput) {
+        colorInput.value = color;
+      }
+      schedulePersistence();
     }
 
     function updateToolSelection(tool) {
@@ -851,23 +1052,30 @@
         btn.setAttribute('aria-pressed', isActive);
       });
       state.tool = tool;
+      schedulePersistence();
     }
 
     function updateLightToggle() {
       const btn = document.querySelector('.tool-btn[data-toggle="light"]');
-      btn.classList.toggle('active', state.isLightVoxel);
-      btn.setAttribute('aria-pressed', state.isLightVoxel);
+      if (btn) {
+        btn.classList.toggle('active', state.isLightVoxel);
+        btn.setAttribute('aria-pressed', state.isLightVoxel);
+      }
+      schedulePersistence();
     }
 
     function updateGridToggle() {
       const btn = document.querySelector('.tool-btn[data-toggle="grid"]');
-      btn.classList.toggle('active', state.gridVisible);
-      btn.setAttribute('aria-pressed', state.gridVisible);
+      if (btn) {
+        btn.classList.toggle('active', state.gridVisible);
+        btn.setAttribute('aria-pressed', state.gridVisible);
+      }
       if (gridLines) {
         gridLines.visible = state.gridVisible;
       }
       floorMesh.material.opacity = state.gridVisible ? 1 : 0;
       floorMesh.material.needsUpdate = true;
+      schedulePersistence();
     }
 
     function toggleGrid() {
@@ -929,7 +1137,9 @@
         try {
           const parsed = JSON.parse(reader.result);
           if (!parsed || !Array.isArray(parsed.voxels)) return;
-          clearVoxels();
+          const previous = suppressPersistence;
+          suppressPersistence = true;
+          clearVoxels({ skipStorage: true });
           parsed.voxels.forEach(item => {
             if (!Array.isArray(item.position) || item.position.length !== 3) return;
             const rawPosition = item.position.map(n => Number(n));
@@ -939,6 +1149,8 @@
             const light = Boolean(item.light);
             addVoxel(new THREE.Vector3(x, y, z), color, light);
           });
+          suppressPersistence = previous;
+          schedulePersistence();
         } catch (err) {
           console.error('Failed to import voxel JSON', err);
         }
@@ -949,8 +1161,13 @@
     function handleToolAction(action) {
       switch (action) {
         case 'clear':
-          clearVoxels();
-          resetToolDefaults();
+          {
+            const previous = suppressPersistence;
+            suppressPersistence = true;
+            clearVoxels();
+            resetToolDefaults();
+            suppressPersistence = previous;
+          }
           break;
         case 'export-png':
           exportPNG();
@@ -1074,7 +1291,8 @@
         state.touchMap.delete(event.pointerId);
         return;
       }
-      const { moved, mode, button } = state.pointerInfo;
+      const pointerSnapshot = state.pointerInfo;
+      const { moved, mode, button } = pointerSnapshot;
       const interaction = moved && mode !== 'orbit' ? null : getPointerIntersection(event);
       const isPrimaryButton = event.pointerType !== 'mouse' || button === 0;
       if (!moved && isPrimaryButton) {
@@ -1094,6 +1312,9 @@
       if (event.pointerType === 'touch' && state.touchMap.size < 2) {
         state.pinchDistance = null;
       }
+      if (pointerSnapshot?.moved && (pointerSnapshot.mode === 'pan' || pointerSnapshot.mode === 'orbit')) {
+        schedulePersistence();
+      }
     }
 
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
@@ -1106,6 +1327,7 @@
     renderer.domElement.addEventListener('wheel', (event) => {
       event.preventDefault();
       handleZoom(event.deltaY);
+      schedulePersistence();
     }, { passive: false });
 
     navRenderer.domElement.addEventListener('pointerdown', (event) => {
@@ -1119,6 +1341,7 @@
         const dir = hits[0].object.userData.direction.clone();
         computeCenter();
         updateCameraPosition(dir);
+        schedulePersistence();
       }
     });
 
@@ -1147,6 +1370,7 @@
         state.isLightVoxel = false;
         updatePaletteSelection(state.color);
         updateLightToggle();
+        schedulePersistence();
       });
     });
 
@@ -1155,6 +1379,7 @@
       state.isLightVoxel = false;
       updatePaletteSelection(state.color);
       updateLightToggle();
+      schedulePersistence();
     });
 
     const gradientInputs = document.querySelectorAll('.gradient-controls input');
@@ -1162,6 +1387,7 @@
       input.addEventListener('input', () => {
         state.bgGradient[input.dataset.gradient] = input.value;
         setGradient(state.bgGradient.top, state.bgGradient.bottom);
+        schedulePersistence();
       });
     });
 
@@ -1170,6 +1396,7 @@
       state.ambientColor = event.target.value;
       ambient.color.set(state.ambientColor);
       ambient.intensity = computeAmbientIntensity(state.ambientColor);
+      schedulePersistence();
     });
 
     const sunColorInput = document.querySelector('.sun-control input[data-sun="color"]');
@@ -1177,12 +1404,14 @@
     sunColorInput.addEventListener('input', (event) => {
       state.sunlightColor = event.target.value;
       sunLight.color.set(state.sunlightColor);
+      schedulePersistence();
     });
 
     sunIntensityInput.addEventListener('input', (event) => {
       const normalized = Number(event.target.value) / 100;
       state.sunlightIntensity = normalized;
       sunLight.intensity = normalized;
+      schedulePersistence();
     });
 
     function resetToolDefaults() {
@@ -1229,6 +1458,7 @@
         const newValue = THREE.MathUtils.clamp(state.floor[dimension] + delta, 6, 64);
         state.floor[dimension] = newValue;
         updateFloor();
+        schedulePersistence();
       });
     });
 
@@ -1247,7 +1477,8 @@
       navRenderer.render(navScene, navCamera);
     }
 
-    updateNavCamera();
+  restorePersistedSession();
+  updateNavCamera();
     animate();
     setGradient(state.bgGradient.top, state.bgGradient.bottom);
     updateFloor();
