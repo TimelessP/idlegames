@@ -61,10 +61,42 @@ async function copyModuleFile(moduleSegments, destinationSegments) {
   await fs.copyFile(src, dest);
 }
 
+async function rewriteBareThreeImports(filePath) {
+  const content = await fs.readFile(filePath, 'utf8');
+  if (!content.includes("from 'three'") && !content.includes('from "three"')) {
+    return;
+  }
+  const threeModulePath = path.join(distDir, 'assets', 'vendor', 'three', 'three.module.js');
+  const relativePath = path.relative(path.dirname(filePath), threeModulePath).split(path.sep).join('/');
+  const normalizedPath = relativePath.startsWith('.') ? relativePath : `./${relativePath}`;
+  const updated = content.replace(/from\s+['"]three['"]/g, `from '${normalizedPath}'`);
+  if (updated !== content) {
+    await fs.writeFile(filePath, updated, 'utf8');
+  }
+}
+
 async function ensureVendorAssets() {
   await copyModuleFile(['qrious', 'dist', 'qrious.min.js'], ['assets', 'vendor', 'qrious', 'qrious.min.js']);
   await copyModuleFile(['jsqr', 'dist', 'jsQR.js'], ['assets', 'vendor', 'jsqr', 'jsQR.js']);
   await copyModuleFile(['three', 'build', 'three.module.js'], ['assets', 'vendor', 'three', 'three.module.js']);
+
+  const exampleFiles = [
+    ['postprocessing', 'EffectComposer.js'],
+    ['postprocessing', 'Pass.js'],
+    ['postprocessing', 'RenderPass.js'],
+    ['postprocessing', 'SSAOPass.js'],
+    ['postprocessing', 'ShaderPass.js'],
+    ['postprocessing', 'MaskPass.js'],
+    ['shaders', 'CopyShader.js'],
+    ['shaders', 'SSAOShader.js'],
+    ['math', 'SimplexNoise.js']
+  ];
+
+  for (const segments of exampleFiles) {
+    const destination = ['assets', 'vendor', 'three', 'examples', 'jsm', ...segments];
+    await copyModuleFile(['three', 'examples', 'jsm', ...segments], destination);
+    await rewriteBareThreeImports(path.join(distDir, ...destination));
+  }
 
   const transformersSrc = path.join(projectRoot, 'node_modules', '@xenova', 'transformers', 'dist');
   const transformersDest = path.join(distDir, 'assets', 'vendor', 'transformers');
