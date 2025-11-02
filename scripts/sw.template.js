@@ -27,43 +27,35 @@ self.addEventListener('fetch', (event) => {
   const requestURL = new URL(event.request.url);
   if (requestURL.origin !== self.location.origin) return;
 
-  if (event.request.mode === 'navigate') {
-    event.respondWith((async () => {
-      const cache = await caches.open(CACHE_NAME);
-      try {
-        const networkResponse = await fetch(event.request, { cache: 'reload' });
-        if (networkResponse && networkResponse.ok) {
-          cache.put(event.request, networkResponse.clone());
-        }
-        return networkResponse;
-      } catch (error) {
-        const cachedPage = await cache.match(event.request);
-        if (cachedPage) return cachedPage;
+  if (requestURL.pathname === '/sw.js' || requestURL.pathname === '/sw.js/') return;
+
+  if (event.request.cache === 'only-if-cached' && event.request.mode !== 'same-origin') return;
+
+  const handleNetworkFirst = async () => {
+    const cache = await caches.open(CACHE_NAME);
+    try {
+      const networkResponse = await fetch(event.request, { cache: 'no-store' });
+      if (networkResponse && networkResponse.ok && (networkResponse.type === 'basic' || networkResponse.type === 'cors')) {
+        await cache.put(event.request, networkResponse.clone());
+      }
+      return networkResponse;
+    } catch (error) {
+      const cached = await cache.match(event.request);
+      if (cached) return cached;
+      if (event.request.mode === 'navigate') {
         const fallback = await cache.match('./index.html');
         if (fallback) return fallback;
-        throw error;
       }
-    })());
+      throw error;
+    }
+  };
+
+  if (event.request.mode === 'navigate') {
+    event.respondWith(handleNetworkFirst());
     return;
   }
 
-  event.respondWith((async () => {
-    const cache = await caches.open(CACHE_NAME);
-    const cached = await cache.match(event.request);
-    if (cached) return cached;
-
-    try {
-      const response = await fetch(event.request);
-      if (response && response.ok && response.type === 'basic') {
-        cache.put(event.request, response.clone());
-      }
-      return response;
-    } catch (error) {
-      const fallback = await cache.match('./index.html');
-      if (fallback) return fallback;
-      throw error;
-    }
-  })());
+  event.respondWith(handleNetworkFirst());
 });
 
 self.addEventListener('message', (event) => {
