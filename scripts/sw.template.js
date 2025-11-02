@@ -31,7 +31,7 @@ self.addEventListener('fetch', (event) => {
     event.respondWith((async () => {
       const cache = await caches.open(CACHE_NAME);
       try {
-        const networkResponse = await fetch(event.request);
+        const networkResponse = await fetch(event.request, { cache: 'reload' });
         if (networkResponse && networkResponse.ok) {
           cache.put(event.request, networkResponse.clone());
         }
