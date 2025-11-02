@@ -270,6 +270,30 @@
           <svg viewBox="0 0 24 24"><path d="M3.707 17.707 11.414 10l-4-4L2 11.414a2 2 0 0 0 0 2.828l2.879 2.879a2 2 0 0 0 2.828 0l8.486-8.485-2.828-2.829-1.415 1.415"/><path d="M15 3h6v6"/></svg>
           <span class="sr-only">Remove voxel</span>
         </button>
+        <button class="tool-btn" data-tool="wall-xy" title="Draw wall on X/Y plane">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="4" width="12" height="12" rx="1.8"/>
+            <path d="M10 8v8"/>
+            <path d="M6 12h8"/>
+          </svg>
+          <span class="sr-only">Draw wall on X/Y plane</span>
+        </button>
+        <button class="tool-btn" data-tool="wall-xz" title="Draw wall on X/Z plane">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 6h14v12H5z"/>
+            <path d="M5 12h14"/>
+            <path d="M12 6v12"/>
+          </svg>
+          <span class="sr-only">Draw wall on X/Z plane</span>
+        </button>
+        <button class="tool-btn" data-tool="wall-yz" title="Draw wall on Y/Z plane">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="8" y="4" width="12" height="12" rx="1.8"/>
+            <path d="M14 8v8"/>
+            <path d="M10 10h8"/>
+          </svg>
+          <span class="sr-only">Draw wall on Y/Z plane</span>
+        </button>
         <button class="tool-btn" data-action="clear" title="Clear all" aria-label="Clear all voxels">
           <svg viewBox="0 0 24 24"><path d="M5 5h14"/><path d="m6 9 1 10a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-10"/><path d="M10 13v6"/><path d="M14 13v6"/><path d="M9 5l.5-2h5l.5 2"/></svg>
         </button>
@@ -369,6 +393,13 @@
   const LIGHT_EMISSIVE_INTENSITY = 1.15;
   const STORAGE_KEY = 'voxel-paint-session-v1';
   const PERSIST_DEBOUNCE_MS = 120;
+  const WALL_TOOLS = new Set(['wall-xy', 'wall-xz', 'wall-yz']);
+  const WALL_PLANES = {
+    'wall-xy': { axes: ['x', 'y'], fixed: 'z', normal: new THREE.Vector3(0, 0, 1) },
+    'wall-xz': { axes: ['x', 'z'], fixed: 'y', normal: new THREE.Vector3(0, 1, 0) },
+    'wall-yz': { axes: ['y', 'z'], fixed: 'x', normal: new THREE.Vector3(1, 0, 0) }
+  };
+  const WALL_GHOST_COLOR = 0x38bdf8;
 
     const state = {
       tool: DEFAULT_TOOL,
@@ -385,7 +416,8 @@
       bgGradient: { top: DEFAULT_BG_TOP, bottom: DEFAULT_BG_BOTTOM },
       ambientColor: DEFAULT_AMBIENT_COLOR,
       sunlightColor: DEFAULT_SUN_COLOR,
-      sunlightIntensity: DEFAULT_SUN_INTENSITY
+      sunlightIntensity: DEFAULT_SUN_INTENSITY,
+      wallDrag: null
     };
 
     const scene = new THREE.Scene();
@@ -480,6 +512,13 @@
       return light;
     });
     const lightVoxels = new Set();
+
+  const wallGhostGeometry = new THREE.BoxGeometry(1, 1, 1);
+  const wallGhostMaterial = new THREE.MeshBasicMaterial({ color: WALL_GHOST_COLOR, opacity: 0.28, transparent: true, depthWrite: false });
+  const wallGhostMesh = new THREE.Mesh(wallGhostGeometry, wallGhostMaterial);
+  wallGhostMesh.visible = false;
+  wallGhostMesh.raycast = () => {};
+  scene.add(wallGhostMesh);
 
     function createGridLines(width, depth) {
       const vertices = [];
@@ -970,6 +1009,7 @@
         light.visible = false;
       });
       state.voxels.clear();
+      clearWallPreview();
       state.floor.width = DEFAULT_FLOOR_SIZE;
       state.floor.depth = DEFAULT_FLOOR_SIZE;
       updateFloor();
@@ -995,6 +1035,148 @@
         return { type: 'floor', intersection: floorHit[0] };
       }
       return null;
+    }
+
+    function isWallTool(tool) {
+      return WALL_TOOLS.has(tool);
+    }
+
+    function clearWallPreview() {
+      state.wallDrag = null;
+      wallGhostMesh.visible = false;
+    }
+
+    function computeWallAnchor(intersection) {
+      if (!intersection) return null;
+      if (intersection.type === 'floor') {
+        const { width, depth } = state.floor;
+        const x = snapToFloorCoordinate(intersection.intersection.point.x, width);
+        const z = snapToFloorCoordinate(intersection.intersection.point.z, depth);
+        return new THREE.Vector3(x, 0.5, z);
+      }
+      if (intersection.type === 'voxel') {
+        const { object, face } = intersection.intersection;
+        const base = object.userData.position.clone();
+        if (face?.normal) {
+          base.add(face.normal);
+        }
+        base.set(
+          quantizeToHalf(base.x),
+          quantizeToHalf(base.y),
+          quantizeToHalf(base.z)
+        );
+        return base;
+      }
+      return null;
+    }
+
+    function refreshWallGhost() {
+      const drag = state.wallDrag;
+      if (!drag) {
+        wallGhostMesh.visible = false;
+        return;
+      }
+      const minX = Math.min(drag.start.x, drag.current.x);
+      const minY = Math.min(drag.start.y, drag.current.y);
+      const minZ = Math.min(drag.start.z, drag.current.z);
+      const maxX = Math.max(drag.start.x, drag.current.x);
+      const maxY = Math.max(drag.start.y, drag.current.y);
+      const maxZ = Math.max(drag.start.z, drag.current.z);
+      const width = (maxX - minX) + 1;
+      const height = (maxY - minY) + 1;
+      const depth = (maxZ - minZ) + 1;
+      wallGhostMesh.visible = true;
+      wallGhostMesh.position.set(
+        (minX + maxX) / 2,
+        (minY + maxY) / 2,
+        (minZ + maxZ) / 2
+      );
+      wallGhostMesh.scale.set(width, height, depth);
+    }
+
+    function startWallDrag(intersection, event) {
+  const planeInfo = WALL_PLANES[state.tool];
+      if (!planeInfo) return false;
+  const anchor = computeWallAnchor(intersection);
+      if (!anchor) return false;
+      clearWallPreview();
+      const plane = new THREE.Plane();
+      plane.setFromNormalAndCoplanarPoint(planeInfo.normal.clone(), anchor);
+      state.wallDrag = {
+        planeKey: state.tool,
+        info: planeInfo,
+        start: anchor.clone(),
+        current: anchor.clone(),
+        plane
+      };
+      wallGhostMesh.visible = true;
+      wallGhostMesh.position.copy(anchor);
+      wallGhostMesh.scale.set(1, 1, 1);
+      refreshWallGhost();
+      return true;
+    }
+
+    function projectPointerToWall(event) {
+      if (!state.wallDrag) return null;
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      const pointOnPlane = new THREE.Vector3();
+      if (!raycaster.ray.intersectPlane(state.wallDrag.plane, pointOnPlane)) {
+        return null;
+      }
+      const { start, info } = state.wallDrag;
+      const snapAxis = (value, anchor) => anchor + Math.round(value - anchor);
+      pointOnPlane.x = snapAxis(pointOnPlane.x, start.x);
+      pointOnPlane.y = snapAxis(pointOnPlane.y, start.y);
+      pointOnPlane.z = snapAxis(pointOnPlane.z, start.z);
+      pointOnPlane[info.fixed] = start[info.fixed];
+      return pointOnPlane;
+    }
+
+    function updateWallPreview(event) {
+      const drag = state.wallDrag;
+      if (!drag) return;
+      const projected = projectPointerToWall(event);
+      if (!projected) return;
+      let changed = false;
+      drag.info.axes.forEach(axis => {
+        if (drag.current[axis] !== projected[axis]) {
+          drag.current[axis] = projected[axis];
+          changed = true;
+        }
+      });
+      drag.current[drag.info.fixed] = drag.start[drag.info.fixed];
+      if (changed) {
+        refreshWallGhost();
+        if (state.pointerInfo) {
+          state.pointerInfo.moved = true;
+        }
+      }
+    }
+
+    function commitWallDrag() {
+      const drag = state.wallDrag;
+      if (!drag) {
+        clearWallPreview();
+        return;
+      }
+      const minX = Math.min(drag.start.x, drag.current.x);
+      const minY = Math.min(drag.start.y, drag.current.y);
+      const minZ = Math.min(drag.start.z, drag.current.z);
+      const maxX = Math.max(drag.start.x, drag.current.x);
+      const maxY = Math.max(drag.start.y, drag.current.y);
+      const maxZ = Math.max(drag.start.z, drag.current.z);
+      const epsilon = 1e-4;
+      for (let x = minX; x <= maxX + epsilon; x += 1) {
+        for (let y = minY; y <= maxY + epsilon; y += 1) {
+          for (let z = minZ; z <= maxZ + epsilon; z += 1) {
+            addVoxel(new THREE.Vector3(x, y, z), state.color, state.isLightVoxel);
+          }
+        }
+      }
+      clearWallPreview();
     }
 
     function placeVoxel(intersection) {
@@ -1046,6 +1228,9 @@
     }
 
     function updateToolSelection(tool) {
+      if (state.wallDrag) {
+        clearWallPreview();
+      }
       document.querySelectorAll('.tool-btn[data-tool]').forEach(btn => {
         const isActive = btn.dataset.tool === tool;
         btn.classList.toggle('active', isActive);
@@ -1197,16 +1382,32 @@
         renderer.domElement.setPointerCapture(event.pointerId);
       }
       let mode = 'pan';
-      if (event.pointerType === 'mouse') {
-        const isLeftButton = event.buttons === 1;
-        const isRightButton = event.buttons === 2;
-        if (isLeftButton) {
-          mode = 'orbit';
-        } else if (isRightButton) {
+      let startedWall = false;
+      if (isWallTool(state.tool)) {
+        const isPrimaryButton = event.pointerType === 'mouse' ? (event.buttons & 1) === 1 : true;
+        if (isPrimaryButton) {
+          const interaction = getPointerIntersection(event);
+          if (interaction && (interaction.type === 'floor' || interaction.type === 'voxel')) {
+            startedWall = startWallDrag(interaction, event);
+            if (startedWall) {
+              mode = 'wall';
+              event.preventDefault();
+            }
+          }
+        }
+      }
+      if (!startedWall) {
+        if (event.pointerType === 'mouse') {
+          const isLeftButton = event.buttons === 1;
+          const isRightButton = event.buttons === 2;
+          if (isLeftButton) {
+            mode = 'orbit';
+          } else if (isRightButton) {
+            mode = 'pan';
+          }
+        } else if (event.pointerType === 'touch') {
           mode = 'pan';
         }
-      } else if (event.pointerType === 'touch') {
-        mode = 'pan';
       }
       state.pointerInfo = {
         id: event.pointerId,
@@ -1254,6 +1455,10 @@
 
     function onPointerMove(event) {
       if (!state.pointerInfo || state.pointerInfo.id !== event.pointerId) return;
+      if (state.pointerInfo.mode === 'wall') {
+        updateWallPreview(event);
+        return;
+      }
       const dx = event.clientX - state.pointerInfo.startX;
       const dy = event.clientY - state.pointerInfo.startY;
       const threshold = 6;
@@ -1293,15 +1498,19 @@
       }
       const pointerSnapshot = state.pointerInfo;
       const { moved, mode, button } = pointerSnapshot;
-      const interaction = moved && mode !== 'orbit' ? null : getPointerIntersection(event);
-      const isPrimaryButton = event.pointerType !== 'mouse' || button === 0;
-      if (!moved && isPrimaryButton) {
-        if (state.tool === 'paint') {
-          placeVoxel(interaction);
-        } else if (state.tool === 'erase') {
-          eraseVoxel(interaction);
-        } else if (state.tool === 'dropper') {
-          pickColor(interaction);
+      if (mode === 'wall') {
+        commitWallDrag();
+      } else {
+        const interaction = moved && mode !== 'orbit' ? null : getPointerIntersection(event);
+        const isPrimaryButton = event.pointerType !== 'mouse' || button === 0;
+        if (!moved && isPrimaryButton) {
+          if (state.tool === 'paint') {
+            placeVoxel(interaction);
+          } else if (state.tool === 'erase') {
+            eraseVoxel(interaction);
+          } else if (state.tool === 'dropper') {
+            pickColor(interaction);
+          }
         }
       }
       if (event.pointerType === 'mouse') {
@@ -1317,10 +1526,26 @@
       }
     }
 
+    function onPointerCancel(event) {
+      if (event.pointerType === 'mouse') {
+        renderer.domElement.releasePointerCapture(event.pointerId);
+      }
+      if (state.pointerInfo && state.pointerInfo.id === event.pointerId) {
+        if (state.pointerInfo.mode === 'wall') {
+          clearWallPreview();
+        }
+        state.pointerInfo = null;
+      }
+      state.touchMap.delete(event.pointerId);
+      if (event.pointerType === 'touch' && state.touchMap.size < 2) {
+        state.pinchDistance = null;
+      }
+    }
+
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
     renderer.domElement.addEventListener('pointermove', onPointerMove);
     renderer.domElement.addEventListener('pointerup', onPointerUp);
-    renderer.domElement.addEventListener('pointercancel', onPointerUp);
+    renderer.domElement.addEventListener('pointercancel', onPointerCancel);
     renderer.domElement.addEventListener('contextmenu', (event) => {
       event.preventDefault();
     });
