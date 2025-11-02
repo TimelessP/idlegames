@@ -1,4 +1,5 @@
 const versionModulePromise = import(`./version.js?cache-bust=${Date.now().toString(36)}`);
+const SW_PATH = './sw.js';
 
 const promptedVersions = new Set();
 
@@ -48,10 +49,11 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
       const { APP_VERSION: moduleVersion } = await versionModulePromise;
-      const resolvedVersion = moduleVersion || appVersionMeta?.content || storedSwVersion || 'dev';
-      const swPath = `sw.js?v=${encodeURIComponent(resolvedVersion)}`;
+  const resolvedVersion = moduleVersion || appVersionMeta?.content || storedSwVersion || 'dev';
+  const swPath = new URL(SW_PATH, window.location.href);
+  swPath.searchParams.set('version', resolvedVersion);
 
-      const registration = await navigator.serviceWorker.register(swPath, {
+  const registration = await navigator.serviceWorker.register(swPath.toString(), {
         scope: './',
         updateViaCache: 'none'
       });
