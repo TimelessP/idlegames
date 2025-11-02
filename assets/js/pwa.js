@@ -1,6 +1,17 @@
+import { APP_VERSION as SOURCE_APP_VERSION } from './version.js';
+
 const appVersionMeta = document.querySelector('meta[name="app-version"]');
-const APP_VERSION = appVersionMeta?.content || 'dev';
-const SW_PATH = 'sw.js';
+const storedSwVersion = (() => {
+  try {
+    return localStorage.getItem('idle-games-sw-version');
+  } catch (error) {
+    console.warn('Unable to read stored SW version', error);
+    return null;
+  }
+})();
+
+const APP_VERSION = SOURCE_APP_VERSION || appVersionMeta?.content || storedSwVersion || 'dev';
+const SW_PATH = `sw.js?v=${encodeURIComponent(APP_VERSION)}`;
 let refreshing = false;
 
 function promptReload(worker) {
@@ -14,7 +25,10 @@ function promptReload(worker) {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
-      const registration = await navigator.serviceWorker.register(SW_PATH, { scope: './' });
+      const registration = await navigator.serviceWorker.register(SW_PATH, {
+        scope: './',
+        updateViaCache: 'none'
+      });
       console.info(`IdleGames ${APP_VERSION} ready. Service worker scope:`, registration.scope);
 
       const trackInstalling = (worker) => {

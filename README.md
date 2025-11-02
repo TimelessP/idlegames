@@ -121,7 +121,7 @@ Adorable, mobile-first organiser with Notes, Calendar, Tasks, Flip Cards, and Ca
 
 ### � Progressive Web App
 - Service worker precaches the entire collection for offline play.
-- `assets/js/pwa.js` detects new versions (via `<meta name="app-version">`) and prompts the user to refresh.
+- `assets/js/pwa.js` reads the centralized version constant in `assets/js/version.js` and prompts the user to refresh once a new build is available.
 - `manifest.webmanifest` and bundled icons enable installation on desktop and mobile.
 - All runtime dependencies (Three.js, QRious, jsQR, Transformers.js, Inter font) are vendored into `assets/vendor/` and `assets/fonts/` during the build so the experience is self-contained.
 
@@ -176,6 +176,31 @@ Simply visit [https://timelessp.github.io/idlegames/](https://timelessp.github.i
    npm run serve
    ```
    This command rebuilds and serves `dist/` via a static server on port 4173. You can also deploy the contents of `dist/` directly to GitHub Pages or any static host.
+
+## 🚢 Release Process
+
+The service worker caches by version, so every public release needs a fresh build tied to a new semantic version. Use the checklist below to publish a new drop.
+
+1. **Bump the version.** Pick the next semantic version and update the `version` field in `package.json` (e.g. `1.0.5`). The build script automatically regenerates `assets/js/version.js`; update any user-facing version display only if you want it visible in the UI.
+2. **Regenerate the lockfile.** Run `npm install --package-lock-only` from the repo root. This keeps `package-lock.json` aligned with the new version number.
+3. **Build the distributable.** Execute `npm run build`. The script rewrites `assets/js/version.js`, wipes `dist/`, copies the site, rewrites Three.js imports, vendors dependencies, and emits `dist/sw.js` with the new cache name (`IdleGames-vX.Y.Z`).
+4. **Smoke test locally.** Launch `npm run serve`, open `http://localhost:4173`, and confirm the service worker registers, assets load, and any modified pages behave as expected. Stop the server when finished.
+5. **Deploy GitHub Pages.** Replace the contents of the Pages branch (currently `gh-pages`) with the freshly built `dist/` directory. One manual workflow is:
+   ```bash
+   npm run build
+   git worktree add ../idlegames-gh-pages gh-pages
+   rsync -av --delete dist/ ../idlegames-gh-pages/
+   cd ../idlegames-gh-pages
+   git add .
+   git commit -m "Release v1.0.5"
+   git push origin gh-pages
+   cd -
+   git worktree remove ../idlegames-gh-pages
+   ```
+   Adjust the release version in the commit message. If you prefer another deployment method (GitHub Action, `gh-pages` npm package, etc.) swap in your workflow, but always publish the built `dist/` artifacts.
+6. **Commit and tag main.** Back in the main worktree, commit the source changes (`package.json`, lockfile, docs) and optionally create a git tag (`git tag v1.0.5 && git push --tags`). This keeps the history aligned with the deployed build.
+
+Following those steps ensures browsers detect the new cache version, prompt the in-app reload, and serve the latest assets after you publish.
 
 ## 🎮 Categories
 
