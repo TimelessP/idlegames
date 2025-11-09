@@ -7,7 +7,7 @@ function extractWorkerVersion(worker, fallback) {
   if (!worker) return fallback ?? null;
   try {
     const url = new URL(worker.scriptURL, window.location.origin);
-    const versionParam = url.searchParams.get('v');
+    const versionParam = url.searchParams.get('version') || url.searchParams.get('v');
     if (versionParam) {
       return versionParam;
     }
@@ -49,14 +49,36 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     try {
       const { APP_VERSION: moduleVersion } = await versionModulePromise;
-  const resolvedVersion = moduleVersion || appVersionMeta?.content || storedSwVersion || 'dev';
-  const swPath = new URL(SW_PATH, window.location.href);
-  swPath.searchParams.set('version', resolvedVersion);
+      const resolvedVersion = moduleVersion || appVersionMeta?.content || storedSwVersion || 'dev';
+      const baseSwUrl = new URL(SW_PATH, window.location.href);
+      const versionedSwUrl = new URL(baseSwUrl.toString());
+      versionedSwUrl.searchParams.set('version', resolvedVersion);
 
-  const registration = await navigator.serviceWorker.register(swPath.toString(), {
-        scope: './',
-        updateViaCache: 'none'
-      });
+      async function attemptRegistration(url, { logLabel }) {
+        try {
+          const registration = await navigator.serviceWorker.register(url.toString(), {
+            scope: './',
+            updateViaCache: 'none'
+          });
+          return registration;
+        } catch (error) {
+          console.warn(`Service worker registration failed for ${logLabel}:`, error);
+          return null;
+        }
+      }
+
+      let registration = await attemptRegistration(versionedSwUrl, { logLabel: versionedSwUrl.toString() });
+      if (!registration) {
+        registration = await attemptRegistration(baseSwUrl, { logLabel: baseSwUrl.toString() });
+        if (registration) {
+          console.warn('Service worker registered without cache-busting query parameter. Verify that sw.js is published for versioned URLs.');
+        }
+      }
+
+      if (!registration) {
+        throw new Error('Service worker registration failed for both versioned and plain URLs.');
+      }
+
       console.info(`IdleGames ${resolvedVersion} ready. Service worker scope:`, registration.scope);
 
       const trackInstalling = (worker) => {
