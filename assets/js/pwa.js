@@ -52,8 +52,8 @@ if ('serviceWorker' in navigator) {
       const resolvedVersion = moduleVersion || appVersionMeta?.content || storedSwVersion || 'dev';
       const baseSwUrl = new URL(SW_PATH, window.location.href);
 
-      const MAX_SW_RETRIES = 5;
-      const BASE_RETRY_DELAY_MS = 15000;
+  const MAX_SW_RETRIES = 10;
+  const BASE_RETRY_DELAY_MS = 15000;
 
       const ensureServiceWorkerRegistration = async (attempt = 0) => {
         const versionedSwUrl = new URL(baseSwUrl.toString());
