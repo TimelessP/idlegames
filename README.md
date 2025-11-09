@@ -158,24 +158,26 @@ Security note:
 Simply visit [https://timelessp.github.io/idlegames/](https://timelessp.github.io/idlegames/) to start playing immediately.
 
 ### **Run Locally**
+Idle Games uses plain **npm** for tooling and scripts—no bundlers or task runners beyond what ships in this repository. The workflow below mirrors what the CI pipeline executes.
+
 1. Clone this repository:
    ```bash
    git clone https://github.com/TimelessP/idlegames.git
    cd idlegames
    ```
-2. Install tooling dependencies (Node.js 18+ recommended):
+2. Install dependencies with npm (Node.js 20 LTS recommended, Node.js ≥18 supported):
    ```bash
    npm install
    ```
-3. Build the offline bundle into `dist/`:
+3. Build the offline bundle into `dist/` (vendors Three.js examples, fonts, service worker, etc.):
    ```bash
    npm run build
    ```
-4. Preview locally with caching behaviours intact:
+4. Preview locally with caching behaviours intact (rebuilds and serves `dist/` on port 4173):
    ```bash
    npm run serve
    ```
-   This command rebuilds and serves `dist/` via a static server on port 4173. You can also deploy the contents of `dist/` directly to GitHub Pages or any static host.
+   The generated `dist/` folder is the exact payload deployed to GitHub Pages or any other static host.
 
 ## 🚢 Release Process
 
