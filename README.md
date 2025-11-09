@@ -184,7 +184,7 @@ Idle Games uses plain **npm** for tooling and scripts—no bundlers or task runn
 The service worker caches by version, so every public release needs a fresh build tied to a new semantic version. Use the checklist below to publish a new drop.
 
 1. **Bump the version.** Pick the next semantic version and update the `version` field in `package.json` (e.g. `1.0.5`). The build script automatically regenerates `assets/js/version.js`; update any user-facing version display only if you want it visible in the UI.
-2. **Regenerate the lockfile.** Run `npm install --package-lock-only` from the repo root. This keeps `package-lock.json` aligned with the new version number.
+2. **Regenerate the lockfile.** Run `npm install` from the repo root. This refreshes dependencies (without changing versions unless the semver ranges allow it) and automatically bumps `package-lock.json` to the new app version. If you truly need a lock-only pass, use `npm install --package-lock-only` instead.
 3. **Build the distributable.** Execute `npm run build`. The script rewrites `assets/js/version.js`, wipes `dist/`, copies the site, rewrites Three.js imports, vendors dependencies, and emits `dist/sw.js` with the new cache name (`IdleGames-vX.Y.Z`).
 4. **Smoke test locally.** Launch `npm run serve`, open `http://localhost:4173`, and confirm the service worker registers, assets load, and any modified pages behave as expected. Stop the server when finished.
 5. **Deploy GitHub Pages.** Replace the contents of the Pages branch (currently `gh-pages`) with the freshly built `dist/` directory. One manual workflow is:
@@ -200,7 +200,17 @@ The service worker caches by version, so every public release needs a fresh buil
    git worktree remove ../idlegames-gh-pages
    ```
    Adjust the release version in the commit message. If you prefer another deployment method (GitHub Action, `gh-pages` npm package, etc.) swap in your workflow, but always publish the built `dist/` artifacts.
-6. **Commit and tag main.** Back in the main worktree, commit the source changes (`package.json`, lockfile, docs) and optionally create a git tag (`git tag v1.0.5 && git push --tags`). This keeps the history aligned with the deployed build.
+6. **Commit and tag main.** Back in the main worktree, commit the source changes (`package.json`, `package-lock.json`, docs) and optionally create a git tag (`git tag v1.0.5 && git push --tags`). This keeps the history aligned with the deployed build.
+
+Quick command recap for a standard release:
+
+```bash
+npm install            # refresh lockfile after bumping package.json
+npm run build          # regenerate dist/, service worker, and version module
+git add package.json package-lock.json assets/js/version.js README.md
+git commit -m "Release vX.Y.Z"
+git push origin main
+```
 
 Following those steps ensures browsers detect the new cache version, prompt the in-app reload, and serve the latest assets after you publish.
 
