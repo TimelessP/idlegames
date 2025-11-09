@@ -151,3 +151,13 @@ if ('serviceWorker' in navigator) {
 } else {
   console.info('Service workers are not supported in this browser.');
 }
+
+// Ensure deep links supplied by OS/app launch open the intended URL instead of always showing start_url.
+if ('launchQueue' in window && typeof window.launchQueue.setConsumer === 'function') {
+  window.launchQueue.setConsumer((launchParams) => {
+    const target = launchParams?.targetURL;
+    if (target && target !== window.location.href) {
+      window.location.href = target;
+    }
+  });
+}
