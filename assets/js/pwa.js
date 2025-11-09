@@ -67,16 +67,41 @@ if ('serviceWorker' in navigator) {
         }
       }
 
-      let registration = await attemptRegistration(versionedSwUrl, { logLabel: versionedSwUrl.toString() });
-      if (!registration) {
-        registration = await attemptRegistration(baseSwUrl, { logLabel: baseSwUrl.toString() });
+      const candidates = [
+        { url: versionedSwUrl, logLabel: `${versionedSwUrl.toString()} (versioned)` },
+        { url: baseSwUrl, logLabel: `${baseSwUrl.toString()} (plain)` }
+      ];
+
+      let registration = null;
+      for (const candidate of candidates) {
+        let exists = false;
+        try {
+          const response = await fetch(candidate.url.toString(), { method: 'HEAD', cache: 'no-store' });
+          exists = response.ok;
+          if (!exists && response.status !== 404) {
+            console.warn(`Service worker preflight returned ${response.status} for ${candidate.logLabel}`);
+          }
+        } catch (error) {
+          console.warn(`Service worker preflight failed for ${candidate.logLabel}:`, error);
+        }
+
+        if (!exists) {
+          console.warn(`Service worker script not found at ${candidate.logLabel}.`);
+          continue;
+        }
+
+        registration = await attemptRegistration(candidate.url, { logLabel: candidate.logLabel });
         if (registration) {
-          console.warn('Service worker registered without cache-busting query parameter. Verify that sw.js is published for versioned URLs.');
+          if (candidate.url === baseSwUrl) {
+            console.warn('Service worker registered without cache-busting query parameter. Verify that sw.js is published for versioned URLs.');
+          }
+          break;
         }
       }
 
       if (!registration) {
-        throw new Error('Service worker registration failed for both versioned and plain URLs.');
+        console.warn('Service worker script is unavailable. Offline caching will remain disabled until sw.js is deployed for this version.');
+        return;
       }
 
       console.info(`IdleGames ${resolvedVersion} ready. Service worker scope:`, registration.scope);
