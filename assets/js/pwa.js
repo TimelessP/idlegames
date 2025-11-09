@@ -54,6 +54,12 @@ if ('serviceWorker' in navigator) {
       const versionedSwUrl = new URL(baseSwUrl.toString());
       versionedSwUrl.searchParams.set('version', resolvedVersion);
 
+      let storedVersionUrl = null;
+      if (storedSwVersion && storedSwVersion !== resolvedVersion) {
+        storedVersionUrl = new URL(baseSwUrl.toString());
+        storedVersionUrl.searchParams.set('version', storedSwVersion);
+      }
+
       async function attemptRegistration(url, { logLabel }) {
         try {
           const registration = await navigator.serviceWorker.register(url.toString(), {
@@ -68,9 +74,14 @@ if ('serviceWorker' in navigator) {
       }
 
       const candidates = [
-        { url: versionedSwUrl, logLabel: `${versionedSwUrl.toString()} (versioned)` },
-        { url: baseSwUrl, logLabel: `${baseSwUrl.toString()} (plain)` }
+        { url: versionedSwUrl, logLabel: `${versionedSwUrl.toString()} (versioned)` }
       ];
+
+      if (storedVersionUrl) {
+        candidates.push({ url: storedVersionUrl, logLabel: `${storedVersionUrl.toString()} (previous version)` });
+      }
+
+      candidates.push({ url: baseSwUrl, logLabel: `${baseSwUrl.toString()} (plain)` });
 
       let registration = null;
       for (const candidate of candidates) {
@@ -79,28 +90,30 @@ if ('serviceWorker' in navigator) {
           const response = await fetch(candidate.url.toString(), { method: 'HEAD', cache: 'no-store' });
           exists = response.ok;
           if (!exists && response.status !== 404) {
-            console.warn(`Service worker preflight returned ${response.status} for ${candidate.logLabel}`);
+            console.info(`Service worker preflight returned ${response.status} for ${candidate.logLabel}`);
           }
         } catch (error) {
-          console.warn(`Service worker preflight failed for ${candidate.logLabel}:`, error);
+          console.info(`Service worker preflight failed for ${candidate.logLabel}:`, error);
         }
 
         if (!exists) {
-          console.warn(`Service worker script not found at ${candidate.logLabel}.`);
+          console.info(`Service worker script not found at ${candidate.logLabel}.`);
           continue;
         }
 
         registration = await attemptRegistration(candidate.url, { logLabel: candidate.logLabel });
         if (registration) {
-          if (candidate.url === baseSwUrl) {
-            console.warn('Service worker registered without cache-busting query parameter. Verify that sw.js is published for versioned URLs.');
+          if (candidate.url === storedVersionUrl) {
+            console.info(`Continuing with previously deployed service worker version (${storedSwVersion}) until ${resolvedVersion} is live.`);
+          } else if (candidate.url === baseSwUrl) {
+            console.info('Service worker registered without cache-busting query parameter. Verify that sw.js is published for versioned URLs.');
           }
           break;
         }
       }
 
       if (!registration) {
-        console.warn('Service worker script is unavailable. Offline caching will remain disabled until sw.js is deployed for this version.');
+          console.info('Service worker script is unavailable yet. Offline caching will stay disabled until the new sw.js deploys. No action required.');
         return;
       }
 
