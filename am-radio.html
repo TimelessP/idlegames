@@ -553,6 +553,7 @@
   let playbackStartTime = 0;
   let pauseOffset = 0;
   let tunerPointerState = null;
+    let tunerFineAccumulator = 0;
 
     const STATION_MIN = 520;
     const STATION_MAX = 1710;
@@ -560,7 +561,9 @@
     const STATION_FALLOFF = 130; // beyond this the signal is mostly noise
   const PAUSE_THRESHOLD = 0.05;
   const SILENCE_THRESHOLD = 0.0005;
-  const FINE_TUNING_FACTOR = 0.25;
+  const FINE_TUNING_DISTANCE_SCALE = 1.2;
+  const FINE_TUNING_MIN_MULTIPLIER = 0.08;
+  const KEY_FINE_MULTIPLIER = 0.2;
   const compactMedia = window.matchMedia('(max-width: 560px)');
     const STATUS_COPY = {
       locked: {
@@ -939,9 +942,49 @@
       frequencyReadout.textContent = `${freq} kHz`;
     }
 
+    function adjustTunerBySteps(stepCount, { fine = false } = {}) {
+      if (!tuner) return false;
+      const step = Number(tuner.step) || 1;
+      const min = Number(tuner.min);
+      const max = Number(tuner.max);
+      const currentValue = Number(tuner.value);
+      if (!Number.isFinite(currentValue)) return false;
+
+      let delta = stepCount * step;
+
+      if (fine) {
+        const scaledDelta = delta * KEY_FINE_MULTIPLIER;
+        tunerFineAccumulator += scaledDelta;
+        const direction = Math.sign(tunerFineAccumulator);
+        const magnitude = Math.abs(tunerFineAccumulator);
+        if (magnitude >= step) {
+          const stepsToApply = Math.floor(magnitude / step) * direction;
+          delta = stepsToApply * step;
+          tunerFineAccumulator -= stepsToApply * step;
+        } else {
+          delta = 0;
+        }
+      } else {
+        tunerFineAccumulator = 0;
+      }
+
+      if (delta === 0) return false;
+
+      const nextValue = clamp(currentValue + delta, min, max);
+      if (nextValue === currentValue) {
+        tunerFineAccumulator = 0;
+        return false;
+      }
+
+      tuner.value = nextValue;
+      updateTuningDisplay();
+      updateClarity();
+      return true;
+    }
+
     tuner.addEventListener('pointerdown', (event) => {
-      if (event.pointerType !== 'touch') return;
       if (!dialTrack) return;
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
       if (tunerPointerState) return;
       const rect = dialTrack.getBoundingClientRect();
       tunerPointerState = {
@@ -976,8 +1019,11 @@
         return;
       }
 
-      const fineZone = event.clientY > rect.bottom;
-      const multiplier = perPixel * (fineZone ? FINE_TUNING_FACTOR : 1);
+      const distanceBelow = Math.max(0, event.clientY - rect.bottom);
+      const normalization = Math.max(1, rect.height * FINE_TUNING_DISTANCE_SCALE);
+      const normalizedDistance = distanceBelow / normalization;
+      const dynamicScale = 1 / (1 + normalizedDistance);
+      const multiplier = perPixel * Math.max(FINE_TUNING_MIN_MULTIPLIER, dynamicScale);
 
       const currentValue = Number(tuner.value);
       const rawValue = currentValue + deltaX * multiplier;
@@ -988,6 +1034,7 @@
         tuner.value = finalValue;
         updateTuningDisplay();
         updateClarity();
+        tunerFineAccumulator = 0;
       }
 
       event.preventDefault();
@@ -1015,9 +1062,70 @@
       updateClarity();
     });
 
+    tuner.addEventListener('keydown', (event) => {
+      const key = event.key;
+      const shift = event.shiftKey;
+      let handled = false;
+
+      switch (key) {
+        case 'ArrowLeft':
+        case 'ArrowDown':
+          handled = adjustTunerBySteps(-1, { fine: shift });
+          break;
+        case 'ArrowRight':
+        case 'ArrowUp':
+          handled = adjustTunerBySteps(1, { fine: shift });
+          break;
+        case 'Tab':
+          handled = adjustTunerBySteps(shift ? -1 : 1, { fine: true });
+          break;
+        default:
+          break;
+      }
+
+      if (handled) {
+        event.preventDefault();
+      }
+    });
+
+    tuner.addEventListener('wheel', (event) => {
+      if (!Number.isFinite(Number(tuner.value))) return;
+      const deltaReference = Math.abs(event.deltaY) > Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+      if (!deltaReference) return;
+      event.preventDefault();
+      const step = Number(tuner.step) || 1;
+      const min = Number(tuner.min);
+      const max = Number(tuner.max);
+      const currentValue = Number(tuner.value);
+      const direction = deltaReference > 0 ? -1 : 1;
+      const nextValue = clamp(currentValue + direction * step, min, max);
+      if (nextValue !== currentValue) {
+        tuner.value = nextValue;
+        updateTuningDisplay();
+        updateClarity();
+        tunerFineAccumulator = 0;
+      }
+    }, { passive: false });
+
     volumeControl.addEventListener('input', () => {
       updateVolume(volumeControl.value);
     });
+
+    volumeControl.addEventListener('wheel', (event) => {
+      const deltaReference = Math.abs(event.deltaY) > Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+      if (!deltaReference) return;
+      event.preventDefault();
+      const step = Number(volumeControl.step) || 1;
+      const min = volumeControl.min === '' ? 0 : Number(volumeControl.min);
+      const max = volumeControl.max === '' ? 100 : Number(volumeControl.max);
+      const currentValue = Number(volumeControl.value);
+      const direction = deltaReference > 0 ? -1 : 1;
+      const nextValue = clamp(currentValue + direction * step, min, max);
+      if (nextValue !== currentValue) {
+        volumeControl.value = nextValue;
+        updateVolume(volumeControl.value);
+      }
+    }, { passive: false });
 
     [tuner, volumeControl].forEach((control) => {
       control.addEventListener('contextmenu', (event) => {
