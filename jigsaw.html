@@ -136,6 +136,10 @@
             transform: translateY(1px);
         }
 
+        .fab.active {
+            box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 55%, transparent), 0 8px 20px var(--shadow);
+        }
+
         .fab svg {
             width: 22px;
             height: 22px;
@@ -416,6 +420,11 @@
                 <path d="M12 3a9 9 0 1 0 9 9c0-.34-.02-.68-.06-1.01A7 7 0 0 1 12 3Z" />
             </svg>
         </button>
+        <button id="btnGather" class="fab" title="Nudge loose pieces" aria-label="Bring loose pieces into view">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5a1 1 0 0 1 1 1v3.59l1.29-1.3a1 1 0 0 1 1.42 1.42l-3 3a1 1 0 0 1-1.42 0l-3-3a1 1 0 1 1 1.42-1.42L11 9.59V6a1 1 0 0 1 1-1Zm0 14a1 1 0 0 0 1-1v-3.59l1.29 1.3a1 1 0 1 0 1.42-1.42l-3-3a1 1 0 0 0-1.42 0l-3 3a1 1 0 1 0 1.42 1.42L11 14.41V18a1 1 0 0 0 1 1Zm-7-5a1 1 0 0 0 1-1v-2h3a1 1 0 0 0 0-2H6V8a1 1 0 0 0-2 0v8a1 1 0 0 0 1 1Zm13 0a1 1 0 0 1-1-1v-2h-3a1 1 0 0 1 0-2h3V8a1 1 0 0 1 2 0v8a1 1 0 0 1-1 1Z" />
+            </svg>
+        </button>
     </div>
     <div class="stage">
         <svg id="svg" xmlns="http://www.w3.org/2000/svg">
@@ -497,6 +506,7 @@
             const iconFull = document.getElementById('iconFull');
             const btnTheme = document.getElementById('btnTheme');
             const iconTheme = document.getElementById('iconTheme');
+            const btnGather = document.getElementById('btnGather');
 
             let imgHref = null;
             let imgW = 0, imgH = 0;
@@ -538,6 +548,11 @@
             let viewRAF = 0; // rAF for coalescing pan/zoom transforms
             let pendingView = null; // { s, tx, ty }
             let motionTimeout = 0; // timer to remove motion class after pan/zoom settles
+            // Gather assist
+            let gatherRAF = 0;
+            let gatherActive = false;
+            let gatherUntil = 0;
+            let gatherLast = 0;
 
             // --- UI wiring ---
             closeWin.addEventListener('click', () => { winEl.style.display = 'none'; });
@@ -651,6 +666,11 @@
                 fitView(getContentBounds());
             });
 
+            btnGather.addEventListener('click', () => {
+                if (flattened || !groups || !groups.size) return;
+                activateGatherAssist();
+            });
+
             // Modal UX: backdrop click and Escape to cancel
             importModal.addEventListener('click', (e) => { if (e.target === importModal) importModal.style.display = 'none'; });
             window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && importModal.style.display === 'flex') importModal.style.display = 'none'; });
@@ -706,8 +726,227 @@
                 return { x: pt.x * scale + tx + rect.left, y: pt.y * scale + ty + rect.top };
             }
 
+            function getVisibleWorldRect() {
+                const rect = svg.getBoundingClientRect();
+                const tl = screenToWorld({ x: rect.left, y: rect.top });
+                const br = screenToWorld({ x: rect.right, y: rect.bottom });
+                const tr = screenToWorld({ x: rect.right, y: rect.top });
+                const bl = screenToWorld({ x: rect.left, y: rect.bottom });
+                return {
+                    minX: Math.min(tl.x, br.x, tr.x, bl.x),
+                    minY: Math.min(tl.y, br.y, tr.y, bl.y),
+                    maxX: Math.max(tl.x, br.x, tr.x, bl.x),
+                    maxY: Math.max(tl.y, br.y, tr.y, bl.y)
+                };
+            }
+
+            function expandRect(rect, amount) {
+                if (!rect) return null;
+                return {
+                    minX: rect.minX - amount,
+                    minY: rect.minY - amount,
+                    maxX: rect.maxX + amount,
+                    maxY: rect.maxY + amount
+                };
+            }
+
+            function rectsOverlap(a, b) {
+                if (!a || !b) return false;
+                return !(a.maxX < b.minX || a.minX > b.maxX || a.maxY < b.minY || a.minY > b.maxY);
+            }
+
+            function shiftRect(rect, dx, dy) {
+                if (!rect) return null;
+                return {
+                    minX: rect.minX + dx,
+                    minY: rect.minY + dy,
+                    maxX: rect.maxX + dx,
+                    maxY: rect.maxY + dy
+                };
+            }
+
+            function rectCenter(rect) {
+                if (!rect) return { x: 0, y: 0 };
+                return { x: (rect.minX + rect.maxX) / 2, y: (rect.minY + rect.maxY) / 2 };
+            }
+
+            function nowMs() {
+                return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            }
+
+            function separateRectPair(a, b, padding) {
+                if (!a || !b) return false;
+                const inflatedA = expandRect(a.bounds, padding);
+                const inflatedB = expandRect(b.bounds, padding);
+                if (!rectsOverlap(inflatedA, inflatedB)) return false;
+                const overlapX = Math.min(inflatedA.maxX, inflatedB.maxX) - Math.max(inflatedA.minX, inflatedB.minX);
+                const overlapY = Math.min(inflatedA.maxY, inflatedB.maxY) - Math.max(inflatedA.minY, inflatedB.minY);
+                if (overlapX <= 0 || overlapY <= 0) return false;
+                if (overlapX <= overlapY) {
+                    const dir = (a.center.x <= b.center.x) ? -1 : 1;
+                    const shift = overlapX / 2;
+                    translateGroup(a.gr, a.bounds, dir * shift, 0);
+                    translateGroup(b.gr, b.bounds, -dir * shift, 0);
+                } else {
+                    const dir = (a.center.y <= b.center.y) ? -1 : 1;
+                    const shift = overlapY / 2;
+                    translateGroup(a.gr, a.bounds, 0, dir * shift);
+                    translateGroup(b.gr, b.bounds, 0, -dir * shift);
+                }
+                a.center = rectCenter(a.bounds);
+                b.center = rectCenter(b.bounds);
+                return true;
+            }
+
+            function pushOutOfRect(entry, rect, padding) {
+                if (!entry || !rect) return false;
+                const inflated = expandRect(entry.bounds, padding);
+                if (!rectsOverlap(inflated, rect)) return false;
+                const overlapX = Math.min(inflated.maxX, rect.maxX) - Math.max(inflated.minX, rect.minX);
+                const overlapY = Math.min(inflated.maxY, rect.maxY) - Math.max(inflated.minY, rect.minY);
+                if (overlapX <= 0 || overlapY <= 0) return false;
+                if (overlapX <= overlapY) {
+                    const dir = (entry.center.x <= (rect.minX + rect.maxX) / 2) ? -1 : 1;
+                    const shift = overlapX + padding * 0.4;
+                    translateGroup(entry.gr, entry.bounds, dir * shift, 0);
+                } else {
+                    const dir = (entry.center.y <= (rect.minY + rect.maxY) / 2) ? -1 : 1;
+                    const shift = overlapY + padding * 0.4;
+                    translateGroup(entry.gr, entry.bounds, 0, dir * shift);
+                }
+                entry.center = rectCenter(entry.bounds);
+                return true;
+            }
+
+            function activateGatherAssist() {
+                const now = nowMs();
+                gatherUntil = now + 5000;
+                gatherLast = now;
+                gatherActive = true;
+                btnGather.classList.add('active');
+                if (!gatherRAF) {
+                    gatherRAF = requestAnimationFrame(runGatherAssist);
+                }
+            }
+
+            function stopGatherAssist() {
+                gatherActive = false;
+                btnGather && btnGather.classList.remove('active');
+                if (gatherRAF) {
+                    cancelAnimationFrame(gatherRAF);
+                    gatherRAF = 0;
+                }
+            }
+
+            function runGatherAssist() {
+                if (!gatherActive) { gatherRAF = 0; return; }
+                const now = nowMs();
+                if (now >= gatherUntil || flattened || !groups || !groups.size) {
+                    stopGatherAssist();
+                    gatherRAF = 0;
+                    return;
+                }
+                const dt = Math.max(1, now - gatherLast);
+                applyGatherStep(dt);
+                gatherLast = now;
+                gatherRAF = requestAnimationFrame(runGatherAssist);
+            }
+
+            function applyGatherStep(dtMs) {
+                if (flattened || !groups || !groups.size) return;
+                const visRect = getVisibleWorldRect();
+                const shrink = Math.max(40 / scale, Math.min(cellW, cellH) * 0.5);
+                const maxShrinkX = Math.max(0, (visRect.maxX - visRect.minX) / 2 - 1);
+                const maxShrinkY = Math.max(0, (visRect.maxY - visRect.minY) / 2 - 1);
+                const safeShrink = Math.min(shrink, maxShrinkX, maxShrinkY);
+                const innerRect = expandRect(visRect, -safeShrink);
+                const dtFactor = clamp(dtMs / 16, 0.5, 3);
+                const stepBase = Math.max(cellW, cellH) * 0.12;
+                const moveStep = stepBase * dtFactor;
+                const spacing = Math.max(cellW, cellH) * 0.45;
+                let mainGroup = null;
+                let maxSize = 0;
+                groups.forEach(gr => {
+                    if (gr.members.size > maxSize) {
+                        maxSize = gr.members.size;
+                        mainGroup = gr;
+                    }
+                });
+                const keepOut = (mainGroup && maxSize > 1) ? expandRect(getGroupBounds(mainGroup), Math.max(spacing, edgeTabRMax || 0)) : null;
+                const loose = [];
+                groups.forEach(gr => {
+                    if (mainGroup && gr.id === mainGroup.id && maxSize > 1) return;
+                    if (dragging && dragging.groupId === gr.id) return;
+                    const bounds = getGroupBounds(gr);
+                    if (!bounds) return;
+                    const center = rectCenter(bounds);
+                    const intersects = rectsOverlap(bounds, visRect);
+                    if (!intersects) {
+                        const targetX = clamp(center.x, innerRect.minX, innerRect.maxX);
+                        const targetY = clamp(center.y, innerRect.minY, innerRect.maxY);
+                        let dx = targetX - center.x;
+                        let dy = targetY - center.y;
+                        const dist = Math.hypot(dx, dy);
+                        if (dist > 0.5) {
+                            const mag = Math.min(dist, moveStep);
+                            dx = (dx / dist) * mag;
+                            dy = (dy / dist) * mag;
+                            if (keepOut) {
+                                const nextBounds = shiftRect(bounds, dx, dy);
+                                if (rectsOverlap(nextBounds, keepOut)) {
+                                    const nextCenter = rectCenter(nextBounds);
+                                    const koCenter = rectCenter(keepOut);
+                                    let kdx = nextCenter.x - koCenter.x;
+                                    let kdy = nextCenter.y - koCenter.y;
+                                    const kdist = Math.hypot(kdx, kdy) || 1;
+                                    const push = spacing * 0.6;
+                                    dx += (kdx / kdist) * push;
+                                    dy += (kdy / kdist) * push;
+                                }
+                            }
+                            translateGroup(gr, bounds, dx, dy);
+                        }
+                    }
+                    loose.push({ gr, bounds, center: rectCenter(bounds) });
+                });
+                resolveLooseCollisions(loose, spacing, keepOut);
+            }
+
+            function translateGroup(gr, bounds, dx, dy) {
+                if (!dx && !dy) return;
+                setGroupTransform(gr.id, gr.x + dx, gr.y + dy);
+                bounds.minX += dx;
+                bounds.maxX += dx;
+                bounds.minY += dy;
+                bounds.maxY += dy;
+            }
+
+            function resolveLooseCollisions(entries, spacing, keepOut) {
+                const padding = Math.max(spacing * 0.4, Math.min(cellW, cellH) * 0.2);
+                const iterations = 8;
+                for (let iter = 0; iter < iterations; iter++) {
+                    let movedAny = false;
+                    for (let i = 0; i < entries.length; i++) {
+                        const a = entries[i];
+                        if (!a) continue;
+                        for (let j = i + 1; j < entries.length; j++) {
+                            const b = entries[j];
+                            if (!b) continue;
+                            if (separateRectPair(a, b, padding)) {
+                                movedAny = true;
+                            }
+                        }
+                        if (keepOut && pushOutOfRect(a, keepOut, padding)) {
+                            movedAny = true;
+                        }
+                    }
+                    if (!movedAny) break;
+                }
+            }
+
             // --- Puzzle generation ---
             function initPuzzle() {
+                stopGatherAssist();
                 // Reset layers/state
                 piecesLayer.innerHTML = '';
                 defs.innerHTML = '';
@@ -879,19 +1118,35 @@
                 let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
                 const tabMargin = edgeTabRMax + Math.min(cellW, cellH) * 0.05;
                 groups.forEach(gr => {
-                    gr.members.forEach(pid => {
-                        const p = pieces[pid];
-                        const x = p.anchor.x + gr.x;
-                        const y = p.anchor.y + gr.y;
-                        minX = Math.min(minX, x - tabMargin);
-                        minY = Math.min(minY, y - tabMargin);
-                        maxX = Math.max(maxX, x + cellW + tabMargin);
-                        maxY = Math.max(maxY, y + cellH + tabMargin);
-                    });
+                    const bounds = getGroupBounds(gr);
+                    if (!bounds) return;
+                    minX = Math.min(minX, bounds.minX - tabMargin);
+                    minY = Math.min(minY, bounds.minY - tabMargin);
+                    maxX = Math.max(maxX, bounds.maxX + tabMargin);
+                    maxY = Math.max(maxY, bounds.maxY + tabMargin);
                 });
                 if (!Number.isFinite(minX)) {
                     // Fallback to puzzle rectangle
                     minX = 0; minY = 0; maxX = imgW; maxY = imgH;
+                }
+                return { minX, minY, maxX, maxY };
+            }
+
+            function getGroupBounds(gr) {
+                if (!gr) return null;
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                gr.members.forEach(pid => {
+                    const p = pieces[pid];
+                    if (!p) return;
+                    const x = p.anchor.x + gr.x;
+                    const y = p.anchor.y + gr.y;
+                    minX = Math.min(minX, x);
+                    minY = Math.min(minY, y);
+                    maxX = Math.max(maxX, x + cellW);
+                    maxY = Math.max(maxY, y + cellH);
+                });
+                if (!Number.isFinite(minX)) {
+                    return null;
                 }
                 return { minX, minY, maxX, maxY };
             }
@@ -941,6 +1196,7 @@
 
             function showWin() {
                 winEl.style.display = 'flex';
+                stopGatherAssist();
                 // Hide all shading so the finished image looks flat
                 document.querySelectorAll('.edge-shade').forEach(el => el.style.display = 'none');
                 // Flatten solved puzzle to a single image for performance
