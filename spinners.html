@@ -619,23 +619,9 @@
                                 </div>
                                 <div class="config-group">
                                     <div class="range-field">
-                                        <label for="initialSpeed">Initial spin speed (°/s)</label>
-                                        <output id="initialSpeedOutput">1080</output>
-                                        <input type="range" id="initialSpeed" name="initialSpeed" min="360" max="2160" step="10" value="1080">
-                                    </div>
-                                </div>
-                                <div class="config-group">
-                                    <div class="range-field">
-                                        <label for="friction">Friction (drag strength)</label>
-                                        <output id="frictionOutput">50% drag</output>
-                                        <input type="range" id="friction" name="friction" min="0" max="100" step="1" value="50">
-                                    </div>
-                                </div>
-                                <div class="config-group">
-                                    <div class="range-field">
-                                        <label for="stopVelocity">Stop velocity</label>
-                                        <output id="stopVelocityOutput">18</output>
-                                        <input type="range" id="stopVelocity" name="stopVelocity" min="5" max="60" step="1" value="18">
+                                        <label for="spinDuration">Spin duration (seconds)</label>
+                                        <output id="spinDurationOutput">4s</output>
+                                        <input type="range" id="spinDuration" name="spinDuration" min="2" max="8" step="0.25" value="4">
                                     </div>
                                 </div>
                             </div>
@@ -655,9 +641,13 @@
             const THEME_KEY = 'idlegames-spinners-theme';
             const THEMES = ['system', 'light', 'dark'];
             const DEFAULT_ENTRIES = ['Team One', 'Team Two', 'Brainstorm', 'Coffee Break'];
-            const FRICTION_COEFF_MIN = 0.9;
-            const FRICTION_COEFF_MAX = 0.995;
             const MAX_WHEEL_SIZE_FALLBACK = 480;
+            const SPIN_DURATION_MIN = 2;
+            const SPIN_DURATION_MAX = 8;
+            const DEFAULT_SPIN_DURATION = 4;
+            const EXTRA_ROTATIONS_MIN = 3;
+            const EXTRA_ROTATIONS_MAX = 6;
+            const TWO_PI = Math.PI * 2;
 
             const qs = selector => document.querySelector(selector);
             const wheelGrid = qs('#wheelGrid');
@@ -713,24 +703,6 @@
                 return hasUUID ? window.crypto.randomUUID() : `wheel-${Date.now()}-${Math.random().toString(16).slice(2)}`;
             };
             const randomBetween = (min, max) => Math.random() * (max - min) + min;
-
-            const frictionSliderToCoefficient = sliderValue => {
-                const raw = Number(sliderValue);
-                const normalized = clampValue((Number.isFinite(raw) ? raw : 50) / 100, 0, 1);
-                return FRICTION_COEFF_MAX - (FRICTION_COEFF_MAX - FRICTION_COEFF_MIN) * normalized;
-            };
-
-            const frictionCoefficientToSlider = coefficient => {
-                const clamped = clampValue(Number.isFinite(coefficient) ? coefficient : FRICTION_COEFF_MIN, FRICTION_COEFF_MIN, FRICTION_COEFF_MAX);
-                const normalized = (FRICTION_COEFF_MAX - clamped) / (FRICTION_COEFF_MAX - FRICTION_COEFF_MIN);
-                return Math.round(normalized * 100);
-            };
-
-            const formatFrictionOutput = sliderValue => {
-                const numeric = Number(sliderValue);
-                const safeValue = Number.isFinite(numeric) ? Math.round(numeric) : 0;
-                return `${safeValue}% drag`;
-            };
 
             const adjustFontSizeToWidth = (ctx, text, maxWidth, initialSize, minSize = 10) => {
                 let size = initialSize;
@@ -847,22 +819,20 @@
                 const activeIds = Array.isArray(overrides.activeItemIds)
                     ? overrides.activeItemIds.filter(id => items.some(item => item.id === id))
                     : items.map(item => item.id);
+                const duration = overrides.spin?.duration ?? DEFAULT_SPIN_DURATION;
                 return {
                     id: overrides.id || safeId(),
                     label: overrides.label || `Wheel ${index + 1}`,
                     items,
                     activeItemIds: activeIds,
                     rotation: overrides.rotation || 0,
-                    velocity: 0,
                     colors,
                     outlineWidth: typeof overrides.outlineWidth === 'number' ? overrides.outlineWidth : randomBetween(1.5, 3.5),
                     spin: {
-                        initialSpeed: overrides.spin?.initialSpeed ?? randomBetween(720, 1440),
-                        friction: overrides.spin?.friction ?? randomBetween(0.94, 0.975),
-                        stopVelocity: overrides.spin?.stopVelocity ?? randomBetween(12, 25)
+                        duration: clampValue(Number(duration) || DEFAULT_SPIN_DURATION, SPIN_DURATION_MIN, SPIN_DURATION_MAX)
                     },
                     lastSelectedId: overrides.lastSelectedId || null,
-                    lastTick: null
+                    isSpinning: false
                 };
             };
 
@@ -1107,7 +1077,7 @@
                 if (!wheel || !runtime) return;
                 applyPanelStyles(wheel);
                 const actions = runtime.panel.querySelectorAll('.action-button');
-                const spinning = wheel.velocity > 0;
+                const spinning = !!wheel.isSpinning;
                 actions.forEach(button => {
                     if (button.dataset.action === 'reset') {
                         button.disabled = spinning || wheel.items.length === wheel.activeItemIds.length;
@@ -1122,46 +1092,115 @@
                 requestAnimationFrame(() => (liveRegion.textContent = message));
             };
 
-            const finishSpin = wheel => {
-                wheel.velocity = 0;
-                wheel.lastTick = null;
-                const selectedIndex = getSelectedIndex(wheel);
-                if (selectedIndex >= 0) {
-                    const selectedId = wheel.activeItemIds[selectedIndex];
-                    const selectedItem = wheel.items.find(item => item.id === selectedId);
-                    if (selectedItem) {
-                        wheel.lastSelectedId = selectedItem.id;
-                        announce(`${wheel.label} selected ${selectedItem.label}`);
-                        showResultModal(wheel, selectedItem.label, { focusClose: true });
+            const finishSpin = (wheel, forcedSelectedId = null) => {
+                wheel.isSpinning = false;
+                let selectedId = forcedSelectedId;
+                if (!selectedId) {
+                    const selectedIndex = getSelectedIndex(wheel);
+                    if (selectedIndex >= 0) {
+                        selectedId = wheel.activeItemIds[selectedIndex];
                     }
                 }
+
+                let selectedItem = null;
+                if (selectedId) {
+                    selectedItem = wheel.items.find(item => item.id === selectedId);
+                }
+
+                if (selectedItem) {
+                    wheel.lastSelectedId = selectedItem.id;
+                    announce(`${wheel.label} selected ${selectedItem.label}`);
+                    showResultModal(wheel, selectedItem.label, { focusClose: true });
+                } else {
+                    wheel.lastSelectedId = null;
+                }
+
                 drawWheel(wheel);
                 updateActionState(wheel.id);
                 saveState();
             };
 
-            const animateWheel = wheel => {
-                const step = timestamp => {
-                    if (!wheel.velocity) return;
-                    if (!wheel.lastTick) wheel.lastTick = timestamp;
-                    const delta = (timestamp - wheel.lastTick) / 1000;
-                    wheel.lastTick = timestamp;
-                    const radiansPerSecond = (wheel.velocity * Math.PI) / 180;
-                    wheel.rotation = (wheel.rotation + radiansPerSecond * delta) % (Math.PI * 2);
-                    wheel.velocity *= Math.pow(wheel.spin.friction, delta * 60);
+            const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+
+            const normalizeAngle = value => ((value % TWO_PI) + TWO_PI) % TWO_PI;
+
+            const cancelSpinAnimation = wheel => {
+                const runtime = wheelRuntime.get(wheel.id);
+                if (runtime?.spinAnimationFrame) {
+                    cancelAnimationFrame(runtime.spinAnimationFrame);
+                    runtime.spinAnimationFrame = null;
+                }
+            };
+
+            const animateSpin = (wheel, targetRotation, durationMs, onComplete) => {
+                const runtime = wheelRuntime.get(wheel.id);
+                if (!runtime) return;
+                cancelSpinAnimation(wheel);
+                const startRotation = wheel.rotation;
+                const totalDistance = targetRotation - startRotation;
+                const duration = Math.max(0, durationMs);
+                if (duration === 0 || !Number.isFinite(totalDistance)) {
+                    wheel.rotation = targetRotation;
                     drawWheel(wheel);
-                    if (wheel.velocity <= wheel.spin.stopVelocity) {
-                        finishSpin(wheel);
-                        return;
+                    onComplete?.();
+                    return;
+                }
+                const startTime = performance.now();
+                const step = timestamp => {
+                    const elapsed = timestamp - startTime;
+                    const progress = Math.min(elapsed / duration, 1);
+                    const eased = easeOutCubic(progress);
+                    wheel.rotation = startRotation + totalDistance * eased;
+                    drawWheel(wheel);
+                    if (progress < 1) {
+                        runtime.spinAnimationFrame = requestAnimationFrame(step);
+                    } else {
+                        runtime.spinAnimationFrame = null;
+                        wheel.rotation = targetRotation;
+                        drawWheel(wheel);
+                        onComplete?.();
                     }
-                    requestAnimationFrame(step);
                 };
-                requestAnimationFrame(step);
+                runtime.spinAnimationFrame = requestAnimationFrame(step);
+            };
+
+            const pickRandomActiveEntry = wheel => {
+                const total = wheel.activeItemIds.length;
+                if (!total) return null;
+                const index = Math.floor(Math.random() * total);
+                const id = wheel.activeItemIds[index];
+                const item = wheel.items.find(entry => entry.id === id);
+                if (!item) return null;
+                return { index, id, item };
+            };
+
+            const computeSpinPlan = (wheel, targetIndex) => {
+                const total = wheel.activeItemIds.length;
+                if (!total) {
+                    const rotation = wheel.rotation;
+                    return {
+                        finalRotation: rotation,
+                        targetRotation: normalizeAngle(rotation),
+                        totalDistance: 0
+                    };
+                }
+                const arc = TWO_PI / total;
+                const targetAngleCenter = targetIndex * arc + arc / 2;
+                const targetRotationMod = normalizeAngle(TWO_PI - targetAngleCenter);
+                const currentRotationMod = normalizeAngle(wheel.rotation);
+                const deltaToTarget = normalizeAngle(targetRotationMod - currentRotationMod);
+                const extraTurns = Math.floor(Math.random() * (EXTRA_ROTATIONS_MAX - EXTRA_ROTATIONS_MIN + 1)) + EXTRA_ROTATIONS_MIN;
+                const totalDistance = extraTurns * TWO_PI + deltaToTarget;
+                return {
+                    finalRotation: wheel.rotation + totalDistance,
+                    targetRotation: targetRotationMod,
+                    totalDistance
+                };
             };
 
             const startSpin = (wheelId, removeBeforeSpin) => {
                 const wheel = getWheel(wheelId);
-                if (!wheel || wheel.velocity > 0) return;
+                if (!wheel || wheel.isSpinning) return;
                 if (!wheel.activeItemIds.length) return;
 
                 if (removeBeforeSpin) {
@@ -1179,18 +1218,31 @@
                 }
 
                 hideResultModal(wheel.id);
-                wheel.velocity = wheel.spin.initialSpeed;
-                wheel.lastTick = null;
+                cancelSpinAnimation(wheel);
+                wheel.isSpinning = true;
+                wheel.lastSelectedId = null;
+                const selection = pickRandomActiveEntry(wheel);
+                if (!selection) {
+                    wheel.isSpinning = false;
+                    updateActionState(wheel.id);
+                    return;
+                }
+
                 updateActionState(wheel.id);
-                animateWheel(wheel);
+                const { finalRotation } = computeSpinPlan(wheel, selection.index);
+                const durationSeconds = clampValue(wheel.spin?.duration ?? DEFAULT_SPIN_DURATION, SPIN_DURATION_MIN, SPIN_DURATION_MAX);
+                animateSpin(wheel, finalRotation, durationSeconds * 1000, () => {
+                    finishSpin(wheel, selection.id);
+                });
             };
 
             const resetWheel = wheelId => {
                 const wheel = getWheel(wheelId);
                 if (!wheel) return;
+                cancelSpinAnimation(wheel);
                 wheel.activeItemIds = wheel.items.map(item => item.id);
                 wheel.rotation = 0;
-                wheel.velocity = 0;
+                wheel.isSpinning = false;
                 wheel.lastSelectedId = null;
                 hideResultModal(wheel.id);
                 drawWheel(wheel);
@@ -1201,6 +1253,10 @@
             const removeWheel = wheelId => {
                 const index = appState.wheels.findIndex(w => w.id === wheelId);
                 if (index < 0) return;
+                const wheel = appState.wheels[index];
+                if (wheel) {
+                    cancelSpinAnimation(wheel);
+                }
                 const runtime = wheelRuntime.get(wheelId);
                 if (runtime) {
                     runtime.areaObserver?.disconnect();
@@ -1318,7 +1374,8 @@
                     padding: 8,
                     logicalSize: 0,
                     areaObserver,
-                    panelObserver
+                    panelObserver,
+                    spinAnimationFrame: null
                 });
                 resultClose.addEventListener('click', event => {
                     event.stopPropagation();
@@ -1330,7 +1387,7 @@
                     }
                 });
                 area.addEventListener('click', () => {
-                    if (wheel.velocity > 0) return;
+                    if (wheel.isSpinning) return;
                     if (!wheel.lastSelectedId) return;
                     showResultModal(wheel);
                 });
@@ -1342,6 +1399,9 @@
 
             const cleanupRuntimes = () => {
                 wheelRuntime.forEach(runtime => {
+                    if (runtime.spinAnimationFrame) {
+                        cancelAnimationFrame(runtime.spinAnimationFrame);
+                    }
                     runtime.areaObserver?.disconnect();
                     runtime.panelObserver?.disconnect();
                 });
@@ -1367,14 +1427,9 @@
                 getField('textColor').value = wheel.colors.textColor;
                 getField('selectedTextColor').value = wheel.colors.selectedTextColor;
                 getField('outlineWidth').value = wheel.outlineWidth;
-                getField('initialSpeed').value = wheel.spin.initialSpeed;
-                const frictionField = getField('friction');
-                const frictionSliderValue = Number.isFinite(wheel.spin.friction)
-                    ? frictionCoefficientToSlider(wheel.spin.friction)
-                    : 50;
-                frictionField.value = String(frictionSliderValue);
-                getField('stopVelocity').value = wheel.spin.stopVelocity;
-                ['outlineWidth', 'initialSpeed', 'friction', 'stopVelocity'].forEach(id => updateRangeOutput(getField(id)));
+                const durationField = getField('spinDuration');
+                durationField.value = String(clampValue(wheel.spin?.duration ?? DEFAULT_SPIN_DURATION, SPIN_DURATION_MIN, SPIN_DURATION_MAX));
+                ['outlineWidth', 'spinDuration'].forEach(id => updateRangeOutput(getField(id)));
                 document.body.classList.add('modal-open');
                 document.documentElement.classList.add('modal-open');
                 modal.removeAttribute('inert');
@@ -1406,13 +1461,21 @@
                 editingWheelId = null;
             };
 
+            const formatSpinDuration = value => {
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric)) return `${DEFAULT_SPIN_DURATION}s`;
+                const fixed = numeric.toFixed(2).replace(/\.00$/, '').replace(/\.0$/, '');
+                return `${fixed}s`;
+            };
+
             const updateRangeOutput = input => {
                 if (!input) return;
                 const output = document.getElementById(`${input.id}Output`);
-                if (output) {
-                    output.textContent = input.id === 'friction'
-                        ? formatFrictionOutput(input.value)
-                        : input.value;
+                if (!output) return;
+                if (input.id === 'spinDuration') {
+                    output.textContent = formatSpinDuration(input.value);
+                } else {
+                    output.textContent = input.value;
                 }
             };
 
@@ -1421,20 +1484,34 @@
                 if (!editingWheelId) return;
                 const wheel = getWheel(editingWheelId);
                 if (!wheel) return;
-                const entries = parseEntries(getField('items').value);
-                wheel.items = entries;
-                wheel.activeItemIds = entries.map(item => item.id);
+
+                const rawEntries = getField('items').value;
+                const normalizedInput = rawEntries
+                    .split(/\r?\n/)
+                    .map(line => line.trim())
+                    .filter(Boolean);
+                const currentLabels = wheel.items.map(item => item.label.trim());
+                const entriesChanged = normalizedInput.length !== currentLabels.length
+                    || normalizedInput.some((label, index) => label !== currentLabels[index]);
+
+                if (entriesChanged) {
+                    const entries = normalizedInput.length
+                        ? createItemObjects(normalizedInput)
+                        : createItemObjects(DEFAULT_ENTRIES);
+                    wheel.items = entries;
+                    wheel.activeItemIds = entries.map(item => item.id);
+                    wheel.rotation = 0;
+                    wheel.lastSelectedId = null;
+                }
+
                 wheel.colors.segmentColor = getField('segmentColor').value;
                 wheel.colors.selectedColor = getField('selectedColor').value;
                 wheel.colors.outlineColor = getField('outlineColor').value;
                 wheel.colors.textColor = getField('textColor').value;
                 wheel.colors.selectedTextColor = getField('selectedTextColor').value;
                 wheel.outlineWidth = parseFloat(getField('outlineWidth').value);
-                wheel.spin.initialSpeed = parseFloat(getField('initialSpeed').value);
-                const frictionSliderSetting = parseFloat(getField('friction').value);
-                wheel.spin.friction = frictionSliderToCoefficient(frictionSliderSetting);
-                wheel.spin.stopVelocity = parseFloat(getField('stopVelocity').value);
-                wheel.rotation = 0;
+                const durationValue = parseFloat(getField('spinDuration').value);
+                wheel.spin.duration = clampValue(Number.isFinite(durationValue) ? durationValue : DEFAULT_SPIN_DURATION, SPIN_DURATION_MIN, SPIN_DURATION_MAX);
                 closeConfig();
                 saveState();
                 renderAllWheels();
