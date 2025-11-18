@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#ffa726">
+  <meta name="application-name" content="IdleGames">
+  <link rel="manifest" href="manifest.webmanifest">
+  <script type="module" src="assets/js/pwa.js" defer></script>
+  <title>Offroad Rally - Endless Desert</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Arial', sans-serif;
+      background: #1a0f0a;
+      color: #fff;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    #container {
+      width: 100vw;
+      height: 100vh;
+      position: relative;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      font-size: 18px;
+      font-weight: bold;
+      text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    #hud div {
+      margin-bottom: 8px;
+    }
+
+    #controls {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.7);
+      padding: 12px 24px;
+      border-radius: 12px;
+      font-size: 14px;
+      text-align: center;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    #loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #ff9a56, #ff6b35);
+      font-size: 24px;
+      font-weight: bold;
+      z-index: 100;
+      transition: opacity 0.5s ease;
+    }
+
+    #loading.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="loading">Loading Desert Rally...</div>
+    <div id="hud">
+      <div>Speed: <span id="speed">0</span> km/h</div>
+      <div>Distance: <span id="distance">0</span> m</div>
+    </div>
+    <div id="controls">
+      WASD / Arrow Keys: Drive | C: Change Car Color | R: Reset Position
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from './assets/vendor/three/three.module.js';
+
+    // ========== CONFIG ==========
+    const GRAVITY = 30;
+    const SPHERE_RADIUS = 0.3;
+    const CAR_BODY_HEIGHT = 0.8;
+    const WHEEL_RADIUS = 0.4;
+    const WHEEL_WIDTH = 0.3;
+    const MAX_SUSPENSION = 0.2;
+    const ACCELERATION = 22;
+    const MAX_SPEED = 320;
+    const BRAKE_FORCE = 30;
+    const STEERING_SPEED = 4.5;
+    const MAX_STEER_ANGLE = 0.5;
+    const DRIFT_FACTOR = 0.92;
+    const TERRAIN_SIZE = 200;
+    const TERRAIN_SEGMENTS = 80;
+    const DUNE_HEIGHT = 8;
+    const CHUNK_SIZE = 100;
+    const CHUNK_SEGMENTS = 40;
+    const RENDER_DISTANCE = 2;
+    const CAMERA_FOLLOW_SPEED = 0.12;
+    const CAMERA_LOOK_SPEED = 0.08;
+    const CAMERA_OFFSET = new THREE.Vector3(0, 4, 8);
+
+    // ========== SCENE SETUP ==========
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xffd599);
+    scene.fog = new THREE.Fog(0xffd599, 100, 250);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 300);
+    camera.position.set(0, 8, 12);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.getElementById('container').appendChild(renderer.domElement);
+
+    // ========== LIGHTING ==========
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.25);
+    scene.add(ambientLight);
+
+    const sunLight = new THREE.DirectionalLight(0xfff5e1, 2.0);
+    sunLight.position.set(50, 60, 30);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.width = 4096;
+    sunLight.shadow.mapSize.height = 4096;
+    // Larger frustum for shadows so they persist as you drive
+    sunLight.shadow.camera.left = -150;
+    sunLight.shadow.camera.right = 150;
+    sunLight.shadow.camera.top = 150;
+    sunLight.shadow.camera.bottom = -150;
+    sunLight.shadow.camera.near = 1;
+    sunLight.shadow.camera.far = 600;
+    sunLight.shadow.bias = -0.0003;
+    sunLight.shadow.normalBias = 0.02;
+    // Ensure light targets the car (updated per-frame)
+    sunLight.target.position.set(0, 0, 0);
+    scene.add(sunLight.target);
+    scene.add(sunLight);
+
+    // ========== PROCEDURAL TERRAIN ==========
+    // Simplex-like noise using sine waves for procedural dunes
+    function noise2D(x, z, seed = 0) {
+      const scale1 = 0.05;
+      const scale2 = 0.12;
+      const scale3 = 0.23;
+      
+      const wave1 = Math.sin(x * scale1 + seed) * Math.cos(z * scale1 + seed);
+      const wave2 = Math.sin(x * scale2 - seed * 0.7) * Math.cos(z * scale2 + seed * 0.5);
+      const wave3 = Math.sin(x * scale3 + seed * 1.3) * Math.cos(z * scale3 - seed * 0.9);
+      
+      return (wave1 * 0.5 + wave2 * 0.3 + wave3 * 0.2) * DUNE_HEIGHT;
+    }
+
+    // Terrain chunk system for infinite world
+    const terrainChunks = new Map();
+    const terrainMaterial = new THREE.MeshStandardMaterial({
+      color: 0xe8c89f,
+      roughness: 0.8,
+      metalness: 0.05,
+      flatShading: false
+    });
+
+    function getChunkKey(chunkX, chunkZ) {
+      return `${chunkX},${chunkZ}`;
+    }
+
+    function createTerrainChunk(chunkX, chunkZ) {
+      const geometry = new THREE.PlaneGeometry(
+        CHUNK_SIZE,
+        CHUNK_SIZE,
+        CHUNK_SEGMENTS,
+        CHUNK_SEGMENTS
+      );
+      geometry.rotateX(-Math.PI / 2);
+
+      const vertices = geometry.attributes.position.array;
+      const offsetX = chunkX * CHUNK_SIZE;
+      const offsetZ = chunkZ * CHUNK_SIZE;
+
+      for (let i = 0; i < vertices.length; i += 3) {
+        const x = vertices[i] + offsetX;
+        const z = vertices[i + 2] + offsetZ;
+        vertices[i + 1] = noise2D(x, z, 42);
+      }
+
+      geometry.computeVertexNormals();
+      geometry.attributes.position.needsUpdate = true;
+
+      const mesh = new THREE.Mesh(geometry, terrainMaterial);
+      mesh.position.set(offsetX, 0, offsetZ);
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+
+      return mesh;
+    }
+
+    function updateTerrainChunks(centerX, centerZ) {
+      const chunkX = Math.floor(centerX / CHUNK_SIZE);
+      const chunkZ = Math.floor(centerZ / CHUNK_SIZE);
+
+      const newChunks = new Set();
+
+      // Create chunks in render distance
+      for (let x = chunkX - RENDER_DISTANCE; x <= chunkX + RENDER_DISTANCE; x++) {
+        for (let z = chunkZ - RENDER_DISTANCE; z <= chunkZ + RENDER_DISTANCE; z++) {
+          const key = getChunkKey(x, z);
+          newChunks.add(key);
+
+          if (!terrainChunks.has(key)) {
+            terrainChunks.set(key, createTerrainChunk(x, z));
+          }
+        }
+      }
+
+      // Remove distant chunks
+      for (const [key, mesh] of terrainChunks) {
+        if (!newChunks.has(key)) {
+          scene.remove(mesh);
+          mesh.geometry.dispose();
+          terrainChunks.delete(key);
+        }
+      }
+    }
+
+    // Initialize starting chunks
+    updateTerrainChunks(0, 0);
+
+    // Raycaster for terrain height queries
+    const raycaster = new THREE.Raycaster();
+    const downVector = new THREE.Vector3(0, -1, 0);
+
+    function getTerrainHeight(x, z) {
+      raycaster.set(new THREE.Vector3(x, 100, z), downVector);
+      const chunks = Array.from(terrainChunks.values());
+      const intersects = raycaster.intersectObjects(chunks);
+      return intersects.length > 0 ? intersects[0].point.y : 0;
+    }
+
+    // ========== PHYSICS SPHERE (INVISIBLE) ==========
+    const sphereState = {
+      position: new THREE.Vector3(0, 10, 0),
+      velocity: new THREE.Vector3(0, 0, 0),
+      onGround: false
+    };
+
+    // ========== CAR MODEL ==========
+    const carGroup = new THREE.Group();
+    scene.add(carGroup);
+
+    // Car body - Tesla Cybertruck-ish angular design
+    const bodyGeometry = new THREE.BoxGeometry(1.8, CAR_BODY_HEIGHT, 3.5);
+    const carColors = [0xff4444, 0x44ff44, 0x4444ff, 0xffff44, 0xff44ff, 0x44ffff, 0xff8844, 0x8844ff];
+    let currentColorIndex = 0;
+    
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+      color: carColors[currentColorIndex],
+      roughness: 0.4,
+      metalness: 0.7
+    });
+    
+    const carBody = new THREE.Mesh(bodyGeometry, bodyMaterial);
+    carBody.position.y = CAR_BODY_HEIGHT / 2;
+    carBody.castShadow = true;
+    carBody.receiveShadow = true;
+    carGroup.add(carBody);
+
+    // Angular roof wedge
+    const roofGeometry = new THREE.BoxGeometry(1.6, 0.5, 2.0);
+    const roofMaterial = new THREE.MeshStandardMaterial({
+      color: 0x222222,
+      roughness: 0.3,
+      metalness: 0.8
+    });
+    const roof = new THREE.Mesh(roofGeometry, roofMaterial);
+    roof.position.set(0, CAR_BODY_HEIGHT / 2 + 0.25, -0.3);
+    roof.rotation.x = -0.1;
+    roof.castShadow = true;
+    carBody.add(roof);
+
+    // Car number decals (simple boxes)
+    const numberGeometry = new THREE.BoxGeometry(0.05, 0.4, 0.6);
+    const numberMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    
+    const numberLeft = new THREE.Mesh(numberGeometry, numberMaterial);
+    numberLeft.position.set(-0.92, 0, 0);
+    carBody.add(numberLeft);
+
+    const numberRight = new THREE.Mesh(numberGeometry, numberMaterial);
+    numberRight.position.set(0.92, 0, 0);
+    carBody.add(numberRight);
+
+    const numberRoof = new THREE.Mesh(numberGeometry, numberMaterial);
+    numberRoof.position.set(0, CAR_BODY_HEIGHT / 2 + 0.5, -0.3);
+    numberRoof.rotation.x = Math.PI / 2;
+    carBody.add(numberRoof);
+
+    // Wheels
+    const wheelGeometry = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, WHEEL_WIDTH, 16);
+    wheelGeometry.rotateZ(Math.PI / 2);
+    
+    const wheelMaterial = new THREE.MeshStandardMaterial({
+      color: 0x1a1a1a,
+      roughness: 0.8,
+      metalness: 0.2
+    });
+
+    const hubcapGeometry = new THREE.CylinderGeometry(0.2, 0.2, WHEEL_WIDTH + 0.05, 8);
+    hubcapGeometry.rotateZ(Math.PI / 2);
+    const hubcapMaterial = new THREE.MeshStandardMaterial({
+      color: 0xcccccc,
+      roughness: 0.3,
+      metalness: 0.9
+    });
+
+    const wheels = [];
+    const wheelPositions = [
+      { x: -1.0, z: -1.3 }, // Front left (negative Z is forward)
+      { x: 1.0, z: -1.3 },  // Front right
+      { x: -1.0, z: 1.3 },  // Rear left (positive Z is back)
+      { x: 1.0, z: 1.3 }    // Rear right
+    ];
+
+    wheelPositions.forEach((pos, i) => {
+      const wheelGroup = new THREE.Group();
+      
+      const wheelMesh = new THREE.Mesh(wheelGeometry, wheelMaterial);
+      wheelMesh.castShadow = true;
+      wheelMesh.receiveShadow = true;
+      wheelGroup.add(wheelMesh);
+
+      const hubcap = new THREE.Mesh(hubcapGeometry, hubcapMaterial);
+      hubcap.position.x = pos.x > 0 ? 0.02 : -0.02;
+      wheelGroup.add(hubcap);
+
+      wheelGroup.userData = {
+        restX: pos.x,
+        restZ: pos.z,
+        currentY: 0,
+        isFront: i < 2
+      };
+
+      carGroup.add(wheelGroup);
+      wheels.push(wheelGroup);
+    });
+
+    // ========== INPUT ==========
+    const keys = {
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      boost: false
+    };
+
+    window.addEventListener('keydown', (e) => {
+      switch (e.key.toLowerCase()) {
+        case 'w':
+        case 'arrowup':
+          keys.forward = true;
+          break;
+        case 's':
+        case 'arrowdown':
+          keys.backward = true;
+          break;
+        case 'a':
+        case 'arrowleft':
+          keys.left = true;
+          break;
+        case 'd':
+        case 'arrowright':
+          keys.right = true;
+          break;
+        case 'c':
+          currentColorIndex = (currentColorIndex + 1) % carColors.length;
+          bodyMaterial.color.setHex(carColors[currentColorIndex]);
+          break;
+        case ' ':
+        case 'space':
+          keys.boost = true;
+          break;
+        case 'r':
+          // Reset position
+          sphereState.position.set(0, 10, 0);
+          sphereState.velocity.set(0, 0, 0);
+          carGroup.rotation.set(0, 0, 0);
+          totalDistance = 0;
+          break;
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      switch (e.key.toLowerCase()) {
+        case 'w':
+        case 'arrowup':
+          keys.forward = false;
+          break;
+        case 's':
+        case 'arrowdown':
+          keys.backward = false;
+          break;
+        case 'a':
+        case 'arrowleft':
+          keys.left = false;
+          break;
+        case 'd':
+        case 'arrowright':
+          keys.right = false;
+          break;
+        case ' ':
+        case 'space':
+          keys.boost = false;
+          break;
+      }
+    });
+
+    // ========== PHYSICS & GAME LOOP ==========
+    let steerAngle = 0;
+    let totalDistance = 0;
+    let pitchVel = 0;
+    let rollVel = 0;
+    const cameraLookTarget = new THREE.Vector3();
+
+    function getTerrainSlope(x, z, offsetX, offsetZ) {
+      const y1 = getTerrainHeight(x, z);
+      const y2 = getTerrainHeight(x + offsetX, z + offsetZ);
+      const distance = Math.sqrt(offsetX * offsetX + offsetZ * offsetZ);
+      return Math.atan2(y2 - y1, distance);
+    }
+
+    function computeSlopeAlongAxis(points, origin, axis) {
+      if (points.length < 2) return 0;
+      const dir = axis.clone().normalize();
+      let minProj = Infinity;
+      let maxProj = -Infinity;
+      let minHeight = 0;
+      let maxHeight = 0;
+
+      points.forEach((pt) => {
+        const relative = pt.clone().sub(origin);
+        const projection = relative.dot(dir);
+        if (projection < minProj) {
+          minProj = projection;
+          minHeight = pt.y;
+        }
+        if (projection > maxProj) {
+          maxProj = projection;
+          maxHeight = pt.y;
+        }
+      });
+
+      const span = maxProj - minProj;
+      if (Math.abs(span) < 0.001) return 0;
+      return Math.atan2(maxHeight - minHeight, span);
+    }
+
+    function updatePhysics(dt) {
+      // Get current terrain height under sphere
+      const terrainY = getTerrainHeight(sphereState.position.x, sphereState.position.z);
+      const sphereBottom = sphereState.position.y - SPHERE_RADIUS;
+
+      // Ground collision
+      if (sphereBottom <= terrainY) {
+        sphereState.position.y = terrainY + SPHERE_RADIUS;
+        sphereState.velocity.y = Math.max(0, sphereState.velocity.y);
+        sphereState.onGround = true;
+      } else {
+        sphereState.onGround = false;
+      }
+
+      // Apply gravity
+      if (!sphereState.onGround) {
+        sphereState.velocity.y -= GRAVITY * dt;
+      }
+
+      // Get car forward direction
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(carGroup.quaternion);
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(carGroup.quaternion);
+
+      // Acceleration and braking (with turbo boost)
+      if (keys.forward) {
+        const currentSpeed = sphereState.velocity.length();
+        const accelMul = keys.boost ? 3.0 : 1.0;
+        const speedCap = MAX_SPEED * (keys.boost ? 1.5 : 1.0);
+        if (currentSpeed < speedCap) {
+          sphereState.velocity.add(forward.clone().multiplyScalar(ACCELERATION * accelMul * dt));
+        }
+      }
+      if (keys.backward) {
+        // Stronger force for reverse to make it usable
+        const isReversing = sphereState.velocity.dot(forward) < 1.0;
+        const force = isReversing ? 45 : BRAKE_FORCE;
+        const brakeDir = forward.clone().multiplyScalar(-force * dt);
+        sphereState.velocity.add(brakeDir);
+      }
+
+      // Steering - immediate response with exponential curve
+      const targetSteer = keys.left ? MAX_STEER_ANGLE : keys.right ? -MAX_STEER_ANGLE : 0;
+      steerAngle += (targetSteer - steerAngle) * STEERING_SPEED * dt;
+
+      const forwardSpeed = sphereState.velocity.dot(forward);
+      const reversingInput = keys.backward && !keys.forward;
+      const reversingMotion = forwardSpeed < -1.0;
+      const shouldInvertSteer = reversingMotion || (reversingInput && forwardSpeed < 8);
+
+      // Rotate car immediately based on steering input
+      if (sphereState.onGround && Math.abs(sphereState.velocity.length()) > 0.1) {
+        const directionSign = shouldInvertSteer ? -1 : 1;
+        
+        // Use total velocity for turn authority so we can steer while drifting sideways
+        const turnSpeed = (Math.abs(forwardSpeed) * 0.3 + sphereState.velocity.length() * 0.7);
+        const turnRate = directionSign * steerAngle * turnSpeed * 0.35 * dt;
+        carGroup.rotation.y += turnRate;
+      }
+
+      // Apply drift - velocity gradually follows car direction
+      if (sphereState.onGround && sphereState.velocity.length() > 0.1) {
+        const velocityDir = sphereState.velocity.clone().normalize();
+        const targetDir = (shouldInvertSteer ? forward.clone().multiplyScalar(-1) : forward.clone());
+        const blendAmount = Math.abs(steerAngle) > 0.01 ? 0.18 : 0.10;
+        const blendedDir = velocityDir.lerp(targetDir, blendAmount);
+        sphereState.velocity.copy(blendedDir.multiplyScalar(sphereState.velocity.length()));
+      }
+
+      // Ground friction
+      if (sphereState.onGround) {
+        sphereState.velocity.multiplyScalar(Math.max(0, 1 - 2.5 * dt));
+      }
+
+      // Air resistance
+      sphereState.velocity.multiplyScalar(Math.max(0, 1 - 0.3 * dt));
+
+      // Update position
+      sphereState.position.add(sphereState.velocity.clone().multiplyScalar(dt));
+
+      // Track distance
+      totalDistance += sphereState.velocity.length() * dt;
+
+      // Keep car on sphere position
+      carGroup.position.copy(sphereState.position);
+
+      // Update terrain chunks for infinite world
+      updateTerrainChunks(sphereState.position.x, sphereState.position.z);
+
+      // Calculate velocity for roll effects
+      const velocityXZ = new THREE.Vector2(sphereState.velocity.x, sphereState.velocity.z).length();
+      
+      // Update matrices to ensure world positions are correct for raycasting
+      carGroup.updateMatrixWorld(true);
+
+      // Spring physics for body rotation
+      let totalPitchTorque = 0;
+      let totalRollTorque = 0;
+      const SPRING_STIFFNESS = 50.0; // Increased to support car weight (Gravity 30)
+      const DAMPING = 0.88; // Increased damping for stiffer springs
+      const contactPoints = [];
+
+      // Suspension settings
+      const MIN_EXTENSION = 0.0; // Fully compressed
+      const MAX_EXTENSION = WHEEL_RADIUS * 0.85; // Increased travel (droop)
+
+      // Update wheel suspension with ray tracing along car body angle
+      wheels.forEach((wheel, i) => {
+        // Calculate mount point (axle) relative to car body
+        // Mount is at the bottom corners of the car body box
+        // carBody center is at (0, 0.4, 0) in carGroup.
+        // Relative to carBody center, mount is at (restX, -0.4, restZ).
+        const mountLocal = new THREE.Vector3(wheel.userData.restX, -CAR_BODY_HEIGHT / 2, wheel.userData.restZ);
+        const mountWorld = mountLocal.applyMatrix4(carBody.matrixWorld);
+
+        // Get car body's local down vector (accounts for pitch and roll)
+        const bodyDownVector = new THREE.Vector3(0, -1, 0)
+          .applyQuaternion(carBody.quaternion)
+          .applyQuaternion(carGroup.quaternion)
+          .normalize();
+        
+        // Start ray well above mount to avoid missing ground if mount is buried
+        const RAY_START_OFFSET = 1.0;
+        const rayOrigin = mountWorld.clone().add(bodyDownVector.clone().multiplyScalar(-RAY_START_OFFSET));
+        
+        // Raycast from elevated origin down along body's down vector
+        raycaster.set(rayOrigin, bodyDownVector);
+        const chunks = Array.from(terrainChunks.values());
+        const intersects = raycaster.intersectObjects(chunks);
+        wheel.userData.hasContact = false;
+        wheel.userData.contactPoint = null;
+        wheel.userData.contactNormal = null;
+        
+        let extensionDistance = MAX_EXTENSION; 
+        
+        // Calculate compression for physics
+        let compression = 0;
+
+        if (intersects.length > 0) {
+          wheel.userData.hasContact = true;
+          const hit = intersects[0];
+          const hitPoint = hit.point.clone();
+          wheel.userData.contactPoint = hitPoint;
+
+          if (hit.face) {
+            // Transform local normal into world space so we can clamp along the terrain plane
+            const normalMatrix = new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld);
+            const worldNormal = hit.face.normal.clone().applyMatrix3(normalMatrix).normalize();
+            wheel.userData.contactNormal = worldNormal;
+          }
+
+          contactPoints.push(hitPoint.clone());
+          // Subtract the offset from hit distance to get real distance from mount
+          const groundDistance = hit.distance - RAY_START_OFFSET;
+          // Desired extension to touch ground
+          const desiredExtension = groundDistance - WHEEL_RADIUS;
+          
+          // Clamp to valid range for visual
+          extensionDistance = Math.max(MIN_EXTENSION, Math.min(desiredExtension, MAX_EXTENSION));
+
+          // Calculate physics compression
+          // If desiredExtension < MAX_EXTENSION, spring is compressed
+          if (desiredExtension < MAX_EXTENSION) {
+            compression = MAX_EXTENSION - desiredExtension;
+            // Add extra stiffness if bottoming out (negative extension)
+            if (desiredExtension < 0) {
+              compression += -desiredExtension * 2.0; // Hard stop stiffness
+            }
+          }
+        }
+        
+        // Apply spring force to body torque
+        const force = compression * SPRING_STIFFNESS;
+        
+        // Front (Z < 0) -> Pitch Up (+X)
+        totalPitchTorque += force * (wheel.userData.restZ < 0 ? 1 : -1);
+        // Left (X < 0) -> Roll Right (-Z)
+        totalRollTorque += force * (wheel.userData.restX < 0 ? -1 : 1);
+
+        // Smooth suspension movement
+        if (wheel.userData.currentExtension === undefined) wheel.userData.currentExtension = MAX_EXTENSION;
+        wheel.userData.currentExtension = THREE.MathUtils.lerp(wheel.userData.currentExtension, extensionDistance, 0.3);
+        // Hard clamp after smoothing
+        wheel.userData.currentExtension = Math.max(MIN_EXTENSION, Math.min(wheel.userData.currentExtension, MAX_EXTENSION));
+        
+        // Position wheel along the ray from mount point
+        let wheelWorldPos = mountWorld.clone().add(bodyDownVector.clone().multiplyScalar(wheel.userData.currentExtension));
+
+        if (wheel.userData.hasContact && wheel.userData.contactPoint) {
+          const CLEARANCE = 0.02;
+          const surfaceNormal = (wheel.userData.contactNormal
+            ? wheel.userData.contactNormal.clone()
+            : bodyDownVector.clone().multiplyScalar(-1))
+            .normalize();
+          const safeCenter = wheel.userData.contactPoint.clone().add(
+            surfaceNormal.clone().multiplyScalar(WHEEL_RADIUS - CLEARANCE)
+          );
+          const penetration = safeCenter.clone().sub(wheelWorldPos).dot(surfaceNormal);
+          if (penetration > 0) {
+            wheelWorldPos.copy(safeCenter);
+            const projectedExtension = safeCenter.clone().sub(mountWorld).dot(bodyDownVector);
+            const clampedExtension = Math.max(
+              MIN_EXTENSION,
+              Math.min(MAX_EXTENSION, projectedExtension)
+            );
+            wheel.userData.currentExtension = Math.min(
+              wheel.userData.currentExtension,
+              clampedExtension
+            );
+          }
+        }
+        
+        // Convert world position back to local carGroup coordinates
+        wheel.position.copy(wheelWorldPos);
+        carGroup.worldToLocal(wheel.position);
+
+        // Store accumulated roll in userData
+        if (!wheel.userData.rollRotation) wheel.userData.rollRotation = 0;
+        wheel.userData.rollRotation += velocityXZ * dt * 2;
+        
+        // Build wheel rotation: body tilt + steering (front only) + rolling
+        const wheelQuat = new THREE.Quaternion();
+        // Match car body's tilt
+        wheelQuat.multiply(carBody.quaternion);
+        
+        // Apply steering (front only)
+        if (wheel.userData.isFront) {
+          const steerQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), steerAngle);
+          wheelQuat.multiply(steerQuat);
+        }
+        
+        // Apply rolling
+        const rollQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), wheel.userData.rollRotation);
+        wheelQuat.multiply(rollQuat);
+        
+        wheel.quaternion.copy(wheelQuat);
+      });
+
+      // Terrain following stabilization using actual wheel contacts
+      let groundedCount = 0;
+      wheels.forEach((wheel) => {
+        if (wheel.userData.hasContact) groundedCount++;
+      });
+
+      if (groundedCount >= 2 && contactPoints.length >= 2) {
+        const forwardAxis = new THREE.Vector3(0, 0, -1).applyQuaternion(carGroup.quaternion);
+        const rightAxis = new THREE.Vector3(1, 0, 0).applyQuaternion(carGroup.quaternion);
+
+        const slopePitch = computeSlopeAlongAxis(contactPoints, carGroup.position, forwardAxis);
+        const slopeRoll = computeSlopeAlongAxis(contactPoints, carGroup.position, rightAxis);
+
+        const targetPitch = slopePitch;
+        const targetRoll = slopeRoll;
+
+        const STABILIZE_STRENGTH = groundedCount === wheels.length ? 16.0 : 12.0;
+        const pitchError = targetPitch - carBody.rotation.x;
+        const rollError = targetRoll - carBody.rotation.z;
+
+        totalPitchTorque += pitchError * STABILIZE_STRENGTH;
+        totalRollTorque += rollError * STABILIZE_STRENGTH;
+      }
+
+      // Centrifugal force torque
+      // Steer Left (+Angle) -> Roll Right (-Z)
+      totalRollTorque -= steerAngle * velocityXZ * 0.08;
+
+      // Integrate angular velocity
+      pitchVel += totalPitchTorque * dt;
+      rollVel += totalRollTorque * dt;
+
+      // Apply damping
+      pitchVel *= DAMPING;
+      rollVel *= DAMPING;
+
+      // Apply to body rotation
+      carBody.rotation.x += pitchVel * dt;
+      carBody.rotation.z += rollVel * dt;
+
+      // Update HUD
+      // Calibration: Wheelbase is 2.6 units. Assumed real wheelbase ~3.2m.
+      // Scale: 1 unit ≈ 1.23m. Speed km/h = units/s * 1.23 * 3.6 ≈ units/s * 4.5
+      document.getElementById('speed').textContent = Math.round(velocityXZ * 4.5);
+      document.getElementById('distance').textContent = Math.round(totalDistance * 1.23);
+    }
+
+    // ========== CAMERA FOLLOW ==========
+    function updateCamera() {
+      const targetPos = carGroup.position.clone().add(
+        CAMERA_OFFSET.clone().applyQuaternion(carGroup.quaternion)
+      );
+      camera.position.lerp(targetPos, CAMERA_FOLLOW_SPEED);
+      
+      // Camera look with lag (behindness)
+      const lookTarget = carGroup.position.clone().add(new THREE.Vector3(0, 1, 0));
+      cameraLookTarget.lerp(lookTarget, CAMERA_LOOK_SPEED);
+      camera.lookAt(cameraLookTarget);
+
+      // Keep the sun light following the car so shadows stay visible
+      sunLight.position.copy(carGroup.position).add(new THREE.Vector3(50, 60, 30));
+      sunLight.target.position.copy(carGroup.position);
+      sunLight.target.updateMatrixWorld();
+    }
+
+    // ========== ANIMATION LOOP ==========
+    const clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = Math.min(clock.getDelta(), 0.1);
+
+      updatePhysics(dt);
+      updateCamera();
+
+      renderer.render(scene, camera);
+    }
+
+    // ========== RESIZE ==========
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // ========== START ==========
+    setTimeout(() => {
+      document.getElementById('loading').classList.add('hidden');
+      animate();
+    }, 500);
+  </script>
+  <script src="parental.js" defer></script>
+</body>
+</html>
