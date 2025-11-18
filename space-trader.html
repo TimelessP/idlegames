@@ -1915,6 +1915,31 @@
     html[data-theme="dark"] .grid-3 span {
       color: inherit;
     }
+
+    /* Face Comms Panel */
+    .face-comms-panel {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 80px;
+      height: 80px;
+      background: #000;
+      box-shadow: 0 0 10px rgba(255, 191, 0, 0.2);
+      z-index: 10;
+      overflow: hidden;
+      border-radius: 4px;
+    }
+    
+    html[data-theme="dark"] .face-comms-panel {
+      box-shadow: 0 0 10px rgba(74, 182, 255, 0.2);
+    }
+
+    .face-comms-panel svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background-color: #1a1a1a; /* Fallback background */
+    }
   </style>
 </head>
 <body>
@@ -2315,6 +2340,7 @@ Standing: Neutral</pre>
           <div class="label">Ship Visual</div>
           <div class="trader-ship-holo offline" id="trader-ship-viewport">
             <div class="ship-holo-label" id="trader-ship-name"></div>
+            <div class="face-comms-panel" id="face-comms"></div>
           </div>
           <div class="label ship-actions-label">Trade Actions</div>
           <div class="grid-2">
@@ -10344,12 +10370,14 @@ Auto-save  : Active</pre>
     function updateTraderShipPreview(status, isPowered) {
       const container = document.getElementById('trader-ship-viewport');
       const labelEl = document.getElementById('trader-ship-name');
+      const faceComms = document.getElementById('face-comms');
       if (!container || !labelEl) return;
 
       if (!isPowered) {
         container.classList.add('offline');
         container.classList.remove('scanning');
         labelEl.textContent = '';
+        if (faceComms) faceComms.style.display = 'none';
         disposeTraderShipContext();
         return;
       }
@@ -10358,12 +10386,21 @@ Auto-save  : Active</pre>
         container.classList.remove('offline');
         container.classList.add('scanning');
         labelEl.textContent = 'SCANNING...';
+        if (faceComms) faceComms.style.display = 'none';
         disposeTraderShipContext();
         return;
       }
 
       container.classList.remove('offline');
       container.classList.remove('scanning');
+      
+      if (faceComms) {
+        faceComms.style.display = 'block';
+        if (typeof faceGen !== 'undefined' && faceGen && typeof navigationSystem !== 'undefined') {
+          faceGen.updateFromLocation(navigationSystem.currentX, navigationSystem.currentY, navigationSystem.currentPlanetIndex);
+        }
+      }
+
       const shipLabel = status.trader.shipClass
         ? `${status.trader.ship} • ${status.trader.shipClass}`
         : status.trader.ship;
@@ -12890,6 +12927,390 @@ Auto-save  : Active</pre>
     });
 
     // ============================================================================
+    // FACE GENERATOR (PRNG)
+    // ============================================================================
+    
+    class Mulberry32 {
+      constructor(seed) {
+        this.state = seed;
+      }
+      next() {
+        this.state |= 0;
+        this.state = this.state + 0x6D2B79F5 | 0;
+        let t = Math.imul(this.state ^ (this.state >>> 15), 1 | this.state);
+        t = t + Math.imul(t ^ (t >>> 7), 61 | t) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      }
+      // Range [min, max)
+      range(min, max) {
+        return min + this.next() * (max - min);
+      }
+      // Pick one from array
+      pick(arr) {
+        return arr[Math.floor(this.range(0, arr.length))];
+      }
+    }
+
+    class FaceGenerator {
+      constructor(containerId, seed) {
+        this.container = document.getElementById(containerId);
+        this.seed = seed;
+        this.rng = new Mulberry32(seed);
+        this.ns = "http://www.w3.org/2000/svg";
+        this.mouthNodes = []; // Array of {x, y, originalY, speed, offset}
+        this.svg = null;
+        this.mouthPath = null;
+        
+        this.skinColors = ["#f5cda2", "#eac086", "#ffdfc4", "#8d5524", "#c68642", "#e0ac69", "#f1c27d", "#ffdbac"];
+        this.hairColors = ["#090806", "#2c222b", "#71635a", "#b7a69e", "#d6c4c2", "#cabfb1", "#dcd0ba", "#fff5e1", "#e6cea8", "#a56b46", "#91553d", "#533d32"];
+        this.shirtColors = ["#333", "#555", "#224", "#422", "#242"];
+        
+        this.generate();
+      }
+
+      updateFromLocation(x, y, planetIndex) {
+        let newSeed;
+        // Try to use the same hash as TradingSystem for consistency
+        if (typeof tradingSystem !== 'undefined' && typeof tradingSystem.hashLocation === 'function') {
+          newSeed = tradingSystem.hashLocation(x, y, planetIndex);
+        } else {
+          // Fallback FNV-1a-like hash if TradingSystem isn't ready
+          let h = 2166136261;
+          h ^= x & 0xff; h = Math.imul(h, 16777619);
+          h ^= y & 0xff; h = Math.imul(h, 16777619);
+          h ^= planetIndex & 0xff; h = Math.imul(h, 16777619);
+          newSeed = h >>> 0;
+        }
+
+        if (this.seed !== newSeed) {
+          this.seed = newSeed;
+          this.rng = new Mulberry32(this.seed);
+          this.generate();
+        }
+      }
+
+      generate() {
+        if (!this.container) return;
+        this.container.innerHTML = '';
+        this.svg = document.createElementNS(this.ns, "svg");
+        this.svg.setAttribute("viewBox", "0 0 100 100");
+        this.svg.setAttribute("preserveAspectRatio", "xMidYMid slice");
+        this.container.appendChild(this.svg);
+
+        // Background
+        const bg = document.createElementNS(this.ns, "rect");
+        bg.setAttribute("width", "100");
+        bg.setAttribute("height", "100");
+        bg.setAttribute("fill", "#1a1a1a"); // Dark background for video call
+        this.svg.appendChild(bg);
+
+        // Parameters
+        const skinColor = this.rng.pick(this.skinColors);
+        const hairColor = this.rng.pick(this.hairColors);
+        const shirtColor = this.rng.pick(this.shirtColors);
+        
+        // Shoulders/Neck
+        this.drawShoulders(shirtColor, skinColor);
+        
+        // Head
+        this.drawHead(skinColor);
+        
+        // Features
+        this.drawEyes();
+        this.drawNose(skinColor);
+        this.drawMouth();
+        this.drawHair(hairColor);
+        
+        // Scanlines overlay
+        this.drawScanlines();
+      }
+
+      createPoly(points, fill) {
+        const poly = document.createElementNS(this.ns, "polygon");
+        poly.setAttribute("points", points.map(p => `${p[0]},${p[1]}`).join(" "));
+        poly.setAttribute("fill", fill);
+        return poly;
+      }
+
+      drawShoulders(shirtColor, skinColor) {
+        // Neck
+        const neckWidth = this.rng.range(15, 25);
+        const neckPoints = [
+          [50 - neckWidth/2, 60],
+          [50 + neckWidth/2, 60],
+          [50 + neckWidth/2, 90],
+          [50 - neckWidth/2, 90]
+        ];
+        // Darker neck for shadow
+        this.svg.appendChild(this.createPoly(neckPoints, this.adjustColor(skinColor, -20)));
+
+        // Shoulders
+        const shoulderSlope = this.rng.range(0, 10);
+        const shoulderPoints = [
+          [0, 100],
+          [0, 85 + shoulderSlope],
+          [50 - neckWidth/2 - 5, 80], // Collar start
+          [50 + neckWidth/2 + 5, 80],
+          [100, 85 + shoulderSlope],
+          [100, 100]
+        ];
+        this.svg.appendChild(this.createPoly(shoulderPoints, shirtColor));
+      }
+
+      drawHead(skinColor) {
+        // Simple blocky head for now, maybe refine to be more polygonal
+        const jawWidth = this.rng.range(30, 40);
+        const chinY = this.rng.range(75, 82);
+        const headWidth = this.rng.range(35, 45);
+        const topY = this.rng.range(15, 25);
+        
+        const points = [
+          [50 - headWidth/2, topY], // Top Left
+          [50 + headWidth/2, topY], // Top Right
+          [50 + headWidth/2, 55],   // Ear level Right
+          [50 + jawWidth/2, chinY - 5], // Jaw Right
+          [50, chinY],              // Chin
+          [50 - jawWidth/2, chinY - 5], // Jaw Left
+          [50 - headWidth/2, 55]    // Ear level Left
+        ];
+        
+        this.svg.appendChild(this.createPoly(points, skinColor));
+        
+        // Ears
+        const earY = 45;
+        const earSize = 6;
+        this.svg.appendChild(this.createPoly([
+            [50 - headWidth/2, earY],
+            [50 - headWidth/2 - 3, earY + 2],
+            [50 - headWidth/2 - 3, earY + earSize],
+            [50 - headWidth/2, earY + earSize + 2]
+        ], this.adjustColor(skinColor, -10)));
+        
+        this.svg.appendChild(this.createPoly([
+            [50 + headWidth/2, earY],
+            [50 + headWidth/2 + 3, earY + 2],
+            [50 + headWidth/2 + 3, earY + earSize],
+            [50 + headWidth/2, earY + earSize + 2]
+        ], this.adjustColor(skinColor, -10)));
+      }
+
+      drawEyes() {
+        const eyeY = this.rng.range(40, 45);
+        const eyeSpacing = this.rng.range(8, 12);
+        const eyeSize = this.rng.range(3, 5);
+        
+        // Whites
+        this.svg.appendChild(this.createPoly([
+            [50 - eyeSpacing - eyeSize, eyeY],
+            [50 - eyeSpacing + eyeSize, eyeY],
+            [50 - eyeSpacing + eyeSize, eyeY + eyeSize/1.5],
+            [50 - eyeSpacing - eyeSize, eyeY + eyeSize/1.5]
+        ], "#eee"));
+        
+        this.svg.appendChild(this.createPoly([
+            [50 + eyeSpacing - eyeSize, eyeY],
+            [50 + eyeSpacing + eyeSize, eyeY],
+            [50 + eyeSpacing + eyeSize, eyeY + eyeSize/1.5],
+            [50 + eyeSpacing - eyeSize, eyeY + eyeSize/1.5]
+        ], "#eee"));
+        
+        // Pupils
+        const pupilColor = this.rng.pick(["#422", "#224", "#242", "#000", "#531"]);
+        const pupilSize = eyeSize / 2;
+        
+        this.svg.appendChild(this.createPoly([
+            [50 - eyeSpacing - pupilSize/2, eyeY + 1],
+            [50 - eyeSpacing + pupilSize/2, eyeY + 1],
+            [50 - eyeSpacing + pupilSize/2, eyeY + 1 + pupilSize],
+            [50 - eyeSpacing - pupilSize/2, eyeY + 1 + pupilSize]
+        ], pupilColor));
+        
+        this.svg.appendChild(this.createPoly([
+            [50 + eyeSpacing - pupilSize/2, eyeY + 1],
+            [50 + eyeSpacing + pupilSize/2, eyeY + 1],
+            [50 + eyeSpacing + pupilSize/2, eyeY + 1 + pupilSize],
+            [50 + eyeSpacing - pupilSize/2, eyeY + 1 + pupilSize]
+        ], pupilColor));
+        
+        // Brows
+        const browY = eyeY - 3;
+        const browW = eyeSize + 2;
+        this.svg.appendChild(this.createPoly([
+            [50 - eyeSpacing - browW, browY],
+            [50 - eyeSpacing + browW, browY],
+            [50 - eyeSpacing + browW, browY+1],
+            [50 - eyeSpacing - browW, browY+1]
+        ], "#00000040"));
+        
+        this.svg.appendChild(this.createPoly([
+            [50 + eyeSpacing - browW, browY],
+            [50 + eyeSpacing + browW, browY],
+            [50 + eyeSpacing + browW, browY+1],
+            [50 + eyeSpacing - browW, browY+1]
+        ], "#00000040"));
+      }
+
+      drawNose(skinColor) {
+        const noseY = this.rng.range(50, 55);
+        const noseW = this.rng.range(3, 6);
+        const noseH = this.rng.range(6, 10);
+        
+        // Shadow side
+        this.svg.appendChild(this.createPoly([
+            [50, noseY],
+            [50 - noseW/2, noseY + noseH],
+            [50, noseY + noseH + 1]
+        ], this.adjustColor(skinColor, -30)));
+        
+        // Light side
+        this.svg.appendChild(this.createPoly([
+            [50, noseY],
+            [50 + noseW/2, noseY + noseH],
+            [50, noseY + noseH + 1]
+        ], this.adjustColor(skinColor, -10)));
+      }
+
+      drawMouth() {
+        const mouthY = this.rng.range(65, 70);
+        const mouthW = this.rng.range(8, 14);
+        
+        // Create mouth nodes for animation
+        // Top lip (3 points), Bottom lip (3 points)
+        // 0: Left corner, 1: Top center, 2: Right corner, 3: Bottom center
+        
+        this.mouthNodes = [
+            {x: 50 - mouthW/2, y: mouthY, oy: mouthY, type: 'fixed'},
+            {x: 50, y: mouthY, oy: mouthY, type: 'top'},
+            {x: 50 + mouthW/2, y: mouthY, oy: mouthY, type: 'fixed'},
+            {x: 50, y: mouthY + 1, oy: mouthY + 1, type: 'bottom'}
+        ];
+        
+        this.mouthPath = document.createElementNS(this.ns, "path");
+        this.mouthPath.setAttribute("fill", "#4a3030");
+        this.updateMouthShape();
+        this.svg.appendChild(this.mouthPath);
+      }
+      
+      updateMouthShape() {
+        // Simple diamond/polygon shape
+        const d = `M ${this.mouthNodes[0].x} ${this.mouthNodes[0].y} ` +
+                  `L ${this.mouthNodes[1].x} ${this.mouthNodes[1].y} ` +
+                  `L ${this.mouthNodes[2].x} ${this.mouthNodes[2].y} ` +
+                  `L ${this.mouthNodes[3].x} ${this.mouthNodes[3].y} Z`;
+        this.mouthPath.setAttribute("d", d);
+      }
+
+      drawHair(hairColor) {
+        // Simple hair shape
+        const style = this.rng.pick(['short', 'long', 'bald', 'mohawk']);
+        
+        if (style === 'bald') return;
+        
+        const topY = 15; // Match head top
+        const headW = 40; // Approx
+        
+        if (style === 'short') {
+            this.svg.appendChild(this.createPoly([
+                [50 - headW/2 - 2, topY + 10],
+                [50 - headW/2, topY - 5],
+                [50 + headW/2, topY - 5],
+                [50 + headW/2 + 2, topY + 10],
+                [50, topY + 5] // Bangs
+            ], hairColor));
+        } else if (style === 'long') {
+             this.svg.appendChild(this.createPoly([
+                [50 - headW/2 - 2, 80],
+                [50 - headW/2, topY - 5],
+                [50 + headW/2, topY - 5],
+                [50 + headW/2 + 2, 80],
+                [50, topY + 5]
+            ], hairColor));
+        } else if (style === 'mohawk') {
+             this.svg.appendChild(this.createPoly([
+                [45, topY + 10],
+                [45, topY - 15],
+                [55, topY - 15],
+                [55, topY + 10]
+            ], hairColor));
+        }
+      }
+      
+      drawScanlines() {
+        const g = document.createElementNS(this.ns, "g");
+        g.setAttribute("stroke", "rgba(0,0,0,0.3)");
+        g.setAttribute("stroke-width", "0.5");
+        for(let i=0; i<100; i+=2) {
+            const line = document.createElementNS(this.ns, "line");
+            line.setAttribute("x1", "0");
+            line.setAttribute("y1", i);
+            line.setAttribute("x2", "100");
+            line.setAttribute("y2", i);
+            g.appendChild(line);
+        }
+        this.svg.appendChild(g);
+      }
+
+      adjustColor(hex, percent) {
+        // Simple hex darken/lighten
+        let r = parseInt(hex.substring(1,3), 16);
+        let g = parseInt(hex.substring(3,5), 16);
+        let b = parseInt(hex.substring(5,7), 16);
+        
+        r = parseInt(r * (100 + percent) / 100);
+        g = parseInt(g * (100 + percent) / 100);
+        b = parseInt(b * (100 + percent) / 100);
+        
+        r = (r<255)?r:255;
+        g = (g<255)?g:255;
+        b = (b<255)?b:255;
+        
+        const rr = ((r.toString(16).length==1)?"0"+r.toString(16):r.toString(16));
+        const gg = ((g.toString(16).length==1)?"0"+g.toString(16):g.toString(16));
+        const bb = ((b.toString(16).length==1)?"0"+b.toString(16):b.toString(16));
+        
+        return "#"+rr+gg+bb;
+      }
+
+      animate(time) {
+        // Animate mouth nodes
+        // Use 3 sine waves of different wavelengths for constructive/destructive interference
+        // to simulate more natural, non-repetitive talking patterns
+        
+        const w1 = Math.sin(time * 0.015);
+        const w2 = Math.sin(time * 0.027);
+        const w3 = Math.sin(time * 0.008);
+        
+        // Sum waves (range approx -3 to 3)
+        const signal = w1 + w2 + w3;
+        
+        // Map to opening amount (0 to ~5 pixels)
+        // Using Math.max(0, signal) creates pauses when the interference is destructive (negative)
+        const openAmount = Math.max(0, signal) * 1.2;
+        
+        // Top lip moves up slightly
+        this.mouthNodes[1].y = this.mouthNodes[1].oy - openAmount * 0.3;
+        // Bottom lip moves down
+        this.mouthNodes[3].y = this.mouthNodes[3].oy + openAmount;
+        
+        this.updateMouthShape();
+      }
+    }
+    
+    // Initialize Face Generator
+    let faceGen = null;
+    function initFace() {
+        // Use a seed based on the current location
+        let seed = 0;
+        if (typeof navigationSystem !== 'undefined' && typeof tradingSystem !== 'undefined') {
+             seed = tradingSystem.hashLocation(navigationSystem.currentX, navigationSystem.currentY, navigationSystem.currentPlanetIndex);
+        }
+        faceGen = new FaceGenerator('face-comms', seed);
+    }
+    
+    // Call initFace after DOM load
+    setTimeout(initFace, 100);
+
+    // ============================================================================
     // GAME LOOP
     // ============================================================================
     
@@ -12908,7 +13329,11 @@ Auto-save  : Active</pre>
       powerSystem.update(deltaTime);
       batterySystem.update(deltaTime);
       navigationSystem.update(deltaTime);
-  const fuelDirty = fuelSystem.update(deltaTime);
+      const fuelDirty = fuelSystem.update(deltaTime);
+
+      if (faceGen) {
+        faceGen.animate(currentTime);
+      }
 
       // Check power availability and auto-disable systems if no power
       if (!powerSystem.isPowerAvailable()) {
