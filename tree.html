@@ -279,6 +279,7 @@
             wireNodes: [], // Array of arrays of points [[{x,y}, {x,y}...], ...] (multiple strands)
             currentStrand: null,
             decorations: [], // {id, emoji, x, y, scale}
+            presents: [], // {x, y, w, h, color}
             isDraggingWire: false,
             isDraggingDeco: false,
             draggedDeco: null,
@@ -301,13 +302,69 @@
         const presentsLayer = document.getElementById('presents-layer');
         const decoBox = document.getElementById('decorations-box');
 
+        // --- Persistence ---
+        const STORAGE_KEY = 'idlegames-tree-v1';
+        let saveTimeout;
+
+        function saveState() {
+            clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(() => {
+                const data = {
+                    lightsOn: state.lightsOn,
+                    lightMode: state.lightMode,
+                    wireNodes: state.wireNodes,
+                    decorations: state.decorations.map(d => ({
+                        emoji: d.emoji,
+                        x: d.x,
+                        y: d.y,
+                        rotation: d.rotation,
+                        vy: d.vy,
+                        isFalling: d.isFalling
+                    })),
+                    presents: state.presents,
+                    viewBox: state.viewBox
+                };
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+            }, 500);
+        }
+
+        function loadState() {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (raw) {
+                    const data = JSON.parse(raw);
+                    state.lightsOn = data.lightsOn ?? true;
+                    state.lightMode = data.lightMode ?? 0;
+                    state.wireNodes = data.wireNodes || [];
+                    state.decorations = data.decorations || [];
+                    state.presents = data.presents || [];
+                    if (data.viewBox) state.viewBox = data.viewBox;
+                    return true;
+                }
+            } catch (e) {
+                console.error('Failed to load state', e);
+            }
+            return false;
+        }
+
         // --- Initialization ---
         function init() {
-            handleResize();
+            const loaded = loadState();
+            if (!loaded) {
+                handleResize();
+            } else {
+                updateViewBox();
+            }
+            
             generateTree();
             generatePresents();
             initUI();
             setupInteraction();
+            
+            renderWires();
+            renderLights();
+            renderDecos();
+            
             requestAnimationFrame(gameLoop);
         }
         
@@ -506,48 +563,57 @@
         }
 
         function generatePresents() {
-            const colors = ['#e53935', '#1e88e5', '#43a047', '#fdd835', '#8e24aa'];
-            for (let i = 0; i < 8; i++) {
-                const w = 40 + Math.random() * 60;
-                const h = 30 + Math.random() * 50;
-                const x = CONFIG.treeBaseX - 200 + Math.random() * 400;
-                const y = CONFIG.treeBaseY - h + 10; // Slightly buried in carpet
-                
-                const color = colors[Math.floor(Math.random() * colors.length)];
-                
+            if (state.presents.length === 0) {
+                const colors = ['#e53935', '#1e88e5', '#43a047', '#fdd835', '#8e24aa'];
+                for (let i = 0; i < 8; i++) {
+                    const w = 40 + Math.random() * 60;
+                    const h = 30 + Math.random() * 50;
+                    const x = CONFIG.treeBaseX - 200 + Math.random() * 400;
+                    const y = CONFIG.treeBaseY - h + 10; // Slightly buried in carpet
+                    const color = colors[Math.floor(Math.random() * colors.length)];
+                    
+                    state.presents.push({ x, y, w, h, color });
+                }
+            }
+            renderPresents();
+        }
+        
+        function renderPresents() {
+            presentsLayer.innerHTML = '';
+            state.presents.forEach(p => {
                 const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
                 
                 // Box
                 const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-                rect.setAttribute('x', x);
-                rect.setAttribute('y', y);
-                rect.setAttribute('width', w);
-                rect.setAttribute('height', h);
-                rect.setAttribute('fill', color);
+                rect.setAttribute('x', p.x);
+                rect.setAttribute('y', p.y);
+                rect.setAttribute('width', p.w);
+                rect.setAttribute('height', p.h);
+                rect.setAttribute('fill', p.color);
                 rect.setAttribute('stroke', '#000');
                 rect.setAttribute('stroke-width', '1');
                 g.appendChild(rect);
                 
                 // Ribbon (vertical)
                 const ribV = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-                ribV.setAttribute('x', x + w/2 - 5);
-                ribV.setAttribute('y', y);
+                ribV.setAttribute('x', p.x + p.w/2 - 5);
+                ribV.setAttribute('y', p.y);
                 ribV.setAttribute('width', 10);
-                ribV.setAttribute('height', h);
+                ribV.setAttribute('height', p.h);
                 ribV.setAttribute('fill', '#fff');
                 g.appendChild(ribV);
                 
                 // Ribbon (horizontal)
                 const ribH = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-                ribH.setAttribute('x', x);
-                ribH.setAttribute('y', y + h/2 - 5);
-                ribH.setAttribute('width', w);
+                ribH.setAttribute('x', p.x);
+                ribH.setAttribute('y', p.y + p.h/2 - 5);
+                ribH.setAttribute('width', p.w);
                 ribH.setAttribute('height', 10);
                 ribH.setAttribute('fill', '#fff');
                 g.appendChild(ribH);
                 
                 presentsLayer.appendChild(g);
-            }
+            });
         }
 
         // --- UI & Interaction ---
@@ -564,10 +630,12 @@
             document.getElementById('btn-power').onclick = () => {
                 state.lightsOn = !state.lightsOn;
                 renderLights();
+                saveState();
             };
             
             document.getElementById('btn-mode').onclick = () => {
                 state.lightMode = (state.lightMode + 1) % 4;
+                saveState();
             };
             
             document.getElementById('btn-clear-lights').onclick = () => {
@@ -575,6 +643,7 @@
                     state.wireNodes = [];
                     renderWires();
                     renderLights();
+                    saveState();
                 }
             };
             
@@ -582,6 +651,7 @@
                 if(confirm('Remove all decorations?')) {
                     state.decorations = [];
                     renderDecos();
+                    saveState();
                 }
             };
         }
@@ -645,6 +715,7 @@
             state.viewBox.h = newH;
             
             updateViewBox();
+            saveState();
         }
 
         function handlePointerDown(e) {
@@ -672,6 +743,7 @@
                     state.decorations.splice(i, 1);
                     renderDecos();
                     startDragDeco(e, d.emoji);
+                    saveState();
                     return;
                 }
             }
@@ -697,6 +769,7 @@
                 state.viewBox.x -= dx * scale;
                 state.viewBox.y -= dy * scale;
                 updateViewBox();
+                saveState();
                 
                 state.lastPanPoint = { x: e.clientX, y: e.clientY };
                 return;
@@ -741,11 +814,13 @@
         function handlePointerUp(e) {
             if (state.isPanning) {
                 state.isPanning = false;
+                saveState();
             }
             
             if (state.isDraggingWire) {
                 state.isDraggingWire = false;
                 state.currentStrand = null;
+                saveState();
             } else if (state.isDraggingDeco) {
                 const pt = getSVGPoint(e);
                 
@@ -761,6 +836,7 @@
                     state.isDraggingDeco = false;
                     state.draggedDeco = null;
                     dragLayer.innerHTML = '';
+                    saveState();
                     return;
                 }
                 
@@ -781,6 +857,7 @@
                 state.isDraggingDeco = false;
                 state.draggedDeco = null;
                 dragLayer.innerHTML = '';
+                saveState();
             }
         }
         
@@ -830,6 +907,7 @@
                         state.decorations.splice(i, 1);
                         renderDecos();
                         startDragDeco(e, d.emoji);
+                        saveState();
                         return;
                     }
                 }
@@ -884,6 +962,7 @@
                 }
                 
                 updateViewBox();
+                saveState();
                 
                 state.lastPinchDist = dist;
                 state.lastPinchCenter = { x: cx, y: cy };
@@ -894,6 +973,7 @@
             if (e.touches.length < 2) {
                 state.isPanning = false;
                 state.lastPinchDist = 0;
+                saveState();
             }
         }
 
