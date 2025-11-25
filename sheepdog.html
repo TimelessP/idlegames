@@ -1,0 +1,1132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Sheepdog</title>
+    <link rel="icon" type="image/x-icon" href="assets/appicons/favicon.ico">
+    <link rel="icon" type="image/png" sizes="192x192" href="assets/appicons/icon-192-maskable.png">
+    <link rel="apple-touch-icon" href="assets/appicons/icon-192-maskable.png">
+    <link rel="manifest" href="manifest.webmanifest">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-color: #4a7c59;
+            --grass-light: #5a8f69;
+            --grass-dark: #3d6b4a;
+            --paddock-black: #2d2d2d;
+            --paddock-white: #f5f5dc;
+            --fence-color: #8b4513;
+            --ui-bg: rgba(0, 0, 0, 0.7);
+            --ui-text: #fff;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: var(--bg-color);
+            overflow: hidden;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        #game-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+
+        #game-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            pointer-events: none;
+        }
+
+        .ui-panel {
+            background: var(--ui-bg);
+            color: var(--ui-text);
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            pointer-events: auto;
+        }
+
+        #level-info {
+            display: flex;
+            gap: 20px;
+        }
+
+        #level-info span {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .sheep-icon {
+            width: 16px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .sheep-icon.black {
+            background: #1a1a1a;
+        }
+
+        .sheep-icon.white {
+            background: #f0f0f0;
+        }
+
+        #message-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: var(--ui-bg);
+            color: var(--ui-text);
+            padding: 24px 48px;
+            border-radius: 12px;
+            text-align: center;
+            display: none;
+            pointer-events: auto;
+        }
+
+        #message-overlay h2 {
+            margin-bottom: 12px;
+            font-size: 24px;
+        }
+
+        #message-overlay p {
+            margin-bottom: 16px;
+            opacity: 0.8;
+        }
+
+        #message-overlay button {
+            background: #5a8f69;
+            color: white;
+            border: none;
+            padding: 12px 32px;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        #message-overlay button:hover {
+            background: #4a7c59;
+        }
+
+        #target-indicator {
+            position: absolute;
+            width: 24px;
+            height: 24px;
+            border: 3px solid rgba(255, 255, 255, 0.8);
+            border-radius: 50%;
+            pointer-events: none;
+            display: none;
+            transform: translate(-50%, -50%);
+        }
+
+        #target-indicator::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 6px;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        #game-container.hide-cursor {
+            cursor: none;
+        }
+
+        #game-container.hide-cursor #target-indicator {
+            display: none !important;
+        }
+
+        #instructions {
+            position: absolute;
+            bottom: 12px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--ui-bg);
+            color: var(--ui-text);
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 12px;
+            opacity: 0.8;
+            pointer-events: none;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="game-canvas"></canvas>
+        
+        <div id="ui-overlay">
+            <div class="ui-panel" id="level-info">
+                <span>Level: <strong id="level-num">1</strong></span>
+                <span><span class="sheep-icon black"></span> <span id="black-count">0</span>/<span id="black-total">0</span></span>
+                <span><span class="sheep-icon white"></span> <span id="white-count">0</span>/<span id="white-total">0</span></span>
+            </div>
+            <div class="ui-panel" id="timer">Time: <span id="time-value">0:00</span></div>
+        </div>
+
+        <div id="target-indicator"></div>
+
+        <div id="message-overlay">
+            <h2 id="message-title">Sheepdog</h2>
+            <p id="message-text">Herd the sheep into their paddocks!</p>
+            <button id="message-button">Start</button>
+        </div>
+
+        <div id="instructions">
+            Move cursor/finger to guide the dog • Sort sheep by color into paddocks
+        </div>
+    </div>
+
+    <script>
+        // ============ GAME STATE ============
+        const state = {
+            phase: 'menu', // menu, playing, levelComplete, gameComplete
+            level: 1,
+            time: 0,
+            lastTime: 0,
+            targetX: 0,
+            targetY: 0,
+            touchOffsetY: -80, // Offset above finger for touch
+            isTouch: false
+        };
+
+        // ============ GAME CONFIG ============
+        const config = {
+            fieldPadding: 60,
+            paddockWidth: 120,
+            paddockHeight: 150,
+            fenceThickness: 8,
+            gateWidth: 60,
+            
+            dogSpeed: 4.5,
+            dogSize: 20,
+            
+            sheepSize: 18,
+            sheepSpeed: 1.0,
+            sheepFlightDistance: 100,
+            sheepFlightSpeed: 2.0,
+            sheepCohesion: 0.2,
+            sheepSeparation: 40,
+            sheepAlignmentRadius: 50,
+            scatterThreshold: 55, // How close before scatter - larger means easier to split
+            
+            levels: [
+                { black: 3, white: 3, stubborn: 0 },
+                { black: 4, white: 4, stubborn: 1 },
+                { black: 5, white: 5, stubborn: 1 },
+                { black: 6, white: 6, stubborn: 2 },
+                { black: 8, white: 8, stubborn: 2 },
+                { black: 10, white: 10, stubborn: 3 },
+                { black: 12, white: 12, stubborn: 4 },
+                { black: 15, white: 15, stubborn: 5 }
+            ]
+        };
+
+        // ============ ENTITIES ============
+        let dog = {
+            x: 0, y: 0,
+            vx: 0, vy: 0,
+            phase: 0, // For animation
+            crouching: false,
+            stalking: false,
+            facingDir: 1 // Remember last meaningful direction
+        };
+
+        let sheep = [];
+        let paddocks = { black: null, white: null };
+        let fieldBounds = { x: 0, y: 0, width: 0, height: 0 };
+
+        // ============ CANVAS SETUP ============
+        const canvas = document.getElementById('game-canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resizeCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            ctx.scale(dpr, dpr);
+            canvas.style.width = rect.width + 'px';
+            canvas.style.height = rect.height + 'px';
+            
+            setupField(rect.width, rect.height);
+        }
+
+        function setupField(width, height) {
+            const padding = config.fieldPadding;
+            const pw = config.paddockWidth;
+            const ph = config.paddockHeight;
+            
+            const oldFieldBounds = { ...fieldBounds };
+            
+            fieldBounds = {
+                x: padding,
+                y: padding,
+                width: width - padding * 2,
+                height: height - padding * 2
+            };
+            
+            // Determine orientation - paddocks on short edges
+            const isLandscape = width > height;
+            
+            if (isLandscape) {
+                // Paddocks on left and right (original layout)
+                paddocks.black = {
+                    x: padding,
+                    y: height / 2 - ph / 2,
+                    width: pw,
+                    height: ph,
+                    gateX: padding + pw,
+                    gateY: height / 2 - config.gateWidth / 2,
+                    gateWidth: 0,
+                    gateHeight: config.gateWidth,
+                    color: 'black',
+                    gateSide: 'right'
+                };
+                
+                paddocks.white = {
+                    x: width - padding - pw,
+                    y: height / 2 - ph / 2,
+                    width: pw,
+                    height: ph,
+                    gateX: width - padding - pw,
+                    gateY: height / 2 - config.gateWidth / 2,
+                    gateWidth: 0,
+                    gateHeight: config.gateWidth,
+                    color: 'white',
+                    gateSide: 'left'
+                };
+            } else {
+                // Portrait - paddocks on top and bottom
+                paddocks.black = {
+                    x: width / 2 - pw / 2,
+                    y: padding,
+                    width: pw,
+                    height: ph,
+                    gateX: width / 2 - config.gateWidth / 2,
+                    gateY: padding + ph,
+                    gateWidth: config.gateWidth,
+                    gateHeight: 0,
+                    color: 'black',
+                    gateSide: 'bottom'
+                };
+                
+                paddocks.white = {
+                    x: width / 2 - pw / 2,
+                    y: height - padding - ph,
+                    width: pw,
+                    height: ph,
+                    gateX: width / 2 - config.gateWidth / 2,
+                    gateY: height - padding - ph,
+                    gateWidth: config.gateWidth,
+                    gateHeight: 0,
+                    color: 'white',
+                    gateSide: 'top'
+                };
+            }
+
+            // Reset target to center
+            state.targetX = width / 2;
+            state.targetY = height / 2;
+            
+            // Reposition sheep to stay in bounds
+            if (oldFieldBounds.width > 0 && sheep.length > 0) {
+                repositionEntities(width, height);
+            }
+        }
+        
+        function repositionEntities(width, height) {
+            const margin = config.sheepSize * 2;
+            
+            // Reposition sheep
+            for (const s of sheep) {
+                if (s.penned) {
+                    // Keep penned sheep in their paddock
+                    const p = paddocks[s.color];
+                    s.x = Math.max(p.x + 20, Math.min(p.x + p.width - 20, s.x));
+                    s.y = Math.max(p.y + 20, Math.min(p.y + p.height - 20, s.y));
+                } else {
+                    // Keep free sheep in field bounds
+                    s.x = Math.max(fieldBounds.x + margin, Math.min(fieldBounds.x + fieldBounds.width - margin, s.x));
+                    s.y = Math.max(fieldBounds.y + margin, Math.min(fieldBounds.y + fieldBounds.height - margin, s.y));
+                    
+                    // Push away from paddocks
+                    for (const color of ['black', 'white']) {
+                        const p = paddocks[color];
+                        if (s.x > p.x - margin && s.x < p.x + p.width + margin &&
+                            s.y > p.y - margin && s.y < p.y + p.height + margin) {
+                            // Push to nearest edge
+                            const centerX = p.x + p.width / 2;
+                            const centerY = p.y + p.height / 2;
+                            if (Math.abs(s.x - centerX) > Math.abs(s.y - centerY)) {
+                                s.x = s.x < centerX ? p.x - margin : p.x + p.width + margin;
+                            } else {
+                                s.y = s.y < centerY ? p.y - margin : p.y + p.height + margin;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Reposition dog
+            dog.x = Math.max(fieldBounds.x, Math.min(fieldBounds.x + fieldBounds.width, dog.x));
+            dog.y = Math.max(fieldBounds.y, Math.min(fieldBounds.y + fieldBounds.height, dog.y));
+        }
+
+        // ============ SHEEP CREATION ============
+        function createSheep(color, stubborn = false) {
+            const rect = canvas.getBoundingClientRect();
+            const margin = 150;
+            const centerX = rect.width / 2;
+            const centerY = rect.height / 2;
+            
+            // Spawn in center area
+            const spawnRadius = Math.min(rect.width, rect.height) * 0.25;
+            const angle = Math.random() * Math.PI * 2;
+            const dist = Math.random() * spawnRadius;
+            
+            return {
+                x: centerX + Math.cos(angle) * dist,
+                y: centerY + Math.sin(angle) * dist,
+                vx: 0,
+                vy: 0,
+                color: color,
+                stubborn: stubborn,
+                penned: false,
+                fleeing: false,
+                fleeTime: 0,
+                wobble: Math.random() * Math.PI * 2
+            };
+        }
+
+        function spawnSheep(levelConfig) {
+            sheep = [];
+            
+            // Create black sheep
+            for (let i = 0; i < levelConfig.black; i++) {
+                const isStubborn = i < Math.floor(levelConfig.stubborn / 2);
+                sheep.push(createSheep('black', isStubborn));
+            }
+            
+            // Create white sheep
+            for (let i = 0; i < levelConfig.white; i++) {
+                const isStubborn = i < Math.ceil(levelConfig.stubborn / 2);
+                sheep.push(createSheep('white', isStubborn));
+            }
+            
+            // Shuffle
+            for (let i = sheep.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [sheep[i], sheep[j]] = [sheep[j], sheep[i]];
+            }
+        }
+
+        // ============ GAME LOGIC ============
+        function startLevel(levelNum) {
+            state.level = levelNum;
+            state.time = 0;
+            state.phase = 'playing';
+            
+            const levelConfig = config.levels[Math.min(levelNum - 1, config.levels.length - 1)];
+            spawnSheep(levelConfig);
+            
+            // Position dog at bottom center
+            const rect = canvas.getBoundingClientRect();
+            dog.x = rect.width / 2;
+            dog.y = rect.height - config.fieldPadding - 30;
+            dog.vx = 0;
+            dog.vy = 0;
+            
+            state.targetX = dog.x;
+            state.targetY = dog.y;
+            
+            updateUI();
+            hideMessage();
+        }
+
+        function checkWinCondition() {
+            const blackPenned = sheep.filter(s => s.color === 'black' && s.penned).length;
+            const whitePenned = sheep.filter(s => s.color === 'white' && s.penned).length;
+            const totalBlack = sheep.filter(s => s.color === 'black').length;
+            const totalWhite = sheep.filter(s => s.color === 'white').length;
+            
+            if (blackPenned === totalBlack && whitePenned === totalWhite) {
+                if (state.level >= config.levels.length) {
+                    state.phase = 'gameComplete';
+                    showMessage('Game Complete!', `You herded all the sheep in ${formatTime(state.time)}!`, 'Play Again');
+                } else {
+                    state.phase = 'levelComplete';
+                    showMessage('Level Complete!', `Time: ${formatTime(state.time)}`, 'Next Level');
+                }
+            }
+        }
+
+        // ============ UPDATE FUNCTIONS ============
+        function updateDog(dt) {
+            const container = document.getElementById('game-container');
+            
+            // Move toward target
+            const dx = state.targetX - dog.x;
+            const dy = state.targetY - dog.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            const crouchDist = 8;      // Distance to fully stop
+            const stalkDist = 60;      // Distance to start slowing/stalking
+            const hideCursorDist = 30; // Distance to hide cursor
+            
+            if (dist > crouchDist) {
+                // Calculate speed - slow down as we approach (stalking)
+                let speed = config.dogSpeed;
+                
+                if (dist < stalkDist) {
+                    // Stalking - slow down proportionally
+                    const stalkFactor = (dist - crouchDist) / (stalkDist - crouchDist);
+                    speed = config.dogSpeed * (0.3 + stalkFactor * 0.7); // Min 30% speed
+                    dog.stalking = true;
+                } else {
+                    dog.stalking = false;
+                }
+                
+                dog.vx = (dx / dist) * speed;
+                dog.vy = (dy / dist) * speed;
+                dog.crouching = false;
+                
+                // Update facing direction only when moving meaningfully
+                if (Math.abs(dog.vx) > 0.5) {
+                    dog.facingDir = Math.sign(dog.vx);
+                }
+            } else {
+                dog.vx *= 0.8;
+                dog.vy *= 0.8;
+                dog.crouching = true;
+                dog.stalking = false;
+            }
+            
+            // Hide/show cursor based on distance
+            if (dist < hideCursorDist) {
+                container.classList.add('hide-cursor');
+            } else {
+                container.classList.remove('hide-cursor');
+            }
+            
+            dog.x += dog.vx;
+            dog.y += dog.vy;
+            
+            // Animation phase
+            const animSpeed = Math.sqrt(dog.vx * dog.vx + dog.vy * dog.vy);
+            if (animSpeed > 0.5) {
+                dog.phase += 0.08 + animSpeed * 0.02; // Slower, more natural animation
+            }
+            
+            // Clamp to field
+            dog.x = Math.max(fieldBounds.x, Math.min(fieldBounds.x + fieldBounds.width, dog.x));
+            dog.y = Math.max(fieldBounds.y, Math.min(fieldBounds.y + fieldBounds.height, dog.y));
+        }
+
+        function updateSheep(dt) {
+            // First pass: calculate flock center for each color
+            const flockCenter = { black: { x: 0, y: 0, count: 0 }, white: { x: 0, y: 0, count: 0 } };
+            for (const s of sheep) {
+                if (s.penned) continue;
+                flockCenter[s.color].x += s.x;
+                flockCenter[s.color].y += s.y;
+                flockCenter[s.color].count++;
+            }
+            for (const color of ['black', 'white']) {
+                if (flockCenter[color].count > 0) {
+                    flockCenter[color].x /= flockCenter[color].count;
+                    flockCenter[color].y /= flockCenter[color].count;
+                }
+            }
+            
+            for (const s of sheep) {
+                if (s.penned) continue;
+                
+                s.wobble += 0.025; // Slower wobble animation
+                
+                // Check distance to dog
+                const dxDog = s.x - dog.x;
+                const dyDog = s.y - dog.y;
+                const distDog = Math.sqrt(dxDog * dxDog + dyDog * dyDog);
+                
+                // Calculate if this sheep is "exposed" (on the edge nearest the dog)
+                const fc = flockCenter[s.color];
+                const dxFromCenter = s.x - fc.x;
+                const dyFromCenter = s.y - fc.y;
+                const distFromCenter = Math.sqrt(dxFromCenter * dxFromCenter + dyFromCenter * dyFromCenter);
+                
+                // Dot product to see if sheep is between dog and flock center
+                const dogToCenter_x = fc.x - dog.x;
+                const dogToCenter_y = fc.y - dog.y;
+                const dogToCenterDist = Math.sqrt(dogToCenter_x * dogToCenter_x + dogToCenter_y * dogToCenter_y);
+                
+                let exposedFactor = 1.0; // How exposed this sheep is to the dog
+                if (dogToCenterDist > 0 && distFromCenter > 5) {
+                    // Normalize vectors
+                    const dogToCenterNorm_x = dogToCenter_x / dogToCenterDist;
+                    const dogToCenterNorm_y = dogToCenter_y / dogToCenterDist;
+                    const sheepFromCenterNorm_x = dxFromCenter / distFromCenter;
+                    const sheepFromCenterNorm_y = dyFromCenter / distFromCenter;
+                    
+                    // Dot product: positive means sheep is on the side facing the dog
+                    const dot = -(dogToCenterNorm_x * sheepFromCenterNorm_x + dogToCenterNorm_y * sheepFromCenterNorm_y);
+                    
+                    // Exposed sheep (facing dog) flee slower, protected sheep flee faster
+                    // This allows the dog to "wedge" into the flock
+                    exposedFactor = 0.6 + (1 - dot) * 0.4; // Range: 0.6 (exposed) to 1.4 (protected)
+                }
+                
+                // Flee from dog
+                let fleeX = 0, fleeY = 0;
+                const flightDist = s.stubborn ? config.sheepFlightDistance * 0.6 : config.sheepFlightDistance;
+                
+                if (distDog < flightDist) {
+                    // Base flee strength modified by exposure
+                    const baseFleeStrength = (1 - distDog / flightDist) * (s.stubborn ? config.sheepFlightSpeed * 0.5 : config.sheepFlightSpeed);
+                    const fleeStrength = baseFleeStrength * exposedFactor;
+                    
+                    fleeX = (dxDog / distDog) * fleeStrength;
+                    fleeY = (dyDog / distDog) * fleeStrength;
+                    s.fleeing = true;
+                    
+                    // Scatter if too close - but exposed sheep scatter MORE (they're the ones that should split off)
+                    if (distDog < config.scatterThreshold) {
+                        s.fleeTime = 30;
+                        // Exposed sheep get pushed sideways to split the flock
+                        if (exposedFactor < 0.8) {
+                            // Add perpendicular component to split
+                            const perpX = -dyDog / distDog;
+                            const perpY = dxDog / distDog;
+                            const perpSign = (s.x * perpY - s.y * perpX > 0) ? 1 : -1;
+                            fleeX += perpX * perpSign * 1.5;
+                            fleeY += perpY * perpSign * 1.5;
+                        }
+                        fleeX *= 2;
+                        fleeY *= 2;
+                    }
+                } else {
+                    s.fleeing = false;
+                }
+                
+                if (s.fleeTime > 0) {
+                    s.fleeTime--;
+                    fleeX *= 1.5;
+                    fleeY *= 1.5;
+                }
+                
+                // Cohesion with nearby sheep of same color
+                let cohX = 0, cohY = 0, cohCount = 0;
+                let sepX = 0, sepY = 0;
+                
+                for (const other of sheep) {
+                    if (other === s || other.penned) continue;
+                    
+                    const dx = other.x - s.x;
+                    const dy = other.y - s.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    
+                    // Separation from all sheep - stronger force to prevent overlap
+                    if (dist < config.sheepSeparation && dist > 0) {
+                        const sepStrength = Math.pow(1 - dist / config.sheepSeparation, 2) * 2; // Quadratic falloff, stronger
+                        sepX -= (dx / dist) * sepStrength;
+                        sepY -= (dy / dist) * sepStrength;
+                    }
+                    
+                    // Cohesion with same color
+                    if (other.color === s.color && dist < config.sheepAlignmentRadius) {
+                        cohX += dx;
+                        cohY += dy;
+                        cohCount++;
+                    }
+                }
+                
+                if (cohCount > 0) {
+                    cohX = (cohX / cohCount) * config.sheepCohesion;
+                    cohY = (cohY / cohCount) * config.sheepCohesion;
+                }
+                
+                // Apply forces
+                const baseSpeed = s.stubborn ? config.sheepSpeed * 0.6 : config.sheepSpeed;
+                s.vx += fleeX + cohX * 0.15 + sepX * 1.5; // Weaker cohesion, stronger separation
+                s.vy += fleeY + cohY * 0.15 + sepY * 1.5;
+                
+                // Damping
+                s.vx *= 0.95;
+                s.vy *= 0.95;
+                
+                // Clamp speed
+                const speed = Math.sqrt(s.vx * s.vx + s.vy * s.vy);
+                const maxSpeed = s.fleeing ? baseSpeed * 2 : baseSpeed;
+                if (speed > maxSpeed) {
+                    s.vx = (s.vx / speed) * maxSpeed;
+                    s.vy = (s.vy / speed) * maxSpeed;
+                }
+                
+                s.x += s.vx;
+                s.y += s.vy;
+                
+                // Check paddock entry
+                const targetPaddock = paddocks[s.color];
+                if (s.x > targetPaddock.x && s.x < targetPaddock.x + targetPaddock.width &&
+                    s.y > targetPaddock.y && s.y < targetPaddock.y + targetPaddock.height) {
+                    s.penned = true;
+                    // Move to random spot inside paddock
+                    s.x = targetPaddock.x + 20 + Math.random() * (targetPaddock.width - 40);
+                    s.y = targetPaddock.y + 20 + Math.random() * (targetPaddock.height - 40);
+                    s.vx = 0;
+                    s.vy = 0;
+                }
+                
+                // Boundary collision (avoid paddocks of wrong color)
+                const wrongPaddock = paddocks[s.color === 'black' ? 'white' : 'black'];
+                
+                // Field bounds
+                const margin = config.sheepSize;
+                if (s.x < fieldBounds.x + margin) { s.x = fieldBounds.x + margin; s.vx *= -0.5; }
+                if (s.x > fieldBounds.x + fieldBounds.width - margin) { s.x = fieldBounds.x + fieldBounds.width - margin; s.vx *= -0.5; }
+                if (s.y < fieldBounds.y + margin) { s.y = fieldBounds.y + margin; s.vy *= -0.5; }
+                if (s.y > fieldBounds.y + fieldBounds.height - margin) { s.y = fieldBounds.y + fieldBounds.height - margin; s.vy *= -0.5; }
+                
+                // Avoid wrong paddock
+                if (s.x > wrongPaddock.x - margin && s.x < wrongPaddock.x + wrongPaddock.width + margin &&
+                    s.y > wrongPaddock.y - margin && s.y < wrongPaddock.y + wrongPaddock.height + margin) {
+                    // Push away from wrong paddock
+                    const centerX = wrongPaddock.x + wrongPaddock.width / 2;
+                    const centerY = wrongPaddock.y + wrongPaddock.height / 2;
+                    const awayX = s.x - centerX;
+                    const awayY = s.y - centerY;
+                    const awayDist = Math.sqrt(awayX * awayX + awayY * awayY);
+                    if (awayDist > 0) {
+                        s.vx += (awayX / awayDist) * 2;
+                        s.vy += (awayY / awayDist) * 2;
+                    }
+                }
+            }
+        }
+
+        function update(timestamp) {
+            if (state.lastTime === 0) state.lastTime = timestamp;
+            const dt = (timestamp - state.lastTime) / 1000;
+            state.lastTime = timestamp;
+            
+            if (state.phase === 'playing') {
+                state.time += dt;
+                updateDog(dt);
+                updateSheep(dt);
+                checkWinCondition();
+                updateUI();
+            }
+            
+            render();
+            requestAnimationFrame(update);
+        }
+
+        // ============ RENDERING ============
+        function render() {
+            const rect = canvas.getBoundingClientRect();
+            
+            // Clear with grass color
+            ctx.fillStyle = '#4a7c59';
+            ctx.fillRect(0, 0, rect.width, rect.height);
+            
+            // Draw grass texture
+            drawGrass(rect.width, rect.height);
+            
+            // Draw paddocks
+            drawPaddock(paddocks.black, '#2d2d2d', '#1a1a1a');
+            drawPaddock(paddocks.white, '#f5f5dc', '#e0e0c0');
+            
+            // Draw sheep
+            for (const s of sheep) {
+                drawSheep(s);
+            }
+            
+            // Draw dog
+            drawDog();
+            
+            // Draw target indicator when moving (and cursor not hidden)
+            const container = document.getElementById('game-container');
+            if (state.phase === 'playing' && !dog.crouching && !container.classList.contains('hide-cursor')) {
+                drawTarget();
+            } else {
+                document.getElementById('target-indicator').style.display = 'none';
+            }
+        }
+
+        function drawGrass(width, height) {
+            // Simple grass pattern
+            ctx.fillStyle = '#5a8f69';
+            for (let x = 0; x < width; x += 40) {
+                for (let y = 0; y < height; y += 40) {
+                    if ((x + y) % 80 === 0) {
+                        ctx.fillRect(x, y, 20, 20);
+                    }
+                }
+            }
+        }
+
+        function drawPaddock(p, fillColor, strokeColor) {
+            // Fill
+            ctx.fillStyle = fillColor;
+            ctx.fillRect(p.x, p.y, p.width, p.height);
+            
+            // Fence
+            ctx.strokeStyle = '#8b4513';
+            ctx.lineWidth = config.fenceThickness;
+            ctx.strokeRect(p.x, p.y, p.width, p.height);
+            
+            // Gate opening (clear part of fence)
+            ctx.fillStyle = '#4a7c59';
+            if (p.gateSide === 'right') {
+                ctx.fillRect(p.x + p.width - 2, p.gateY, 12, p.gateHeight);
+            } else if (p.gateSide === 'left') {
+                ctx.fillRect(p.x - 10, p.gateY, 12, p.gateHeight);
+            } else if (p.gateSide === 'bottom') {
+                ctx.fillRect(p.gateX, p.y + p.height - 2, p.gateWidth, 12);
+            } else if (p.gateSide === 'top') {
+                ctx.fillRect(p.gateX, p.y - 10, p.gateWidth, 12);
+            }
+            
+            // Gate posts
+            ctx.fillStyle = '#6b3510';
+            if (p.gateSide === 'right') {
+                ctx.fillRect(p.x + p.width - 4, p.gateY - 4, 8, 8);
+                ctx.fillRect(p.x + p.width - 4, p.gateY + p.gateHeight - 4, 8, 8);
+            } else if (p.gateSide === 'left') {
+                ctx.fillRect(p.x - 4, p.gateY - 4, 8, 8);
+                ctx.fillRect(p.x - 4, p.gateY + p.gateHeight - 4, 8, 8);
+            } else if (p.gateSide === 'bottom') {
+                ctx.fillRect(p.gateX - 4, p.y + p.height - 4, 8, 8);
+                ctx.fillRect(p.gateX + p.gateWidth - 4, p.y + p.height - 4, 8, 8);
+            } else if (p.gateSide === 'top') {
+                ctx.fillRect(p.gateX - 4, p.y - 4, 8, 8);
+                ctx.fillRect(p.gateX + p.gateWidth - 4, p.y - 4, 8, 8);
+            }
+            
+            // Label - position based on gate side
+            ctx.fillStyle = p.color === 'black' ? '#fff' : '#333';
+            ctx.font = 'bold 14px system-ui';
+            ctx.textAlign = 'center';
+            
+            if (p.gateSide === 'right' || p.gateSide === 'left') {
+                ctx.fillText(p.color.toUpperCase(), p.x + p.width / 2, p.y + p.height + 20);
+            } else if (p.gateSide === 'bottom') {
+                ctx.fillText(p.color.toUpperCase(), p.x + p.width / 2, p.y - 8);
+            } else if (p.gateSide === 'top') {
+                ctx.fillText(p.color.toUpperCase(), p.x + p.width / 2, p.y + p.height + 20);
+            }
+        }
+
+        function drawSheep(s) {
+            const size = config.sheepSize;
+            const wobble = s.penned ? Math.sin(s.wobble) * 2 : Math.sin(s.wobble * 2) * (s.fleeing ? 4 : 2);
+            
+            ctx.save();
+            ctx.translate(s.x, s.y + wobble);
+            
+            // Body (fluffy cloud)
+            const bodyColor = s.color === 'black' ? '#1a1a1a' : '#f5f5f5';
+            const shadowColor = s.color === 'black' ? '#0a0a0a' : '#ddd';
+            
+            // Shadow
+            ctx.fillStyle = 'rgba(0,0,0,0.2)';
+            ctx.beginPath();
+            ctx.ellipse(2, 4, size * 0.8, size * 0.5, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Main body
+            ctx.fillStyle = bodyColor;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, size * 0.8, size * 0.6, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Fluffy bumps
+            ctx.beginPath();
+            ctx.arc(-size * 0.4, -size * 0.2, size * 0.35, 0, Math.PI * 2);
+            ctx.arc(size * 0.3, -size * 0.25, size * 0.3, 0, Math.PI * 2);
+            ctx.arc(size * 0.1, -size * 0.4, size * 0.25, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Head (black corner)
+            const headColor = s.color === 'black' ? '#0a0a0a' : '#2a2a2a';
+            ctx.fillStyle = headColor;
+            
+            // Face direction based on velocity or default right
+            const faceDir = Math.abs(s.vx) > 0.1 ? Math.sign(s.vx) : 1;
+            ctx.beginPath();
+            ctx.ellipse(faceDir * size * 0.5, -size * 0.1, size * 0.28, size * 0.35, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Ears
+            ctx.beginPath();
+            ctx.ellipse(faceDir * size * 0.65, -size * 0.35, size * 0.12, size * 0.18, faceDir * 0.5, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Legs (cute little sticks)
+            ctx.fillStyle = '#2a2a2a';
+            const legOffset = Math.sin(s.wobble * 2) * (s.fleeing ? 2 : 0.5);
+            ctx.fillRect(-size * 0.4 + legOffset, size * 0.3, 4, size * 0.4);
+            ctx.fillRect(-size * 0.15 - legOffset, size * 0.3, 4, size * 0.4);
+            ctx.fillRect(size * 0.1 + legOffset, size * 0.3, 4, size * 0.4);
+            ctx.fillRect(size * 0.35 - legOffset, size * 0.3, 4, size * 0.4);
+            
+            // Stubborn indicator - small horns/tufts to show they're stubborn
+            if (s.stubborn && !s.penned) {
+                ctx.fillStyle = s.color === 'black' ? '#333' : '#888';
+                // Left tuft/horn
+                ctx.beginPath();
+                ctx.moveTo(-size * 0.3, -size * 0.5);
+                ctx.lineTo(-size * 0.4, -size * 0.85);
+                ctx.lineTo(-size * 0.15, -size * 0.55);
+                ctx.closePath();
+                ctx.fill();
+                // Right tuft/horn
+                ctx.beginPath();
+                ctx.moveTo(size * 0.1, -size * 0.55);
+                ctx.lineTo(size * 0.2, -size * 0.85);
+                ctx.lineTo(size * 0.35, -size * 0.5);
+                ctx.closePath();
+                ctx.fill();
+            }
+            
+            ctx.restore();
+        }
+
+        function drawDog() {
+            ctx.save();
+            ctx.translate(dog.x, dog.y);
+            
+            const speed = Math.sqrt(dog.vx * dog.vx + dog.vy * dog.vy);
+            const moving = speed > 0.5;
+            
+            // Use remembered facing direction to prevent flip-flopping
+            const dir = dog.facingDir;
+            
+            // Body animation - stalk is low like crouch but still moving
+            const bodyStretch = moving ? 1 + Math.sin(dog.phase) * 0.15 : 1;
+            const bodySquash = dog.crouching ? 0.7 : (dog.stalking ? 0.8 : (moving ? 1 - Math.sin(dog.phase) * 0.1 : 1));
+            
+            ctx.scale(dir, 1);
+            
+            // Shadow
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.beginPath();
+            ctx.ellipse(0, 8, 15 * bodyStretch, 6, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Body
+            ctx.fillStyle = '#1a1a1a';
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 12 * bodyStretch, 8 * bodySquash, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // White chest
+            ctx.fillStyle = '#f5f5f5';
+            ctx.beginPath();
+            ctx.ellipse(8, 2, 5, 6 * bodySquash, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Head
+            ctx.fillStyle = '#1a1a1a';
+            ctx.beginPath();
+            ctx.ellipse(14, -4, 8, 7, 0.2, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Snout
+            ctx.fillStyle = '#2a2a2a';
+            ctx.beginPath();
+            ctx.ellipse(20, -2, 5, 4, 0.3, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // White blaze
+            ctx.fillStyle = '#f5f5f5';
+            ctx.beginPath();
+            ctx.ellipse(14, -6, 3, 4, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Nose
+            ctx.fillStyle = '#111';
+            ctx.beginPath();
+            ctx.arc(24, -1, 2, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Eyes
+            ctx.fillStyle = '#3a2518';
+            ctx.beginPath();
+            ctx.arc(16, -6, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Eye shine
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(16.5, -6.5, 1, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Ears
+            ctx.fillStyle = '#1a1a1a';
+            ctx.beginPath();
+            ctx.ellipse(10, -10, 4, 6, -0.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.ellipse(16, -11, 4, 5, 0.3, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Legs
+            const legPhase = moving ? dog.phase : 0;
+            ctx.fillStyle = '#1a1a1a';
+            
+            // Leg height - shorter when crouching or stalking
+            const legHeight = dog.crouching ? 6 : (dog.stalking ? 8 : 10);
+            
+            // Front legs
+            const fl1 = Math.sin(legPhase) * (moving ? 8 : 0);
+            const fl2 = Math.sin(legPhase + Math.PI) * (moving ? 8 : 0);
+            ctx.fillRect(6 + fl1 * 0.3, 4, 4, legHeight);
+            ctx.fillRect(2 + fl2 * 0.3, 4, 4, legHeight);
+            
+            // Back legs
+            ctx.fillRect(-8 + fl2 * 0.3, 4, 4, legHeight);
+            ctx.fillRect(-12 + fl1 * 0.3, 4, 4, legHeight);
+            
+            // Tail
+            ctx.beginPath();
+            ctx.moveTo(-12, -2);
+            const tailWag = Math.sin(dog.phase * 2) * (moving ? 0.5 : 0.2);
+            ctx.quadraticCurveTo(-20, -8 + tailWag * 10, -18, -14 + tailWag * 5);
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = '#1a1a1a';
+            ctx.stroke();
+            
+            // White tail tip
+            ctx.beginPath();
+            ctx.arc(-18, -14 + tailWag * 5, 3, 0, Math.PI * 2);
+            ctx.fillStyle = '#f5f5f5';
+            ctx.fill();
+            
+            ctx.restore();
+        }
+
+        function drawTarget() {
+            const indicator = document.getElementById('target-indicator');
+            indicator.style.display = 'block';
+            indicator.style.left = state.targetX + 'px';
+            indicator.style.top = state.targetY + 'px';
+        }
+
+        // ============ UI ============
+        function updateUI() {
+            const levelConfig = config.levels[Math.min(state.level - 1, config.levels.length - 1)];
+            
+            document.getElementById('level-num').textContent = state.level;
+            document.getElementById('black-count').textContent = sheep.filter(s => s.color === 'black' && s.penned).length;
+            document.getElementById('black-total').textContent = levelConfig.black;
+            document.getElementById('white-count').textContent = sheep.filter(s => s.color === 'white' && s.penned).length;
+            document.getElementById('white-total').textContent = levelConfig.white;
+            document.getElementById('time-value').textContent = formatTime(state.time);
+        }
+
+        function formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        function showMessage(title, text, buttonText) {
+            document.getElementById('message-title').textContent = title;
+            document.getElementById('message-text').textContent = text;
+            document.getElementById('message-button').textContent = buttonText;
+            document.getElementById('message-overlay').style.display = 'block';
+            
+            // Restore cursor visibility when showing dialogs
+            document.getElementById('game-container').classList.remove('hide-cursor');
+            document.getElementById('target-indicator').style.display = 'none';
+        }
+
+        function hideMessage() {
+            document.getElementById('message-overlay').style.display = 'none';
+            document.getElementById('target-indicator').style.display = 'none';
+        }
+
+        // ============ INPUT ============
+        function handlePointerMove(x, y, isTouch) {
+            if (state.phase !== 'playing') return;
+            
+            state.targetX = x;
+            state.targetY = isTouch ? y + state.touchOffsetY : y;
+            state.isTouch = isTouch;
+            
+            // Clamp to field
+            state.targetX = Math.max(fieldBounds.x, Math.min(fieldBounds.x + fieldBounds.width, state.targetX));
+            state.targetY = Math.max(fieldBounds.y, Math.min(fieldBounds.y + fieldBounds.height, state.targetY));
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            handlePointerMove(e.clientX - rect.left, e.clientY - rect.top, false);
+        });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            handlePointerMove(touch.clientX - rect.left, touch.clientY - rect.top, true);
+        }, { passive: false });
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            handlePointerMove(touch.clientX - rect.left, touch.clientY - rect.top, true);
+        }, { passive: false });
+
+        document.getElementById('message-button').addEventListener('click', () => {
+            if (state.phase === 'menu') {
+                startLevel(1);
+            } else if (state.phase === 'levelComplete') {
+                startLevel(state.level + 1);
+            } else if (state.phase === 'gameComplete') {
+                startLevel(1);
+            }
+        });
+
+        // ============ INIT ============
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        showMessage('Sheepdog', 'Guide the dog to herd sheep into their matching paddocks!', 'Start');
+
+        requestAnimationFrame(update);
+    </script>
+    <script src="parental.js" defer></script>
+    <script src="assets/js/pwa.js" defer></script>
+</body>
+</html>
