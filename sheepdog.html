@@ -164,7 +164,7 @@
             display: none !important;
         }
 
-        #instructions {
+            #instructions {
             position: absolute;
             bottom: 12px;
             left: 50%;
@@ -177,6 +177,11 @@
             opacity: 0.8;
             pointer-events: none;
             text-align: center;
+            transition: opacity 0.3s ease;
+        }
+        
+        #instructions.hidden {
+            opacity: 0;
         }
     </style>
 </head>
@@ -213,11 +218,18 @@
             level: 1,
             time: 0,
             lastTime: 0,
+            lastFrameTime: 0,
             targetX: 0,
             targetY: 0,
             touchOffsetY: -80, // Offset above finger for touch
-            isTouch: false
+            isTouch: false,
+            lastActivityTime: 0,
+            helpVisible: true
         };
+        
+        const TARGET_FPS = 25;
+        const FRAME_DURATION = 1000 / TARGET_FPS; // ~40ms per frame
+        const HELP_HIDE_DELAY = 10000; // 10 seconds of inactivity
 
         // ============ GAME CONFIG ============
         const config = {
@@ -226,6 +238,7 @@
             paddockHeight: 150,
             fenceThickness: 8,
             gateWidth: 60,
+            bottomFenceOffset: 90, // Keep sheep away from bottom (slightly more than touch offset)
             
             dogSpeed: 4.5,
             dogSize: 20,
@@ -327,6 +340,9 @@
                 };
             } else {
                 // Portrait - paddocks on top and bottom
+                // Add extra bottom margin so text is visible on mobile
+                const bottomMargin = 25;
+                
                 paddocks.black = {
                     x: width / 2 - pw / 2,
                     y: padding,
@@ -342,11 +358,11 @@
                 
                 paddocks.white = {
                     x: width / 2 - pw / 2,
-                    y: height - padding - ph,
+                    y: height - padding - ph - bottomMargin,
                     width: pw,
                     height: ph,
                     gateX: width / 2 - config.gateWidth / 2,
-                    gateY: height - padding - ph,
+                    gateY: height - padding - ph - bottomMargin,
                     gateWidth: config.gateWidth,
                     gateHeight: 0,
                     color: 'white',
@@ -455,19 +471,24 @@
             state.level = levelNum;
             state.time = 0;
             state.phase = 'playing';
+            state.lastActivityTime = performance.now();
+            state.helpVisible = true;
             
             const levelConfig = config.levels[Math.min(levelNum - 1, config.levels.length - 1)];
             spawnSheep(levelConfig);
             
-            // Position dog at bottom center
+            // Position dog at bottom center (above bottom fence)
             const rect = canvas.getBoundingClientRect();
             dog.x = rect.width / 2;
-            dog.y = rect.height - config.fieldPadding - 30;
+            dog.y = rect.height - config.bottomFenceOffset - 30;
             dog.vx = 0;
             dog.vy = 0;
             
             state.targetX = dog.x;
             state.targetY = dog.y;
+            
+            // Show instructions initially
+            document.getElementById('instructions').classList.remove('hidden');
             
             updateUI();
             hideMessage();
@@ -493,6 +514,7 @@
         // ============ UPDATE FUNCTIONS ============
         function updateDog(dt) {
             const container = document.getElementById('game-container');
+            const dtScale = dt * TARGET_FPS; // Normalize to expected frame rate
             
             // Move toward target
             const dx = state.targetX - dog.x;
@@ -538,13 +560,13 @@
                 container.classList.remove('hide-cursor');
             }
             
-            dog.x += dog.vx;
-            dog.y += dog.vy;
+            dog.x += dog.vx * dtScale;
+            dog.y += dog.vy * dtScale;
             
             // Animation phase
             const animSpeed = Math.sqrt(dog.vx * dog.vx + dog.vy * dog.vy);
             if (animSpeed > 0.5) {
-                dog.phase += 0.08 + animSpeed * 0.02; // Slower, more natural animation
+                dog.phase += (0.08 + animSpeed * 0.02) * dtScale; // Slower, more natural animation
             }
             
             // Clamp to field
@@ -553,6 +575,9 @@
         }
 
         function updateSheep(dt) {
+            const dtScale = dt * TARGET_FPS; // Normalize to expected frame rate
+            const rect = canvas.getBoundingClientRect();
+            
             // First pass: calculate flock center for each color
             const flockCenter = { black: { x: 0, y: 0, count: 0 }, white: { x: 0, y: 0, count: 0 } };
             for (const s of sheep) {
@@ -571,7 +596,7 @@
             for (const s of sheep) {
                 if (s.penned) continue;
                 
-                s.wobble += 0.025; // Slower wobble animation
+                s.wobble += 0.025 * dtScale; // Slower wobble animation
                 
                 // Check distance to dog
                 const dxDog = s.x - dog.x;
@@ -691,8 +716,8 @@
                     s.vy = (s.vy / speed) * maxSpeed;
                 }
                 
-                s.x += s.vx;
-                s.y += s.vy;
+                s.x += s.vx * dtScale;
+                s.y += s.vy * dtScale;
                 
                 // Check paddock entry
                 const targetPaddock = paddocks[s.color];
@@ -709,12 +734,14 @@
                 // Boundary collision (avoid paddocks of wrong color)
                 const wrongPaddock = paddocks[s.color === 'black' ? 'white' : 'black'];
                 
-                // Field bounds
+                // Field bounds - with bottom fence zone to keep sheep accessible on mobile
                 const margin = config.sheepSize;
+                const bottomLimit = rect.height - config.bottomFenceOffset - margin;
+                
                 if (s.x < fieldBounds.x + margin) { s.x = fieldBounds.x + margin; s.vx *= -0.5; }
                 if (s.x > fieldBounds.x + fieldBounds.width - margin) { s.x = fieldBounds.x + fieldBounds.width - margin; s.vx *= -0.5; }
                 if (s.y < fieldBounds.y + margin) { s.y = fieldBounds.y + margin; s.vy *= -0.5; }
-                if (s.y > fieldBounds.y + fieldBounds.height - margin) { s.y = fieldBounds.y + fieldBounds.height - margin; s.vy *= -0.5; }
+                if (s.y > bottomLimit) { s.y = bottomLimit; s.vy *= -0.5; }
                 
                 // Avoid wrong paddock
                 if (s.x > wrongPaddock.x - margin && s.x < wrongPaddock.x + wrongPaddock.width + margin &&
@@ -734,9 +761,21 @@
         }
 
         function update(timestamp) {
-            if (state.lastTime === 0) state.lastTime = timestamp;
-            const dt = (timestamp - state.lastTime) / 1000;
-            state.lastTime = timestamp;
+            // Frame rate limiting
+            if (state.lastFrameTime === 0) state.lastFrameTime = timestamp;
+            const elapsed = timestamp - state.lastFrameTime;
+            
+            if (elapsed < FRAME_DURATION) {
+                requestAnimationFrame(update);
+                return;
+            }
+            
+            // Calculate delta time (clamped to prevent huge jumps)
+            const dt = Math.min(elapsed / 1000, 0.1);
+            state.lastFrameTime = timestamp;
+            
+            // Update help panel visibility
+            updateHelpVisibility(timestamp);
             
             if (state.phase === 'playing') {
                 state.time += dt;
@@ -749,6 +788,28 @@
             render();
             requestAnimationFrame(update);
         }
+        
+        function updateHelpVisibility(timestamp) {
+            const instructions = document.getElementById('instructions');
+            const timeSinceActivity = timestamp - state.lastActivityTime;
+            
+            if (state.phase === 'playing') {
+                if (timeSinceActivity > HELP_HIDE_DELAY && !state.helpVisible) {
+                    // Show help after inactivity
+                    instructions.classList.remove('hidden');
+                    state.helpVisible = true;
+                }
+            }
+        }
+        
+        function registerActivity() {
+            state.lastActivityTime = performance.now();
+            const instructions = document.getElementById('instructions');
+            if (state.helpVisible && state.phase === 'playing') {
+                instructions.classList.add('hidden');
+                state.helpVisible = false;
+            }
+        }
 
         // ============ RENDERING ============
         function render() {
@@ -760,6 +821,9 @@
             
             // Draw grass texture
             drawGrass(rect.width, rect.height);
+            
+            // Draw bottom fence (no-sheep zone)
+            drawBottomFence(rect.width, rect.height);
             
             // Draw paddocks
             drawPaddock(paddocks.black, '#2d2d2d', '#1a1a1a');
@@ -793,10 +857,37 @@
                 }
             }
         }
+        
+        function drawBottomFence(width, height) {
+            const fenceY = height - config.bottomFenceOffset;
+            
+            // Fence posts
+            ctx.fillStyle = '#6b3510';
+            const postSpacing = 50;
+            for (let x = 0; x < width; x += postSpacing) {
+                ctx.fillRect(x, fenceY - 5, 8, 20);
+            }
+            
+            // Fence rails
+            ctx.strokeStyle = '#8b4513';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(0, fenceY);
+            ctx.lineTo(width, fenceY);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(0, fenceY + 10);
+            ctx.lineTo(width, fenceY + 10);
+            ctx.stroke();
+        }
 
         function drawPaddock(p, fillColor, strokeColor) {
-            // Fill
-            ctx.fillStyle = fillColor;
+            // Fill - 75% transparent so sheep are visible
+            if (p.color === 'black') {
+                ctx.fillStyle = 'rgba(45, 45, 45, 0.25)'; // Dark grey at 25% opacity (75% transparent)
+            } else {
+                ctx.fillStyle = 'rgba(245, 245, 220, 0.25)'; // Beige at 25% opacity (75% transparent)
+            }
             ctx.fillRect(p.x, p.y, p.width, p.height);
             
             // Fence
@@ -1080,6 +1171,8 @@
         function handlePointerMove(x, y, isTouch) {
             if (state.phase !== 'playing') return;
             
+            registerActivity();
+            
             state.targetX = x;
             state.targetY = isTouch ? y + state.touchOffsetY : y;
             state.isTouch = isTouch;
@@ -1093,6 +1186,10 @@
             const rect = canvas.getBoundingClientRect();
             handlePointerMove(e.clientX - rect.left, e.clientY - rect.top, false);
         });
+        
+        canvas.addEventListener('mousedown', () => {
+            registerActivity();
+        });
 
         canvas.addEventListener('touchmove', (e) => {
             e.preventDefault();
@@ -1103,6 +1200,7 @@
 
         canvas.addEventListener('touchstart', (e) => {
             e.preventDefault();
+            registerActivity();
             const rect = canvas.getBoundingClientRect();
             const touch = e.touches[0];
             handlePointerMove(touch.clientX - rect.left, touch.clientY - rect.top, true);
