@@ -168,6 +168,14 @@ if ('serviceWorker' in navigator) {
             promptReload(registration.waiting, incoming);
           }
           localStorage.setItem('idle-games-sw-version', incoming);
+          return;
+        }
+        if (event.data.type === 'timer-finished') {
+          markTimerFinishedInStorage(event.data.timerId);
+          return;
+        }
+        if (event.data.type === 'timer-notification-clicked') {
+          // Reserved for future use.
         }
       });
 
@@ -176,6 +184,8 @@ if ('serviceWorker' in navigator) {
         refreshing = true;
         window.location.reload();
       });
+
+      scheduleTimerSync(0);
     } catch (error) {
       console.error('Service worker registration failed:', error);
     }
@@ -192,4 +202,105 @@ if ('launchQueue' in window && typeof window.launchQueue.setConsumer === 'functi
       window.location.href = target;
     }
   });
+}
+
+const TIMER_STORAGE_KEY = 'idlegames-timers';
+const TIMER_SETTINGS_STORAGE_KEY = 'idlegames-timers-settings';
+const TIMERS_FALLBACK_URL = new URL('./timers.html', window.location.origin).href;
+let timerSyncTimeoutId = null;
+
+function readJSONStorage(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function timerNotifyEnabled(timer, globalSettingsSnapshot) {
+  const pref = timer?.notifyPreference || 'inherit';
+  if (pref === 'on') return true;
+  if (pref === 'off') return false;
+  return !!(globalSettingsSnapshot && globalSettingsSnapshot.notify);
+}
+
+function collectRunningTimersForSync() {
+  const timers = readJSONStorage(TIMER_STORAGE_KEY, []);
+  const settings = readJSONStorage(TIMER_SETTINGS_STORAGE_KEY, { notify: true });
+  if (!Array.isArray(timers)) return [];
+  return timers
+    .filter((timer) => timer
+      && timer.running
+      && typeof timer.endTime === 'number'
+      && timerNotifyEnabled(timer, settings))
+    .map((timer) => ({
+      id: timer.id,
+      name: timer.name || 'Timer',
+      endTime: timer.endTime,
+      startUrl: timer.startUrl || TIMERS_FALLBACK_URL,
+      notify: true
+    }));
+}
+
+function markTimerFinishedInStorage(timerId) {
+  if (!timerId) return;
+  try {
+    const timers = readJSONStorage(TIMER_STORAGE_KEY, null);
+    if (!Array.isArray(timers)) return;
+    let updated = false;
+    for (const timer of timers) {
+      if (timer && timer.id === timerId) {
+        if (timer.running || !timer.finished || timer.remaining !== 0 || timer.endTime) {
+          timer.running = false;
+          timer.finished = true;
+          timer.remaining = 0;
+          timer.endTime = null;
+          updated = true;
+        }
+        break;
+      }
+    }
+    if (updated) {
+      localStorage.setItem(TIMER_STORAGE_KEY, JSON.stringify(timers));
+    }
+  } catch (error) {
+    console.warn('Unable to update timer state from service worker message', error);
+  }
+}
+
+async function sendTimerSyncMessage() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const timersPayload = collectRunningTimersForSync();
+    const registration = await navigator.serviceWorker.ready;
+    const target = registration.active || navigator.serviceWorker.controller;
+    target?.postMessage({ type: 'timer-sync', timers: timersPayload });
+  } catch (error) {
+    // Service worker not ready; will retry later.
+  }
+}
+
+function scheduleTimerSync(delay = 0) {
+  if (!('serviceWorker' in navigator)) return;
+  if (timerSyncTimeoutId) {
+    clearTimeout(timerSyncTimeoutId);
+  }
+  timerSyncTimeoutId = setTimeout(() => {
+    timerSyncTimeoutId = null;
+    sendTimerSyncMessage();
+  }, delay);
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('storage', (event) => {
+    if (event.key === TIMER_STORAGE_KEY || event.key === TIMER_SETTINGS_STORAGE_KEY) {
+      scheduleTimerSync(0);
+    }
+  });
+
+  setInterval(() => {
+    scheduleTimerSync(0);
+  }, 60000);
 }
