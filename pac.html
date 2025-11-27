@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#1a1a2e">
   <meta name="description" content="Personal Area Communications - acoustic data transfer chat">
   <title>PAC - Personal Area Comms</title>
-  <link rel="icon" href="assets/appicons/icon-192.png" type="image/png">
-  <link rel="apple-touch-icon" href="assets/appicons/icon-192.png">
+  <link rel="icon" href="assets/appicons/idle-games-512x512px.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/appicons/idle-games-512x512px.png">
   <link rel="manifest" href="manifest.webmanifest">
   <style>
     *, *::before, *::after { box-sizing: border-box; }
@@ -279,11 +279,47 @@
     .message-actions {
       display: flex;
       justify-content: flex-end;
+      gap: 0.5rem;
       margin-top: 0.5rem;
       padding-top: 0.5rem;
       border-top: 1px solid rgba(255,255,255,0.1);
     }
 
+    .msg-action-btn {
+      background: transparent;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: all var(--transition);
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .msg-action-btn:hover {
+      background: var(--accent);
+      color: var(--bg-primary);
+    }
+
+    .msg-action-btn.delete-btn {
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+
+    .msg-action-btn.delete-btn:hover {
+      background: var(--danger);
+      color: white;
+    }
+
+    .msg-action-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Legacy class for backwards compat */
     .retransmit-btn {
       background: transparent;
       border: 1px solid var(--accent);
@@ -656,6 +692,8 @@
     <div class="status-indicator">
       <div class="status-dot" id="statusDot"></div>
       <span id="statusText">Idle</span>
+      <button class="icon-btn" id="stopReceiveBtn" title="Stop receiving" style="display: none; color: var(--danger); font-size: 1rem; padding: 0.25rem 0.5rem;">⏹️</button>
+      <button class="icon-btn" id="listenToggleBtn" title="Toggle listening" style="font-size: 1rem; padding: 0.25rem 0.5rem;">🔇</button>
     </div>
     <div class="top-bar-buttons">
       <button class="icon-btn" id="settingsBtn" title="Settings">⚙️</button>
@@ -805,6 +843,8 @@
       permissionBanner: document.getElementById('permissionBanner'),
       statusDot: document.getElementById('statusDot'),
       statusText: document.getElementById('statusText'),
+      stopReceiveBtn: document.getElementById('stopReceiveBtn'),
+      listenToggleBtn: document.getElementById('listenToggleBtn'),
       spectrumBar: document.getElementById('spectrumBar'),
       timeline: document.getElementById('timeline'),
       emptyState: document.getElementById('emptyState'),
@@ -831,6 +871,7 @@
       initDeviceId();
       initTheme();
       initSpectrumBins();
+      initListenToggleButton();
       renderTimeline();
       bindEvents();
       checkMicrophonePermission();
@@ -979,6 +1020,76 @@
     function updateStatus(state, text) {
       elements.statusDot.className = 'status-dot ' + state;
       elements.statusText.textContent = text;
+      // Show stop button only when receiving
+      elements.stopReceiveBtn.style.display = (state === 'transmitting' && text === 'Receiving...') ? 'inline-block' : 'none';
+      // Update listen toggle button appearance
+      updateListenToggleButton();
+    }
+
+    function updateListenToggleButton() {
+      if (isListening) {
+        elements.listenToggleBtn.textContent = '🔇';
+        elements.listenToggleBtn.title = 'Stop listening';
+        elements.listenToggleBtn.style.color = '';
+      } else {
+        elements.listenToggleBtn.textContent = '🎙️';
+        elements.listenToggleBtn.title = 'Start listening';
+        elements.listenToggleBtn.style.color = 'var(--text-secondary)';
+      }
+    }
+
+    function stopListening() {
+      if (!isListening) return;
+      
+      // Stop any ongoing reception
+      if (receivingMessage) {
+        receivingMessage = false;
+        receiveBuffer = [];
+        syncDetectCount = 0;
+      }
+      
+      // Cancel analysis loop
+      if (analysisFrame) {
+        cancelAnimationFrame(analysisFrame);
+        analysisFrame = null;
+      }
+      
+      // Stop microphone stream
+      if (micStream) {
+        micStream.getTracks().forEach(track => track.stop());
+        micStream = null;
+      }
+      
+      isListening = false;
+      updateStatus('', 'Idle');
+      
+      // Clear spectrum visualization
+      const bins = elements.spectrumBar.children;
+      for (let i = 0; i < bins.length; i++) {
+        bins[i].classList.remove('active');
+      }
+    }
+
+    function toggleListening() {
+      if (isListening) {
+        stopListening();
+      } else {
+        startListening();
+      }
+    }
+
+    function stopReceiving() {
+      if (receivingMessage) {
+        receivingMessage = false;
+        receiveBuffer = [];
+        syncDetectCount = 0;
+        updateStatus(isListening ? 'listening' : '', isListening ? 'Listening' : 'Idle');
+      }
+    }
+
+    // Initialize listen toggle button state on load
+    function initListenToggleButton() {
+      updateListenToggleButton();
     }
 
     // ============================================================
@@ -988,7 +1099,11 @@
     let receiveBuffer = [];
     let receivingMessage = false;
     let lastSyncTime = 0;
+    let syncDetectCount = 0;
     const SYNC_COOLDOWN = 500;
+    const SYNC_CONFIRM_FRAMES = 5; // Require sustained sync tone
+    const MAGIC_HEADER = 0xAC01; // Magic number to validate messages (used in encode/decode)
+    const DEBUG_DECODE = false; // Set true to see decode errors
 
     function startAnalysis() {
       const bufferLength = analyser.frequencyBinCount;
@@ -1007,17 +1122,24 @@
           bins[i].classList.toggle('active', value > FREQUENCY_CONFIG.detectionThreshold);
         });
         
-        // Check for sync tone
+        // Check for sync tone with sustained detection
         const syncBin = Math.round(FREQUENCY_CONFIG.syncFrequency * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
         const syncLevel = dataArray[syncBin] / 255;
         
         const now = Date.now();
-        if (syncLevel > FREQUENCY_CONFIG.detectionThreshold * 1.5 && !receivingMessage && (now - lastSyncTime) > SYNC_COOLDOWN) {
-          lastSyncTime = now;
-          receivingMessage = true;
-          receiveBuffer = [];
-          updateStatus('transmitting', 'Receiving...');
-          setTimeout(receiveSymbols, FREQUENCY_CONFIG.preambleDuration);
+        if (syncLevel > FREQUENCY_CONFIG.detectionThreshold * 2 && !receivingMessage && (now - lastSyncTime) > SYNC_COOLDOWN) {
+          // Require sustained sync tone, not just a spike
+          syncDetectCount++;
+          if (syncDetectCount >= SYNC_CONFIRM_FRAMES) {
+            lastSyncTime = now;
+            syncDetectCount = 0;
+            receivingMessage = true;
+            receiveBuffer = [];
+            updateStatus('transmitting', 'Receiving...');
+            setTimeout(receiveSymbols, FREQUENCY_CONFIG.preambleDuration - (SYNC_CONFIRM_FRAMES * 16));
+          }
+        } else if (syncLevel <= FREQUENCY_CONFIG.detectionThreshold) {
+          syncDetectCount = 0; // Reset if sync tone drops
         }
         
         analysisFrame = requestAnimationFrame(analyze);
@@ -1063,8 +1185,15 @@
       receivingMessage = false;
       updateStatus('listening', 'Listening');
       
-      if (receiveBuffer.length < 10) {
-        // Too short, probably noise
+      if (receiveBuffer.length < 3) {
+        // Too short, probably noise - silently ignore
+        return;
+      }
+      
+      // Check magic header first
+      if (receiveBuffer[0] !== 0xAC01) {
+        // Not a valid PAC message - silently ignore noise
+        if (DEBUG_DECODE) console.log('Invalid magic header, ignoring');
         return;
       }
       
@@ -1074,17 +1203,29 @@
           addMessageToTimeline(message);
         }
       } catch (err) {
-        console.error('Failed to decode message:', err);
+        if (DEBUG_DECODE) console.error('Failed to decode message:', err);
+        // Silently ignore decode failures - likely noise
       }
     }
 
     // ============================================================
     // Encoding / Decoding
     // ============================================================
+    
+    // Simple checksum (sum of all bytes mod 65536)
+    function calculateChecksum(bytes) {
+      let sum = 0;
+      for (let i = 0; i < bytes.length; i++) {
+        sum = (sum + bytes[i]) & 0xFFFF;
+      }
+      return sum;
+    }
+    
     function encodeMessage(message) {
       // Convert message to JSON string, then to bytes
       const json = JSON.stringify(message);
       const bytes = new TextEncoder().encode(json);
+      const checksum = calculateChecksum(bytes);
       
       // Convert bytes to 16-bit symbols (2 bytes per symbol)
       const symbols = [];
@@ -1094,23 +1235,38 @@
         symbols.push(low | (high << 8));
       }
       
-      // Add length header (first symbol is byte count)
-      return [bytes.length, ...symbols];
+      // Header: magic (0xAC01), byte count, checksum, then data
+      return [0xAC01, bytes.length, checksum, ...symbols];
     }
 
     function decodeMessage(symbols) {
-      if (symbols.length < 2) return null;
+      if (symbols.length < 4) return null;
       
-      const byteCount = symbols[0];
+      // Verify magic header (already checked in finishReceiving, but double-check)
+      if (symbols[0] !== 0xAC01) return null;
+      
+      const byteCount = symbols[1];
+      const expectedChecksum = symbols[2];
+      
+      // Sanity check byte count
+      if (byteCount <= 0 || byteCount > 100000) return null;
+      
       const bytes = new Uint8Array(byteCount);
       
-      for (let i = 1; i < symbols.length && (i - 1) * 2 < byteCount; i++) {
+      for (let i = 3; i < symbols.length && (i - 3) * 2 < byteCount; i++) {
         const symbol = symbols[i];
-        const pos = (i - 1) * 2;
+        const pos = (i - 3) * 2;
         bytes[pos] = symbol & 0xFF;
         if (pos + 1 < byteCount) {
           bytes[pos + 1] = (symbol >> 8) & 0xFF;
         }
+      }
+      
+      // Verify checksum
+      const actualChecksum = calculateChecksum(bytes);
+      if (actualChecksum !== expectedChecksum) {
+        if (DEBUG_DECODE) console.log('Checksum mismatch:', expectedChecksum, 'vs', actualChecksum);
+        return null;
       }
       
       const json = new TextDecoder().decode(bytes);
@@ -1239,6 +1395,15 @@
       elements.timeline.scrollTop = elements.timeline.scrollHeight;
     }
 
+    function deleteMessage(messageId) {
+      const index = timeline.findIndex(m => m.messageId === messageId);
+      if (index !== -1) {
+        timeline.splice(index, 1);
+        saveTimeline();
+        renderTimeline();
+      }
+    }
+
     // ============================================================
     // Rendering
     // ============================================================
@@ -1286,8 +1451,11 @@
           ${renderAttachments(message.attachments || [])}
         </div>
         <div class="message-actions">
-          <button class="retransmit-btn" data-message-id="${message.messageId}">
+          <button class="msg-action-btn retransmit-btn" data-message-id="${message.messageId}">
             📡 Retransmit
+          </button>
+          <button class="msg-action-btn delete-btn" data-message-id="${message.messageId}">
+            🗑️ Delete
           </button>
         </div>
       `;
@@ -1295,6 +1463,11 @@
       // Bind retransmit button
       card.querySelector('.retransmit-btn').addEventListener('click', () => {
         retransmitMessage(message);
+      });
+      
+      // Bind delete button
+      card.querySelector('.delete-btn').addEventListener('click', () => {
+        deleteMessage(message.messageId);
       });
       
       // Bind image clicks for fullscreen view
@@ -1497,6 +1670,12 @@
     function bindEvents() {
       // Permission banner
       elements.permissionBanner.addEventListener('click', startListening);
+      
+      // Stop receiving button
+      elements.stopReceiveBtn.addEventListener('click', stopReceiving);
+      
+      // Listen toggle button
+      elements.listenToggleBtn.addEventListener('click', toggleListening);
       
       // Compose input
       elements.composeInput.addEventListener('input', () => {
