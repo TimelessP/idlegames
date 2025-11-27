@@ -873,11 +873,11 @@
       endMarkerPattern: [0xFF, 0xFF, 0xFF],
       
       // Detection thresholds
-      signalThreshold: 0.08,     // Minimum signal level (0-1) to consider
-      dominanceRatio: 1.5,       // How much stronger peak must be vs average
+      signalThreshold: 0.05,     // Minimum signal level (0-1) to consider
+      dominanceRatio: 1.3,       // How much stronger peak must be vs average
       
       // Frames of consistent marker to trigger reception
-      markerConfirmFrames: 3,
+      markerConfirmFrames: 2,
       
       // Maximum silence frames before ending reception
       maxSilenceFrames: 10,
@@ -1048,9 +1048,21 @@
       if (audioContext) return true;
       
       try {
+        // Try to create with preferred sample rate, but accept browser default
         audioContext = new (window.AudioContext || window.webkitAudioContext)({
           sampleRate: FREQUENCY_CONFIG.sampleRate
         });
+        
+        // Check if we got the requested sample rate
+        if (audioContext.sampleRate !== FREQUENCY_CONFIG.sampleRate) {
+          debugLog('WARNING: Requested', FREQUENCY_CONFIG.sampleRate, 'Hz but got', audioContext.sampleRate, 'Hz');
+          // Update config to match actual rate
+          FREQUENCY_CONFIG.sampleRate = audioContext.sampleRate;
+          // Recalculate frequency spacing for the actual sample rate
+          // Keep fftSize, adjust spacing
+          FREQUENCY_CONFIG.frequencySpacing = audioContext.sampleRate / FREQUENCY_CONFIG.fftSize;
+          debugLog('Adjusted frequency spacing to:', FREQUENCY_CONFIG.frequencySpacing, 'Hz');
+        }
         
         analyser = audioContext.createAnalyser();
         analyser.fftSize = FREQUENCY_CONFIG.fftSize;
@@ -1060,7 +1072,8 @@
           sampleRate: audioContext.sampleRate,
           fftSize: analyser.fftSize,
           binCount: analyser.frequencyBinCount,
-          hzPerBin: audioContext.sampleRate / analyser.fftSize
+          hzPerBin: audioContext.sampleRate / analyser.fftSize,
+          frequencySpacing: FREQUENCY_CONFIG.frequencySpacing
         });
         
         return true;
@@ -1217,6 +1230,17 @@
       const threshold = FREQUENCY_CONFIG.signalThreshold * 255;
       const dominance = FREQUENCY_CONFIG.dominanceRatio;
       
+      // Debug: check if audioContext sample rate matches config
+      if (!window._rateChecked) {
+        window._rateChecked = true;
+        debugLog('AudioContext sampleRate:', audioContext.sampleRate, 
+                 'Config sampleRate:', FREQUENCY_CONFIG.sampleRate,
+                 'FFT size:', analyser.fftSize,
+                 'Hz per bin:', audioContext.sampleRate / analyser.fftSize);
+        debugLog('Band 0 start freq:', F0, 'bin:', freqToBin(F0));
+        debugLog('Band 1 start freq:', F0 + FREQUENCY_CONFIG.bandGap * dF, 'bin:', freqToBin(F0 + FREQUENCY_CONFIG.bandGap * dF));
+      }
+      
       let nibbles = [];
       let confidences = [];
       
@@ -1352,6 +1376,33 @@
     
     function processFrame(dataArray, now) {
       const decoded = decodeFrame(dataArray);
+      
+      // Debug: log every few seconds what we're seeing
+      if (!window._lastDebugLog || now - window._lastDebugLog > 2000) {
+        window._lastDebugLog = now;
+        const dF = FREQUENCY_CONFIG.frequencySpacing;
+        const F0 = FREQUENCY_CONFIG.baseFrequency;
+        
+        // Find max level in entire spectrum to see if mic is working
+        let maxLevel = 0;
+        let maxBin = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          if (dataArray[i] > maxLevel) {
+            maxLevel = dataArray[i];
+            maxBin = i;
+          }
+        }
+        
+        // Check specific bins for our frequencies
+        const band0Bin = freqToBin(F0 + 5 * dF);  // 0x55 low nibble = 5
+        const band1Bin = freqToBin(F0 + FREQUENCY_CONFIG.bandGap * dF + 5 * dF);  // 0x55 high nibble = 5
+        
+        debugLog('Frame check - decoded:', decoded, 
+                 'MaxLevel:', maxLevel, 'at bin', maxBin, '(' + binToFreq(maxBin).toFixed(0) + 'Hz)',
+                 'Band0[5]:', dataArray[band0Bin],
+                 'Band1[5]:', dataArray[band1Bin],
+                 'mode:', receiveState.mode);
+      }
       
       switch (receiveState.mode) {
         case 'idle':
