@@ -904,14 +904,14 @@
       // Bits per frame (2 bands × 1 bit = 2 bits = one dibit)
       bitsPerFrame: 2,
       
-      // Frame duration in ms - can be shorter since easier detection
-      frameDuration: 150,
+      // Frame duration in ms - longer for better frequency resolution
+      frameDuration: 200,
       
       // Sample rate
       sampleRate: 48000,
       
-      // FFT size
-      fftSize: 2048,  // Higher resolution for better peak detection
+      // FFT size - larger for better frequency resolution
+      fftSize: 4096,  // ~11.7 Hz per bin at 48kHz
       
       // Start marker pattern - alternating dibits
       startMarkerPattern: [0x1, 0x2, 0x1, 0x2],  // Now 2-bit values (01, 10, 01, 10)
@@ -942,11 +942,12 @@
       // Gap after transmission ends (ms)
       postTransmitGap: 200,
       
-      // Receiver sample rate multiplier
-      receiveSampleRate: 0.8,
+      // Receiver sample rate multiplier (< 1 means sample faster than TX)
+      // 0.5 means we sample twice during each TX frame and use the cleaner one
+      receiveSampleRate: 0.5,
       
-      // Smoothing for FFT
-      smoothingTimeConstant: 0.5
+      // Smoothing for FFT (0 = no smoothing, instant response)
+      smoothingTimeConstant: 0.0
     };
 
     // ============================================================
@@ -1464,17 +1465,14 @@
     function startAnalysis() {
       const bufferLength = analyser.frequencyBinCount;
       const dataArray = new Uint8Array(bufferLength);
-      const dF = FREQUENCY_CONFIG.frequencySpacing;
-      const F0 = FREQUENCY_CONFIG.baseFrequency;
       
-      // Process frames at the frame rate
-      const frameDuration = FREQUENCY_CONFIG.frameDuration;
-      let lastFrameProcessed = 0;
-      
-      // Frame accumulation for more robust decoding
-      let accumulatedLevels = null;  // Will store accumulated FFT levels
-      let accumulationCount = 0;
-      const samplesPerFrame = 4;  // Accumulate 4 FFT samples per frame decision
+      // Edge-based synchronization state
+      let lastDibit = -1;           // Last decoded dibit (-1 = none)
+      let stableSamples = 0;        // How many samples we've seen this dibit
+      let lastSignalLevel = 0;      // Track signal level
+      const minStableSamples = 2;   // Minimum samples before accepting a dibit
+      const sampleInterval = 15;    // Sample every ~15ms (fast polling)
+      let lastSampleTime = 0;
       
       function analyze() {
         if (!isListening) return;
@@ -1482,44 +1480,137 @@
         // Skip analysis while transmitting
         if (isTransmitting) {
           analysisFrame = requestAnimationFrame(analyze);
-          accumulatedLevels = null;
-          accumulationCount = 0;
+          lastDibit = -1;
+          stableSamples = 0;
           return;
         }
         
         const now = Date.now();
+        
+        // Sample at regular intervals (not tied to frame duration)
+        if (now - lastSampleTime < sampleInterval) {
+          analysisFrame = requestAnimationFrame(analyze);
+          return;
+        }
+        lastSampleTime = now;
+        
         analyser.getByteFrequencyData(dataArray);
         
         // Update spectrum visualization
         updateSpectrumVisualization(dataArray);
         
-        // Accumulate FFT data
-        if (!accumulatedLevels) {
-          accumulatedLevels = new Float32Array(dataArray.length);
-        }
-        for (let i = 0; i < dataArray.length; i++) {
-          accumulatedLevels[i] += dataArray[i];
-        }
-        accumulationCount++;
+        // Decode current sample
+        const decoded = decodeFrame(dataArray);
         
-        // Only process frames at the configured rate AND after accumulating enough samples
-        if (now - lastFrameProcessed >= frameDuration * FREQUENCY_CONFIG.receiveSampleRate) {
-          lastFrameProcessed = now;
-          
-          // Average the accumulated levels
-          const avgArray = new Uint8Array(dataArray.length);
-          for (let i = 0; i < dataArray.length; i++) {
-            avgArray[i] = Math.round(accumulatedLevels[i] / Math.max(1, accumulationCount));
+        // Track signal level for edge detection
+        let currentLevel = 0;
+        if (decoded) {
+          currentLevel = decoded.confidence;
+        }
+        
+        // Edge-based sync: detect when dibit changes or stabilizes
+        if (decoded) {
+          if (decoded.dibit === lastDibit) {
+            // Same dibit - increment stability counter
+            stableSamples++;
+          } else {
+            // EDGE DETECTED - dibit changed
+            // If we had a stable previous dibit, emit it
+            if (lastDibit >= 0 && stableSamples >= minStableSamples) {
+              emitDibit(lastDibit, now);
+            }
+            // Start tracking new dibit
+            lastDibit = decoded.dibit;
+            stableSamples = 1;
           }
+        } else {
+          // No signal - if we had a stable dibit, emit it before going silent
+          if (lastDibit >= 0 && stableSamples >= minStableSamples) {
+            emitDibit(lastDibit, now);
+          }
+          lastDibit = -1;
+          stableSamples = 0;
           
-          processFrame(avgArray, now);
-          
-          // Reset accumulation
-          accumulatedLevels = null;
-          accumulationCount = 0;
+          // Track silence for timeout
+          if (receiveState.mode === 'receiving') {
+            receiveState.silenceCount++;
+            if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
+              debugLog('Silence timeout, finishing reception');
+              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer || []);
+              finishReceiving();
+            }
+          }
+        }
+        
+        // Debug: log periodically
+        if (!window._lastDebugLog || now - window._lastDebugLog > 2000) {
+          window._lastDebugLog = now;
+          let maxLevel = 0, maxBin = 0;
+          for (let i = 0; i < dataArray.length; i++) {
+            if (dataArray[i] > maxLevel) { maxLevel = dataArray[i]; maxBin = i; }
+          }
+          debugLog('Sample - decoded:', decoded, 'stable:', stableSamples,
+                   'MaxLevel:', maxLevel, 'at', binToFreq(maxBin).toFixed(0) + 'Hz',
+                   'mode:', receiveState.mode);
         }
         
         analysisFrame = requestAnimationFrame(analyze);
+      }
+      
+      // Called when we have a confirmed stable dibit
+      function emitDibit(dibit, now) {
+        debugLog('Emit dibit:', dibit.toString(2).padStart(2,'0'), 'stable:', stableSamples);
+        
+        switch (receiveState.mode) {
+          case 'idle':
+            // Look for start marker
+            if (isStartMarkerFrame(dibit, receiveState.markerCount)) {
+              receiveState.markerCount++;
+              debugLog('Start marker', receiveState.markerCount, '- dibit:', dibit.toString(2).padStart(2,'0'));
+              
+              if (receiveState.markerCount >= FREQUENCY_CONFIG.markerConfirmFrames) {
+                receiveState.mode = 'receiving';
+                receiveState.dibitBuffer = [];
+                receiveState.silenceCount = 0;
+                receiveState.markerCount = 0;
+                updateStatus('transmitting', 'Receiving...');
+                showReceivingCard();
+                debugLog('Reception started');
+              }
+            } else {
+              receiveState.markerCount = 0;
+            }
+            break;
+            
+          case 'receiving':
+            // Skip marker dibits at start
+            if (receiveState.dibitBuffer.length < FREQUENCY_CONFIG.markerSkipFrames && 
+                FREQUENCY_CONFIG.startMarkerPattern.includes(dibit)) {
+              debugLog('Skipping marker dibit:', dibit.toString(2).padStart(2,'0'));
+              break;
+            }
+            
+            receiveState.silenceCount = 0;
+            receiveState.dibitBuffer.push(dibit);
+            
+            debugLog('Dibit received:', dibit.toString(2).padStart(2,'0'), 
+                     'Total:', receiveState.dibitBuffer.length);
+            
+            // Check for end marker
+            if (hasEndMarker(receiveState.dibitBuffer)) {
+              debugLog('End marker detected');
+              for (let i = 0; i < FREQUENCY_CONFIG.endMarkerPattern.length; i++) {
+                receiveState.dibitBuffer.pop();
+              }
+              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer);
+              updateReceivingCard();
+              finishReceiving();
+            } else if (receiveState.dibitBuffer.length % 20 === 0) {
+              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer);
+              updateReceivingCard();
+            }
+            break;
+        }
       }
       
       analyze();
@@ -1551,108 +1642,6 @@
       }
     }
     
-    function processFrame(dataArray, now) {
-      const decoded = decodeFrame(dataArray);
-      
-      // Debug: log every few seconds what we're seeing
-      if (!window._lastDebugLog || now - window._lastDebugLog > 2000) {
-        window._lastDebugLog = now;
-        const dF = FREQUENCY_CONFIG.frequencySpacing;
-        const F0 = FREQUENCY_CONFIG.baseFrequency;
-        const F1 = FREQUENCY_CONFIG.band1Frequency;
-        
-        // Find max level in entire spectrum to see if mic is working
-        let maxLevel = 0;
-        let maxBin = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          if (dataArray[i] > maxLevel) {
-            maxLevel = dataArray[i];
-            maxBin = i;
-          }
-        }
-        
-        debugLog('Frame check - decoded:', decoded, 
-                 'MaxLevel:', maxLevel, 'at bin', maxBin, '(' + binToFreq(maxBin).toFixed(0) + 'Hz)',
-                 'mode:', receiveState.mode);
-      }
-      
-      switch (receiveState.mode) {
-        case 'idle':
-          // Look for start marker (2-bit dibits)
-          if (decoded) {
-            if (isStartMarkerFrame(decoded.dibit, receiveState.markerCount)) {
-              receiveState.markerCount++;
-              debugLog('Start marker frame', receiveState.markerCount, '- dibit:', decoded.dibit.toString(2).padStart(2,'0'));
-              
-              if (receiveState.markerCount >= FREQUENCY_CONFIG.markerConfirmFrames) {
-                // Start marker confirmed, begin receiving
-                receiveState.mode = 'receiving';
-                receiveState.dibitBuffer = [];  // Store dibits
-                receiveState.silenceCount = 0;
-                receiveState.markerCount = 0;
-                updateStatus('transmitting', 'Receiving...');
-                showReceivingCard();
-                debugLog('Reception started');
-              }
-            } else {
-              // Wrong dibit for marker sequence, reset
-              receiveState.markerCount = 0;
-            }
-          } else {
-            // No signal, reset marker count
-            receiveState.markerCount = 0;
-          }
-          break;
-          
-        case 'receiving':
-          if (decoded) {
-            // Skip initial marker frames still being transmitted
-            if (receiveState.dibitBuffer.length < FREQUENCY_CONFIG.markerSkipFrames && 
-                FREQUENCY_CONFIG.startMarkerPattern.includes(decoded.dibit)) {
-              // Still in marker pattern, ignore
-              debugLog('Skipping marker dibit:', decoded.dibit.toString(2).padStart(2,'0'));
-              break;
-            }
-            
-            receiveState.silenceCount = 0;
-            receiveState.dibitBuffer.push(decoded.dibit);
-            
-            debugLog('Dibit received:', decoded.dibit.toString(2).padStart(2,'0'), 
-                     'Total dibits:', receiveState.dibitBuffer.length);
-            
-            // Check for end marker (3x 0x3)
-            if (hasEndMarker(receiveState.dibitBuffer)) {
-              debugLog('End marker detected');
-              // Remove end marker from buffer
-              for (let i = 0; i < FREQUENCY_CONFIG.endMarkerPattern.length; i++) {
-                receiveState.dibitBuffer.pop();
-              }
-              
-              // Convert dibit buffer to byte buffer
-              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer);
-              updateReceivingCard();
-              finishReceiving();
-            } else {
-              // Update display periodically
-              if (receiveState.dibitBuffer.length % 20 === 0) {
-                receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer);
-                updateReceivingCard();
-              }
-            }
-          } else {
-            // No clear signal
-            receiveState.silenceCount++;
-            
-            if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
-              debugLog('Silence timeout, finishing reception');
-              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer || []);
-              finishReceiving();
-            }
-          }
-          break;
-      }
-    }
-
     function finishReceiving() {
       const buffer = [...receiveState.buffer];
       
