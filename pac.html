@@ -171,6 +171,11 @@
       background: linear-gradient(135deg, #1a3a2a, #0f2a1f);
     }
 
+    .message-card.failed {
+      border: 2px solid #c44;
+      background: linear-gradient(135deg, #3a1a1a, #2a0f0f);
+    }
+
     .receiving-spinner {
       display: inline-block;
       width: 12px;
@@ -833,12 +838,12 @@
       ],
       // Sync/preamble frequency (distinct from data carriers)
       syncFrequency: 800,
-      // Symbol duration in milliseconds (increased for reliability)
-      symbolDuration: 200,
+      // Symbol duration in milliseconds
+      symbolDuration: 100,
       // Preamble duration (sync tone)
-      preambleDuration: 500,
+      preambleDuration: 400,
       // Gap between symbols (silence helps distinguish)
-      symbolGap: 50,
+      symbolGap: 25,
       // Detection threshold (0-1)
       detectionThreshold: 0.12,
       // Sample rate
@@ -1140,7 +1145,7 @@
     const SYNC_COOLDOWN = 500;
     const SYNC_CONFIRM_FRAMES = 5; // Require sustained sync tone
     const DEBUG_DECODE = true; // Set true to see decode errors
-    const SILENCE_THRESHOLD = 3; // Consecutive silent samples to end reception
+    const SILENCE_THRESHOLD = 8; // Consecutive silent samples to end reception (increased for reliability)
 
     // Initialize noise floor array
     function initNoiseFloor() {
@@ -1318,14 +1323,12 @@
       consecutiveSilence = 0;
       updateStatus('listening', 'Listening');
       
-      // Remove the receiving card
-      removeReceivingCard();
-      
       if (DEBUG_DECODE) console.log('Raw receive buffer:', receiveBuffer.length, 'symbols');
       
       if (receiveBuffer.length < 3) {
-        // Too short, probably noise - silently ignore
+        // Too short, probably noise - remove card and ignore
         if (DEBUG_DECODE) console.log('Buffer too short, ignoring');
+        removeReceivingCard();
         return;
       }
       
@@ -1341,8 +1344,8 @@
       
       // Check magic header first (now 2 separate bytes: 0xAC, 0x01)
       if (decodedSymbols.length < 2 || decodedSymbols[0] !== 0xAC || decodedSymbols[1] !== 0x01) {
-        // Not a valid PAC message - silently ignore noise
         if (DEBUG_DECODE) console.log('Invalid magic header:', decodedSymbols[0]?.toString(16), decodedSymbols[1]?.toString(16), 'expected: ac 01');
+        convertReceivingCardToFailed(decodedSymbols, 'Invalid magic header');
         return;
       }
       
@@ -1350,13 +1353,15 @@
         const message = decodeMessage(decodedSymbols);
         if (message && message.messageId) {
           if (DEBUG_DECODE) console.log('Message decoded successfully!');
+          removeReceivingCard();
           addMessageToTimeline(message);
         } else {
           if (DEBUG_DECODE) console.log('Decode returned null or no messageId');
+          convertReceivingCardToFailed(decodedSymbols, 'Decode failed');
         }
       } catch (err) {
         if (DEBUG_DECODE) console.error('Failed to decode message:', err);
-        // Silently ignore decode failures - likely noise
+        convertReceivingCardToFailed(decodedSymbols, err.message || 'Parse error');
       }
     }
 
@@ -1665,13 +1670,58 @@
       }
     }
     
+    function convertReceivingCardToFailed(decodedSymbols, errorMsg) {
+      const card = document.getElementById(RECEIVING_CARD_ID);
+      if (!card) return;
+      
+      // Remove the ID so it's no longer treated as the active receiving card
+      card.removeAttribute('id');
+      card.classList.remove('receiving');
+      card.classList.add('failed');
+      
+      // Generate unique ID for this failed card
+      const failedId = 'failed-' + Date.now();
+      card.dataset.failedId = failedId;
+      
+      // Update the header
+      const header = card.querySelector('.message-header');
+      header.innerHTML = `
+        <span class="message-sender">❌ Reception Failed</span>
+        <span class="message-time">${errorMsg}</span>
+      `;
+      
+      // Update hex dump to show ALL data (no line limit), make scrollable
+      const hexDump = card.querySelector('.hex-dump');
+      if (hexDump) {
+        hexDump.textContent = formatHexDump(decodedSymbols, null); // null = no limit
+        hexDump.style.maxHeight = '200px';
+        hexDump.style.overflowY = 'auto';
+      }
+      
+      // Add delete button
+      const actionsDiv = document.createElement('div');
+      actionsDiv.className = 'message-actions';
+      actionsDiv.innerHTML = `
+        <button class="msg-action-btn delete-btn">🗑️ Delete</button>
+      `;
+      card.appendChild(actionsDiv);
+      
+      // Bind delete button
+      actionsDiv.querySelector('.delete-btn').addEventListener('click', () => {
+        card.remove();
+        if (timeline.length === 0 && !document.getElementById(RECEIVING_CARD_ID)) {
+          elements.emptyState.style.display = 'flex';
+        }
+      });
+    }
+    
     function formatHexDump(bytes, maxLines) {
       if (bytes.length === 0) return 'Waiting for data...';
       
       const bytesPerLine = 16;
       const lines = [];
       const totalLines = Math.ceil(bytes.length / bytesPerLine);
-      const startLine = Math.max(0, totalLines - maxLines);
+      const startLine = (maxLines === null) ? 0 : Math.max(0, totalLines - maxLines);
       
       for (let lineIdx = startLine; lineIdx < totalLines; lineIdx++) {
         const offset = lineIdx * bytesPerLine;
