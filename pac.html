@@ -903,8 +903,9 @@
       // ggwave uses consecutive 16-bin bands, so gap = 16
       bandGap: 16,
       
-      // Number of FFT frames per transmitted byte (ggwave "fastest" = 3)
-      framesPerTx: 3,
+      // Number of FFT frames per transmitted byte (ggwave "fast" = 6)
+      // "fastest" = 3 was causing bit errors due to insufficient integration time
+      framesPerTx: 6,
       
       // Frame duration = samplesPerFrame / sampleRate * 1000
       // = 1024 / 48000 * 1000 = 21.33ms
@@ -1425,11 +1426,18 @@
       const frameDuration = FREQUENCY_CONFIG.frameDuration;
       let lastFrameProcessed = 0;
       
+      // Accumulator for sub-frame sampling (collect multiple readings per frame)
+      let frameAccumulator = new Float32Array(bufferLength);
+      let accumulatorCount = 0;
+      
       function analyze() {
         if (!isListening) return;
         
         // Skip analysis while transmitting
         if (isTransmitting) {
+          // Reset accumulator when not listening
+          frameAccumulator.fill(0);
+          accumulatorCount = 0;
           analysisFrame = requestAnimationFrame(analyze);
           return;
         }
@@ -1440,11 +1448,27 @@
         // Update spectrum visualization
         updateSpectrumVisualization(dataArray);
         
-        // Only process frames at the configured rate (not faster!)
-        // Use receiveSampleRate to ensure we don't sample same frame twice
+        // Accumulate FFT readings (peak-hold: keep maximum values)
+        for (let i = 0; i < bufferLength; i++) {
+          frameAccumulator[i] = Math.max(frameAccumulator[i], dataArray[i]);
+        }
+        accumulatorCount++;
+        
+        // Only process frames at the configured rate
         if (now - lastFrameProcessed >= frameDuration * FREQUENCY_CONFIG.receiveSampleRate) {
           lastFrameProcessed = now;
-          processFrame(dataArray, now);
+          
+          // Use accumulated data (peak values across sub-samples)
+          const accumulatedData = new Uint8Array(bufferLength);
+          for (let i = 0; i < bufferLength; i++) {
+            accumulatedData[i] = Math.round(frameAccumulator[i]);
+          }
+          
+          processFrame(accumulatedData, now);
+          
+          // Reset accumulator for next frame
+          frameAccumulator.fill(0);
+          accumulatorCount = 0;
         }
         
         analysisFrame = requestAnimationFrame(analyze);
