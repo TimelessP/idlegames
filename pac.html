@@ -1467,12 +1467,12 @@
       const dataArray = new Uint8Array(bufferLength);
       
       // Edge-based synchronization state
-      let lastDibit = -1;           // Last decoded dibit (-1 = none)
-      let stableSamples = 0;        // How many samples we've seen this dibit
-      let lastSignalLevel = 0;      // Track signal level
-      const minStableSamples = 2;   // Minimum samples before accepting a dibit
-      const sampleInterval = 15;    // Sample every ~15ms (fast polling)
+      // Time-windowed detection: collect samples during frame, take majority vote
+      let frameSamples = [];        // Samples collected during current frame
+      let frameStartTime = 0;       // When current frame started
+      const sampleInterval = 10;    // Sample every ~10ms
       let lastSampleTime = 0;
+      let lastEmittedDibit = -1;    // For detecting actual transitions
       
       function analyze() {
         if (!isListening) return;
@@ -1480,14 +1480,15 @@
         // Skip analysis while transmitting
         if (isTransmitting) {
           analysisFrame = requestAnimationFrame(analyze);
-          lastDibit = -1;
-          stableSamples = 0;
+          frameSamples = [];
+          frameStartTime = 0;
+          lastEmittedDibit = -1;
           return;
         }
         
         const now = Date.now();
         
-        // Sample at regular intervals (not tied to frame duration)
+        // Sample at regular intervals
         if (now - lastSampleTime < sampleInterval) {
           analysisFrame = requestAnimationFrame(analyze);
           return;
@@ -1502,44 +1503,59 @@
         // Decode current sample
         const decoded = decodeFrame(dataArray);
         
-        // Track signal level for edge detection
-        let currentLevel = 0;
-        if (decoded) {
-          currentLevel = decoded.confidence;
+        // Start a new frame window if this is the first sample
+        if (frameStartTime === 0 && decoded) {
+          frameStartTime = now;
+          frameSamples = [];
         }
         
-        // Edge-based sync: detect when dibit changes or stabilizes
+        // Collect samples during frame window
         if (decoded) {
-          if (decoded.dibit === lastDibit) {
-            // Same dibit - increment stability counter
-            stableSamples++;
-          } else {
-            // EDGE DETECTED - dibit changed
-            // If we had a stable previous dibit, emit it
-            if (lastDibit >= 0 && stableSamples >= minStableSamples) {
-              emitDibit(lastDibit, now);
+          frameSamples.push(decoded.dibit);
+        }
+        
+        // Check if we've collected enough time for a frame
+        const frameDuration = FREQUENCY_CONFIG.frameDuration;
+        const frameElapsed = now - frameStartTime;
+        
+        if (frameStartTime > 0 && frameElapsed >= frameDuration * 0.8) {
+          // Frame window complete - take majority vote
+          if (frameSamples.length >= 3) {
+            const votes = [0, 0, 0, 0]; // Count for each dibit value (0-3)
+            for (const sample of frameSamples) {
+              votes[sample]++;
             }
-            // Start tracking new dibit
-            lastDibit = decoded.dibit;
-            stableSamples = 1;
+            let bestDibit = 0;
+            let bestCount = 0;
+            for (let i = 0; i < 4; i++) {
+              if (votes[i] > bestCount) {
+                bestCount = votes[i];
+                bestDibit = i;
+              }
+            }
+            
+            // Only emit if we have a clear majority (>50% of samples)
+            if (bestCount > frameSamples.length / 2) {
+              emitDibit(bestDibit, now);
+              lastEmittedDibit = bestDibit;
+            }
           }
-        } else {
-          // No signal - if we had a stable dibit, emit it before going silent
-          if (lastDibit >= 0 && stableSamples >= minStableSamples) {
-            emitDibit(lastDibit, now);
-          }
-          lastDibit = -1;
-          stableSamples = 0;
           
-          // Track silence for timeout
-          if (receiveState.mode === 'receiving') {
-            receiveState.silenceCount++;
-            if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
-              debugLog('Silence timeout, finishing reception');
-              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer || []);
-              finishReceiving();
-            }
+          // Reset for next frame
+          frameSamples = [];
+          frameStartTime = now;
+        }
+        
+        // Handle silence timeout
+        if (!decoded && receiveState.mode === 'receiving') {
+          receiveState.silenceCount++;
+          if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
+            debugLog('Silence timeout, finishing reception');
+            receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer || []);
+            finishReceiving();
           }
+        } else if (decoded) {
+          receiveState.silenceCount = 0;
         }
         
         // Debug: log periodically
@@ -1549,7 +1565,8 @@
           for (let i = 0; i < dataArray.length; i++) {
             if (dataArray[i] > maxLevel) { maxLevel = dataArray[i]; maxBin = i; }
           }
-          debugLog('Sample - decoded:', decoded, 'stable:', stableSamples,
+          debugLog('Sample - decoded:', decoded, 'samples:', frameSamples.length,
+                   'frameTime:', frameElapsed.toFixed(0) + 'ms',
                    'MaxLevel:', maxLevel, 'at', binToFreq(maxBin).toFixed(0) + 'Hz',
                    'mode:', receiveState.mode);
         }
@@ -1557,9 +1574,9 @@
         analysisFrame = requestAnimationFrame(analyze);
       }
       
-      // Called when we have a confirmed stable dibit
+      // Called when we have a confirmed dibit from frame voting
       function emitDibit(dibit, now) {
-        debugLog('Emit dibit:', dibit.toString(2).padStart(2,'0'), 'stable:', stableSamples);
+        debugLog('Emit dibit:', dibit.toString(2).padStart(2,'0'), 'votes:', frameSamples.length);
         
         switch (receiveState.mode) {
           case 'idle':
