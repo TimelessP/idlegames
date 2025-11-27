@@ -1967,7 +1967,7 @@
     }
 
     // ============================================================
-    // Encoding / Decoding (Protocol Version 11)
+    // Encoding / Decoding (Protocol Version 12)
     // ============================================================
     
     // CRC-8 checksum for error detection
@@ -2158,7 +2158,10 @@
     }
 
     // ============================================================
-    // Multi-Frequency Transmission
+    // Pre-Generated Audio Buffer Transmission
+    // 
+    // Generate entire waveform into AudioBuffer FIRST, then play.
+    // This eliminates timing jitter from live oscillator scheduling.
     // ============================================================
     async function transmitMessage(message) {
       if (isTransmitting) {
@@ -2178,130 +2181,163 @@
       const bytes = encodeMessage(message);
       const volume = (settings.volume || 50) / 100;
       
-      debugLog('Transmitting', bytes.length, 'bytes (v11 protocol)');
+      debugLog('Transmitting', bytes.length, 'bytes (v12 protocol - pre-generated buffer)');
       
-      // Transmit start marker (spectral comb pattern)
-      debugLog('Sending start marker...');
-      await transmitMarker(FREQUENCY_CONFIG.markerPattern, volume);
+      // Generate entire transmission waveform
+      const audioBuffer = generateTransmissionBuffer(bytes, volume);
       
-      // Small gap between marker and data
-      await sleep(FREQUENCY_CONFIG.markerDataGap);
+      // Play the buffer
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
       
-      // Transmit data in 3-byte chunks (6 nibbles per Tx frame)
-      debugLog('Sending data...');
-      for (let i = 0; i < bytes.length; i += 3) {
-        const chunk = bytes.slice(i, Math.min(i + 3, bytes.length));
-        // Pad chunk to 3 bytes if needed
-        while (chunk.length < 3) chunk.push(0x00);
-        await transmitThreeBytes(chunk, volume);
-      }
-      
-      // Transmit end marker
-      debugLog('Sending end marker...');
-      await transmitMarker(FREQUENCY_CONFIG.endMarkerPattern, volume);
-      
-      // Brief silence after transmission
-      await sleep(FREQUENCY_CONFIG.postTransmitGap);
-      
-      isTransmitting = false;
-      updateStatus(isListening ? 'listening' : '', isListening ? 'Listening' : 'Idle');
-      
-      debugLog('Transmission complete');
-      
-      if (transmitQueue.length > 0) {
-        transmitMessage(transmitQueue.shift());
-      }
+      return new Promise(resolve => {
+        source.onended = () => {
+          isTransmitting = false;
+          updateStatus(isListening ? 'listening' : '', isListening ? 'Listening' : 'Idle');
+          debugLog('Transmission complete');
+          
+          if (transmitQueue.length > 0) {
+            transmitMessage(transmitQueue.shift());
+          }
+          resolve();
+        };
+        
+        source.start();
+      });
     }
     
-    // Transmit a 16-bit marker as spectral comb pattern
-    // Uses first 16 bins of data range
-    async function transmitMarker(pattern, volume) {
+    // Generate entire transmission as a single AudioBuffer
+    function generateTransmissionBuffer(dataBytes, volume) {
+      const sampleRate = audioContext.sampleRate;
+      const frameSamples = Math.round(FREQUENCY_CONFIG.frameDuration * sampleRate / 1000);
+      const markerFrames = FREQUENCY_CONFIG.markerFrames;
+      const framesPerTx = FREQUENCY_CONFIG.framesPerTx;
+      const gapSamples = Math.round(FREQUENCY_CONFIG.markerDataGap * sampleRate / 1000);
+      const postGapSamples = Math.round(FREQUENCY_CONFIG.postTransmitGap * sampleRate / 1000);
+      
+      // Calculate total duration
+      const numDataChunks = Math.ceil(dataBytes.length / 3);
+      const totalSamples = 
+        (frameSamples * markerFrames) +      // Start marker
+        gapSamples +                          // Gap after start
+        (frameSamples * framesPerTx * numDataChunks) + // Data
+        (frameSamples * markerFrames) +      // End marker
+        postGapSamples;                       // Gap after end
+      
+      const buffer = audioContext.createBuffer(1, totalSamples, sampleRate);
+      const data = buffer.getChannelData(0);
+      
+      let pos = 0;
+      
+      // Generate start marker
+      debugLog('Generating start marker...');
+      const startMarkerFreqs = getMarkerFrequencies(FREQUENCY_CONFIG.markerPattern);
+      pos = generateToneBlock(data, pos, startMarkerFreqs, frameSamples * markerFrames, volume, sampleRate);
+      
+      // Gap
+      pos += gapSamples;
+      
+      // Generate data
+      debugLog('Generating data...');
+      for (let i = 0; i < dataBytes.length; i += 3) {
+        const chunk = dataBytes.slice(i, Math.min(i + 3, dataBytes.length));
+        while (chunk.length < 3) chunk.push(0x00);
+        
+        const dataFreqs = getDataFrequencies(chunk);
+        pos = generateToneBlock(data, pos, dataFreqs, frameSamples * framesPerTx, volume, sampleRate);
+      }
+      
+      // Generate end marker
+      debugLog('Generating end marker...');
+      const endMarkerFreqs = getMarkerFrequencies(FREQUENCY_CONFIG.endMarkerPattern);
+      pos = generateToneBlock(data, pos, endMarkerFreqs, frameSamples * markerFrames, volume, sampleRate);
+      
+      debugLog('Generated', totalSamples, 'samples (', (totalSamples / sampleRate * 1000).toFixed(0), 'ms)');
+      
+      return buffer;
+    }
+    
+    // Get frequencies for a marker pattern
+    function getMarkerFrequencies(pattern) {
       const frequencies = [];
       const baseBin = FREQUENCY_CONFIG.baseBin;
       const hzPerBin = FREQUENCY_CONFIG.hzPerBin;
       
-      // Pattern is 16 bits - each bit corresponds to a consecutive bin
       for (let i = 0; i < 16; i++) {
         if (pattern & (1 << i)) {
-          const freq = (baseBin + i) * hzPerBin;
-          frequencies.push(freq);
+          frequencies.push((baseBin + i) * hzPerBin);
         }
       }
-      
-      debugLog('TX marker pattern:', pattern.toString(16), '→ freqs:', frequencies.map(f=>f.toFixed(0)).join(', '));
-      
-      // Transmit marker for markerFrames times for reliable detection
-      for (let f = 0; f < FREQUENCY_CONFIG.markerFrames; f++) {
-        await playMultiTone(frequencies, FREQUENCY_CONFIG.frameDuration, volume);
-      }
+      return frequencies;
     }
     
-    // Transmit 3 bytes as 6 simultaneous tones (one per nibble)
-    async function transmitThreeBytes(bytes, volume) {
+    // Get frequencies for a 3-byte data chunk
+    function getDataFrequencies(bytes) {
       const nibbles = [];
-      
-      // Extract 6 nibbles from 3 bytes
       for (let i = 0; i < 3; i++) {
         nibbles.push(bytes[i] & 0x0F);        // Low nibble
         nibbles.push((bytes[i] >> 4) & 0x0F); // High nibble
       }
       
-      // Calculate frequency for each nibble slot
       const frequencies = [];
       const baseBin = FREQUENCY_CONFIG.baseBin;
       const hzPerBin = FREQUENCY_CONFIG.hzPerBin;
       const freqsPerNibble = FREQUENCY_CONFIG.frequenciesPerNibble;
       
       for (let slot = 0; slot < 6; slot++) {
-        const nibbleValue = nibbles[slot];
-        const fftBin = baseBin + slot * freqsPerNibble + nibbleValue;
-        const freq = fftBin * hzPerBin;
-        frequencies.push(freq);
+        const fftBin = baseBin + slot * freqsPerNibble + nibbles[slot];
+        frequencies.push(fftBin * hzPerBin);
       }
       
-      debugLog(`TX 3 bytes [${bytes.map(b=>b.toString(16).padStart(2,'0')).join(' ')}] → nibbles [${nibbles.join(',')}] → freqs [${frequencies.map(f=>f.toFixed(0)).join(', ')}]`);
-      
-      // Transmit framesPerTx times for energy accumulation
-      for (let f = 0; f < FREQUENCY_CONFIG.framesPerTx; f++) {
-        await playMultiTone(frequencies, FREQUENCY_CONFIG.frameDuration, volume);
-      }
+      return frequencies;
     }
     
-    // Play multiple tones simultaneously
-    function playMultiTone(frequencies, duration, volume) {
-      return new Promise(resolve => {
-        const oscillators = [];
-        const gains = [];
-        const perToneVolume = volume / Math.sqrt(frequencies.length); // Scale volume
-        
-        for (const freq of frequencies) {
-          const osc = audioContext.createOscillator();
-          const gain = audioContext.createGain();
-          
-          osc.type = 'sine';
-          osc.frequency.value = freq;
-          gain.gain.value = perToneVolume;
-          
-          osc.connect(gain);
-          gain.connect(audioContext.destination);
-          osc.start();
-          
-          oscillators.push(osc);
-          gains.push(gain);
+    // Generate multi-tone block into buffer with smooth envelope
+    function generateToneBlock(data, startPos, frequencies, numSamples, volume, sampleRate) {
+      const perToneVolume = volume / Math.sqrt(frequencies.length);
+      
+      // Ramp time for fade in/out (prevents clicks)
+      const rampSamples = Math.min(64, Math.floor(numSamples / 10));
+      
+      for (let i = 0; i < numSamples; i++) {
+        // Calculate envelope (smooth fade in/out)
+        let envelope = 1.0;
+        if (i < rampSamples) {
+          envelope = i / rampSamples;  // Fade in
+        } else if (i >= numSamples - rampSamples) {
+          envelope = (numSamples - i) / rampSamples;  // Fade out
         }
         
-        setTimeout(() => {
-          for (const osc of oscillators) {
-            osc.stop();
-          }
-          resolve();
-        }, duration);
-      });
+        // Sum all frequencies
+        let sample = 0;
+        for (const freq of frequencies) {
+          const t = (startPos + i) / sampleRate;
+          sample += Math.sin(2 * Math.PI * freq * t);
+        }
+        
+        data[startPos + i] = sample * perToneVolume * envelope;
+      }
+      
+      return startPos + numSamples;
     }
     
-    // Legacy compatibility - no longer used but kept for reference
+    // Legacy functions kept for debugging
+    async function transmitMarker(pattern, volume) {
+      debugLog('WARNING: transmitMarker called directly - use generateTransmissionBuffer');
+    }
+    
+    async function transmitThreeBytes(bytes, volume) {
+      debugLog('WARNING: transmitThreeBytes called directly - use generateTransmissionBuffer');
+    }
+    
+    function playMultiTone(frequencies, duration, volume) {
+      debugLog('WARNING: playMultiTone called directly - use generateTransmissionBuffer');
+    }
+    
+    // Legacy compatibility - no longer used
     async function transmitDibit(dibit, volume) {
-      debugLog('WARNING: transmitDibit called in v11 - not supported');
+      debugLog('WARNING: transmitDibit called in v12 - not supported');
     }
 
     function sleep(ms) {
