@@ -864,90 +864,70 @@
     // Inspired by ggwave: multi-frequency FSK with proper framing
     // ============================================================
 
-    const PROTOCOL_VERSION = 10;  // v10: 2-bit dibit protocol with very wide spacing + FEC
+    const PROTOCOL_VERSION = 11;  // v11: ggwave-inspired 6-tone protocol with spectrum accumulation
     const STORAGE_KEY = 'pac-timeline';
     const SETTINGS_KEY = 'pac-settings';
 
     // ============================================================
-    // Frequency Configuration (Version 9)
-    // Simplified FSK for maximum reliability
+    // PAC Protocol v11 - ggwave-inspired multi-frequency FSK
     // 
-    // Key insight from ggwave: wider frequency spacing = better discrimination
-    // We now use only 4 frequencies per band (2 bits) with 4x wider spacing
-    // This means 4 bits (nibble) per frame instead of 8 bits (byte)
-    // Slower but much more reliable!
-    // 
-    // Band 0 (bit 0): 2 frequencies starting at 1500 Hz
-    // Band 1 (bit 1): 2 frequencies starting at 2400 Hz (avoiding 2x harmonic of Band 0)
-    // Frequency spacing: 400 Hz (very wide - easy to distinguish)
-    // 
-    // Each frame transmits 2 bits (one dibit)
-    // Four frames needed per byte
+    // Key changes from v10:
+    // - 1024 FFT (21ms frames instead of 85ms)
+    // - 16 frequencies per nibble band (4 bits per band)
+    // - 6 tones per frame = 3 bytes per frame
+    // - Frequency spacing: 46.875 Hz (1 bin at 48kHz/1024)
+    // - Multiple frames per TX for energy accumulation
+    // - Spectral pattern matching for markers (not timing)
+    // - Triple redundancy FEC with bit voting
     // ============================================================
     const FREQUENCY_CONFIG = {
-      version: 10,
+      version: 11,
       
-      // Base frequencies for the two bands (avoiding harmonic overlap)
-      // Band 0: 1500, 1900 Hz
-      // Band 1: 2400, 2800 Hz (NOT 3000 which is 2x 1500!)
-      baseFrequency: 1500,
-      band1Frequency: 2400,  // Moved to avoid 2x harmonic of 1500 Hz
-      
-      // Frequency spacing - very wide for reliable discrimination
-      // 400 Hz between 0 and 1 in each band
-      frequencySpacing: 400,
-      
-      // Only 2 frequencies per band (1 bit each)
-      frequenciesPerBand: 2,
-      bitsPerBand: 1,
-      
-      // Bits per frame (2 bands × 1 bit = 2 bits = one dibit)
-      bitsPerFrame: 2,
-      
-      // Frame duration in ms - longer for better frequency resolution
-      frameDuration: 200,
-      
-      // Sample rate
+      // Sample rate and FFT
       sampleRate: 48000,
+      fftSize: 1024,  // 21.3ms per frame, 46.875 Hz per bin
       
-      // FFT size - larger for better frequency resolution
-      fftSize: 4096,  // ~11.7 Hz per bin at 48kHz
+      // Frequency layout: 96 bins for 6 nibbles (16 freqs each)
+      // F0 = bin 40 = 1875 Hz (same as ggwave)
+      // Each nibble uses 16 consecutive bins
+      // Total range: bins 40-135 = 1875 Hz to 6328 Hz
+      baseBin: 40,  // Starting FFT bin
+      binsPerNibble: 16,  // 16 frequencies = 4 bits
+      nibblesPerFrame: 6, // 6 nibbles = 3 bytes per frame
       
-      // Start marker pattern - alternating dibits
-      startMarkerPattern: [0x1, 0x2, 0x1, 0x2],  // Now 2-bit values (01, 10, 01, 10)
+      // Aliases for different parts of the code
+      nibbleSlots: 6,        // Same as nibblesPerFrame
+      frequenciesPerNibble: 16,  // Same as binsPerNibble
       
-      // End marker - 3x 0x3 (both bits high)
-      endMarkerPattern: [0x3, 0x3, 0x3],
+      // Derived values
+      hzPerBin: 46.875,  // 48000/1024
+      baseFrequency: 1875, // bin 40 * 46.875
+      
+      // Frame timing
+      frameDuration: 21,  // ms per frame (~1024/48000 * 1000)
+      framesPerTx: 4,  // Repeat each byte-set 4 times for reliability
+      
+      // Marker patterns (16-bit comb patterns)
+      // Start: 0xAAAA = even bits high, odd bits low
+      // End: 0x5555 = odd bits high, even bits low
+      markerPattern: 0xAAAA,
+      endMarkerPattern: 0x5555,
+      markerBits: 16,  // Use 16 tones for marker
+      markerFrames: 8, // Transmit marker for 8 frames
       
       // Detection thresholds
-      signalThreshold: 0.04,     // Lower threshold for better detection
-      dominanceRatio: 1.3,       // Peak must be 1.3x the other frequency
-      adjacentBinWeight: 0.8,    // Look at adjacent bins
+      signalThreshold: 0.02,  // Lower threshold for energy accumulation
+      markerThreshold: 3.0,   // Marker detection ratio threshold
       
-      // Frames of consistent marker to trigger reception
-      markerConfirmFrames: 2,
+      // Smoothing - very low for quick response
+      smoothingTimeConstant: 0.2,
       
-      // Maximum silence frames before ending reception
-      maxSilenceFrames: 15,
+      // Silence detection
+      maxSilenceFrames: 20,
       
-      // Marker frames to skip at start of data reception
-      markerSkipFrames: 4,
-      
-      // Extra marker frames to transmit beyond pattern length
-      extraMarkerFrames: 6,
-      
-      // Gap between marker and data (ms)
-      markerDataGap: 100,
-      
-      // Gap after transmission ends (ms)
-      postTransmitGap: 200,
-      
-      // Receiver sample rate multiplier (< 1 means sample faster than TX)
-      // 0.5 means we sample twice during each TX frame and use the cleaner one
-      receiveSampleRate: 0.5,
-      
-      // Smoothing for FFT (0 = no smoothing, instant response)
-      smoothingTimeConstant: 0.0
+      // Transmission timing
+      markerDataGap: 50,  // Gap between marker and data
+      postTransmitGap: 100
     };
 
     // ============================================================
@@ -963,24 +943,58 @@
     let timeline = loadTimeline();
     let pendingAttachments = [];
     
-    // Reception state
+    // Reception state - ggwave style
     let receiveState = {
-      mode: 'idle',  // 'idle', 'detecting', 'receiving'
-      buffer: [],         // Assembled bytes
-      dibitBuffer: [],    // Raw received dibits (v10)
-      markerCount: 0,
+      mode: 'idle',  // 'idle', 'receiving', 'analyzing'
+      spectrumHistory: [],  // Accumulated FFT spectra
+      frameCount: 0,
+      markerDetected: false,
       silenceCount: 0,
-      lastFrameTime: 0
+      dataFrames: []  // Raw frame data for analysis
     };
     
-    // Convert array of nibbles to bytes
-    // Each pair of nibbles makes one byte: [lowNibble, highNibble] → byte
+    // ============================================================
+    // ggwave-style Helper Functions
+    // ============================================================
+    
+    // Get frame duration in ms
+    function getFrameDuration() {
+      return (FREQUENCY_CONFIG.fftSize / FREQUENCY_CONFIG.sampleRate) * 1000;
+    }
+    
+    // Get Hz per FFT bin
+    function getHzPerBin() {
+      return FREQUENCY_CONFIG.sampleRate / FREQUENCY_CONFIG.fftSize;
+    }
+    
+    // Get frequency for a nibble value (0-15) in a specific nibble slot (0-5)
+    function getNibbleFrequency(nibbleSlot, value) {
+      const binOffset = FREQUENCY_CONFIG.baseBin + nibbleSlot * FREQUENCY_CONFIG.binsPerNibble + value;
+      return binOffset * getHzPerBin();
+    }
+    
+    // Get FFT bin for a nibble value in a slot
+    function getNibbleBin(nibbleSlot, value) {
+      return FREQUENCY_CONFIG.baseBin + nibbleSlot * FREQUENCY_CONFIG.binsPerNibble + value;
+    }
+    
+    // Convert 3 bytes to 6 nibbles
+    function bytesToNibbles(bytes) {
+      const nibbles = [];
+      for (const byte of bytes) {
+        nibbles.push(byte & 0x0F);         // Low nibble
+        nibbles.push((byte >> 4) & 0x0F);  // High nibble
+      }
+      return nibbles;
+    }
+    
+    // Convert 6 nibbles to 3 bytes
     function nibblesToBytes(nibbles) {
       const bytes = [];
-      for (let i = 0; i + 1 < nibbles.length; i += 2) {
-        const lowNibble = nibbles[i] & 0x0F;
-        const highNibble = nibbles[i + 1] & 0x0F;
-        bytes.push(lowNibble | (highNibble << 4));
+      for (let i = 0; i < nibbles.length; i += 2) {
+        const low = nibbles[i] || 0;
+        const high = nibbles[i + 1] || 0;
+        bytes.push((high << 4) | low);
       }
       return bytes;
     }
@@ -1077,51 +1091,43 @@
     }
 
     function initSpectrumBins() {
-      // Show 32 spectrum bins (16 for each nibble band)
+      // Show spectrum bins for 6 nibble slots × 16 frequencies = 96 bins
+      // But for display, we'll show 12 bins (2 per nibble slot)
       elements.spectrumBar.innerHTML = '';
-      const dF = FREQUENCY_CONFIG.frequencySpacing;
-      const F0 = FREQUENCY_CONFIG.baseFrequency;
-      const F1 = FREQUENCY_CONFIG.band1Frequency;
-      const numFreqs = FREQUENCY_CONFIG.frequenciesPerBand;
       
-      // Create bins for visualization (4 frequencies per band now)
-      for (let band = 0; band < 2; band++) {
-        const bandStart = band === 0 ? F0 : F1;
-        for (let i = 0; i < numFreqs; i++) {
-          const freq = bandStart + i * dF;
+      for (let slot = 0; slot < FREQUENCY_CONFIG.nibblesPerFrame; slot++) {
+        for (let i = 0; i < 2; i++) {  // Just show 2 indicators per slot
           const bin = document.createElement('div');
           bin.className = 'spectrum-bin';
-          bin.dataset.band = band;
+          bin.dataset.slot = slot;
           bin.dataset.value = i;
-          bin.title = `Band ${band}, Value ${i}: ${freq.toFixed(0)} Hz`;
+          const freq = getNibbleFrequency(slot, i * 8);  // Show 0 and 8 freq
+          bin.title = `Slot ${slot}: ${freq.toFixed(0)} Hz`;
           elements.spectrumBar.appendChild(bin);
         }
       }
     }
 
     function initProtocolInfo() {
-      const dF = FREQUENCY_CONFIG.frequencySpacing;
-      const F0 = FREQUENCY_CONFIG.baseFrequency;
-      const F1 = FREQUENCY_CONFIG.band1Frequency;
-      const frameDuration = FREQUENCY_CONFIG.frameDuration;
-      const numFreqs = FREQUENCY_CONFIG.frequenciesPerBand;
+      const hzPerBin = getHzPerBin();
+      const frameDuration = getFrameDuration();
+      const baseFreq = FREQUENCY_CONFIG.baseBin * hzPerBin;
+      const endFreq = (FREQUENCY_CONFIG.baseBin + FREQUENCY_CONFIG.nibblesPerFrame * FREQUENCY_CONFIG.binsPerNibble) * hzPerBin;
       
-      // Calculate actual frequency ranges
-      const band0End = F0 + (numFreqs - 1) * dF;
-      const band1End = F1 + (numFreqs - 1) * dF;
+      // v11: 3 bytes per frame, 4 frames per tx = ~70ms per 3 bytes = 23ms/byte
+      // With Reed-Solomon overhead, ~30-40 bytes/sec effective
+      const bytesPerSecond = Math.round(3 * 1000 / (frameDuration * FREQUENCY_CONFIG.framesPerTx));
       
-      // v10: 4 dibits per byte, with 3x FEC = 12 frames per byte
-      const effectiveRate = (frameDuration * 4 * 3).toFixed(0);
       elements.protocolSummary.textContent = 
-        `v${FREQUENCY_CONFIG.version} FEC · ${effectiveRate}ms/byte · ${F0.toFixed(0)}-${band1End.toFixed(0)}Hz`;
+        `v${FREQUENCY_CONFIG.version} ggwave-style · ~${bytesPerSecond} bytes/sec · ${baseFreq.toFixed(0)}-${endFreq.toFixed(0)}Hz`;
       
       // Update details
       elements.protocolDetails.innerHTML = `
-        <div>Band 0: ${F0.toFixed(0)}-${band0End.toFixed(0)} Hz (1 bit)</div>
-        <div>Band 1: ${F1.toFixed(0)}-${band1End.toFixed(0)} Hz (1 bit)</div>
-        <div>dF: ${dF} Hz · Frame: ${frameDuration}ms · 2 bits/frame</div>
-        <div>FEC: 3x redundancy with bit-level voting</div>
-        <div>Very wide spacing (400 Hz) for reliable detection</div>
+        <div>6 nibbles (3 bytes) per ${frameDuration.toFixed(1)}ms frame</div>
+        <div>16 frequencies per nibble (4 bits), ${hzPerBin.toFixed(1)} Hz spacing</div>
+        <div>${FREQUENCY_CONFIG.framesPerTx} frames per TX for redundancy</div>
+        <div>Range: ${baseFreq.toFixed(0)} - ${endFreq.toFixed(0)} Hz (96 bins)</div>
+        <div>FFT: ${FREQUENCY_CONFIG.fftSize} samples at ${FREQUENCY_CONFIG.sampleRate}Hz</div>
       `;
       
       // Toggle expansion on click
@@ -1186,22 +1192,22 @@
           debugLog('WARNING: Requested', FREQUENCY_CONFIG.sampleRate, 'Hz but got', audioContext.sampleRate, 'Hz');
           // Update config to match actual rate
           FREQUENCY_CONFIG.sampleRate = audioContext.sampleRate;
-          // Recalculate frequency spacing for the actual sample rate
-          // Keep fftSize, adjust spacing
-          FREQUENCY_CONFIG.frequencySpacing = audioContext.sampleRate / FREQUENCY_CONFIG.fftSize;
-          debugLog('Adjusted frequency spacing to:', FREQUENCY_CONFIG.frequencySpacing, 'Hz');
+          // Recalculate hzPerBin for actual rate
+          FREQUENCY_CONFIG.hzPerBin = audioContext.sampleRate / FREQUENCY_CONFIG.fftSize;
+          debugLog('Adjusted hzPerBin to:', FREQUENCY_CONFIG.hzPerBin, 'Hz');
         }
         
         analyser = audioContext.createAnalyser();
         analyser.fftSize = FREQUENCY_CONFIG.fftSize;
         analyser.smoothingTimeConstant = FREQUENCY_CONFIG.smoothingTimeConstant;
         
-        debugLog('Audio initialized:', {
+        debugLog('Audio initialized (v11 ggwave-style):', {
           sampleRate: audioContext.sampleRate,
           fftSize: analyser.fftSize,
           binCount: analyser.frequencyBinCount,
-          hzPerBin: audioContext.sampleRate / analyser.fftSize,
-          frequencySpacing: FREQUENCY_CONFIG.frequencySpacing
+          hzPerBin: getHzPerBin(),
+          frameDuration: getFrameDuration().toFixed(1) + 'ms',
+          baseFreq: (FREQUENCY_CONFIG.baseBin * getHzPerBin()).toFixed(0) + 'Hz'
         });
         
         return true;
@@ -1318,11 +1324,11 @@
     function stopReceiving() {
       receiveState = {
         mode: 'idle',
-        buffer: [],
-        dibitBuffer: [],
-        markerCount: 0,
+        spectrumHistory: [],
+        frameCount: 0,
+        markerDetected: false,
         silenceCount: 0,
-        lastFrameTime: 0
+        dataFrames: []
       };
       removeReceivingCard();
       updateStatus(isListening ? 'listening' : '', isListening ? 'Listening' : 'Idle');
@@ -1334,150 +1340,114 @@
     }
 
     // ============================================================
-    // Multi-Frequency FSK Analysis & Reception
+    // ggwave-style Multi-Frequency FSK Analysis & Reception
     // ============================================================
     let analysisFrame = null;
-    let frameTimer = null;
     
-    // Helper: get FFT bin for a frequency
-    function freqToBin(freq) {
-      const hzPerBin = audioContext.sampleRate / analyser.fftSize;
-      return Math.round(freq / hzPerBin);
+    // Detect start marker: even bins high, odd bins low (16-bit comb pattern)
+    function detectStartMarker(spectrum) {
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      const markerBits = FREQUENCY_CONFIG.markerBits;
+      const threshold = FREQUENCY_CONFIG.markerThreshold;
+      
+      let evenSum = 0, oddSum = 0;
+      for (let i = 0; i < markerBits; i++) {
+        const bin = baseBin + i;
+        if (i % 2 === 0) {
+          evenSum += spectrum[bin];
+        } else {
+          oddSum += spectrum[bin];
+        }
+      }
+      
+      // Start marker: even bins should be much stronger than odd
+      const ratio = evenSum / (oddSum + 1);
+      return ratio > threshold;
     }
     
-    // Helper: get frequency for a bin
-    function binToFreq(bin) {
-      const hzPerBin = audioContext.sampleRate / analyser.fftSize;
-      return bin * hzPerBin;
+    // Detect end marker: odd bins high, even bins low (inverted pattern)
+    function detectEndMarker(spectrum) {
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      const markerBits = FREQUENCY_CONFIG.markerBits;
+      const threshold = FREQUENCY_CONFIG.markerThreshold;
+      
+      let evenSum = 0, oddSum = 0;
+      for (let i = 0; i < markerBits; i++) {
+        const bin = baseBin + i;
+        if (i % 2 === 0) {
+          evenSum += spectrum[bin];
+        } else {
+          oddSum += spectrum[bin];
+        }
+      }
+      
+      // End marker: odd bins should be much stronger than even
+      const ratio = oddSum / (evenSum + 1);
+      return ratio > threshold;
     }
     
-    // Decode a frame from the current FFT data
-    // Returns { dibit: number, confidence: number } or null if no clear signal
-    // V10: Each frame decodes 2 bits (one dibit)
-    // Band 0 encodes bit 0, Band 1 encodes bit 1
-    function decodeFrame(dataArray) {
-      const dF = FREQUENCY_CONFIG.frequencySpacing;
-      const F0 = FREQUENCY_CONFIG.baseFrequency;
-      const F1 = FREQUENCY_CONFIG.band1Frequency;
+    // Check if there's significant signal in our frequency range
+    function hasSignal(spectrum) {
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      const totalBins = FREQUENCY_CONFIG.nibblesPerFrame * FREQUENCY_CONFIG.binsPerNibble;
       const threshold = FREQUENCY_CONFIG.signalThreshold * 255;
-      const dominance = FREQUENCY_CONFIG.dominanceRatio;
-      const numFreqs = FREQUENCY_CONFIG.frequenciesPerBand;  // 2
       
-      // Debug: check if audioContext sample rate matches config
-      if (!window._rateChecked) {
-        window._rateChecked = true;
-        debugLog('AudioContext sampleRate:', audioContext.sampleRate, 
-                 'Config sampleRate:', FREQUENCY_CONFIG.sampleRate,
-                 'FFT size:', analyser.fftSize,
-                 'Hz per bin:', audioContext.sampleRate / analyser.fftSize);
-        debugLog('Band 0 freqs:', F0, F0+dF);
-        debugLog('Band 1 freqs:', F1, F1+dF);
+      let maxLevel = 0;
+      for (let i = 0; i < totalBins; i++) {
+        maxLevel = Math.max(maxLevel, spectrum[baseBin + i]);
       }
-      
-      const bandFreqs = [F0, F1];
-      let bits = [];
-      let confidences = [];
-      let bandDebug = [];
-      
-      // Decode each band (1 bit each)
-      for (let band = 0; band < 2; band++) {
-        const bandStart = bandFreqs[band];
-        
-        // Get levels for both frequencies in this band
-        let levels = [];
-        
-        for (let i = 0; i < numFreqs; i++) {
-          const freq = bandStart + i * dF;
-          const bin = freqToBin(freq);
-          
-          // Average nearby bins for robustness
-          let level = dataArray[bin];
-          const adjWeight = FREQUENCY_CONFIG.adjacentBinWeight;
-          if (bin > 0) level = Math.max(level, dataArray[bin - 1] * adjWeight);
-          if (bin < dataArray.length - 1) level = Math.max(level, dataArray[bin + 1] * adjWeight);
-          
-          levels.push({ idx: i, level, bin });
-        }
-        
-        // Sort by level descending
-        levels.sort((a, b) => b.level - a.level);
-        
-        const maxLevel = levels[0].level;
-        const maxIdx = levels[0].idx;  // 0 or 1
-        const otherLevel = levels[1].level;
-        
-        bandDebug.push({ band, levels: levels.map(l => l.level.toFixed(0)), bit: maxIdx, maxLevel: maxLevel.toFixed(0), otherLevel: otherLevel.toFixed(0) });
-        
-        // Check if signal is strong enough
-        if (maxLevel < threshold) {
-          if (window._debugDecode) debugLog('Band', band, 'below threshold:', maxLevel.toFixed(0), '<', threshold.toFixed(0));
-          return null;
-        }
-        
-        // Check if winner is dominant over loser
-        if (otherLevel > 0 && maxLevel < otherLevel * dominance) {
-          if (window._debugDecode) debugLog('Band', band, 'not dominant:', maxLevel.toFixed(0), 'vs other:', otherLevel.toFixed(0), 'need ratio:', dominance);
-          return null;
-        }
-        
-        // Calculate confidence as ratio of winner to loser
-        const confidence = otherLevel > 0 ? maxLevel / otherLevel : 10;
-        
-        bits.push(maxIdx);  // 0 or 1
-        confidences.push(confidence);
-      }
-      
-      // Combine bits into dibit: bit0 from band0, bit1 from band1
-      const dibit = bits[0] | (bits[1] << 1);
-      const avgConfidence = (confidences[0] + confidences[1]) / 2;
-      
-      // Debug output - always log band levels to diagnose issues
-      if (receiveState.mode === 'receiving' && receiveState.dibitBuffer.length < 20) {
-        debugLog('Bands:', 
-          `B0[${bandDebug[0].levels.join('/')}]→${bits[0]}`,
-          `B1[${bandDebug[1].levels.join('/')}]→${bits[1]}`,
-          `= ${dibit.toString(2).padStart(2,'0')}`);
-      }
-      
-      return { dibit, confidence: avgConfidence };
+      return maxLevel > threshold;
     }
     
-    // Check if current frame matches start marker pattern
-    function isStartMarkerFrame(dibit, index) {
-      const pattern = FREQUENCY_CONFIG.startMarkerPattern;
-      return dibit === pattern[index % pattern.length];
+    // Decode 6 nibbles (3 bytes) from accumulated spectrum
+    function decodeFrame(spectrum) {
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      const binsPerNibble = FREQUENCY_CONFIG.binsPerNibble;
+      const nibblesPerFrame = FREQUENCY_CONFIG.nibblesPerFrame;
+      
+      const nibbles = [];
+      
+      for (let slot = 0; slot < nibblesPerFrame; slot++) {
+        const slotStart = baseBin + slot * binsPerNibble;
+        
+        // Find the peak bin in this slot
+        let maxLevel = 0;
+        let maxBin = 0;
+        for (let i = 0; i < binsPerNibble; i++) {
+          const level = spectrum[slotStart + i];
+          if (level > maxLevel) {
+            maxLevel = level;
+            maxBin = i;
+          }
+        }
+        
+        nibbles.push(maxBin);  // 0-15
+      }
+      
+      return nibbles;
     }
     
-    // Check if buffer ends with end marker
-    function hasEndMarker(buffer) {
-      const endPattern = FREQUENCY_CONFIG.endMarkerPattern;
-      const len = buffer.length;
-      if (len < endPattern.length) return false;
-      
-      for (let i = 0; i < endPattern.length; i++) {
-        if (buffer[len - endPattern.length + i] !== endPattern[i]) {
-          return false;
-        }
+    // Accumulate spectrum over multiple frames for better detection
+    function accumulateSpectrum(current, accumulated) {
+      if (!accumulated) {
+        return current.slice();
       }
-      return true;
+      const result = new Float32Array(current.length);
+      for (let i = 0; i < current.length; i++) {
+        result[i] = accumulated[i] + current[i];
+      }
+      return result;
     }
 
     function startAnalysis() {
       const bufferLength = analyser.frequencyBinCount;
       const dataArray = new Uint8Array(bufferLength);
       
-      // Edge-based synchronization state
-      // Sync-locked frame detection
-      // Phase 1 (idle): Detect edges to find frame boundaries from marker pattern
-      // Phase 2 (receiving): Sample at fixed intervals locked to detected timing
-      let frameSamples = [];        // Samples collected during current frame
-      let frameStartTime = 0;       // When current frame started  
-      let syncedFrameTime = 0;      // Locked frame start time after sync
-      let frameDurationEstimate = FREQUENCY_CONFIG.frameDuration; // Will be refined
-      const sampleInterval = 8;     // Sample every ~8ms for better resolution
-      let lastSampleTime = 0;
-      let lastDibit = -1;           // Last detected dibit for edge detection
-      let edgeTimes = [];           // Times when dibit changed (for sync)
+      // ggwave-style state
+      let accumulatedSpectrum = null;
+      let framesAccumulated = 0;
+      let markerConfirmCount = 0;
+      let receivedData = [];  // Array of decoded byte-triplets
       
       function analyze() {
         if (!isListening) return;
@@ -1485,215 +1455,119 @@
         // Skip analysis while transmitting
         if (isTransmitting) {
           analysisFrame = requestAnimationFrame(analyze);
-          frameSamples = [];
-          frameStartTime = 0;
-          syncedFrameTime = 0;
-          lastDibit = -1;
-          edgeTimes = [];
+          accumulatedSpectrum = null;
+          framesAccumulated = 0;
+          markerConfirmCount = 0;
           return;
         }
-        
-        const now = Date.now();
-        
-        // Sample at regular intervals
-        if (now - lastSampleTime < sampleInterval) {
-          analysisFrame = requestAnimationFrame(analyze);
-          return;
-        }
-        lastSampleTime = now;
         
         analyser.getByteFrequencyData(dataArray);
         updateSpectrumVisualization(dataArray);
         
-        const decoded = decodeFrame(dataArray);
-        
-        if (receiveState.mode === 'idle') {
-          // IDLE MODE: Use edge detection to find marker and establish sync
-          if (decoded) {
-            if (decoded.dibit !== lastDibit) {
-              // Edge detected - record time
-              if (lastDibit >= 0) {
-                edgeTimes.push(now);
-                // Keep only recent edges
-                if (edgeTimes.length > 10) edgeTimes.shift();
-                
-                // Estimate frame duration from edge intervals
-                if (edgeTimes.length >= 3) {
-                  let totalInterval = 0;
-                  for (let i = 1; i < edgeTimes.length; i++) {
-                    totalInterval += edgeTimes[i] - edgeTimes[i-1];
-                  }
-                  frameDurationEstimate = totalInterval / (edgeTimes.length - 1);
-                  debugLog('Frame duration estimate:', frameDurationEstimate.toFixed(1) + 'ms');
-                }
-              }
-              lastDibit = decoded.dibit;
-            }
-            
-            // Check for start marker using the detected dibit
-            if (isStartMarkerFrame(decoded.dibit, receiveState.markerCount)) {
-              receiveState.markerCount++;
-              debugLog('Start marker', receiveState.markerCount, '- dibit:', decoded.dibit.toString(2).padStart(2,'0'));
-              
-              if (receiveState.markerCount >= FREQUENCY_CONFIG.markerConfirmFrames) {
-                receiveState.mode = 'receiving';
-                receiveState.dibitBuffer = [];
-                receiveState.silenceCount = 0;
-                receiveState.markerCount = 0;
-                
-                // SYNC: Lock frame timing to NOW (we just confirmed marker)
-                // Add half frame offset so we sample in the middle of the next frame
-                syncedFrameTime = now + frameDurationEstimate * 0.5;
-                frameSamples = [];
-                
-                updateStatus('transmitting', 'Receiving...');
-                showReceivingCard();
-                debugLog('Reception started, synced at', syncedFrameTime, 'frame duration:', frameDurationEstimate.toFixed(1));
-              }
-            } else if (receiveState.markerCount > 0 && decoded.dibit !== FREQUENCY_CONFIG.startMarkerPattern[0]) {
-              // Wrong dibit, reset marker count
-              receiveState.markerCount = 0;
-            }
-          } else {
-            lastDibit = -1;
-            receiveState.markerCount = 0;
-          }
-        } else if (receiveState.mode === 'receiving') {
-          // RECEIVING MODE: Sample at synced frame boundaries
-          if (decoded) {
-            frameSamples.push(decoded.dibit);
-            receiveState.silenceCount = 0;
-          }
-          
-          // Check if we've passed the frame boundary
-          if (syncedFrameTime > 0 && now >= syncedFrameTime) {
-            // Frame complete - take majority vote from samples
-            if (frameSamples.length >= 2) {
-              const votes = [0, 0, 0, 0];
-              for (const sample of frameSamples) {
-                votes[sample]++;
-              }
-              let bestDibit = 0, bestCount = 0;
-              for (let i = 0; i < 4; i++) {
-                if (votes[i] > bestCount) {
-                  bestCount = votes[i];
-                  bestDibit = i;
-                }
-              }
-              
-              emitDibit(bestDibit, now);
-            }
-            
-            // Advance to next frame
-            syncedFrameTime += frameDurationEstimate;
-            frameSamples = [];
-          }
-          
-          // Silence handling
-          if (!decoded) {
-            receiveState.silenceCount++;
-            if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
-              debugLog('Silence timeout, finishing reception');
-              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer || []);
-              finishReceiving();
-            }
-          }
+        // Convert to float for accumulation
+        const spectrum = new Float32Array(dataArray.length);
+        for (let i = 0; i < dataArray.length; i++) {
+          spectrum[i] = dataArray[i];
         }
         
-        // Debug: log periodically
-        if (!window._lastDebugLog || now - window._lastDebugLog > 2000) {
-          window._lastDebugLog = now;
-          let maxLevel = 0, maxBin = 0;
-          for (let i = 0; i < dataArray.length; i++) {
-            if (dataArray[i] > maxLevel) { maxLevel = dataArray[i]; maxBin = i; }
+        const signalPresent = hasSignal(spectrum);
+        
+        if (receiveState.mode === 'idle') {
+          // IDLE: Look for start marker pattern
+          if (signalPresent && detectStartMarker(spectrum)) {
+            markerConfirmCount++;
+            if (markerConfirmCount >= 2) {
+              debugLog('Start marker detected!');
+              receiveState.mode = 'receiving';
+              receiveState.dataFrames = [];
+              receiveState.silenceCount = 0;
+              accumulatedSpectrum = null;
+              framesAccumulated = 0;
+              receivedData = [];
+              markerConfirmCount = 0;
+              
+              updateStatus('transmitting', 'Receiving...');
+              showReceivingCard();
+            }
+          } else {
+            markerConfirmCount = 0;
           }
-          debugLog('Sync mode:', receiveState.mode, 
-                   'frameDur:', frameDurationEstimate.toFixed(0) + 'ms',
-                   'samples:', frameSamples.length,
-                   'MaxLevel:', maxLevel, 'at', binToFreq(maxBin).toFixed(0) + 'Hz');
+        } else if (receiveState.mode === 'receiving') {
+          if (signalPresent) {
+            receiveState.silenceCount = 0;
+            
+            // Check for end marker
+            if (detectEndMarker(spectrum)) {
+              markerConfirmCount++;
+              if (markerConfirmCount >= 2) {
+                debugLog('End marker detected! Frames received:', receivedData.length);
+                finishReceivingGGwave(receivedData);
+                return;
+              }
+            } else {
+              markerConfirmCount = 0;
+              
+              // Accumulate spectrum
+              accumulatedSpectrum = accumulateSpectrum(spectrum, accumulatedSpectrum);
+              framesAccumulated++;
+              
+              // After framesPerTx frames, decode and reset
+              if (framesAccumulated >= FREQUENCY_CONFIG.framesPerTx) {
+                const nibbles = decodeFrame(accumulatedSpectrum);
+                const bytes = nibblesToBytes(nibbles);
+                receivedData.push(...bytes);
+                
+                debugLog('Decoded 3 bytes:', bytes.map(b => b.toString(16).padStart(2,'0')).join(' '),
+                         'Total:', receivedData.length, 'bytes');
+                
+                // Update display
+                receiveState.buffer = receivedData;
+                updateReceivingCard();
+                
+                accumulatedSpectrum = null;
+                framesAccumulated = 0;
+              }
+            }
+          } else {
+            receiveState.silenceCount++;
+            if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
+              debugLog('Silence timeout, finishing with', receivedData.length, 'bytes');
+              finishReceivingGGwave(receivedData);
+              return;
+            }
+          }
         }
         
         analysisFrame = requestAnimationFrame(analyze);
       }
       
-      // Called when we have a confirmed dibit from frame voting
-      function emitDibit(dibit, now) {
-        debugLog('Emit dibit:', dibit.toString(2).padStart(2,'0'), 'votes:', frameSamples.length);
-        
-        switch (receiveState.mode) {
-          case 'idle':
-            // Look for start marker
-            if (isStartMarkerFrame(dibit, receiveState.markerCount)) {
-              receiveState.markerCount++;
-              debugLog('Start marker', receiveState.markerCount, '- dibit:', dibit.toString(2).padStart(2,'0'));
-              
-              if (receiveState.markerCount >= FREQUENCY_CONFIG.markerConfirmFrames) {
-                receiveState.mode = 'receiving';
-                receiveState.dibitBuffer = [];
-                receiveState.silenceCount = 0;
-                receiveState.markerCount = 0;
-                updateStatus('transmitting', 'Receiving...');
-                showReceivingCard();
-                debugLog('Reception started');
-              }
-            } else {
-              receiveState.markerCount = 0;
-            }
-            break;
-            
-          case 'receiving':
-            // Skip marker dibits at start
-            if (receiveState.dibitBuffer.length < FREQUENCY_CONFIG.markerSkipFrames && 
-                FREQUENCY_CONFIG.startMarkerPattern.includes(dibit)) {
-              debugLog('Skipping marker dibit:', dibit.toString(2).padStart(2,'0'));
-              break;
-            }
-            
-            receiveState.silenceCount = 0;
-            receiveState.dibitBuffer.push(dibit);
-            
-            debugLog('Dibit received:', dibit.toString(2).padStart(2,'0'), 
-                     'Total:', receiveState.dibitBuffer.length);
-            
-            // Check for end marker
-            if (hasEndMarker(receiveState.dibitBuffer)) {
-              debugLog('End marker detected');
-              for (let i = 0; i < FREQUENCY_CONFIG.endMarkerPattern.length; i++) {
-                receiveState.dibitBuffer.pop();
-              }
-              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer);
-              updateReceivingCard();
-              finishReceiving();
-            } else if (receiveState.dibitBuffer.length % 20 === 0) {
-              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer);
-              updateReceivingCard();
-            }
-            break;
-        }
-      }
-      
       analyze();
+    }
+    
+    function finishReceivingGGwave(receivedData) {
+      debugLog('Processing', receivedData.length, 'received bytes');
+      
+      receiveState.buffer = receivedData;
+      receiveState.mode = 'idle';
+      
+      finishReceiving();
     }
     
     function updateSpectrumVisualization(dataArray) {
       const bins = elements.spectrumBar.children;
-      const dF = FREQUENCY_CONFIG.frequencySpacing;
-      const F0 = FREQUENCY_CONFIG.baseFrequency;
-      const F1 = FREQUENCY_CONFIG.band1Frequency;
-      const numFreqs = FREQUENCY_CONFIG.frequenciesPerBand;
+      const numSlots = FREQUENCY_CONFIG.nibbleSlots;
+      const numFreqs = FREQUENCY_CONFIG.frequenciesPerNibble;
+      const baseBin = FREQUENCY_CONFIG.baseBin;
       const threshold = FREQUENCY_CONFIG.signalThreshold * 255;
       
       let binIndex = 0;
-      for (let band = 0; band < 2; band++) {
-        const bandStart = band === 0 ? F0 : F1;
-        for (let i = 0; i < numFreqs; i++) {
-          const freq = bandStart + i * dF;
-          const fftBin = freqToBin(freq);
+      for (let slot = 0; slot < numSlots; slot++) {
+        for (let freq = 0; freq < numFreqs; freq++) {
+          const fftBin = baseBin + slot * numFreqs + freq;
           const level = dataArray[fftBin];
           
           if (bins[binIndex]) {
             bins[binIndex].classList.toggle('active', level > threshold);
-            // Set opacity based on level
             bins[binIndex].style.opacity = Math.min(1, 0.2 + (level / 255) * 0.8);
           }
           binIndex++;
@@ -1740,7 +1614,7 @@
     }
 
     // ============================================================
-    // Encoding / Decoding (Protocol Version 7)
+    // Encoding / Decoding (Protocol Version 11)
     // ============================================================
     
     // CRC-8 checksum for error detection
@@ -1837,12 +1711,12 @@
       const bytes = new TextEncoder().encode(json);
       const checksum = crc8(bytes);
       
-      // Header: magic (0xAC), version (0x09 for v9 nibble protocol), length (2 bytes), checksum
+      // Header: magic (0xAC), version (0x0B for v11), length (2 bytes), checksum
       const lenLow = bytes.length & 0xFF;
       const lenHigh = (bytes.length >> 8) & 0xFF;
       
       // Build raw packet: header + data
-      const rawPacket = [0xAC, 0x09, lenLow, lenHigh, checksum, ...bytes];
+      const rawPacket = [0xAC, 0x0B, lenLow, lenHigh, checksum, ...bytes];
       
       // Apply FEC encoding (3x redundancy)
       const encoded = fecEncode(rawPacket);
@@ -1892,7 +1766,7 @@
       }
       
       const version = decoded[1];
-      if (version < 0x07 || version > 0x0A) {
+      if (version < 0x07 || version > 0x0B) {
         debugLog('Unknown version:', version?.toString(16));
         return null;
       }
@@ -1951,31 +1825,27 @@
       const bytes = encodeMessage(message);
       const volume = (settings.volume || 50) / 100;
       
-      debugLog('Transmitting', bytes.length, 'bytes');
+      debugLog('Transmitting', bytes.length, 'bytes (v11 protocol)');
       
-      // Transmit start marker pattern (extra frames for reliable detection)
-      // Note: markers are dibits, use transmitDibit directly
+      // Transmit start marker (spectral comb pattern)
       debugLog('Sending start marker...');
-      const totalMarkerFrames = FREQUENCY_CONFIG.startMarkerPattern.length + FREQUENCY_CONFIG.extraMarkerFrames;
-      for (let i = 0; i < totalMarkerFrames; i++) {
-        const markerDibit = FREQUENCY_CONFIG.startMarkerPattern[i % FREQUENCY_CONFIG.startMarkerPattern.length];
-        await transmitDibit(markerDibit, volume);
-      }
+      await transmitMarker(FREQUENCY_CONFIG.markerPattern, volume);
       
-      // Brief silence gap between marker and data
+      // Small gap between marker and data
       await sleep(FREQUENCY_CONFIG.markerDataGap);
       
-      // Transmit data bytes
+      // Transmit data in 3-byte chunks (6 nibbles per Tx frame)
       debugLog('Sending data...');
-      for (let i = 0; i < bytes.length; i++) {
-        await transmitByte(bytes[i], volume);
+      for (let i = 0; i < bytes.length; i += 3) {
+        const chunk = bytes.slice(i, Math.min(i + 3, bytes.length));
+        // Pad chunk to 3 bytes if needed
+        while (chunk.length < 3) chunk.push(0x00);
+        await transmitThreeBytes(chunk, volume);
       }
       
-      // Transmit end marker (dibits, not bytes)
+      // Transmit end marker
       debugLog('Sending end marker...');
-      for (const endDibit of FREQUENCY_CONFIG.endMarkerPattern) {
-        await transmitDibit(endDibit, volume);
-      }
+      await transmitMarker(FREQUENCY_CONFIG.endMarkerPattern, volume);
       
       // Brief silence after transmission
       await sleep(FREQUENCY_CONFIG.postTransmitGap);
@@ -1989,78 +1859,96 @@
         transmitMessage(transmitQueue.shift());
       }
     }
-
-    // Transmit one dibit (2 bits) using two frequency bands
-    // Each band encodes 1 bit (2 frequencies per band)
-    async function transmitDibit(dibit, volume) {
-      const dF = FREQUENCY_CONFIG.frequencySpacing;
-      const F0 = FREQUENCY_CONFIG.baseFrequency;
-      const F1 = FREQUENCY_CONFIG.band1Frequency;
-      const duration = FREQUENCY_CONFIG.frameDuration;
-      
-      // Split dibit: bit 0 to band 0, bit 1 to band 1
-      const bit0 = dibit & 0x01;         // bit 0
-      const bit1 = (dibit >> 1) & 0x01;  // bit 1
-      
-      // Calculate frequencies (2 frequencies per band, 400 Hz apart)
-      const freq0 = F0 + bit0 * dF;
-      const freq1 = F1 + bit1 * dF;
-      
-      debugLog(`TX dibit ${dibit.toString(2).padStart(2,'0')}: bit0=${bit0} → ${freq0.toFixed(0)}Hz, bit1=${bit1} → ${freq1.toFixed(0)}Hz`);
-      
-      // Play both tones simultaneously
-      await playDualTone(freq0, freq1, duration, volume);
-    }
     
-    // For compatibility - transmitNibble now sends 2 dibits
-    async function transmitNibble(nibble, volume) {
-      // Split nibble into 2 dibits
-      const dibit0 = nibble & 0x03;         // bits 0-1
-      const dibit1 = (nibble >> 2) & 0x03;  // bits 2-3
+    // Transmit a 16-bit marker as spectral comb pattern
+    // Uses first 16 bins of data range
+    async function transmitMarker(pattern, volume) {
+      const frequencies = [];
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      const hzPerBin = FREQUENCY_CONFIG.hzPerBin;
       
-      await transmitDibit(dibit0, volume);
-      await transmitDibit(dibit1, volume);
-    }
-    
-    // Transmit a full byte as four dibits
-    async function transmitByte(byte, volume) {
-      // Split byte into 4 dibits (2 bits each)
-      for (let i = 0; i < 4; i++) {
-        const dibit = (byte >> (i * 2)) & 0x03;
-        await transmitDibit(dibit, volume);
+      // Pattern is 16 bits - each bit corresponds to a consecutive bin
+      for (let i = 0; i < 16; i++) {
+        if (pattern & (1 << i)) {
+          const freq = (baseBin + i) * hzPerBin;
+          frequencies.push(freq);
+        }
+      }
+      
+      debugLog('TX marker pattern:', pattern.toString(16), '→ freqs:', frequencies.map(f=>f.toFixed(0)).join(', '));
+      
+      // Transmit marker for markerFrames times for reliable detection
+      for (let f = 0; f < FREQUENCY_CONFIG.markerFrames; f++) {
+        await playMultiTone(frequencies, FREQUENCY_CONFIG.frameDuration, volume);
       }
     }
     
-    function playDualTone(freq0, freq1, duration, volume) {
+    // Transmit 3 bytes as 6 simultaneous tones (one per nibble)
+    async function transmitThreeBytes(bytes, volume) {
+      const nibbles = [];
+      
+      // Extract 6 nibbles from 3 bytes
+      for (let i = 0; i < 3; i++) {
+        nibbles.push(bytes[i] & 0x0F);        // Low nibble
+        nibbles.push((bytes[i] >> 4) & 0x0F); // High nibble
+      }
+      
+      // Calculate frequency for each nibble slot
+      const frequencies = [];
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      const hzPerBin = FREQUENCY_CONFIG.hzPerBin;
+      const freqsPerNibble = FREQUENCY_CONFIG.frequenciesPerNibble;
+      
+      for (let slot = 0; slot < 6; slot++) {
+        const nibbleValue = nibbles[slot];
+        const fftBin = baseBin + slot * freqsPerNibble + nibbleValue;
+        const freq = fftBin * hzPerBin;
+        frequencies.push(freq);
+      }
+      
+      debugLog(`TX 3 bytes [${bytes.map(b=>b.toString(16).padStart(2,'0')).join(' ')}] → nibbles [${nibbles.join(',')}] → freqs [${frequencies.map(f=>f.toFixed(0)).join(', ')}]`);
+      
+      // Transmit framesPerTx times for energy accumulation
+      for (let f = 0; f < FREQUENCY_CONFIG.framesPerTx; f++) {
+        await playMultiTone(frequencies, FREQUENCY_CONFIG.frameDuration, volume);
+      }
+    }
+    
+    // Play multiple tones simultaneously
+    function playMultiTone(frequencies, duration, volume) {
       return new Promise(resolve => {
-        const osc0 = audioContext.createOscillator();
-        const osc1 = audioContext.createOscillator();
-        const gain0 = audioContext.createGain();
-        const gain1 = audioContext.createGain();
+        const oscillators = [];
+        const gains = [];
+        const perToneVolume = volume / Math.sqrt(frequencies.length); // Scale volume
         
-        osc0.type = 'sine';
-        osc0.frequency.value = freq0;
-        osc1.type = 'sine';
-        osc1.frequency.value = freq1;
-        
-        // Split volume between the two tones
-        gain0.gain.value = volume * 0.5;
-        gain1.gain.value = volume * 0.5;
-        
-        osc0.connect(gain0);
-        osc1.connect(gain1);
-        gain0.connect(audioContext.destination);
-        gain1.connect(audioContext.destination);
-        
-        osc0.start();
-        osc1.start();
+        for (const freq of frequencies) {
+          const osc = audioContext.createOscillator();
+          const gain = audioContext.createGain();
+          
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          gain.gain.value = perToneVolume;
+          
+          osc.connect(gain);
+          gain.connect(audioContext.destination);
+          osc.start();
+          
+          oscillators.push(osc);
+          gains.push(gain);
+        }
         
         setTimeout(() => {
-          osc0.stop();
-          osc1.stop();
+          for (const osc of oscillators) {
+            osc.stop();
+          }
           resolve();
         }, duration);
       });
+    }
+    
+    // Legacy compatibility - no longer used but kept for reference
+    async function transmitDibit(dibit, volume) {
+      debugLog('WARNING: transmitDibit called in v11 - not supported');
     }
 
     function sleep(ms) {
