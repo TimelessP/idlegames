@@ -540,6 +540,42 @@
       opacity: 1;
     }
 
+    /* Protocol Info Bar */
+    .protocol-info {
+      background: var(--bg-card);
+      padding: 0.25rem 1rem;
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+      cursor: pointer;
+      user-select: none;
+      flex-shrink: 0;
+      text-align: center;
+    }
+
+    .protocol-info:hover {
+      background: var(--bg-secondary);
+    }
+
+    .protocol-summary {
+      font-family: monospace;
+    }
+
+    .protocol-details {
+      display: none;
+      margin-top: 0.25rem;
+      font-family: monospace;
+      font-size: 0.65rem;
+      color: var(--text-secondary);
+      text-align: left;
+      max-width: 300px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .protocol-info.expanded .protocol-details {
+      display: block;
+    }
+
     /* Settings Overlay */
     .overlay {
       position: fixed;
@@ -734,6 +770,14 @@
 
   <!-- Spectrum Visualizer -->
   <div class="spectrum-bar" id="spectrumBar"></div>
+  <div class="protocol-info" id="protocolInfo" title="Click to toggle details">
+    <span class="protocol-summary" id="protocolSummary">v7 · 64ms/byte · 1875-3328Hz</span>
+    <div class="protocol-details" id="protocolDetails">
+      <div>Band 0: 1875-2578 Hz (low nibble)</div>
+      <div>Band 1: 2625-3328 Hz (high nibble)</div>
+      <div>dF: 46.875 Hz · Frame: 64ms · 2 tones/byte</div>
+    </div>
+  </div>
 
   <!-- Timeline -->
   <main class="timeline-container" id="timeline">
@@ -828,45 +872,53 @@
     // Frequency Configuration (Version 7)
     // Multi-frequency FSK with 4-bit nibbles per band
     // 
-    // Architecture (inspired by ggwave):
+    // Architecture (ggwave-compatible):
+    // - Sample rate: 48000 Hz
+    // - FFT size: 1024 samples
+    // - Hz per bin (dF): 46.875 Hz
+    // - Base frequency (F0): 1875 Hz (bin 40 for audible mode)
     // - 2 frequency bands, each encoding 4 bits (nibble)
     // - 16 frequencies per band = 4 bits
     // - Transmit 2 nibbles = 1 byte per frame
-    // - Frame duration: 100ms for reliability
-    // - Frequency spacing: 46.875 Hz (ggwave's dF)
+    // - Band gap: 16 bins (consecutive bands like ggwave)
     // 
-    // Band 0 (low nibble):  F0 = 1875 Hz, frequencies 1875 to 1875+15*46.875
-    // Band 1 (high nibble): F1 = F0 + 32*dF = 1875+1500 = 3375 Hz
+    // Band 0 (low nibble):  bins 40-55 (1875 Hz to 2578 Hz)
+    // Band 1 (high nibble): bins 56-71 (2625 Hz to 3328 Hz)
     // 
-    // Start marker: alternating 0x55/0xAA pattern (distinctive)
-    // End marker: 0xFF 0xFF 0xFF
+    // Frame timing (ggwave "fastest" = 3 frames per Tx):
+    // - 1024 samples @ 48kHz = 21.33ms per FFT frame
+    // - framesPerTx = 3 means ~64ms per byte
     // ============================================================
     const FREQUENCY_CONFIG = {
       version: 7,
       
-      // Base frequency (ggwave uses 1875 Hz for audible mode)
+      // Base frequency - ggwave audible mode starts at bin 40
+      // F0 = 40 * 46.875 = 1875 Hz
       baseFrequency: 1875,
       
-      // Frequency spacing between each of 16 frequencies in a band
-      // ggwave uses 46.875 Hz = sampleRate / fftSize (48000/1024)
-      // We use 48000 sample rate and 1024 FFT = 46.875 Hz bins
+      // Frequency spacing = sampleRate / fftSize = 48000/1024 = 46.875 Hz
       frequencySpacing: 46.875,
       
-      // Gap between Band 0 and Band 1 (in units of dF)
-      // Band 1 starts 32*dF above Band 0's start (16 for data + 16 gap)
-      bandGap: 32,
+      // Gap between Band 0 and Band 1 (in bins)
+      // ggwave uses consecutive 16-bin bands, so gap = 16
+      bandGap: 16,
       
-      // Frame duration in ms (how long each byte is transmitted)
-      frameDuration: 100,
+      // Number of FFT frames per transmitted byte (ggwave "fastest" = 3)
+      framesPerTx: 3,
       
-      // Sample rate - using 48kHz for ggwave compatibility
+      // Frame duration = samplesPerFrame / sampleRate * 1000
+      // = 1024 / 48000 * 1000 = 21.33ms
+      // Total byte duration = framesPerTx * frameMs = 3 * 21.33 = 64ms
+      get frameDuration() { return this.framesPerTx * (1024 / 48000 * 1000); },
+      
+      // Sample rate - 48kHz for ggwave compatibility
       sampleRate: 48000,
       
-      // FFT size (1024 gives ~46.875 Hz resolution at 48kHz)
+      // FFT size (1024 gives 46.875 Hz resolution at 48kHz)
       fftSize: 1024,
       
       // Start marker pattern - 4 frames of alternating 0x55, 0xAA
-      // This creates a distinctive "chirp" pattern that won't appear in noise
+      // This creates a distinctive "checkerboard" in the frequency spectrum
       startMarkerPattern: [0x55, 0xAA, 0x55, 0xAA],
       
       // End marker - 3x 0xFF
@@ -875,12 +927,28 @@
       // Detection thresholds
       signalThreshold: 0.05,     // Minimum signal level (0-1) to consider
       dominanceRatio: 1.3,       // How much stronger peak must be vs average
+      adjacentBinWeight: 0.8,    // Weight for adjacent FFT bins when detecting peaks
       
       // Frames of consistent marker to trigger reception
       markerConfirmFrames: 2,
       
       // Maximum silence frames before ending reception
       maxSilenceFrames: 10,
+      
+      // Marker frames to skip at start of data reception
+      markerSkipFrames: 3,
+      
+      // Extra marker frames to transmit beyond pattern length
+      extraMarkerFrames: 4,
+      
+      // Gap between marker and data (ms)
+      markerDataGap: 50,
+      
+      // Gap after transmission ends (ms)
+      postTransmitGap: 100,
+      
+      // Receiver sample rate multiplier (sample at ~90% of frame duration)
+      receiveSampleRate: 0.9,
       
       // Smoothing for FFT
       smoothingTimeConstant: 0.2
@@ -924,6 +992,9 @@
       stopReceiveBtn: document.getElementById('stopReceiveBtn'),
       listenToggleBtn: document.getElementById('listenToggleBtn'),
       spectrumBar: document.getElementById('spectrumBar'),
+      protocolInfo: document.getElementById('protocolInfo'),
+      protocolSummary: document.getElementById('protocolSummary'),
+      protocolDetails: document.getElementById('protocolDetails'),
       timeline: document.getElementById('timeline'),
       emptyState: document.getElementById('emptyState'),
       composeInput: document.getElementById('composeInput'),
@@ -949,6 +1020,7 @@
       initDeviceId();
       initTheme();
       initSpectrumBins();
+      initProtocolInfo();
       initListenToggleButton();
       renderTimeline();
       bindEvents();
@@ -1000,6 +1072,35 @@
           elements.spectrumBar.appendChild(bin);
         }
       }
+    }
+
+    function initProtocolInfo() {
+      const dF = FREQUENCY_CONFIG.frequencySpacing;
+      const F0 = FREQUENCY_CONFIG.baseFrequency;
+      const frameDuration = FREQUENCY_CONFIG.frameDuration;
+      
+      // Calculate actual frequency ranges
+      const band0Start = F0;
+      const band0End = F0 + 15 * dF;
+      const band1Start = F0 + FREQUENCY_CONFIG.bandGap * dF;
+      const band1End = band1Start + 15 * dF;
+      
+      // Update summary
+      elements.protocolSummary.textContent = 
+        `v${FREQUENCY_CONFIG.version} · ${frameDuration.toFixed(0)}ms/byte · ${band0Start.toFixed(0)}-${band1End.toFixed(0)}Hz`;
+      
+      // Update details
+      elements.protocolDetails.innerHTML = `
+        <div>Band 0: ${band0Start.toFixed(0)}-${band0End.toFixed(0)} Hz (low nibble)</div>
+        <div>Band 1: ${band1Start.toFixed(0)}-${band1End.toFixed(0)} Hz (high nibble)</div>
+        <div>dF: ${dF} Hz · Frame: ${frameDuration.toFixed(1)}ms · 2 tones/byte</div>
+        <div>ggwave-compatible: F0=bin40, dF=46.875Hz</div>
+      `;
+      
+      // Toggle expansion on click
+      elements.protocolInfo.addEventListener('click', () => {
+        elements.protocolInfo.classList.toggle('expanded');
+      });
     }
 
     // ============================================================
@@ -1260,8 +1361,9 @@
           
           // Average nearby bins for robustness
           let level = dataArray[bin];
-          if (bin > 0) level = Math.max(level, dataArray[bin - 1] * 0.8);
-          if (bin < dataArray.length - 1) level = Math.max(level, dataArray[bin + 1] * 0.8);
+          const adjWeight = FREQUENCY_CONFIG.adjacentBinWeight;
+          if (bin > 0) level = Math.max(level, dataArray[bin - 1] * adjWeight);
+          if (bin < dataArray.length - 1) level = Math.max(level, dataArray[bin + 1] * adjWeight);
           
           levels.push(level);
           sumLevel += level;
@@ -1338,8 +1440,9 @@
         // Update spectrum visualization
         updateSpectrumVisualization(dataArray);
         
-        // Only process frames at the configured rate
-        if (now - lastFrameProcessed >= frameDuration * 0.5) {
+        // Only process frames at the configured rate (not faster!)
+        // Use receiveSampleRate to ensure we don't sample same frame twice
+        if (now - lastFrameProcessed >= frameDuration * FREQUENCY_CONFIG.receiveSampleRate) {
           lastFrameProcessed = now;
           processFrame(dataArray, now);
         }
@@ -1435,9 +1538,10 @@
         case 'receiving':
           if (decoded) {
             // Skip initial marker frames still being transmitted
-            if (receiveState.buffer.length === 0 && 
+            if (receiveState.buffer.length < FREQUENCY_CONFIG.markerSkipFrames && 
                 FREQUENCY_CONFIG.startMarkerPattern.includes(decoded.byte)) {
-              // Still in marker, ignore
+              // Still in marker pattern, ignore
+              debugLog('Skipping marker byte:', decoded.byte.toString(16));
               break;
             }
             
@@ -1612,12 +1716,16 @@
       
       debugLog('Transmitting', bytes.length, 'bytes');
       
-      // Transmit start marker pattern
+      // Transmit start marker pattern (extra frames for reliable detection)
       debugLog('Sending start marker...');
-      for (let i = 0; i < FREQUENCY_CONFIG.startMarkerPattern.length + 2; i++) {
+      const totalMarkerFrames = FREQUENCY_CONFIG.startMarkerPattern.length + FREQUENCY_CONFIG.extraMarkerFrames;
+      for (let i = 0; i < totalMarkerFrames; i++) {
         const markerByte = FREQUENCY_CONFIG.startMarkerPattern[i % FREQUENCY_CONFIG.startMarkerPattern.length];
         await transmitByte(markerByte, volume);
       }
+      
+      // Brief silence gap between marker and data
+      await sleep(FREQUENCY_CONFIG.markerDataGap);
       
       // Transmit data bytes
       debugLog('Sending data...');
@@ -1631,8 +1739,8 @@
         await transmitByte(endByte, volume);
       }
       
-      // Brief silence
-      await sleep(100);
+      // Brief silence after transmission
+      await sleep(FREQUENCY_CONFIG.postTransmitGap);
       
       isTransmitting = false;
       updateStatus(isListening ? 'listening' : '', isListening ? 'Listening' : 'Idle');
