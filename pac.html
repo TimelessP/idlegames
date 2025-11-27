@@ -824,37 +824,33 @@
 
     // ============================================================
     // Frequency Configuration (Versioned)
-    // These frequencies are chosen to work across diverse speakers
-    // while being less annoying than pure high frequencies
+    // Using FSK (Frequency Shift Keying) - one bit at a time
+    // Much more robust than parallel transmission
     // ============================================================
     const FREQUENCY_CONFIG = {
-      version: 3,
-      // Carrier frequencies for data (Hz)
-      // Using 8 frequencies for 8-bit (1 byte) parallel transmission
-      // Wider spacing (400 Hz) reduces crosstalk
-      carriers: [
-        1200, 1600, 2000, 2400,
-        2800, 3200, 3600, 4000
-      ],
-      // Sync/preamble frequency (distinct from data carriers)
+      version: 4,
+      // FSK frequencies - just two, widely spaced
+      freq0: 1200,  // Frequency for bit 0
+      freq1: 2400,  // Frequency for bit 1
+      // Sync/preamble uses alternating pattern
       syncFrequency: 800,
-      // Symbol duration in milliseconds
-      symbolDuration: 100,
+      // Bit duration in milliseconds (longer = more reliable)
+      bitDuration: 50,
       // Preamble duration (sync tone)
-      preambleDuration: 400,
-      // Gap between symbols (silence helps distinguish)
-      symbolGap: 25,
+      preambleDuration: 300,
+      // Gap between bytes (helps resync)
+      byteGap: 10,
       // Detection threshold (0-1)
-      detectionThreshold: 0.12,
+      detectionThreshold: 0.15,
       // Sample rate
       sampleRate: 44100,
       // FFT size for analysis
       fftSize: 2048,
       // Error correction settings
-      samplesPerSymbol: 7,      // Number of samples to take per symbol for voting
-      symbolRepetitions: 3,     // Transmit each symbol this many times
-      endMarker: 0xFF,          // Explicit end-of-message marker (8-bit now)
-      noiseFloorSamples: 10     // Samples to measure noise floor
+      samplesPerBit: 5,        // Number of samples to take per bit for voting
+      byteRepetitions: 3,      // Transmit each byte this many times
+      endMarker: 0xFF,         // Explicit end-of-message marker
+      noiseFloorSamples: 10    // Samples to measure noise floor
     };
 
     // ============================================================
@@ -938,12 +934,18 @@
     }
 
     function initSpectrumBins() {
+      // For FSK, show 3 bins: sync, freq0, freq1
       elements.spectrumBar.innerHTML = '';
-      FREQUENCY_CONFIG.carriers.forEach((freq, i) => {
+      const freqs = [
+        { freq: FREQUENCY_CONFIG.syncFrequency, label: 'Sync' },
+        { freq: FREQUENCY_CONFIG.freq0, label: '0' },
+        { freq: FREQUENCY_CONFIG.freq1, label: '1' }
+      ];
+      freqs.forEach(({freq, label}, i) => {
         const bin = document.createElement('div');
         bin.className = 'spectrum-bin';
         bin.dataset.index = i;
-        bin.title = `${freq} Hz`;
+        bin.title = `${label}: ${freq} Hz`;
         elements.spectrumBar.appendChild(bin);
       });
     }
@@ -1116,9 +1118,9 @@
       if (receivingMessage) {
         receivingMessage = false;
         receiveBuffer = [];
+        bitBuffer = [];
+        bitSamples = [];
         syncDetectCount = 0;
-        symbolSamples = [];
-        sampleCount = 0;
         consecutiveSilence = 0;
         removeReceivingCard();
         updateStatus(isListening ? 'listening' : '', isListening ? 'Listening' : 'Idle');
@@ -1131,50 +1133,34 @@
     }
 
     // ============================================================
-    // Frequency Analysis & Reception
+    // Frequency Analysis & Reception (FSK)
     // ============================================================
     let analysisFrame = null;
     let receiveBuffer = [];
     let receivingMessage = false;
     let lastSyncTime = 0;
     let syncDetectCount = 0;
-    let noiseFloor = []; // Per-frequency noise floor (initialized dynamically)
-    let symbolSamples = []; // Collect multiple samples per symbol
-    let sampleCount = 0; // Current sample count within symbol
-    let consecutiveSilence = 0; // Track silence for end detection
+    let consecutiveSilence = 0;
     const SYNC_COOLDOWN = 500;
-    const SYNC_CONFIRM_FRAMES = 5; // Require sustained sync tone
-    const DEBUG_DECODE = true; // Set true to see decode errors
-    const SILENCE_THRESHOLD = 8; // Consecutive silent samples to end reception (increased for reliability)
+    const SYNC_CONFIRM_FRAMES = 5;
+    const DEBUG_DECODE = true;
+    const SILENCE_THRESHOLD = 20;
 
-    // Initialize noise floor array
-    function initNoiseFloor() {
-      noiseFloor = new Array(FREQUENCY_CONFIG.carriers.length).fill(0);
-    }
+    // Noise floor for each FSK frequency
+    let noiseFloor0 = 0;
+    let noiseFloor1 = 0;
 
     // Measure noise floor for adaptive thresholding
     function measureNoiseFloor() {
       if (!analyser) return;
-      if (noiseFloor.length !== FREQUENCY_CONFIG.carriers.length) {
-        initNoiseFloor();
-      }
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
       analyser.getByteFrequencyData(dataArray);
       
-      FREQUENCY_CONFIG.carriers.forEach((freq, i) => {
-        const binIndex = Math.round(freq * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
-        const value = dataArray[binIndex] / 255;
-        // Exponential moving average
-        noiseFloor[i] = (noiseFloor[i] || 0) * 0.9 + value * 0.1;
-      });
-    }
-
-    // Get adaptive threshold for a frequency (noise floor + margin)
-    function getAdaptiveThreshold(freqIndex) {
-      const base = FREQUENCY_CONFIG.detectionThreshold;
-      const noise = noiseFloor[freqIndex] || 0;
-      // Threshold is max of base threshold or noise floor + 0.2 margin
-      return Math.max(base, noise + 0.2);
+      const bin0 = Math.round(FREQUENCY_CONFIG.freq0 * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
+      const bin1 = Math.round(FREQUENCY_CONFIG.freq1 * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
+      
+      noiseFloor0 = noiseFloor0 * 0.95 + (dataArray[bin0] / 255) * 0.05;
+      noiseFloor1 = noiseFloor1 * 0.95 + (dataArray[bin1] / 255) * 0.05;
     }
 
     function startAnalysis() {
@@ -1196,38 +1182,38 @@
           measureNoiseFloor();
         }
         
-        // Update spectrum visualization
+        // Update spectrum visualization (3 bins: sync, freq0, freq1)
         const bins = elements.spectrumBar.children;
-        FREQUENCY_CONFIG.carriers.forEach((freq, i) => {
-          const binIndex = Math.round(freq * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
-          const value = dataArray[binIndex] / 255;
-          const threshold = getAdaptiveThreshold(i);
-          bins[i].classList.toggle('active', value > threshold);
-        });
+        const syncBin = Math.round(FREQUENCY_CONFIG.syncFrequency * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
+        const bin0 = Math.round(FREQUENCY_CONFIG.freq0 * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
+        const bin1 = Math.round(FREQUENCY_CONFIG.freq1 * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
+        
+        const syncLevel = dataArray[syncBin] / 255;
+        const level0 = dataArray[bin0] / 255;
+        const level1 = dataArray[bin1] / 255;
+        
+        if (bins[0]) bins[0].classList.toggle('active', syncLevel > FREQUENCY_CONFIG.detectionThreshold);
+        if (bins[1]) bins[1].classList.toggle('active', level0 > Math.max(FREQUENCY_CONFIG.detectionThreshold, noiseFloor0 + 0.1));
+        if (bins[2]) bins[2].classList.toggle('active', level1 > Math.max(FREQUENCY_CONFIG.detectionThreshold, noiseFloor1 + 0.1));
         
         // Check for sync tone with sustained detection
-        const syncBin = Math.round(FREQUENCY_CONFIG.syncFrequency * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
-        const syncLevel = dataArray[syncBin] / 255;
-        
         const now = Date.now();
-        if (syncLevel > FREQUENCY_CONFIG.detectionThreshold * 2.5 && !receivingMessage && (now - lastSyncTime) > SYNC_COOLDOWN) {
-          // Require sustained sync tone, not just a spike
+        if (syncLevel > FREQUENCY_CONFIG.detectionThreshold * 2 && !receivingMessage && (now - lastSyncTime) > SYNC_COOLDOWN) {
           syncDetectCount++;
           if (syncDetectCount >= SYNC_CONFIRM_FRAMES) {
             lastSyncTime = now;
             syncDetectCount = 0;
             receivingMessage = true;
             receiveBuffer = [];
-            symbolSamples = [];
+            bitBuffer = [];
             consecutiveSilence = 0;
             updateStatus('transmitting', 'Receiving...');
-            // Show receiving card in timeline
             showReceivingCard();
-            // Wait for preamble to finish, then start sampling
-            setTimeout(startSymbolSampling, FREQUENCY_CONFIG.preambleDuration - (SYNC_CONFIRM_FRAMES * 16));
+            // Wait for preamble to finish, then start bit sampling
+            setTimeout(startBitSampling, FREQUENCY_CONFIG.preambleDuration - (SYNC_CONFIRM_FRAMES * 16));
           }
         } else if (syncLevel <= FREQUENCY_CONFIG.detectionThreshold) {
-          syncDetectCount = 0; // Reset if sync tone drops
+          syncDetectCount = 0;
         }
         
         analysisFrame = requestAnimationFrame(analyze);
@@ -1236,161 +1222,187 @@
       analyze();
     }
 
-    // Collect multiple samples for one symbol period
-    function startSymbolSampling() {
+    // FSK bit reception
+    let bitBuffer = [];
+    let bitSamples = [];
+    
+    function startBitSampling() {
       if (!receivingMessage) return;
-      symbolSamples = [];
-      collectSymbolSample(0);
+      bitSamples = [];
+      collectBitSample(0);
     }
-
-    function collectSymbolSample(sampleIndex) {
+    
+    function collectBitSample(sampleIndex) {
       if (!receivingMessage) return;
       
-      const bufferLength = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
       analyser.getByteFrequencyData(dataArray);
       
-      // Read all carrier levels
-      const sample = FREQUENCY_CONFIG.carriers.map((freq, i) => {
-        const binIndex = Math.round(freq * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
-        return dataArray[binIndex] / 255;
-      });
-      symbolSamples.push(sample);
+      const bin0 = Math.round(FREQUENCY_CONFIG.freq0 * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
+      const bin1 = Math.round(FREQUENCY_CONFIG.freq1 * FREQUENCY_CONFIG.fftSize / audioContext.sampleRate);
       
-      if (sampleIndex + 1 < FREQUENCY_CONFIG.samplesPerSymbol) {
-        // Collect more samples
-        const sampleInterval = FREQUENCY_CONFIG.symbolDuration / FREQUENCY_CONFIG.samplesPerSymbol;
-        setTimeout(() => collectSymbolSample(sampleIndex + 1), sampleInterval);
+      const level0 = dataArray[bin0] / 255;
+      const level1 = dataArray[bin1] / 255;
+      
+      bitSamples.push({ level0, level1 });
+      
+      if (sampleIndex + 1 < FREQUENCY_CONFIG.samplesPerBit) {
+        const sampleInterval = FREQUENCY_CONFIG.bitDuration / FREQUENCY_CONFIG.samplesPerBit;
+        setTimeout(() => collectBitSample(sampleIndex + 1), sampleInterval);
       } else {
-        // All samples collected, decode symbol using voting
-        processSymbolSamples();
+        processBitSamples();
       }
     }
-
-    function processSymbolSamples() {
+    
+    function processBitSamples() {
       if (!receivingMessage) return;
       
-      // Majority voting per bit across all samples
-      let symbol = 0;
-      let activeCount = 0;
+      // Average the samples
+      let avg0 = 0, avg1 = 0;
+      for (const s of bitSamples) {
+        avg0 += s.level0;
+        avg1 += s.level1;
+      }
+      avg0 /= bitSamples.length;
+      avg1 /= bitSamples.length;
       
-      for (let bit = 0; bit < FREQUENCY_CONFIG.carriers.length; bit++) {
-        let votesOn = 0;
-        const threshold = getAdaptiveThreshold(bit);
+      const threshold0 = Math.max(FREQUENCY_CONFIG.detectionThreshold, noiseFloor0 + 0.1);
+      const threshold1 = Math.max(FREQUENCY_CONFIG.detectionThreshold, noiseFloor1 + 0.1);
+      
+      const has0 = avg0 > threshold0;
+      const has1 = avg1 > threshold1;
+      
+      // Determine bit value
+      let bit = null;
+      if (has1 && !has0) {
+        bit = 1;
+      } else if (has0 && !has1) {
+        bit = 0;
+      } else if (has0 && has1) {
+        // Both detected - pick stronger one
+        bit = avg1 > avg0 ? 1 : 0;
+      }
+      // else: neither detected = silence
+      
+      if (bit !== null) {
+        consecutiveSilence = 0;
+        bitBuffer.push(bit);
         
-        for (const sample of symbolSamples) {
-          if (sample[bit] > threshold) {
-            votesOn++;
+        // Every 8 bits, assemble a byte
+        if (bitBuffer.length === 8) {
+          let byte = 0;
+          for (let i = 0; i < 8; i++) {
+            byte |= (bitBuffer[i] << i);
+          }
+          receiveBuffer.push(byte);
+          bitBuffer = [];
+          updateReceivingCard();
+          
+          if (DEBUG_DECODE) console.log('Byte received:', byte.toString(16));
+          
+          // Check for end marker
+          if (byte === FREQUENCY_CONFIG.endMarker) {
+            // Need 3 consecutive end markers to confirm
+            const len = receiveBuffer.length;
+            if (len >= 3 && 
+                receiveBuffer[len-1] === 0xFF && 
+                receiveBuffer[len-2] === 0xFF && 
+                receiveBuffer[len-3] === 0xFF) {
+              // Remove end markers and finish
+              receiveBuffer.pop();
+              receiveBuffer.pop();
+              receiveBuffer.pop();
+              finishReceiving();
+              return;
+            }
           }
         }
-        
-        // Majority vote
-        if (votesOn > symbolSamples.length / 2) {
-          symbol |= (1 << bit);
-          activeCount++;
-        }
-      }
-      
-      if (DEBUG_DECODE) console.log('Symbol received:', symbol.toString(16), 'active bits:', activeCount);
-      
-      // Check for end marker
-      if (symbol === FREQUENCY_CONFIG.endMarker) {
-        finishReceiving();
-        return;
-      }
-      
-      // Check for silence (end of transmission fallback)
-      if (activeCount === 0) {
+      } else {
         consecutiveSilence++;
         if (consecutiveSilence >= SILENCE_THRESHOLD) {
+          // Discard partial bits
+          bitBuffer = [];
           finishReceiving();
           return;
         }
-      } else {
-        consecutiveSilence = 0;
-        receiveBuffer.push(symbol);
-        // Update the receiving card with new data
-        updateReceivingCard();
       }
       
-      // Continue to next symbol
-      setTimeout(startSymbolSampling, FREQUENCY_CONFIG.symbolGap);
+      // Continue to next bit
+      setTimeout(startBitSampling, 0);
     }
 
     function finishReceiving() {
       receivingMessage = false;
-      symbolSamples = [];
+      bitBuffer = [];
+      bitSamples = [];
       consecutiveSilence = 0;
       updateStatus('listening', 'Listening');
       
-      if (DEBUG_DECODE) console.log('Raw receive buffer:', receiveBuffer.length, 'symbols');
+      if (DEBUG_DECODE) console.log('Raw receive buffer:', receiveBuffer.length, 'bytes');
       
-      if (receiveBuffer.length < 3) {
-        // Too short, probably noise - remove card and ignore
+      if (receiveBuffer.length < 5) {
         if (DEBUG_DECODE) console.log('Buffer too short, ignoring');
         removeReceivingCard();
         return;
       }
       
-      // Apply symbol repetition voting if enabled
-      let decodedSymbols = receiveBuffer;
-      if (FREQUENCY_CONFIG.symbolRepetitions > 1) {
-        decodedSymbols = applyRepetitionVoting(receiveBuffer);
+      // Apply byte repetition voting if enabled
+      let decodedBytes = receiveBuffer;
+      if (FREQUENCY_CONFIG.byteRepetitions > 1) {
+        decodedBytes = applyByteRepetitionVoting(receiveBuffer);
         if (DEBUG_DECODE) {
-          console.log('After repetition voting:', decodedSymbols.length, 'symbols');
-          console.log('First 10 symbols:', decodedSymbols.slice(0, 10).map(s => s.toString(16)).join(' '));
+          console.log('After repetition voting:', decodedBytes.length, 'bytes');
+          console.log('First 10 bytes:', decodedBytes.slice(0, 10).map(s => s.toString(16)).join(' '));
         }
       }
       
-      // Check magic header first (now 2 separate bytes: 0xAC, 0x01)
-      if (decodedSymbols.length < 2 || decodedSymbols[0] !== 0xAC || decodedSymbols[1] !== 0x01) {
-        if (DEBUG_DECODE) console.log('Invalid magic header:', decodedSymbols[0]?.toString(16), decodedSymbols[1]?.toString(16), 'expected: ac 01');
-        convertReceivingCardToFailed(decodedSymbols, 'Invalid magic header');
+      // Check magic header (0xAC, 0x01)
+      if (decodedBytes.length < 2 || decodedBytes[0] !== 0xAC || decodedBytes[1] !== 0x01) {
+        if (DEBUG_DECODE) console.log('Invalid magic header:', decodedBytes[0]?.toString(16), decodedBytes[1]?.toString(16));
+        convertReceivingCardToFailed(decodedBytes, 'Invalid magic header');
         return;
       }
       
       try {
-        const message = decodeMessage(decodedSymbols);
+        const message = decodeMessage(decodedBytes);
         if (message && message.messageId) {
           if (DEBUG_DECODE) console.log('Message decoded successfully!');
           removeReceivingCard();
           addMessageToTimeline(message);
         } else {
           if (DEBUG_DECODE) console.log('Decode returned null or no messageId');
-          convertReceivingCardToFailed(decodedSymbols, 'Decode failed');
+          convertReceivingCardToFailed(decodedBytes, 'Decode failed');
         }
       } catch (err) {
         if (DEBUG_DECODE) console.error('Failed to decode message:', err);
-        convertReceivingCardToFailed(decodedSymbols, err.message || 'Parse error');
+        convertReceivingCardToFailed(decodedBytes, err.message || 'Parse error');
       }
     }
 
-    // Vote across repeated symbols to correct errors
-    function applyRepetitionVoting(symbols) {
-      const reps = FREQUENCY_CONFIG.symbolRepetitions;
-      const numBits = FREQUENCY_CONFIG.carriers.length; // 8 bits now
-      if (symbols.length < reps) return symbols;
+    // Vote across repeated bytes to correct errors
+    function applyByteRepetitionVoting(bytes) {
+      const reps = FREQUENCY_CONFIG.byteRepetitions;
+      if (bytes.length < reps) return bytes;
       
       const result = [];
-      for (let i = 0; i < symbols.length; i += reps) {
-        // Collect up to 'reps' copies of this symbol
+      for (let i = 0; i < bytes.length; i += reps) {
         const copies = [];
-        for (let j = 0; j < reps && (i + j) < symbols.length; j++) {
-          copies.push(symbols[i + j]);
+        for (let j = 0; j < reps && (i + j) < bytes.length; j++) {
+          copies.push(bytes[i + j]);
         }
         
-        // Vote per bit (8 bits for 8 carriers)
-        let votedSymbol = 0;
-        for (let bit = 0; bit < numBits; bit++) {
+        // Vote per bit
+        let votedByte = 0;
+        for (let bit = 0; bit < 8; bit++) {
           let ones = 0;
           for (const copy of copies) {
             if (copy & (1 << bit)) ones++;
           }
           if (ones > copies.length / 2) {
-            votedSymbol |= (1 << bit);
+            votedByte |= (1 << bit);
           }
         }
-        result.push(votedSymbol);
+        result.push(votedByte);
       }
       return result;
     }
@@ -1465,7 +1477,7 @@
     }
 
     // ============================================================
-    // Transmission
+    // Transmission (FSK - one bit at a time)
     // ============================================================
     async function transmitMessage(message) {
       if (isTransmitting) {
@@ -1474,7 +1486,6 @@
       }
       
       isTransmitting = true;
-      // Stop receiving during transmission (we'd hear ourselves)
       stopReceiving();
       updateStatus('transmitting', 'Transmitting...');
       
@@ -1483,69 +1494,51 @@
         await audioContext.resume();
       }
       
-      const symbols = encodeMessage(message);
+      const bytes = encodeMessage(message);
       const volume = (settings.volume || 50) / 100;
       
       if (DEBUG_DECODE) {
-        console.log('Transmitting', symbols.length, 'symbols');
-        console.log('First 10 symbols:', symbols.slice(0, 10).map(s => s.toString(16)).join(' '));
+        console.log('Transmitting', bytes.length, 'bytes');
+        console.log('First 10 bytes:', bytes.slice(0, 10).map(s => s.toString(16)).join(' '));
       }
       
       // Play preamble/sync tone
       await playTone(FREQUENCY_CONFIG.syncFrequency, FREQUENCY_CONFIG.preambleDuration, volume);
-      await sleep(FREQUENCY_CONFIG.symbolGap);
       
-      // Transmit each symbol with repetition for error correction
-      for (const symbol of symbols) {
-        for (let rep = 0; rep < FREQUENCY_CONFIG.symbolRepetitions; rep++) {
-          await transmitSymbol(symbol, volume);
-          await sleep(FREQUENCY_CONFIG.symbolGap);
+      // Transmit each byte with repetition
+      for (const byte of bytes) {
+        for (let rep = 0; rep < FREQUENCY_CONFIG.byteRepetitions; rep++) {
+          await transmitByte(byte, volume);
+          await sleep(FREQUENCY_CONFIG.byteGap);
         }
       }
       
-      // Transmit end marker (also repeated)
-      for (let rep = 0; rep < FREQUENCY_CONFIG.symbolRepetitions; rep++) {
-        await transmitSymbol(FREQUENCY_CONFIG.endMarker, volume);
-        await sleep(FREQUENCY_CONFIG.symbolGap);
+      // Transmit end markers (3x 0xFF)
+      for (let i = 0; i < 3; i++) {
+        for (let rep = 0; rep < FREQUENCY_CONFIG.byteRepetitions; rep++) {
+          await transmitByte(0xFF, volume);
+          await sleep(FREQUENCY_CONFIG.byteGap);
+        }
       }
       
-      // Brief silence to ensure clean end
-      await sleep(FREQUENCY_CONFIG.symbolDuration);
+      // Brief silence
+      await sleep(100);
       
       isTransmitting = false;
       updateStatus(isListening ? 'listening' : '', isListening ? 'Listening' : 'Idle');
       
-      // Process queue
       if (transmitQueue.length > 0) {
         transmitMessage(transmitQueue.shift());
       }
     }
 
-    async function transmitSymbol(symbol, volume) {
-      const oscillators = [];
-      const gains = [];
-      
-      FREQUENCY_CONFIG.carriers.forEach((freq, i) => {
-        if (symbol & (1 << i)) {
-          const osc = audioContext.createOscillator();
-          const gain = audioContext.createGain();
-          
-          osc.type = 'sine';
-          osc.frequency.value = freq;
-          gain.gain.value = volume / FREQUENCY_CONFIG.carriers.length;
-          
-          osc.connect(gain);
-          gain.connect(audioContext.destination);
-          osc.start();
-          
-          oscillators.push(osc);
-          gains.push(gain);
-        }
-      });
-      
-      await sleep(FREQUENCY_CONFIG.symbolDuration);
-      
-      oscillators.forEach(osc => osc.stop());
+    async function transmitByte(byte, volume) {
+      // Transmit 8 bits, LSB first
+      for (let bit = 0; bit < 8; bit++) {
+        const bitValue = (byte >> bit) & 1;
+        const freq = bitValue ? FREQUENCY_CONFIG.freq1 : FREQUENCY_CONFIG.freq0;
+        await playTone(freq, FREQUENCY_CONFIG.bitDuration, volume);
+      }
     }
 
     function playTone(frequency, duration, volume) {
