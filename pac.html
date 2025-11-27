@@ -1258,7 +1258,7 @@
         elements.permissionBanner.style.display = 'none';
         updateStatus('listening', 'Listening');
         
-        startAnalysis();
+        await startAnalysis();
       } catch (err) {
         console.error('Microphone access denied:', err);
         elements.permissionBanner.style.display = 'block';
@@ -1394,9 +1394,46 @@
       return ratio > FREQUENCY_CONFIG.markerThreshold;
     }
 
-    function startAnalysis() {
-      // We need access to raw audio samples for offline analysis
-      // Create a ScriptProcessorNode (or AudioWorklet) to capture samples
+    // AudioWorklet processor code (inlined as Blob URL)
+    const audioWorkletCode = `
+      class SampleCaptureProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this.bufferSize = 1024;  // Match FFT size
+          this.buffer = new Float32Array(this.bufferSize);
+          this.bufferIndex = 0;
+        }
+        
+        process(inputs, outputs, parameters) {
+          const input = inputs[0];
+          if (!input || !input[0]) return true;
+          
+          const channelData = input[0];
+          
+          // Accumulate samples into buffer
+          for (let i = 0; i < channelData.length; i++) {
+            this.buffer[this.bufferIndex++] = channelData[i];
+            
+            if (this.bufferIndex >= this.bufferSize) {
+              // Send full buffer to main thread
+              this.port.postMessage({
+                type: 'samples',
+                data: this.buffer.slice()  // Copy the buffer
+              });
+              this.bufferIndex = 0;
+            }
+          }
+          
+          return true;  // Keep processor alive
+        }
+      }
+      
+      registerProcessor('sample-capture-processor', SampleCaptureProcessor);
+    `;
+    
+    let audioWorkletNode = null;
+    
+    async function startAnalysis() {
       const bufferSize = FREQUENCY_CONFIG.fftSize;
       
       // For spectrum visualization during recording
@@ -1408,8 +1445,129 @@
       let silenceCount = 0;
       let recordingStartTime = 0;
       
-      // Create ScriptProcessorNode to capture raw samples
-      // (Yes, it's deprecated, but AudioWorklet requires a separate file)
+      try {
+        // Create AudioWorklet from inline code using Blob URL
+        const blob = new Blob([audioWorkletCode], { type: 'application/javascript' });
+        const workletUrl = URL.createObjectURL(blob);
+        
+        await audioContext.audioWorklet.addModule(workletUrl);
+        URL.revokeObjectURL(workletUrl);
+        
+        audioWorkletNode = new AudioWorkletNode(audioContext, 'sample-capture-processor');
+        
+        // Handle samples from worklet
+        audioWorkletNode.port.onmessage = (event) => {
+          if (event.data.type !== 'samples') return;
+          if (!isListening || isTransmitting) {
+            isRecording = false;
+            recordedSamples = [];
+            markerConfirmCount = 0;
+            return;
+          }
+          
+          const inputData = event.data.data;
+          
+          // Get spectrum for marker detection
+          analyser.getByteFrequencyData(spectrumArray);
+          updateSpectrumVisualization(spectrumArray);
+          
+          const energy = detectSignalEnergy(spectrumArray);
+          const hasSignal = energy > FREQUENCY_CONFIG.signalThreshold * 255;
+          
+          if (!isRecording) {
+            // Look for start marker to begin recording
+            if (hasSignal && detectMarkerPattern(spectrumArray, true)) {
+              markerConfirmCount++;
+              if (markerConfirmCount >= 3) {
+                debugLog('Start marker detected - beginning recording');
+                isRecording = true;
+                recordedSamples = [];
+                recordingStartTime = Date.now();
+                silenceCount = 0;
+                markerConfirmCount = 0;
+                
+                receiveState.mode = 'recording';
+                updateStatus('transmitting', 'Recording...');
+                showReceivingCard();
+              }
+            } else {
+              markerConfirmCount = Math.max(0, markerConfirmCount - 1);
+            }
+          } else {
+            // Recording in progress - store raw samples
+            const samples = new Float32Array(inputData.length);
+            samples.set(inputData);
+            recordedSamples.push(samples);
+            
+            // Update UI with recording progress
+            const recordedMs = (recordedSamples.length * bufferSize / audioContext.sampleRate) * 1000;
+            receiveState.buffer = [`Recording: ${(recordedMs/1000).toFixed(1)}s`];
+            updateReceivingCard();
+            
+            // Check for end marker
+            if (hasSignal && detectMarkerPattern(spectrumArray, false)) {
+              markerConfirmCount++;
+              if (markerConfirmCount >= 3) {
+                debugLog('End marker detected after', recordedSamples.length, 'frames');
+                isRecording = false;
+                markerConfirmCount = 0;
+                
+                // Run offline analysis
+                analyzeRecordedAudio();
+                return;
+              }
+            } else {
+              markerConfirmCount = Math.max(0, markerConfirmCount - 1);
+            }
+            
+            // Silence timeout
+            if (!hasSignal) {
+              silenceCount++;
+              if (silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
+                debugLog('Silence timeout after', recordedSamples.length, 'frames');
+                isRecording = false;
+                analyzeRecordedAudio();
+                return;
+              }
+            } else {
+              silenceCount = 0;
+            }
+            
+            // Max recording time safety
+            if (Date.now() - recordingStartTime > MAX_RECORDING_SECONDS * 1000) {
+              debugLog('Max recording time reached');
+              isRecording = false;
+              analyzeRecordedAudio();
+              return;
+            }
+          }
+        };
+        
+        // Connect: mic -> analyser (for spectrum) and mic -> worklet (for samples)
+        const source = audioContext.createMediaStreamSource(micStream);
+        source.connect(analyser);
+        source.connect(audioWorkletNode);
+        
+        debugLog('Analysis started with AudioWorklet - listening for markers');
+        
+      } catch (err) {
+        console.error('AudioWorklet setup failed:', err);
+        debugLog('AudioWorklet failed, falling back to ScriptProcessor');
+        startAnalysisFallback();
+      }
+    }
+    
+    // Fallback for browsers that don't support AudioWorklet
+    function startAnalysisFallback() {
+      const bufferSize = FREQUENCY_CONFIG.fftSize;
+      const spectrumArray = new Uint8Array(analyser.frequencyBinCount);
+      
+      let isRecording = false;
+      let markerConfirmCount = 0;
+      let silenceCount = 0;
+      let recordingStartTime = 0;
+      
+      // ScriptProcessorNode fallback (deprecated but widely supported)
       const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
       
       processor.onaudioprocess = (e) => {
@@ -1422,7 +1580,6 @@
         
         const inputData = e.inputBuffer.getChannelData(0);
         
-        // Get spectrum for marker detection
         analyser.getByteFrequencyData(spectrumArray);
         updateSpectrumVisualization(spectrumArray);
         
@@ -1430,7 +1587,6 @@
         const hasSignal = energy > FREQUENCY_CONFIG.signalThreshold * 255;
         
         if (!isRecording) {
-          // Look for start marker to begin recording
           if (hasSignal && detectMarkerPattern(spectrumArray, true)) {
             markerConfirmCount++;
             if (markerConfirmCount >= 3) {
@@ -1449,28 +1605,21 @@
             markerConfirmCount = Math.max(0, markerConfirmCount - 1);
           }
         } else {
-          // Recording in progress - store raw samples
           const samples = new Float32Array(inputData.length);
           samples.set(inputData);
           recordedSamples.push(samples);
           
-          // Update UI with recording progress
           const recordedMs = (recordedSamples.length * bufferSize / audioContext.sampleRate) * 1000;
           receiveState.buffer = [`Recording: ${(recordedMs/1000).toFixed(1)}s`];
           updateReceivingCard();
           
-          // Check for end marker
           if (hasSignal && detectMarkerPattern(spectrumArray, false)) {
             markerConfirmCount++;
             if (markerConfirmCount >= 3) {
               debugLog('End marker detected after', recordedSamples.length, 'frames');
               isRecording = false;
               markerConfirmCount = 0;
-              
-              // Disconnect processor during analysis
               processor.disconnect();
-              
-              // Run offline analysis
               analyzeRecordedAudio();
               return;
             }
@@ -1478,13 +1627,11 @@
             markerConfirmCount = Math.max(0, markerConfirmCount - 1);
           }
           
-          // Silence timeout
           if (!hasSignal) {
             silenceCount++;
             if (silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
               debugLog('Silence timeout after', recordedSamples.length, 'frames');
               isRecording = false;
-              
               processor.disconnect();
               analyzeRecordedAudio();
               return;
@@ -1493,7 +1640,6 @@
             silenceCount = 0;
           }
           
-          // Max recording time safety
           if (Date.now() - recordingStartTime > MAX_RECORDING_SECONDS * 1000) {
             debugLog('Max recording time reached');
             isRecording = false;
@@ -1504,13 +1650,12 @@
         }
       };
       
-      // Connect: mic -> analyser (for spectrum) and mic -> processor (for samples)
       const source = audioContext.createMediaStreamSource(micStream);
       source.connect(analyser);
       source.connect(processor);
-      processor.connect(audioContext.destination);  // Required even if we don't output
+      processor.connect(audioContext.destination);
       
-      debugLog('Analysis started - listening for markers');
+      debugLog('Analysis started with ScriptProcessor fallback - listening for markers');
     }
     
     // ============================================================
