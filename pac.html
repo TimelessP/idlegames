@@ -864,24 +864,30 @@
     // Inspired by ggwave: multi-frequency FSK with proper framing
     // ============================================================
 
-    const PROTOCOL_VERSION = 11;  // v11: ggwave-inspired 6-tone protocol with spectrum accumulation
+    const PROTOCOL_VERSION = 12;  // v12: ggwave-style batch recording with offline analysis
     const STORAGE_KEY = 'pac-timeline';
     const SETTINGS_KEY = 'pac-settings';
 
     // ============================================================
-    // PAC Protocol v11 - ggwave-inspired multi-frequency FSK
+    // PAC Protocol v12 - ggwave-style batch recording & offline analysis
     // 
-    // Key changes from v10:
-    // - 1024 FFT (21ms frames instead of 85ms)
-    // - 16 frequencies per nibble band (4 bits per band)
-    // - 6 tones per frame = 3 bytes per frame
-    // - Frequency spacing: 46.875 Hz (1 bin at 48kHz/1024)
-    // - Multiple frames per TX for energy accumulation
-    // - Spectral pattern matching for markers (not timing)
-    // - Triple redundancy FEC with bit voting
+    // Key insight: Record raw audio during reception, analyze AFTER.
+    // This allows trying multiple frame alignments like ggwave does.
+    // 
+    // Architecture:
+    // - ScriptProcessorNode captures raw audio samples
+    // - Start marker triggers recording
+    // - End marker or silence timeout stops recording
+    // - Offline analysis: compute FFT at multiple alignments
+    // - Find best alignment, decode nibbles from accumulated spectra
+    // 
+    // Frequency encoding (same as v11):
+    // - 1024 FFT (21ms frames, 46.875 Hz per bin)
+    // - 6 nibble slots × 16 frequencies = 3 bytes per Tx
+    // - framesPerTx repetition for energy accumulation
     // ============================================================
     const FREQUENCY_CONFIG = {
-      version: 11,
+      version: 12,
       
       // Sample rate and FFT
       sampleRate: 48000,
@@ -1340,217 +1346,419 @@
     }
 
     // ============================================================
-    // ggwave-style Multi-Frequency FSK Analysis & Reception
+    // ggwave-style Batch Recording & Offline Analysis
+    // 
+    // Key insight: Record raw audio during reception, analyze AFTER
+    // transmission ends. This allows trying multiple frame alignments
+    // to find optimal decode, just like ggwave does in C.
     // ============================================================
     let analysisFrame = null;
     
-    // Detect start marker: even bins high, odd bins low (16-bit comb pattern)
-    function detectStartMarker(spectrum) {
-      const baseBin = FREQUENCY_CONFIG.baseBin;
-      const markerBits = FREQUENCY_CONFIG.markerBits;
-      const threshold = FREQUENCY_CONFIG.markerThreshold;
-      
-      let evenSum = 0, oddSum = 0;
-      for (let i = 0; i < markerBits; i++) {
-        const bin = baseBin + i;
-        if (i % 2 === 0) {
-          evenSum += spectrum[bin];
-        } else {
-          oddSum += spectrum[bin];
-        }
-      }
-      
-      // Start marker: even bins should be much stronger than odd
-      const ratio = evenSum / (oddSum + 1);
-      return ratio > threshold;
-    }
+    // Raw audio recording buffer (ggwave stores amplitudeRecorded)
+    let recordedSamples = [];
+    const MAX_RECORDING_SECONDS = 30;  // Max 30 seconds of audio
+    const SAMPLES_PER_FRAME = FREQUENCY_CONFIG.fftSize;
     
-    // Detect end marker: odd bins high, even bins low (inverted pattern)
-    function detectEndMarker(spectrum) {
+    // Simple energy-based signal detection for marker triggering
+    function detectSignalEnergy(dataArray) {
       const baseBin = FREQUENCY_CONFIG.baseBin;
-      const markerBits = FREQUENCY_CONFIG.markerBits;
-      const threshold = FREQUENCY_CONFIG.markerThreshold;
-      
-      let evenSum = 0, oddSum = 0;
-      for (let i = 0; i < markerBits; i++) {
-        const bin = baseBin + i;
-        if (i % 2 === 0) {
-          evenSum += spectrum[bin];
-        } else {
-          oddSum += spectrum[bin];
-        }
-      }
-      
-      // End marker: odd bins should be much stronger than even
-      const ratio = oddSum / (evenSum + 1);
-      return ratio > threshold;
-    }
-    
-    // Check if there's significant signal in our frequency range
-    function hasSignal(spectrum) {
-      const baseBin = FREQUENCY_CONFIG.baseBin;
-      const totalBins = FREQUENCY_CONFIG.nibblesPerFrame * FREQUENCY_CONFIG.binsPerNibble;
-      const threshold = FREQUENCY_CONFIG.signalThreshold * 255;
-      
-      let maxLevel = 0;
+      const totalBins = FREQUENCY_CONFIG.nibbleSlots * FREQUENCY_CONFIG.frequenciesPerNibble;
+      let sum = 0;
       for (let i = 0; i < totalBins; i++) {
-        maxLevel = Math.max(maxLevel, spectrum[baseBin + i]);
+        sum += dataArray[baseBin + i];
       }
-      return maxLevel > threshold;
+      return sum / totalBins;
     }
     
-    // Decode 6 nibbles (3 bytes) from accumulated spectrum
-    function decodeFrame(spectrum) {
+    // Detect marker pattern in spectrum (for triggering recording start/stop)
+    function detectMarkerPattern(dataArray, isStartMarker) {
       const baseBin = FREQUENCY_CONFIG.baseBin;
-      const binsPerNibble = FREQUENCY_CONFIG.binsPerNibble;
-      const nibblesPerFrame = FREQUENCY_CONFIG.nibblesPerFrame;
+      const markerBits = FREQUENCY_CONFIG.markerBits;
       
-      const nibbles = [];
-      
-      for (let slot = 0; slot < nibblesPerFrame; slot++) {
-        const slotStart = baseBin + slot * binsPerNibble;
-        
-        // Find the peak bin in this slot
-        let maxLevel = 0;
-        let maxBin = 0;
-        for (let i = 0; i < binsPerNibble; i++) {
-          const level = spectrum[slotStart + i];
-          if (level > maxLevel) {
-            maxLevel = level;
-            maxBin = i;
-          }
+      let evenSum = 0, oddSum = 0;
+      for (let i = 0; i < markerBits; i++) {
+        const level = dataArray[baseBin + i];
+        if (i % 2 === 0) {
+          evenSum += level;
+        } else {
+          oddSum += level;
         }
-        
-        nibbles.push(maxBin);  // 0-15
       }
       
-      return nibbles;
-    }
-    
-    // Accumulate spectrum over multiple frames for better detection
-    function accumulateSpectrum(current, accumulated) {
-      if (!accumulated) {
-        return current.slice();
-      }
-      const result = new Float32Array(current.length);
-      for (let i = 0; i < current.length; i++) {
-        result[i] = accumulated[i] + current[i];
-      }
-      return result;
+      // Start marker: even bins high, odd low
+      // End marker: odd bins high, even low
+      const ratio = isStartMarker 
+        ? evenSum / (oddSum + 1)
+        : oddSum / (evenSum + 1);
+      
+      return ratio > FREQUENCY_CONFIG.markerThreshold;
     }
 
     function startAnalysis() {
-      const bufferLength = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
+      // We need access to raw audio samples for offline analysis
+      // Create a ScriptProcessorNode (or AudioWorklet) to capture samples
+      const bufferSize = FREQUENCY_CONFIG.fftSize;
       
-      // ggwave-style state
-      let accumulatedSpectrum = null;
-      let framesAccumulated = 0;
+      // For spectrum visualization during recording
+      const spectrumArray = new Uint8Array(analyser.frequencyBinCount);
+      
+      // Recording state
+      let isRecording = false;
       let markerConfirmCount = 0;
-      let receivedData = [];  // Array of decoded byte-triplets
+      let silenceCount = 0;
+      let recordingStartTime = 0;
       
-      function analyze() {
-        if (!isListening) return;
-        
-        // Skip analysis while transmitting
-        if (isTransmitting) {
-          analysisFrame = requestAnimationFrame(analyze);
-          accumulatedSpectrum = null;
-          framesAccumulated = 0;
+      // Create ScriptProcessorNode to capture raw samples
+      // (Yes, it's deprecated, but AudioWorklet requires a separate file)
+      const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+      
+      processor.onaudioprocess = (e) => {
+        if (!isListening || isTransmitting) {
+          isRecording = false;
+          recordedSamples = [];
           markerConfirmCount = 0;
           return;
         }
         
-        analyser.getByteFrequencyData(dataArray);
-        updateSpectrumVisualization(dataArray);
+        const inputData = e.inputBuffer.getChannelData(0);
         
-        // Convert to float for accumulation
-        const spectrum = new Float32Array(dataArray.length);
-        for (let i = 0; i < dataArray.length; i++) {
-          spectrum[i] = dataArray[i];
-        }
+        // Get spectrum for marker detection
+        analyser.getByteFrequencyData(spectrumArray);
+        updateSpectrumVisualization(spectrumArray);
         
-        const signalPresent = hasSignal(spectrum);
+        const energy = detectSignalEnergy(spectrumArray);
+        const hasSignal = energy > FREQUENCY_CONFIG.signalThreshold * 255;
         
-        if (receiveState.mode === 'idle') {
-          // IDLE: Look for start marker pattern
-          if (signalPresent && detectStartMarker(spectrum)) {
+        if (!isRecording) {
+          // Look for start marker to begin recording
+          if (hasSignal && detectMarkerPattern(spectrumArray, true)) {
             markerConfirmCount++;
-            if (markerConfirmCount >= 2) {
-              debugLog('Start marker detected!');
-              receiveState.mode = 'receiving';
-              receiveState.dataFrames = [];
-              receiveState.silenceCount = 0;
-              accumulatedSpectrum = null;
-              framesAccumulated = 0;
-              receivedData = [];
+            if (markerConfirmCount >= 3) {
+              debugLog('Start marker detected - beginning recording');
+              isRecording = true;
+              recordedSamples = [];
+              recordingStartTime = Date.now();
+              silenceCount = 0;
               markerConfirmCount = 0;
               
-              updateStatus('transmitting', 'Receiving...');
+              receiveState.mode = 'recording';
+              updateStatus('transmitting', 'Recording...');
               showReceivingCard();
             }
           } else {
-            markerConfirmCount = 0;
+            markerConfirmCount = Math.max(0, markerConfirmCount - 1);
           }
-        } else if (receiveState.mode === 'receiving') {
-          if (signalPresent) {
-            receiveState.silenceCount = 0;
-            
-            // Check for end marker
-            if (detectEndMarker(spectrum)) {
-              markerConfirmCount++;
-              if (markerConfirmCount >= 2) {
-                debugLog('End marker detected! Frames received:', receivedData.length);
-                finishReceivingGGwave(receivedData);
-                return;
-              }
-            } else {
+        } else {
+          // Recording in progress - store raw samples
+          const samples = new Float32Array(inputData.length);
+          samples.set(inputData);
+          recordedSamples.push(samples);
+          
+          // Update UI with recording progress
+          const recordedMs = (recordedSamples.length * bufferSize / audioContext.sampleRate) * 1000;
+          receiveState.buffer = [`Recording: ${(recordedMs/1000).toFixed(1)}s`];
+          updateReceivingCard();
+          
+          // Check for end marker
+          if (hasSignal && detectMarkerPattern(spectrumArray, false)) {
+            markerConfirmCount++;
+            if (markerConfirmCount >= 3) {
+              debugLog('End marker detected after', recordedSamples.length, 'frames');
+              isRecording = false;
               markerConfirmCount = 0;
               
-              // Accumulate spectrum
-              accumulatedSpectrum = accumulateSpectrum(spectrum, accumulatedSpectrum);
-              framesAccumulated++;
+              // Disconnect processor during analysis
+              processor.disconnect();
               
-              // After framesPerTx frames, decode and reset
-              if (framesAccumulated >= FREQUENCY_CONFIG.framesPerTx) {
-                const nibbles = decodeFrame(accumulatedSpectrum);
-                const bytes = nibblesToBytes(nibbles);
-                receivedData.push(...bytes);
-                
-                debugLog('Decoded 3 bytes:', bytes.map(b => b.toString(16).padStart(2,'0')).join(' '),
-                         'Total:', receivedData.length, 'bytes');
-                
-                // Update display
-                receiveState.buffer = receivedData;
-                updateReceivingCard();
-                
-                accumulatedSpectrum = null;
-                framesAccumulated = 0;
-              }
-            }
-          } else {
-            receiveState.silenceCount++;
-            if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
-              debugLog('Silence timeout, finishing with', receivedData.length, 'bytes');
-              finishReceivingGGwave(receivedData);
+              // Run offline analysis
+              analyzeRecordedAudio();
               return;
             }
+          } else {
+            markerConfirmCount = Math.max(0, markerConfirmCount - 1);
+          }
+          
+          // Silence timeout
+          if (!hasSignal) {
+            silenceCount++;
+            if (silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
+              debugLog('Silence timeout after', recordedSamples.length, 'frames');
+              isRecording = false;
+              
+              processor.disconnect();
+              analyzeRecordedAudio();
+              return;
+            }
+          } else {
+            silenceCount = 0;
+          }
+          
+          // Max recording time safety
+          if (Date.now() - recordingStartTime > MAX_RECORDING_SECONDS * 1000) {
+            debugLog('Max recording time reached');
+            isRecording = false;
+            processor.disconnect();
+            analyzeRecordedAudio();
+            return;
+          }
+        }
+      };
+      
+      // Connect: mic -> analyser (for spectrum) and mic -> processor (for samples)
+      const source = audioContext.createMediaStreamSource(micStream);
+      source.connect(analyser);
+      source.connect(processor);
+      processor.connect(audioContext.destination);  // Required even if we don't output
+      
+      debugLog('Analysis started - listening for markers');
+    }
+    
+    // ============================================================
+    // Offline Analysis (ggwave-style batch processing)
+    // ============================================================
+    function analyzeRecordedAudio() {
+      debugLog('Beginning offline analysis of', recordedSamples.length, 'frames');
+      updateStatus('transmitting', 'Analyzing...');
+      
+      if (recordedSamples.length < 10) {
+        debugLog('Recording too short');
+        finishReceivingWithError('Recording too short');
+        return;
+      }
+      
+      // Flatten recorded samples into single buffer
+      const totalSamples = recordedSamples.reduce((sum, arr) => sum + arr.length, 0);
+      const allSamples = new Float32Array(totalSamples);
+      let offset = 0;
+      for (const chunk of recordedSamples) {
+        allSamples.set(chunk, offset);
+        offset += chunk.length;
+      }
+      
+      debugLog('Total samples:', totalSamples, '(', (totalSamples / audioContext.sampleRate).toFixed(2), 'seconds)');
+      
+      // Use setTimeout to avoid blocking UI during analysis
+      setTimeout(() => {
+        const result = runOfflineAnalysis(allSamples);
+        
+        if (result && result.length > 0) {
+          debugLog('Offline analysis decoded', result.length, 'bytes');
+          receiveState.buffer = result;
+          receiveState.mode = 'idle';
+          finishReceiving();
+        } else {
+          finishReceivingWithError('Decode failed');
+        }
+        
+        // Clear recording buffer
+        recordedSamples = [];
+        
+        // Restart listening
+        if (isListening) {
+          startAnalysis();
+        }
+      }, 10);
+    }
+    
+    // ggwave-style offline FFT analysis with alignment search
+    function runOfflineAnalysis(samples) {
+      const sampleRate = audioContext.sampleRate;
+      const fftSize = FREQUENCY_CONFIG.fftSize;
+      const framesPerTx = FREQUENCY_CONFIG.framesPerTx;
+      const stepsPerFrame = 16;  // Try 16 sub-frame alignments like ggwave
+      const step = Math.floor(fftSize / stepsPerFrame);
+      
+      debugLog('Offline analysis: fftSize=', fftSize, 'framesPerTx=', framesPerTx, 'step=', step);
+      
+      // Create offline FFT analyzer
+      const offlineCtx = new OfflineAudioContext(1, fftSize, sampleRate);
+      
+      // Pre-compute all spectra at step resolution
+      const spectra = [];
+      const numSteps = Math.floor((samples.length - fftSize) / step);
+      
+      debugLog('Computing', numSteps, 'spectra...');
+      
+      for (let i = 0; i < numSteps; i++) {
+        const startIdx = i * step;
+        const frameData = samples.slice(startIdx, startIdx + fftSize);
+        const spectrum = computeFFTSpectrum(frameData, fftSize);
+        spectra.push(spectrum);
+      }
+      
+      debugLog('Spectra computed, searching for best alignment...');
+      
+      // Try different starting alignments (like ggwave's loop)
+      let bestResult = null;
+      let bestScore = 0;
+      
+      // Find where start marker ends (search first portion of spectra)
+      const markerSearchEnd = Math.min(spectra.length, stepsPerFrame * FREQUENCY_CONFIG.markerFrames * 2);
+      let dataStartStep = 0;
+      
+      for (let i = 0; i < markerSearchEnd; i++) {
+        if (!isStartMarkerSpectrum(spectra[i]) && i > stepsPerFrame) {
+          dataStartStep = i;
+          break;
+        }
+      }
+      
+      debugLog('Data appears to start at step', dataStartStep);
+      
+      // Try multiple alignments
+      for (let alignOffset = 0; alignOffset < stepsPerFrame; alignOffset++) {
+        const result = tryDecodeFromOffset(spectra, dataStartStep + alignOffset, stepsPerFrame, framesPerTx);
+        
+        if (result && result.score > bestScore) {
+          bestScore = result.score;
+          bestResult = result.data;
+          debugLog('Better alignment found at offset', alignOffset, 'score:', result.score);
+        }
+      }
+      
+      return bestResult;
+    }
+    
+    // Compute FFT spectrum from time-domain samples
+    function computeFFTSpectrum(samples, fftSize) {
+      // Apply Hann window
+      const windowed = new Float32Array(fftSize);
+      for (let i = 0; i < fftSize; i++) {
+        const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / fftSize);
+        windowed[i] = (samples[i] || 0) * window;
+      }
+      
+      // Simple DFT for the bins we care about
+      // (Full FFT would be faster but this is clearer and we only need ~100 bins)
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      const numBins = FREQUENCY_CONFIG.nibbleSlots * FREQUENCY_CONFIG.frequenciesPerNibble;
+      const spectrum = new Float32Array(baseBin + numBins + 16);
+      
+      for (let k = baseBin; k < baseBin + numBins + 16; k++) {
+        let real = 0, imag = 0;
+        const freq = 2 * Math.PI * k / fftSize;
+        for (let n = 0; n < fftSize; n++) {
+          real += windowed[n] * Math.cos(freq * n);
+          imag -= windowed[n] * Math.sin(freq * n);
+        }
+        spectrum[k] = Math.sqrt(real * real + imag * imag);
+      }
+      
+      return spectrum;
+    }
+    
+    // Check if spectrum looks like start marker
+    function isStartMarkerSpectrum(spectrum) {
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      const markerBits = FREQUENCY_CONFIG.markerBits;
+      
+      let evenSum = 0, oddSum = 0;
+      for (let i = 0; i < markerBits; i++) {
+        if (i % 2 === 0) {
+          evenSum += spectrum[baseBin + i] || 0;
+        } else {
+          oddSum += spectrum[baseBin + i] || 0;
+        }
+      }
+      
+      return evenSum > oddSum * FREQUENCY_CONFIG.markerThreshold;
+    }
+    
+    // Check if spectrum looks like end marker
+    function isEndMarkerSpectrum(spectrum) {
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      const markerBits = FREQUENCY_CONFIG.markerBits;
+      
+      let evenSum = 0, oddSum = 0;
+      for (let i = 0; i < markerBits; i++) {
+        if (i % 2 === 0) {
+          evenSum += spectrum[baseBin + i] || 0;
+        } else {
+          oddSum += spectrum[baseBin + i] || 0;
+        }
+      }
+      
+      return oddSum > evenSum * FREQUENCY_CONFIG.markerThreshold;
+    }
+    
+    // Try decoding from a specific offset
+    function tryDecodeFromOffset(spectra, startStep, stepsPerFrame, framesPerTx) {
+      const stepsPerTx = stepsPerFrame * framesPerTx;
+      const nibbleSlots = FREQUENCY_CONFIG.nibbleSlots;
+      const binsPerNibble = FREQUENCY_CONFIG.binsPerNibble;
+      const baseBin = FREQUENCY_CONFIG.baseBin;
+      
+      const decodedBytes = [];
+      let totalConfidence = 0;
+      let txCount = 0;
+      
+      for (let txStart = startStep; txStart + stepsPerTx <= spectra.length; txStart += stepsPerTx) {
+        // Check for end marker
+        const midSpectrum = spectra[txStart + Math.floor(stepsPerTx / 2)];
+        if (midSpectrum && isEndMarkerSpectrum(midSpectrum)) {
+          debugLog('End marker found at tx', txCount);
+          break;
+        }
+        
+        // Accumulate spectra over this Tx period (like ggwave)
+        const accumulated = new Float32Array(spectra[0].length);
+        for (let s = 0; s < stepsPerTx && txStart + s < spectra.length; s++) {
+          const spec = spectra[txStart + s];
+          for (let i = 0; i < accumulated.length; i++) {
+            accumulated[i] += spec[i] || 0;
           }
         }
         
-        analysisFrame = requestAnimationFrame(analyze);
+        // Decode 6 nibbles from accumulated spectrum
+        const nibbles = [];
+        let frameConfidence = 0;
+        
+        for (let slot = 0; slot < nibbleSlots; slot++) {
+          const slotStart = baseBin + slot * binsPerNibble;
+          let maxVal = 0, maxBin = 0, secondMax = 0;
+          
+          for (let b = 0; b < binsPerNibble; b++) {
+            const val = accumulated[slotStart + b] || 0;
+            if (val > maxVal) {
+              secondMax = maxVal;
+              maxVal = val;
+              maxBin = b;
+            } else if (val > secondMax) {
+              secondMax = val;
+            }
+          }
+          
+          nibbles.push(maxBin);
+          // Confidence: how much stronger is peak vs second peak
+          frameConfidence += (secondMax > 0) ? (maxVal / secondMax) : maxVal;
+        }
+        
+        // Convert nibbles to bytes
+        const bytes = nibblesToBytes(nibbles);
+        decodedBytes.push(...bytes);
+        totalConfidence += frameConfidence;
+        txCount++;
       }
       
-      analyze();
+      if (decodedBytes.length === 0) {
+        return null;
+      }
+      
+      return {
+        data: decodedBytes,
+        score: totalConfidence / txCount
+      };
     }
     
-    function finishReceivingGGwave(receivedData) {
-      debugLog('Processing', receivedData.length, 'received bytes');
-      
-      receiveState.buffer = receivedData;
+    function finishReceivingWithError(message) {
+      debugLog('Receive error:', message);
       receiveState.mode = 'idle';
+      convertReceivingCardToFailed([], message);
       
-      finishReceiving();
+      // Restart listening
+      if (isListening) {
+        setTimeout(() => startAnalysis(), 100);
+      }
     }
     
     function updateSpectrumVisualization(dataArray) {
@@ -1711,12 +1919,12 @@
       const bytes = new TextEncoder().encode(json);
       const checksum = crc8(bytes);
       
-      // Header: magic (0xAC), version (0x0B for v11), length (2 bytes), checksum
+      // Header: magic (0xAC), version (0x0C for v12), length (2 bytes), checksum
       const lenLow = bytes.length & 0xFF;
       const lenHigh = (bytes.length >> 8) & 0xFF;
       
       // Build raw packet: header + data
-      const rawPacket = [0xAC, 0x0B, lenLow, lenHigh, checksum, ...bytes];
+      const rawPacket = [0xAC, 0x0C, lenLow, lenHigh, checksum, ...bytes];
       
       // Apply FEC encoding (3x redundancy)
       const encoded = fecEncode(rawPacket);
@@ -1766,7 +1974,7 @@
       }
       
       const version = decoded[1];
-      if (version < 0x07 || version > 0x0B) {
+      if (version < 0x07 || version > 0x0C) {
         debugLog('Unknown version:', version?.toString(16));
         return null;
       }
