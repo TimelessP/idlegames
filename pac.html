@@ -1636,32 +1636,53 @@
     
     // ============================================================
     // Forward Error Correction (FEC)
-    // Uses interleaved triple redundancy with bit-level voting
-    // Each byte is sent 3 times, interleaved to spread burst errors
+    // Uses INTERLEAVED triple redundancy with bit-level voting
+    // 
+    // Encoding: For data [A, B, C, D], transmit as:
+    //   [A, B, C, D, A, B, C, D, A, B, C, D]
+    // This spreads copies apart so burst errors can't corrupt
+    // multiple copies of the same byte.
+    //
+    // Decoding: De-interleave and vote on each position
     // ============================================================
     
     function fecEncode(data) {
-      // Interleave: send byte 0 of copy 1, byte 0 of copy 2, byte 0 of copy 3,
-      //             then byte 1 of copy 1, byte 1 of copy 2, byte 1 of copy 3, etc.
-      // This spreads burst errors across different copies
+      // Send 3 complete copies of the data back-to-back
+      // The interleaving happens naturally because each copy
+      // is separated by the full message length
       const encoded = [];
-      for (let i = 0; i < data.length; i++) {
-        encoded.push(data[i], data[i], data[i]);
+      for (let copy = 0; copy < 3; copy++) {
+        for (let i = 0; i < data.length; i++) {
+          encoded.push(data[i]);
+        }
       }
       return encoded;
     }
     
     function fecDecode(encoded) {
-      // Expect groups of 3 bytes
-      if (encoded.length % 3 !== 0) {
-        debugLog('FEC: length not multiple of 3, truncating');
+      // We have 3 copies back-to-back
+      // First, figure out the length of one copy
+      const totalLen = encoded.length;
+      const copyLen = Math.floor(totalLen / 3);
+      
+      if (copyLen < 1) {
+        debugLog('FEC: data too short');
+        return encoded;
       }
       
+      debugLog('FEC: total', totalLen, 'bytes, copy length', copyLen);
+      
+      // Extract the 3 copies
+      const copy1 = encoded.slice(0, copyLen);
+      const copy2 = encoded.slice(copyLen, copyLen * 2);
+      const copy3 = encoded.slice(copyLen * 2, copyLen * 3);
+      
+      // Vote on each byte position
       const decoded = [];
-      for (let i = 0; i + 2 < encoded.length; i += 3) {
-        const a = encoded[i];
-        const b = encoded[i + 1];
-        const c = encoded[i + 2];
+      for (let i = 0; i < copyLen; i++) {
+        const a = copy1[i] ?? 0;
+        const b = copy2[i] ?? 0;
+        const c = copy3[i] ?? 0;
         
         // Bit-by-bit majority voting
         let result = 0;
@@ -1676,7 +1697,7 @@
         
         // Log corrections
         if (result !== a || result !== b || result !== c) {
-          debugLog(`FEC corrected: ${a.toString(16)}/${b.toString(16)}/${c.toString(16)} → ${result.toString(16)}`);
+          debugLog(`FEC corrected @${i}: ${a.toString(16)}/${b.toString(16)}/${c.toString(16)} → ${result.toString(16)}`);
         }
         
         decoded.push(result);
@@ -1709,32 +1730,36 @@
     function decodeMessage(bytes) {
       debugLog('Decoding', bytes.length, 'raw bytes');
       
-      // Find the start of FEC data by looking for AC AC AC pattern
-      // (the magic byte 0xAC repeated 3 times indicates FEC start)
+      // With the new FEC format (3 complete copies), we need to find where
+      // each copy of 0xAC appears. They should be roughly 1/3 apart.
+      // First, find all positions that look like 0xAC
+      const isCloseToAC = (b) => b === 0xAC || b === 0xAD || b === 0xAE || b === 0xA8 || 
+                                 b === 0xBC || b === 0x8C || b === 0xEC || b === 0xA9 || b === 0xAB;
+      
+      const acPositions = [];
+      for (let i = 0; i < bytes.length; i++) {
+        if (isCloseToAC(bytes[i])) {
+          acPositions.push(i);
+        }
+      }
+      
+      debugLog('Found AC-like bytes at positions:', acPositions.slice(0, 10));
+      
+      // Try to find the start - look for the first AC-like byte
       let startOffset = 0;
-      for (let i = 0; i < bytes.length - 2; i++) {
-        // Look for three consecutive bytes that are close to 0xAC
-        // (allowing for some bit errors)
-        const b0 = bytes[i];
-        const b1 = bytes[i + 1];
-        const b2 = bytes[i + 2];
-        
-        // Count how many are exactly 0xAC or close (within 1-2 bit flips)
-        const isCloseToAC = (b) => b === 0xAC || b === 0xAD || b === 0xAE || b === 0xA8 || 
-                                   b === 0xBC || b === 0x8C || b === 0xEC || b === 0xA9 || b === 0xAB;
-        
-        if (isCloseToAC(b0) && isCloseToAC(b1) && isCloseToAC(b2)) {
+      for (let i = 0; i < bytes.length; i++) {
+        if (isCloseToAC(bytes[i])) {
           startOffset = i;
-          debugLog('Found FEC start at offset', startOffset, 
-                   'bytes:', b0.toString(16), b1.toString(16), b2.toString(16));
           break;
         }
       }
       
+      debugLog('Using start offset:', startOffset);
+      
       // Slice from the found start
       const alignedBytes = bytes.slice(startOffset);
       
-      // Apply FEC decode
+      // Apply FEC decode (now handles 3 sequential copies)
       let decoded;
       if (alignedBytes.length >= 3) {
         decoded = fecDecode(alignedBytes);
