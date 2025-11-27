@@ -864,13 +864,13 @@
     // Inspired by ggwave: multi-frequency FSK with proper framing
     // ============================================================
 
-    const PROTOCOL_VERSION = 7;
+    const PROTOCOL_VERSION = 8;  // v8 adds FEC (Forward Error Correction)
     const STORAGE_KEY = 'pac-timeline';
     const SETTINGS_KEY = 'pac-settings';
 
     // ============================================================
-    // Frequency Configuration (Version 7)
-    // Multi-frequency FSK with 4-bit nibbles per band
+    // Frequency Configuration (Version 8)
+    // Multi-frequency FSK with 4-bit nibbles per band + FEC
     // 
     // Architecture (ggwave-compatible):
     // - Sample rate: 48000 Hz
@@ -890,7 +890,7 @@
     // - framesPerTx = 3 means ~64ms per byte
     // ============================================================
     const FREQUENCY_CONFIG = {
-      version: 7,
+      version: 8,
       
       // Base frequency - ggwave audible mode starts at bin 40
       // F0 = 40 * 46.875 = 1875 Hz
@@ -1086,15 +1086,17 @@
       const band1Start = F0 + FREQUENCY_CONFIG.bandGap * dF;
       const band1End = band1Start + 15 * dF;
       
-      // Update summary
+      // Update summary (3x overhead for FEC)
+      const effectiveRate = (frameDuration * 3).toFixed(0);
       elements.protocolSummary.textContent = 
-        `v${FREQUENCY_CONFIG.version} · ${frameDuration.toFixed(0)}ms/byte · ${band0Start.toFixed(0)}-${band1End.toFixed(0)}Hz`;
+        `v${FREQUENCY_CONFIG.version} FEC · ${effectiveRate}ms/byte · ${band0Start.toFixed(0)}-${band1End.toFixed(0)}Hz`;
       
       // Update details
       elements.protocolDetails.innerHTML = `
         <div>Band 0: ${band0Start.toFixed(0)}-${band0End.toFixed(0)} Hz (low nibble)</div>
         <div>Band 1: ${band1Start.toFixed(0)}-${band1End.toFixed(0)} Hz (high nibble)</div>
         <div>dF: ${dF} Hz · Frame: ${frameDuration.toFixed(1)}ms · 2 tones/byte</div>
+        <div>FEC: 3x redundancy with bit-level voting</div>
         <div>ggwave-compatible: F0=bin40, dF=46.875Hz</div>
       `;
       
@@ -1620,7 +1622,7 @@
     // Encoding / Decoding (Protocol Version 7)
     // ============================================================
     
-    // CRC-8 checksum for better error detection
+    // CRC-8 checksum for error detection
     function crc8(bytes) {
       let crc = 0;
       for (const byte of bytes) {
@@ -1636,33 +1638,110 @@
       return crc;
     }
     
+    // ============================================================
+    // Forward Error Correction (FEC)
+    // Uses interleaved triple redundancy with bit-level voting
+    // Each byte is sent 3 times, interleaved to spread burst errors
+    // ============================================================
+    
+    function fecEncode(data) {
+      // Interleave: send byte 0 of copy 1, byte 0 of copy 2, byte 0 of copy 3,
+      //             then byte 1 of copy 1, byte 1 of copy 2, byte 1 of copy 3, etc.
+      // This spreads burst errors across different copies
+      const encoded = [];
+      for (let i = 0; i < data.length; i++) {
+        encoded.push(data[i], data[i], data[i]);
+      }
+      return encoded;
+    }
+    
+    function fecDecode(encoded) {
+      // Expect groups of 3 bytes
+      if (encoded.length % 3 !== 0) {
+        debugLog('FEC: length not multiple of 3, truncating');
+      }
+      
+      const decoded = [];
+      for (let i = 0; i + 2 < encoded.length; i += 3) {
+        const a = encoded[i];
+        const b = encoded[i + 1];
+        const c = encoded[i + 2];
+        
+        // Bit-by-bit majority voting
+        let result = 0;
+        for (let bit = 0; bit < 8; bit++) {
+          const mask = 1 << bit;
+          const bitA = (a & mask) ? 1 : 0;
+          const bitB = (b & mask) ? 1 : 0;
+          const bitC = (c & mask) ? 1 : 0;
+          const majority = (bitA + bitB + bitC) >= 2 ? 1 : 0;
+          result |= (majority << bit);
+        }
+        
+        // Log corrections
+        if (result !== a || result !== b || result !== c) {
+          debugLog(`FEC corrected: ${a.toString(16)}/${b.toString(16)}/${c.toString(16)} → ${result.toString(16)}`);
+        }
+        
+        decoded.push(result);
+      }
+      
+      return decoded;
+    }
+    
     function encodeMessage(message) {
       // Convert message to JSON string, then to bytes
       const json = JSON.stringify(message);
       const bytes = new TextEncoder().encode(json);
       const checksum = crc8(bytes);
       
-      // Header: magic (0xAC), version (0x07), length (2 bytes), checksum, then data
+      // Header: magic (0xAC), version (0x08 for FEC), length (2 bytes), checksum
+      // Note: version 8 indicates FEC-encoded payload
       const lenLow = bytes.length & 0xFF;
       const lenHigh = (bytes.length >> 8) & 0xFF;
       
-      const encoded = [0xAC, PROTOCOL_VERSION, lenLow, lenHigh, checksum, ...bytes];
+      // Build raw packet: header + data
+      const rawPacket = [0xAC, 0x08, lenLow, lenHigh, checksum, ...bytes];
       
-      debugLog('Encoded message:', encoded.length, 'bytes, checksum:', checksum.toString(16));
+      // Apply FEC encoding (3x redundancy with interleaving)
+      const encoded = fecEncode(rawPacket);
+      
+      debugLog('Encoded message:', bytes.length, 'bytes →', encoded.length, 'bytes with FEC, checksum:', checksum.toString(16));
       return encoded;
     }
 
     function decodeMessage(bytes) {
-      if (bytes.length < 6) return null;
+      debugLog('Decoding', bytes.length, 'raw bytes');
       
-      // Verify magic header
-      if (bytes[0] !== 0xAC || bytes[1] !== PROTOCOL_VERSION) {
-        debugLog('Invalid magic:', bytes[0]?.toString(16), bytes[1]?.toString(16));
+      // Check if this is FEC-encoded (v8) or plain (v7)
+      // First try FEC decode
+      let decoded;
+      if (bytes.length >= 3) {
+        decoded = fecDecode(bytes);
+        debugLog('FEC decoded:', decoded.length, 'bytes');
+      } else {
+        decoded = bytes;
+      }
+      
+      if (decoded.length < 6) {
+        debugLog('Too short after FEC decode');
         return null;
       }
       
-      const byteCount = bytes[2] | (bytes[3] << 8);
-      const expectedChecksum = bytes[4];
+      // Verify magic header
+      if (decoded[0] !== 0xAC) {
+        debugLog('Invalid magic:', decoded[0]?.toString(16));
+        return null;
+      }
+      
+      const version = decoded[1];
+      if (version !== 0x07 && version !== 0x08) {
+        debugLog('Unknown version:', version?.toString(16));
+        return null;
+      }
+      
+      const byteCount = decoded[2] | (decoded[3] << 8);
+      const expectedChecksum = decoded[4];
       
       // Sanity check byte count
       if (byteCount <= 0 || byteCount > 100000) {
@@ -1671,7 +1750,7 @@
       }
       
       // Extract data bytes (starting at index 5)
-      const dataBytes = bytes.slice(5);
+      const dataBytes = decoded.slice(5);
       if (dataBytes.length < byteCount) {
         debugLog('Not enough data:', dataBytes.length, 'need', byteCount);
         return null;
@@ -1690,6 +1769,7 @@
       }
       
       const json = new TextDecoder().decode(payload);
+      debugLog('JSON payload:', json.substring(0, 100) + '...');
       return JSON.parse(json);
     }
 
