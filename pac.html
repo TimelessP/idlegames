@@ -864,7 +864,7 @@
     // Inspired by ggwave: multi-frequency FSK with proper framing
     // ============================================================
 
-    const PROTOCOL_VERSION = 9;  // v9: 4-bit nibble protocol with wide spacing + FEC
+    const PROTOCOL_VERSION = 10;  // v10: 2-bit dibit protocol with very wide spacing + FEC
     const STORAGE_KEY = 'pac-timeline';
     const SETTINGS_KEY = 'pac-settings';
 
@@ -877,33 +877,33 @@
     // This means 4 bits (nibble) per frame instead of 8 bits (byte)
     // Slower but much more reliable!
     // 
-    // Band 0 (bits 0-1): 4 frequencies starting at 1500 Hz
-    // Band 1 (bits 2-3): 4 frequencies starting at 3000 Hz
-    // Frequency spacing: 250 Hz (very wide)
+    // Band 0 (bit 0): 2 frequencies starting at 1500 Hz
+    // Band 1 (bit 1): 2 frequencies starting at 3000 Hz
+    // Frequency spacing: 400 Hz (very wide - easy to distinguish)
     // 
-    // Each frame transmits 4 bits (one nibble)
-    // Two frames needed per byte
+    // Each frame transmits 2 bits (one dibit)
+    // Four frames needed per byte
     // ============================================================
     const FREQUENCY_CONFIG = {
-      version: 9,
+      version: 10,
       
       // Base frequencies for the two bands (well separated)
       baseFrequency: 1500,
       band1Frequency: 3000,  // 1500 Hz gap between bands
       
       // Frequency spacing - very wide for reliable discrimination
-      // 250 Hz = ~5 bins at 46.875 Hz resolution  
-      frequencySpacing: 250,
+      // 400 Hz between 0 and 1 in each band
+      frequencySpacing: 400,
       
-      // Only 4 frequencies per band (2 bits)
-      frequenciesPerBand: 4,
-      bitsPerBand: 2,
+      // Only 2 frequencies per band (1 bit each)
+      frequenciesPerBand: 2,
+      bitsPerBand: 1,
       
-      // Bits per frame (2 bands × 2 bits = 4 bits = 1 nibble)
-      bitsPerFrame: 4,
+      // Bits per frame (2 bands × 1 bit = 2 bits = one dibit)
+      bitsPerFrame: 2,
       
-      // Frame duration in ms - longer for reliability
-      frameDuration: 250,
+      // Frame duration in ms - can be shorter since easier detection
+      frameDuration: 150,
       
       // Sample rate
       sampleRate: 48000,
@@ -911,31 +911,31 @@
       // FFT size
       fftSize: 2048,  // Higher resolution for better peak detection
       
-      // Start marker pattern - distinctive tones
-      startMarkerPattern: [0x5, 0xA, 0x5, 0xA],  // Now 4-bit values
+      // Start marker pattern - alternating dibits
+      startMarkerPattern: [0x1, 0x2, 0x1, 0x2],  // Now 2-bit values (01, 10, 01, 10)
       
-      // End marker - 3x 0xF
-      endMarkerPattern: [0xF, 0xF, 0xF],
+      // End marker - 3x 0x3 (both bits high)
+      endMarkerPattern: [0x3, 0x3, 0x3],
       
       // Detection thresholds
       signalThreshold: 0.04,     // Lower threshold for better detection
-      dominanceRatio: 1.2,       // Peak must be 1.2x second-highest (relaxed)
+      dominanceRatio: 1.3,       // Peak must be 1.3x the other frequency
       adjacentBinWeight: 0.8,    // Look at adjacent bins
       
       // Frames of consistent marker to trigger reception
       markerConfirmFrames: 2,
       
       // Maximum silence frames before ending reception
-      maxSilenceFrames: 8,
+      maxSilenceFrames: 10,
       
       // Marker frames to skip at start of data reception
-      markerSkipFrames: 4,  // Skip more marker frames
+      markerSkipFrames: 4,
       
       // Extra marker frames to transmit beyond pattern length
-      extraMarkerFrames: 6,  // Transmit more marker frames
+      extraMarkerFrames: 6,
       
       // Gap between marker and data (ms)
-      markerDataGap: 150,  // Longer gap
+      markerDataGap: 100,
       
       // Gap after transmission ends (ms)
       postTransmitGap: 200,
@@ -964,7 +964,7 @@
     let receiveState = {
       mode: 'idle',  // 'idle', 'detecting', 'receiving'
       buffer: [],         // Assembled bytes
-      nibbleBuffer: [],   // Raw received nibbles (v9)
+      dibitBuffer: [],    // Raw received dibits (v10)
       markerCount: 0,
       silenceCount: 0,
       lastFrameTime: 0
@@ -978,6 +978,20 @@
         const lowNibble = nibbles[i] & 0x0F;
         const highNibble = nibbles[i + 1] & 0x0F;
         bytes.push(lowNibble | (highNibble << 4));
+      }
+      return bytes;
+    }
+    
+    // Convert array of dibits (2-bit values) to bytes
+    // Each group of 4 dibits makes one byte
+    function dibitsToBytes(dibits) {
+      const bytes = [];
+      for (let i = 0; i + 3 < dibits.length; i += 4) {
+        let byte = 0;
+        for (let j = 0; j < 4; j++) {
+          byte |= (dibits[i + j] & 0x03) << (j * 2);
+        }
+        bytes.push(byte);
       }
       return bytes;
     }
@@ -1093,18 +1107,18 @@
       const band0End = F0 + (numFreqs - 1) * dF;
       const band1End = F1 + (numFreqs - 1) * dF;
       
-      // v9: 2 nibbles per byte, with 3x FEC
-      const effectiveRate = (frameDuration * 2 * 3).toFixed(0);
+      // v10: 4 dibits per byte, with 3x FEC = 12 frames per byte
+      const effectiveRate = (frameDuration * 4 * 3).toFixed(0);
       elements.protocolSummary.textContent = 
         `v${FREQUENCY_CONFIG.version} FEC · ${effectiveRate}ms/byte · ${F0.toFixed(0)}-${band1End.toFixed(0)}Hz`;
       
       // Update details
       elements.protocolDetails.innerHTML = `
-        <div>Band 0: ${F0.toFixed(0)}-${band0End.toFixed(0)} Hz (2 bits)</div>
-        <div>Band 1: ${F1.toFixed(0)}-${band1End.toFixed(0)} Hz (2 bits)</div>
-        <div>dF: ${dF} Hz · Frame: ${frameDuration}ms · 4 bits/frame</div>
+        <div>Band 0: ${F0.toFixed(0)}-${band0End.toFixed(0)} Hz (1 bit)</div>
+        <div>Band 1: ${F1.toFixed(0)}-${band1End.toFixed(0)} Hz (1 bit)</div>
+        <div>dF: ${dF} Hz · Frame: ${frameDuration}ms · 2 bits/frame</div>
         <div>FEC: 3x redundancy with bit-level voting</div>
-        <div>Wide spacing for noise immunity</div>
+        <div>Very wide spacing (400 Hz) for reliable detection</div>
       `;
       
       // Toggle expansion on click
@@ -1302,6 +1316,7 @@
       receiveState = {
         mode: 'idle',
         buffer: [],
+        dibitBuffer: [],
         markerCount: 0,
         silenceCount: 0,
         lastFrameTime: 0
@@ -1334,16 +1349,16 @@
     }
     
     // Decode a frame from the current FFT data
-    // Returns { nibble: number, confidence: number } or null if no clear signal
-    // V9: Each frame decodes 4 bits (one nibble)
-    // Band 0 encodes bits 0-1, Band 1 encodes bits 2-3
+    // Returns { dibit: number, confidence: number } or null if no clear signal
+    // V10: Each frame decodes 2 bits (one dibit)
+    // Band 0 encodes bit 0, Band 1 encodes bit 1
     function decodeFrame(dataArray) {
       const dF = FREQUENCY_CONFIG.frequencySpacing;
       const F0 = FREQUENCY_CONFIG.baseFrequency;
       const F1 = FREQUENCY_CONFIG.band1Frequency;
       const threshold = FREQUENCY_CONFIG.signalThreshold * 255;
       const dominance = FREQUENCY_CONFIG.dominanceRatio;
-      const numFreqs = FREQUENCY_CONFIG.frequenciesPerBand;  // 4
+      const numFreqs = FREQUENCY_CONFIG.frequenciesPerBand;  // 2
       
       // Debug: check if audioContext sample rate matches config
       if (!window._rateChecked) {
@@ -1352,20 +1367,20 @@
                  'Config sampleRate:', FREQUENCY_CONFIG.sampleRate,
                  'FFT size:', analyser.fftSize,
                  'Hz per bin:', audioContext.sampleRate / analyser.fftSize);
-        debugLog('Band 0 freqs:', F0, F0+dF, F0+2*dF, F0+3*dF);
-        debugLog('Band 1 freqs:', F1, F1+dF, F1+2*dF, F1+3*dF);
+        debugLog('Band 0 freqs:', F0, F0+dF);
+        debugLog('Band 1 freqs:', F1, F1+dF);
       }
       
       const bandFreqs = [F0, F1];
-      let bitPairs = [];
+      let bits = [];
       let confidences = [];
       let bandDebug = [];
       
-      // Decode each band (2 bits each)
+      // Decode each band (1 bit each)
       for (let band = 0; band < 2; band++) {
         const bandStart = bandFreqs[band];
         
-        // Find the peak frequency in this band (only 4 frequencies)
+        // Get levels for both frequencies in this band
         let levels = [];
         
         for (let i = 0; i < numFreqs; i++) {
@@ -1385,10 +1400,10 @@
         levels.sort((a, b) => b.level - a.level);
         
         const maxLevel = levels[0].level;
-        const maxIdx = levels[0].idx;
-        const secondLevel = levels[1].level;
+        const maxIdx = levels[0].idx;  // 0 or 1
+        const otherLevel = levels[1].level;
         
-        bandDebug.push({ band, levels: levels.map(l => l.level.toFixed(0)), maxIdx, maxLevel: maxLevel.toFixed(0), secondLevel: secondLevel.toFixed(0) });
+        bandDebug.push({ band, levels: levels.map(l => l.level.toFixed(0)), bit: maxIdx, maxLevel: maxLevel.toFixed(0), otherLevel: otherLevel.toFixed(0) });
         
         // Check if signal is strong enough
         if (maxLevel < threshold) {
@@ -1396,36 +1411,35 @@
           return null;
         }
         
-        // Check if peak is dominant over second-highest (not average)
-        // This is more robust than comparing to average
-        if (secondLevel > 0 && maxLevel < secondLevel * dominance) {
-          if (window._debugDecode) debugLog('Band', band, 'not dominant:', maxLevel.toFixed(0), 'vs 2nd:', secondLevel.toFixed(0), 'need ratio:', dominance);
+        // Check if winner is dominant over loser
+        if (otherLevel > 0 && maxLevel < otherLevel * dominance) {
+          if (window._debugDecode) debugLog('Band', band, 'not dominant:', maxLevel.toFixed(0), 'vs other:', otherLevel.toFixed(0), 'need ratio:', dominance);
           return null;
         }
         
-        // Calculate confidence as ratio of peak to second
-        const confidence = secondLevel > 0 ? maxLevel / secondLevel : 10;
+        // Calculate confidence as ratio of winner to loser
+        const confidence = otherLevel > 0 ? maxLevel / otherLevel : 10;
         
-        bitPairs.push(maxIdx);  // 0-3 (2 bits)
+        bits.push(maxIdx);  // 0 or 1
         confidences.push(confidence);
       }
       
-      // Combine bit pairs into nibble: bits01 from band0, bits23 from band1
-      const nibble = bitPairs[0] | (bitPairs[1] << 2);
+      // Combine bits into dibit: bit0 from band0, bit1 from band1
+      const dibit = bits[0] | (bits[1] << 1);
       const avgConfidence = (confidences[0] + confidences[1]) / 2;
       
       // Debug output periodically
       if (window._debugDecode) {
-        debugLog('Decode bands:', JSON.stringify(bandDebug), '→ nibble:', nibble.toString(16));
+        debugLog('Decode bands:', JSON.stringify(bandDebug), '→ dibit:', dibit.toString(2).padStart(2,'0'));
       }
       
-      return { nibble, confidence: avgConfidence };
+      return { dibit, confidence: avgConfidence };
     }
     
     // Check if current frame matches start marker pattern
-    function isStartMarkerFrame(nibble, index) {
+    function isStartMarkerFrame(dibit, index) {
       const pattern = FREQUENCY_CONFIG.startMarkerPattern;
-      return nibble === pattern[index % pattern.length];
+      return dibit === pattern[index % pattern.length];
     }
     
     // Check if buffer ends with end marker
@@ -1552,10 +1566,6 @@
           }
         }
         
-        // Check specific bins for marker frequencies (0x5 = bits 01=1, bits 23=1)
-        const band0Bin = freqToBin(F0 + 1 * dF);  // bit pair 01
-        const band1Bin = freqToBin(F1 + 1 * dF);  // bit pair 01
-        
         debugLog('Frame check - decoded:', decoded, 
                  'MaxLevel:', maxLevel, 'at bin', maxBin, '(' + binToFreq(maxBin).toFixed(0) + 'Hz)',
                  'mode:', receiveState.mode);
@@ -1563,16 +1573,16 @@
       
       switch (receiveState.mode) {
         case 'idle':
-          // Look for start marker (now 4-bit nibbles)
+          // Look for start marker (2-bit dibits)
           if (decoded) {
-            if (isStartMarkerFrame(decoded.nibble, receiveState.markerCount)) {
+            if (isStartMarkerFrame(decoded.dibit, receiveState.markerCount)) {
               receiveState.markerCount++;
-              debugLog('Start marker frame', receiveState.markerCount, '- nibble:', decoded.nibble.toString(16));
+              debugLog('Start marker frame', receiveState.markerCount, '- dibit:', decoded.dibit.toString(2).padStart(2,'0'));
               
               if (receiveState.markerCount >= FREQUENCY_CONFIG.markerConfirmFrames) {
                 // Start marker confirmed, begin receiving
                 receiveState.mode = 'receiving';
-                receiveState.nibbleBuffer = [];  // Store nibbles
+                receiveState.dibitBuffer = [];  // Store dibits
                 receiveState.silenceCount = 0;
                 receiveState.markerCount = 0;
                 updateStatus('transmitting', 'Receiving...');
@@ -1580,7 +1590,7 @@
                 debugLog('Reception started');
               }
             } else {
-              // Wrong nibble for marker sequence, reset
+              // Wrong dibit for marker sequence, reset
               receiveState.markerCount = 0;
             }
           } else {
@@ -1592,35 +1602,35 @@
         case 'receiving':
           if (decoded) {
             // Skip initial marker frames still being transmitted
-            if (receiveState.nibbleBuffer.length < FREQUENCY_CONFIG.markerSkipFrames * 2 && 
-                FREQUENCY_CONFIG.startMarkerPattern.includes(decoded.nibble)) {
+            if (receiveState.dibitBuffer.length < FREQUENCY_CONFIG.markerSkipFrames && 
+                FREQUENCY_CONFIG.startMarkerPattern.includes(decoded.dibit)) {
               // Still in marker pattern, ignore
-              debugLog('Skipping marker nibble:', decoded.nibble.toString(16));
+              debugLog('Skipping marker dibit:', decoded.dibit.toString(2).padStart(2,'0'));
               break;
             }
             
             receiveState.silenceCount = 0;
-            receiveState.nibbleBuffer.push(decoded.nibble);
+            receiveState.dibitBuffer.push(decoded.dibit);
             
-            debugLog('Nibble received:', decoded.nibble.toString(16), 
-                     'Total nibbles:', receiveState.nibbleBuffer.length);
+            debugLog('Dibit received:', decoded.dibit.toString(2).padStart(2,'0'), 
+                     'Total dibits:', receiveState.dibitBuffer.length);
             
-            // Check for end marker (3x 0xF)
-            if (hasEndMarker(receiveState.nibbleBuffer)) {
+            // Check for end marker (3x 0x3)
+            if (hasEndMarker(receiveState.dibitBuffer)) {
               debugLog('End marker detected');
               // Remove end marker from buffer
               for (let i = 0; i < FREQUENCY_CONFIG.endMarkerPattern.length; i++) {
-                receiveState.nibbleBuffer.pop();
+                receiveState.dibitBuffer.pop();
               }
               
-              // Convert nibble buffer to byte buffer
-              receiveState.buffer = nibblesToBytes(receiveState.nibbleBuffer);
+              // Convert dibit buffer to byte buffer
+              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer);
               updateReceivingCard();
               finishReceiving();
             } else {
               // Update display periodically
-              if (receiveState.nibbleBuffer.length % 10 === 0) {
-                receiveState.buffer = nibblesToBytes(receiveState.nibbleBuffer);
+              if (receiveState.dibitBuffer.length % 20 === 0) {
+                receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer);
                 updateReceivingCard();
               }
             }
@@ -1630,7 +1640,7 @@
             
             if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
               debugLog('Silence timeout, finishing reception');
-              receiveState.buffer = nibblesToBytes(receiveState.nibbleBuffer || []);
+              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer || []);
               finishReceiving();
             }
           }
@@ -1829,7 +1839,7 @@
       }
       
       const version = decoded[1];
-      if (version !== 0x07 && version !== 0x08 && version !== 0x09) {
+      if (version < 0x07 || version > 0x0A) {
         debugLog('Unknown version:', version?.toString(16));
         return null;
       }
@@ -1928,35 +1938,45 @@
       }
     }
 
-    // Transmit one nibble (4 bits) using two frequency bands
-    // Each band encodes 2 bits (4 frequencies per band)
-    async function transmitNibble(nibble, volume) {
+    // Transmit one dibit (2 bits) using two frequency bands
+    // Each band encodes 1 bit (2 frequencies per band)
+    async function transmitDibit(dibit, volume) {
       const dF = FREQUENCY_CONFIG.frequencySpacing;
       const F0 = FREQUENCY_CONFIG.baseFrequency;
       const F1 = FREQUENCY_CONFIG.band1Frequency;
       const duration = FREQUENCY_CONFIG.frameDuration;
       
-      // Split nibble: low 2 bits to band 0, high 2 bits to band 1
-      const bits01 = nibble & 0x03;        // bits 0-1
-      const bits23 = (nibble >> 2) & 0x03; // bits 2-3
+      // Split dibit: bit 0 to band 0, bit 1 to band 1
+      const bit0 = dibit & 0x01;         // bit 0
+      const bit1 = (dibit >> 1) & 0x01;  // bit 1
       
-      // Calculate frequencies (4 frequencies per band, widely spaced)
-      const freq0 = F0 + bits01 * dF;
-      const freq1 = F1 + bits23 * dF;
+      // Calculate frequencies (2 frequencies per band, 400 Hz apart)
+      const freq0 = F0 + bit0 * dF;
+      const freq1 = F1 + bit1 * dF;
       
-      debugLog(`TX nibble ${nibble.toString(16)}: bits01=${bits01} → ${freq0.toFixed(0)}Hz, bits23=${bits23} → ${freq1.toFixed(0)}Hz`);
+      debugLog(`TX dibit ${dibit.toString(2).padStart(2,'0')}: bit0=${bit0} → ${freq0.toFixed(0)}Hz, bit1=${bit1} → ${freq1.toFixed(0)}Hz`);
       
       // Play both tones simultaneously
       await playDualTone(freq0, freq1, duration, volume);
     }
     
-    // Transmit a full byte as two nibbles
-    async function transmitByte(byte, volume) {
-      const lowNibble = byte & 0x0F;
-      const highNibble = (byte >> 4) & 0x0F;
+    // For compatibility - transmitNibble now sends 2 dibits
+    async function transmitNibble(nibble, volume) {
+      // Split nibble into 2 dibits
+      const dibit0 = nibble & 0x03;         // bits 0-1
+      const dibit1 = (nibble >> 2) & 0x03;  // bits 2-3
       
-      await transmitNibble(lowNibble, volume);
-      await transmitNibble(highNibble, volume);
+      await transmitDibit(dibit0, volume);
+      await transmitDibit(dibit1, volume);
+    }
+    
+    // Transmit a full byte as four dibits
+    async function transmitByte(byte, volume) {
+      // Split byte into 4 dibits (2 bits each)
+      for (let i = 0; i < 4; i++) {
+        const dibit = (byte >> (i * 2)) & 0x03;
+        await transmitDibit(dibit, volume);
+      }
     }
     
     function playDualTone(freq0, freq1, duration, volume) {
