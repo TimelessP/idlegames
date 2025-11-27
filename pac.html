@@ -1371,27 +1371,28 @@
     }
     
     // Detect marker pattern in spectrum (for triggering recording start/stop)
+    // Simplified: just detect if there's strong energy in our frequency range
     function detectMarkerPattern(dataArray, isStartMarker) {
       const baseBin = FREQUENCY_CONFIG.baseBin;
       const markerBits = FREQUENCY_CONFIG.markerBits;
       
-      let evenSum = 0, oddSum = 0;
+      // Count how many of the first 16 bins have significant energy
+      let activeCount = 0;
+      let totalEnergy = 0;
+      const threshold = 50;  // Uint8 threshold
+      
       for (let i = 0; i < markerBits; i++) {
         const level = dataArray[baseBin + i];
-        if (i % 2 === 0) {
-          evenSum += level;
-        } else {
-          oddSum += level;
-        }
+        totalEnergy += level;
+        if (level > threshold) activeCount++;
       }
       
-      // Start marker: even bins high, odd low
-      // End marker: odd bins high, even low
-      const ratio = isStartMarker 
-        ? evenSum / (oddSum + 1)
-        : oddSum / (evenSum + 1);
+      // For start marker: need multiple active bins (marker has 8 tones)
+      // For end marker: same check
+      const hasEnoughBins = activeCount >= 4;
+      const avgEnergy = totalEnergy / markerBits;
       
-      return ratio > FREQUENCY_CONFIG.markerThreshold;
+      return hasEnoughBins && avgEnergy > 40;
     }
 
     // AudioWorklet processor code (inlined as Blob URL)
@@ -1432,8 +1433,18 @@
     `;
     
     let audioWorkletNode = null;
+    let audioWorkletModuleLoaded = false;  // Track if module already registered
     
     async function startAnalysis() {
+      // For now, use the ScriptProcessor approach which is known to work
+      // AudioWorklet requires more careful setup (sink connection, etc.)
+      // We can migrate to AudioWorklet later once basic functionality works
+      debugLog('Starting analysis with ScriptProcessor...');
+      startAnalysisFallback();
+    }
+    
+    async function startAnalysisWithWorklet() {
+      // DISABLED - AudioWorklet version for future use
       const bufferSize = FREQUENCY_CONFIG.fftSize;
       
       // For spectrum visualization during recording
@@ -1446,13 +1457,17 @@
       let recordingStartTime = 0;
       
       try {
-        // Create AudioWorklet from inline code using Blob URL
-        const blob = new Blob([audioWorkletCode], { type: 'application/javascript' });
-        const workletUrl = URL.createObjectURL(blob);
+        // Only load AudioWorklet module once per AudioContext
+        if (!audioWorkletModuleLoaded) {
+          const blob = new Blob([audioWorkletCode], { type: 'application/javascript' });
+          const workletUrl = URL.createObjectURL(blob);
+          
+          await audioContext.audioWorklet.addModule(workletUrl);
+          URL.revokeObjectURL(workletUrl);
+          audioWorkletModuleLoaded = true;
+        }
         
-        await audioContext.audioWorklet.addModule(workletUrl);
-        URL.revokeObjectURL(workletUrl);
-        
+        // Create new node (can create multiple nodes from same processor)
         audioWorkletNode = new AudioWorkletNode(audioContext, 'sample-capture-processor');
         
         // Handle samples from worklet
@@ -1472,12 +1487,22 @@
           updateSpectrumVisualization(spectrumArray);
           
           const energy = detectSignalEnergy(spectrumArray);
-          const hasSignal = energy > FREQUENCY_CONFIG.signalThreshold * 255;
+          const energyThreshold = FREQUENCY_CONFIG.signalThreshold * 255;
+          const hasSignal = energy > energyThreshold;
+          
+          // Debug: log energy levels very occasionally (1% of frames)
+          if (Math.random() < 0.01 && energy > 5) {
+            debugLog(`Energy: ${energy.toFixed(1)} (threshold: ${energyThreshold.toFixed(1)}, hasSignal: ${hasSignal})`);
+          }
           
           if (!isRecording) {
             // Look for start marker to begin recording
-            if (hasSignal && detectMarkerPattern(spectrumArray, true)) {
+            const markerDetected = detectMarkerPattern(spectrumArray, true);
+            if (hasSignal && markerDetected) {
               markerConfirmCount++;
+              if (markerConfirmCount === 1 || markerConfirmCount === 3) {
+                debugLog(`Marker confirm: ${markerConfirmCount}/3, energy=${energy.toFixed(1)}`);
+              }
               if (markerConfirmCount >= 3) {
                 debugLog('Start marker detected - beginning recording');
                 isRecording = true;
