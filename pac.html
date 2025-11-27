@@ -1467,12 +1467,17 @@
       const dataArray = new Uint8Array(bufferLength);
       
       // Edge-based synchronization state
-      // Time-windowed detection: collect samples during frame, take majority vote
+      // Sync-locked frame detection
+      // Phase 1 (idle): Detect edges to find frame boundaries from marker pattern
+      // Phase 2 (receiving): Sample at fixed intervals locked to detected timing
       let frameSamples = [];        // Samples collected during current frame
-      let frameStartTime = 0;       // When current frame started
-      const sampleInterval = 10;    // Sample every ~10ms
+      let frameStartTime = 0;       // When current frame started  
+      let syncedFrameTime = 0;      // Locked frame start time after sync
+      let frameDurationEstimate = FREQUENCY_CONFIG.frameDuration; // Will be refined
+      const sampleInterval = 8;     // Sample every ~8ms for better resolution
       let lastSampleTime = 0;
-      let lastEmittedDibit = -1;    // For detecting actual transitions
+      let lastDibit = -1;           // Last detected dibit for edge detection
+      let edgeTimes = [];           // Times when dibit changed (for sync)
       
       function analyze() {
         if (!isListening) return;
@@ -1482,7 +1487,9 @@
           analysisFrame = requestAnimationFrame(analyze);
           frameSamples = [];
           frameStartTime = 0;
-          lastEmittedDibit = -1;
+          syncedFrameTime = 0;
+          lastDibit = -1;
+          edgeTimes = [];
           return;
         }
         
@@ -1496,66 +1503,101 @@
         lastSampleTime = now;
         
         analyser.getByteFrequencyData(dataArray);
-        
-        // Update spectrum visualization
         updateSpectrumVisualization(dataArray);
         
-        // Decode current sample
         const decoded = decodeFrame(dataArray);
         
-        // Start a new frame window if this is the first sample
-        if (frameStartTime === 0 && decoded) {
-          frameStartTime = now;
-          frameSamples = [];
-        }
-        
-        // Collect samples during frame window
-        if (decoded) {
-          frameSamples.push(decoded.dibit);
-        }
-        
-        // Check if we've collected enough time for a frame
-        const frameDuration = FREQUENCY_CONFIG.frameDuration;
-        const frameElapsed = now - frameStartTime;
-        
-        if (frameStartTime > 0 && frameElapsed >= frameDuration * 0.8) {
-          // Frame window complete - take majority vote
-          if (frameSamples.length >= 3) {
-            const votes = [0, 0, 0, 0]; // Count for each dibit value (0-3)
-            for (const sample of frameSamples) {
-              votes[sample]++;
-            }
-            let bestDibit = 0;
-            let bestCount = 0;
-            for (let i = 0; i < 4; i++) {
-              if (votes[i] > bestCount) {
-                bestCount = votes[i];
-                bestDibit = i;
+        if (receiveState.mode === 'idle') {
+          // IDLE MODE: Use edge detection to find marker and establish sync
+          if (decoded) {
+            if (decoded.dibit !== lastDibit) {
+              // Edge detected - record time
+              if (lastDibit >= 0) {
+                edgeTimes.push(now);
+                // Keep only recent edges
+                if (edgeTimes.length > 10) edgeTimes.shift();
+                
+                // Estimate frame duration from edge intervals
+                if (edgeTimes.length >= 3) {
+                  let totalInterval = 0;
+                  for (let i = 1; i < edgeTimes.length; i++) {
+                    totalInterval += edgeTimes[i] - edgeTimes[i-1];
+                  }
+                  frameDurationEstimate = totalInterval / (edgeTimes.length - 1);
+                  debugLog('Frame duration estimate:', frameDurationEstimate.toFixed(1) + 'ms');
+                }
               }
+              lastDibit = decoded.dibit;
             }
             
-            // Only emit if we have a clear majority (>50% of samples)
-            if (bestCount > frameSamples.length / 2) {
-              emitDibit(bestDibit, now);
-              lastEmittedDibit = bestDibit;
+            // Check for start marker using the detected dibit
+            if (isStartMarkerFrame(decoded.dibit, receiveState.markerCount)) {
+              receiveState.markerCount++;
+              debugLog('Start marker', receiveState.markerCount, '- dibit:', decoded.dibit.toString(2).padStart(2,'0'));
+              
+              if (receiveState.markerCount >= FREQUENCY_CONFIG.markerConfirmFrames) {
+                receiveState.mode = 'receiving';
+                receiveState.dibitBuffer = [];
+                receiveState.silenceCount = 0;
+                receiveState.markerCount = 0;
+                
+                // SYNC: Lock frame timing to NOW (we just confirmed marker)
+                // Add half frame offset so we sample in the middle of the next frame
+                syncedFrameTime = now + frameDurationEstimate * 0.5;
+                frameSamples = [];
+                
+                updateStatus('transmitting', 'Receiving...');
+                showReceivingCard();
+                debugLog('Reception started, synced at', syncedFrameTime, 'frame duration:', frameDurationEstimate.toFixed(1));
+              }
+            } else if (receiveState.markerCount > 0 && decoded.dibit !== FREQUENCY_CONFIG.startMarkerPattern[0]) {
+              // Wrong dibit, reset marker count
+              receiveState.markerCount = 0;
             }
+          } else {
+            lastDibit = -1;
+            receiveState.markerCount = 0;
+          }
+        } else if (receiveState.mode === 'receiving') {
+          // RECEIVING MODE: Sample at synced frame boundaries
+          if (decoded) {
+            frameSamples.push(decoded.dibit);
+            receiveState.silenceCount = 0;
           }
           
-          // Reset for next frame
-          frameSamples = [];
-          frameStartTime = now;
-        }
-        
-        // Handle silence timeout
-        if (!decoded && receiveState.mode === 'receiving') {
-          receiveState.silenceCount++;
-          if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
-            debugLog('Silence timeout, finishing reception');
-            receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer || []);
-            finishReceiving();
+          // Check if we've passed the frame boundary
+          if (syncedFrameTime > 0 && now >= syncedFrameTime) {
+            // Frame complete - take majority vote from samples
+            if (frameSamples.length >= 2) {
+              const votes = [0, 0, 0, 0];
+              for (const sample of frameSamples) {
+                votes[sample]++;
+              }
+              let bestDibit = 0, bestCount = 0;
+              for (let i = 0; i < 4; i++) {
+                if (votes[i] > bestCount) {
+                  bestCount = votes[i];
+                  bestDibit = i;
+                }
+              }
+              
+              emitDibit(bestDibit, now);
+            }
+            
+            // Advance to next frame
+            syncedFrameTime += frameDurationEstimate;
+            frameSamples = [];
           }
-        } else if (decoded) {
-          receiveState.silenceCount = 0;
+          
+          // Silence handling
+          if (!decoded) {
+            receiveState.silenceCount++;
+            if (receiveState.silenceCount >= FREQUENCY_CONFIG.maxSilenceFrames) {
+              debugLog('Silence timeout, finishing reception');
+              receiveState.buffer = dibitsToBytes(receiveState.dibitBuffer || []);
+              finishReceiving();
+            }
+          }
         }
         
         // Debug: log periodically
@@ -1565,10 +1607,10 @@
           for (let i = 0; i < dataArray.length; i++) {
             if (dataArray[i] > maxLevel) { maxLevel = dataArray[i]; maxBin = i; }
           }
-          debugLog('Sample - decoded:', decoded, 'samples:', frameSamples.length,
-                   'frameTime:', frameElapsed.toFixed(0) + 'ms',
-                   'MaxLevel:', maxLevel, 'at', binToFreq(maxBin).toFixed(0) + 'Hz',
-                   'mode:', receiveState.mode);
+          debugLog('Sync mode:', receiveState.mode, 
+                   'frameDur:', frameDurationEstimate.toFixed(0) + 'ms',
+                   'samples:', frameSamples.length,
+                   'MaxLevel:', maxLevel, 'at', binToFreq(maxBin).toFixed(0) + 'Hz');
         }
         
         analysisFrame = requestAnimationFrame(analyze);
