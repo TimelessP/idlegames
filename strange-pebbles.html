@@ -27,7 +27,8 @@
 
         body {
             margin: 0;
-            height: 100vh;
+            height: 100vh; /* Fallback */
+            height: 100dvh; /* Mobile viewport fix */
             width: 100vw;
             overflow: hidden;
             background-color: var(--bg-sand);
@@ -145,10 +146,36 @@
             flex: 1;
             display: flex;
             align-items: center;
-            padding: 0 20px;
-            overflow-x: auto;
-            gap: 15px;
+            justify-content: center; /* Center the pager */
+            padding: 0 10px;
+            overflow: hidden; /* No scrolling */
+            gap: 10px;
             height: 100%;
+        }
+
+        .toolbox-nav-btn {
+            width: 40px;
+            height: 60px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            color: rgba(255,255,255,0.5);
+            cursor: pointer;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            flex-shrink: 0;
+            user-select: none;
+        }
+        
+        .toolbox-nav-btn:active {
+            background: rgba(255,255,255,0.1);
+            color: white;
+        }
+        
+        .toolbox-nav-btn.disabled {
+            opacity: 0.2;
+            pointer-events: none;
         }
 
         .pebble-slot, .toolbox-tool {
@@ -184,27 +211,7 @@
             transform: scale(1.1);
         }
 
-        .pebble-slot .delete-btn {
-            position: absolute;
-            top: -5px;
-            right: -5px;
-            width: 20px;
-            height: 20px;
-            background: #ff5252;
-            border-radius: 50%;
-            color: white;
-            font-size: 12px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            cursor: pointer;
-            opacity: 0;
-            transition: opacity 0.2s;
-        }
-
-        .pebble-slot:hover .delete-btn {
-            opacity: 1;
-        }
+        /* Removed .delete-btn styles */
 
         #waste-bin {
             display: none; /* Removed fixed bin */
@@ -295,6 +302,40 @@
             align-items: center;
             font-size: 24px;
             box-shadow: 0 5px 15px rgba(0,0,0,0.5);
+        }
+
+        /* Mobile Layout Adjustments */
+        @media (max-width: 600px) {
+            #toolbox {
+                height: 100px;
+            }
+            
+            #toolbox-static {
+                padding: 0 10px;
+                gap: 8px;
+            }
+            
+            #toolbox-content {
+                padding: 0 5px;
+                gap: 5px;
+            }
+            
+            .toolbox-nav-btn {
+                width: 30px;
+                height: 44px;
+                font-size: 18px;
+            }
+            
+            .pebble-slot, .toolbox-tool {
+                width: 44px;
+                height: 44px;
+                font-size: 18px;
+            }
+            
+            /* Adjust toggle button position when open */
+            body.toolbox-open #toolbox-toggle {
+                bottom: 120px;
+            }
         }
 
     </style>
@@ -419,7 +460,8 @@
                 this.color = COLORS[this.type];
                 this.angle = config.angle || Math.random() * Math.PI * 2;
                 this.oscillationPhase = config.oscillationPhase || Math.random() * Math.PI * 2;
-                this.forceType = config.forceType || (Math.random() > 0.5 ? 'inverse-square' : 'linear');
+                // Use linear force by default for consistent field strength (avoids bias in clusters)
+                this.forceType = config.forceType || 'linear';
                 
                 // Shape irregularity
                 if (config.points) {
@@ -842,6 +884,11 @@
             canvas.height = rect.height;
             width = canvas.width;
             height = canvas.height;
+            
+            // Re-render toolbox on resize to adjust pagination
+            if (typeof renderToolbox === 'function') {
+                renderToolbox();
+            }
         }
 
         function loop(timestamp) {
@@ -1071,7 +1118,7 @@
                 // Drop in toolbox?
                 // Check if dropped in toolbox area (if open) or near bottom
                 else if (document.body.classList.contains('toolbox-open') && clientY > toolboxRect.top) {
-                    addToToolbox(draggedPebble.type);
+                    // Removed: addToToolbox(draggedPebble.type);
                     const index = pebbles.indexOf(draggedPebble);
                     if (index > -1) pebbles.splice(index, 1);
                     changed = true;
@@ -1138,6 +1185,9 @@
 
         // --- Toolbox Logic ---
         const STORAGE_KEY = 'idlegames-strange-pebbles-state';
+        
+        let toolboxPage = 0;
+        const ALL_PEBBLE_TYPES = Object.values(PEBBLE_TYPES);
 
         function saveState() {
             const state = {
@@ -1151,7 +1201,7 @@
                     forceType: p.forceType,
                     points: p.points
                 })),
-                toolbox: Array.from(toolboxContent.querySelectorAll('.pebble-slot')).map(slot => slot.dataset.type),
+                // Removed toolbox array saving as it's now static/paginated
                 toolboxOpen: document.body.classList.contains('toolbox-open')
             };
             localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -1167,11 +1217,6 @@
                 // Restore pebbles
                 pebbles = state.pebbles.map(p => new Pebble(p.x, p.y, p.type, p));
                 
-                // Restore toolbox items (append them)
-                state.toolbox.forEach(type => {
-                    if (type && COLORS[type]) addToToolbox(type, false);
-                });
-
                 // Restore toolbox open state
                 if (state.toolboxOpen) {
                     openToolbox();
@@ -1187,15 +1232,100 @@
         }
 
         function initToolbox() {
-            toolboxContent.innerHTML = ''; // Clear pebbles
             toolboxStatic.innerHTML = ''; // Clear static tools
-            
             addStaticTools(); // Add static tools
-
-            if (!loadState()) {
-                // If no state, add defaults
-                Object.values(PEBBLE_TYPES).forEach(type => addToToolbox(type, false));
+            
+            loadState(); // Load game state (pebbles on canvas)
+            
+            renderToolbox(); // Render the paginated toolbox
+        }
+        
+        function renderToolbox() {
+            toolboxContent.innerHTML = '';
+            
+            // Calculate available width for slots
+            // Total width - nav buttons (approx 40px * 2 + gaps)
+            const contentRect = toolboxContent.getBoundingClientRect();
+            const isMobile = window.innerWidth <= 600;
+            const slotSize = isMobile ? 44 : 60;
+            const gap = isMobile ? 5 : 10;
+            const navBtnWidth = isMobile ? 30 : 40;
+            
+            // Available width for slots
+            const availableWidth = contentRect.width - (navBtnWidth * 2) - (gap * 4);
+            
+            // How many fit?
+            const itemsPerPage = Math.max(1, Math.floor(availableWidth / (slotSize + gap)));
+            const totalPages = Math.ceil(ALL_PEBBLE_TYPES.length / itemsPerPage);
+            
+            // Clamp page
+            if (toolboxPage >= totalPages) toolboxPage = totalPages - 1;
+            if (toolboxPage < 0) toolboxPage = 0;
+            
+            // Prev Button
+            const prevBtn = document.createElement('div');
+            prevBtn.className = 'toolbox-nav-btn';
+            prevBtn.innerHTML = '‹';
+            if (toolboxPage === 0) prevBtn.classList.add('disabled');
+            prevBtn.onclick = () => {
+                if (toolboxPage > 0) {
+                    toolboxPage--;
+                    renderToolbox();
+                }
+            };
+            toolboxContent.appendChild(prevBtn);
+            
+            // Slots Container
+            const slotsContainer = document.createElement('div');
+            slotsContainer.style.display = 'flex';
+            slotsContainer.style.gap = gap + 'px';
+            slotsContainer.style.justifyContent = 'center';
+            slotsContainer.style.flex = '1';
+            
+            const startIdx = toolboxPage * itemsPerPage;
+            const endIdx = Math.min(startIdx + itemsPerPage, ALL_PEBBLE_TYPES.length);
+            
+            for (let i = startIdx; i < endIdx; i++) {
+                const type = ALL_PEBBLE_TYPES[i];
+                const slot = createPebbleSlot(type);
+                slotsContainer.appendChild(slot);
             }
+            
+            toolboxContent.appendChild(slotsContainer);
+            
+            // Next Button
+            const nextBtn = document.createElement('div');
+            nextBtn.className = 'toolbox-nav-btn';
+            nextBtn.innerHTML = '›';
+            if (toolboxPage >= totalPages - 1) nextBtn.classList.add('disabled');
+            nextBtn.onclick = () => {
+                if (toolboxPage < totalPages - 1) {
+                    toolboxPage++;
+                    renderToolbox();
+                }
+            };
+            toolboxContent.appendChild(nextBtn);
+        }
+        
+        function createPebbleSlot(type) {
+            const slot = document.createElement('div');
+            slot.className = 'pebble-slot';
+            slot.dataset.type = type;
+            
+            const preview = document.createElement('div');
+            preview.style.width = '50%';
+            preview.style.height = '50%';
+            preview.style.borderRadius = '50%';
+            preview.style.backgroundColor = COLORS[type];
+            preview.style.boxShadow = 'inset 0 0 5px rgba(0,0,0,0.5)';
+            
+            slot.appendChild(preview);
+            
+            // Drag start
+            slot.addEventListener('mousedown', (e) => startToolboxDrag(e, type));
+            slot.addEventListener('touchstart', (e) => startToolboxDrag(e, type), {passive: false});
+            
+            return slot;
         }
         
         function addStaticTools() {
@@ -1206,6 +1336,14 @@
             resetBtn.title = 'Reset Game';
             resetBtn.onclick = resetGame;
             toolboxStatic.appendChild(resetBtn);
+            
+            // Fullscreen Button
+            const fsBtn = document.createElement('div');
+            fsBtn.className = 'toolbox-tool';
+            fsBtn.innerHTML = '⛶';
+            fsBtn.title = 'Toggle Fullscreen';
+            fsBtn.onclick = toggleFullscreen;
+            toolboxStatic.appendChild(fsBtn);
             
             // Waste Bin
             const bin = document.createElement('div');
@@ -1227,43 +1365,9 @@
             info.innerHTML = '?';
             info.title = 'Drag here to cancel or see info';
             toolboxStatic.appendChild(info);
-            
-            // Separator (Visual only, border handles it now)
-            // const sep = document.createElement('div');
-            // ...
         }
 
-        function addToToolbox(type, save = true) {
-            const slot = document.createElement('div');
-            slot.className = 'pebble-slot';
-            slot.dataset.type = type;
-            
-            const preview = document.createElement('div');
-            preview.style.width = '30px';
-            preview.style.height = '30px';
-            preview.style.borderRadius = '50%';
-            preview.style.backgroundColor = COLORS[type];
-            preview.style.boxShadow = 'inset 0 0 5px rgba(0,0,0,0.5)';
-            
-            const delBtn = document.createElement('div');
-            delBtn.className = 'delete-btn';
-            delBtn.innerHTML = '×';
-            delBtn.onclick = (e) => {
-                e.stopPropagation();
-                slot.remove();
-                saveState();
-            };
-
-            slot.appendChild(preview);
-            slot.appendChild(delBtn);
-            toolboxContent.appendChild(slot);
-            
-            // Drag start
-            slot.addEventListener('mousedown', (e) => startToolboxDrag(e, type));
-            slot.addEventListener('touchstart', (e) => startToolboxDrag(e, type), {passive: false});
-            
-            if (save) saveState();
-        }
+        // Removed old addToToolbox function as it's replaced by renderToolbox + createPebbleSlot
 
         function startToolboxDrag(e, type) {
             e.preventDefault();
@@ -1315,6 +1419,18 @@
         function closeToolbox() {
             document.getElementById('toolbox').classList.remove('open');
             document.body.classList.remove('toolbox-open');
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(err => {
+                    console.log(`Error attempting to enable fullscreen: ${err.message}`);
+                });
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                }
+            }
         }
 
         function resetGame() {
