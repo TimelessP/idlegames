@@ -37,9 +37,11 @@ _A quick orientation for AI agents contributing to this repo._
 - When creating a new page, copy the existing pattern: load your game scripts, then finish with `<script src="parental.js" defer></script>` (and `assets/js/pwa.js` if needed) so the parental gating and launcher stay in sync.
 
 ## Deployment/release expectations
-- Bump `package.json` → rerun `npm install` to refresh `package-lock.json` → `npm run build` to recreate `dist/` and update `assets/js/version.js`.
-- `dist/` contents are what gets pushed to the `gh-pages` branch (or any static host). Do not hand-edit files inside `dist/`; regenerate instead.
-- The service worker cache name (`IdleGames-v<version>`) comes from the app version. Publishing without bumping the version may leave users on stale caches.
+1. **Bump Version:** Update `package.json` version (+0.0.1).
+2. **Build:** Run `npm install && npm run build`. This updates `package-lock.json` and regenerates `assets/js/version.js`.
+3. **Push:** Commit and push to `main`. The GitHub Action `build-and-deploy.yml` handles the rest.
+
+**Pro Tip:** We use the **"GitHub Actions"** source setting in GitHub Pages (not "Deploy from a branch"). This prevents the default Pages workflow from racing with our custom PWA build. If deployments break, check that this setting hasn't reverted!
 
 ## Tips for future contributors
 - The repo intentionally avoids frameworks; stick to minimal dependencies to keep load times low for slow devices.

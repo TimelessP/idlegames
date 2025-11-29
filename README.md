@@ -181,38 +181,32 @@ Idle Games uses plain **npm** for tooling and scripts—no bundlers or task runn
 
 ## 🚢 Release Process
 
-The service worker caches by version, so every public release needs a fresh build tied to a new semantic version. Use the checklist below to publish a new drop.
+The service worker caches by version, so every public release needs a fresh build tied to a new semantic version.
 
-1. **Bump the version.** Pick the next semantic version and update the `version` field in `package.json` (e.g. `1.0.5`). The build script automatically regenerates `assets/js/version.js`; update any user-facing version display only if you want it visible in the UI.
-2. **Regenerate the lockfile.** Run `npm install` from the repo root. This refreshes dependencies (without changing versions unless the semver ranges allow it) and automatically bumps `package-lock.json` to the new app version. If you truly need a lock-only pass, use `npm install --package-lock-only` instead.
-3. **Build the distributable.** Execute `npm run build`. The script rewrites `assets/js/version.js`, wipes `dist/`, copies the site, rewrites Three.js imports, vendors dependencies, and emits `dist/sw.js` with the new cache name (`IdleGames-vX.Y.Z`).
-4. **Smoke test locally.** Launch `npm run serve`, open `http://localhost:4173`, and confirm the service worker registers, assets load, and any modified pages behave as expected. Stop the server when finished.
-5. **Deploy GitHub Pages.** Replace the contents of the Pages branch (currently `gh-pages`) with the freshly built `dist/` directory. One manual workflow is:
-   ```bash
-   npm run build
-   git worktree add ../idlegames-gh-pages gh-pages
-   rsync -av --delete dist/ ../idlegames-gh-pages/
-   cd ../idlegames-gh-pages
-   git add .
-   git commit -m "Release v1.0.5"
-   git push origin gh-pages
-   cd -
-   git worktree remove ../idlegames-gh-pages
-   ```
-   Adjust the release version in the commit message. If you prefer another deployment method (GitHub Action, `gh-pages` npm package, etc.) swap in your workflow, but always publish the built `dist/` artifacts.
-6. **Commit and tag main.** Back in the main worktree, commit the source changes (`package.json`, `package-lock.json`, docs) and optionally create a git tag (`git tag v1.0.5 && git push --tags`). This keeps the history aligned with the deployed build.
-
-Quick command recap for a standard release:
+1. **Bump the version.** Update the `version` field in `package.json` (e.g. `1.0.5`). Bump by +0.0.1 regardless of semantic versioning rules.
+2. **Build & Update Lockfile.** Run `npm install && npm run build`. The install updates `package-lock.json` with the new version number, and the build updates the version in the app itself (regenerating `assets/js/version.js` and `dist/`).
+3. **Commit and Push.** Commit the changes (`package.json`, `package-lock.json`, `assets/js/version.js`) and push to GitHub.
 
 ```bash
-npm install            # refresh lockfile after bumping package.json
-npm run build          # regenerate dist/, service worker, and version module
-git add package.json package-lock.json assets/js/version.js README.md
-git commit -m "Release vX.Y.Z"
+# 1. Update package.json version manually
+# 2. Run build pipeline
+npm install && npm run build
+
+# 3. Commit and push
+git add package.json package-lock.json assets/js/version.js
+git commit -m "Release v1.0.109"
 git push origin main
 ```
 
-Following those steps ensures browsers detect the new cache version, prompt the in-app reload, and serve the latest assets after you publish.
+The GitHub Actions workflow (`build-and-deploy.yml`) will automatically pick up the push, build the project again (ensuring a clean environment), and deploy the `dist/` folder to GitHub Pages.
+
+### ❤️ Love Letter Pro Tip: Solving the Race Condition
+
+If you ever see two workflows running in parallel on GitHub Actions ("pages build and deployment" vs "Build and Deploy PWA") and getting 404 errors for `sw.js`:
+
+**The Problem:** GitHub's default "Deploy from a branch" setting triggers a standard Pages workflow that competes with our custom PWA build workflow. If the default one wins, it deploys the raw source (ignoring `dist/`), breaking the app.
+
+**The Fix:** Go to **Settings > Pages** in the repository. Under **Build and deployment**, change the **Source** from "Deploy from a branch" to **"GitHub Actions"**. This disables the default workflow and lets our custom `build-and-deploy.yml` handle everything perfectly. No more race conditions! <3
 
 ## 🎮 Categories
 
