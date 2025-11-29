@@ -12,85 +12,101 @@ A curated collection of relaxing idle and puzzle games built with HTML5, CSS3, a
 
 The complete collection is hosted on GitHub Pages with a beautiful launcher interface.
 
-### 🚚 [Space Trader](https://timelessp.github.io/idlegames/space-trader.html)
-Retro space trading adventure in a deterministic procedural galaxy. Trade at outposts, haggle, refuel, and travel across systems with maps and a 15s cinematic jump.
-- Features: Deterministic procedural galaxy, dynamic supply/demand trading with haggle, fuel management & refueling, cargo management and commodity prices, power management, navigation, warp travel animation, persistent saves (LocalStorage, seeded universe), keyboard & touch-friendly controls, responsive UI, export photos and infographics
-- Tags: Simulation, Sci-Fi, Procedural
+### 🎮 Games
+
+### 🟣 [Strange Pebbles](https://timelessp.github.io/idlegames/strange-pebbles.html)
+A physics sandbox with curious pebbles. Discover their interactions, build complex machines, or just enjoy the chaos.
+- **Tags:** Physics, Sandbox, Simulation
+
+### 🎄 [Tree Decorator](https://timelessp.github.io/idlegames/tree.html)
+A cozy, fractal-based Christmas tree decorating game. Draw glowing lights, place ornaments, and enjoy the festive atmosphere.
+- **Tags:** Creative, Relaxing, Seasonal
+
+### 🎄 [Festive Advent](https://timelessp.github.io/idlegames/advent.html)
+Unlock daily festive surprises, each hiding a cheerful mini-game or cozy activity. Progress is saved locally.
+- **Tags:** Seasonal, Mini-games
 
 ### 🏮 [Lumen Drift](https://timelessp.github.io/idlegames/lumen-drift.html)
-Guide a wandering lantern through luminous currents, collect glints, and soak in relaxing ambience while violet whispers grant temporary shields.
-- Features: Pointer/touch drift controls, collectible glints with energy management, shield-granting whisper orbs, fullscreen canvas rendering, responsive HUD, gentle particle effects, mobile-friendly play
-- Tags: Relaxing, Atmospheric, Arcade
+Guide an astral lantern through drifting currents, collect glints, dodge dusk shadows, and chase ever-longer drifts.
+- **Tags:** Relaxing, Arcade, Atmospheric
+
+### 🛸 [Space Trader](https://timelessp.github.io/idlegames/space-trader.html)
+Retro space trading adventure in a deterministic procedural galaxy. Trade, haggle, refuel, and travel across systems.
+- **Tags:** Trading, Procedural, Space, Retro
+
+### 🐕 [Sheepdog](https://timelessp.github.io/idlegames/sheepdog.html)
+Guide your border collie to herd fluffy sheep into their paddocks. Sort black and white sheep, manage stubborn ones.
+- **Tags:** Herding, Puzzle, Cute
 
 ### 🎯 [Ballistic Warfare](https://timelessp.github.io/idlegames/ballistic.html)
-Turn-based artillery duels across destructible terrain. Roll grenades down slopes, fire homing missiles, and manage shields while trading volleys in mobile-friendly head-to-head battles.
-- Features: Grenade rolling physics, muzzle-origin firing, homing missiles with cruise control, destructible terrain, shield power-ups, movement actions, round result modal, responsive controls for phones
-- Tags: Artillery, Physics, Strategy, Multiplayer
+Turn-based artillery duel featuring rolling grenades, homing missiles, destructible terrain, and mobile-friendly controls.
+- **Tags:** Artillery, Physics, Multiplayer
 
 ### 🧩 [Fit the Shapes](https://timelessp.github.io/idlegames/fit-the-shapes.html)
-Tetris-inspired placement puzzle with special Diamond and Lava pieces. Clear rows/columns and manage economy-like tradeoffs.
-- Features: Drag & drop, diamond refunds, lava burns, score animations, mobile-friendly
-- Tags: Puzzle, Strategy, Tetris-like
-
-### 🚀 [Space Scroller](https://timelessp.github.io/idlegames/space-scroller.html)
-Touch-friendly arcade scroller with power-ups and a modern HUD. Survive, manage overheat, and collect upgrades.
-- Features: Wingmen, missiles, homing, bombs, overheat system, pause/play, fullscreen, responsive HUD
-- Tags: Action, Arcade, Endless
-
-### 🧪 [Magic Potion](https://timelessp.github.io/idlegames/potion.html)
-Mesmerizing physics toy with layered canvases, glow, and tilt support. Play with a reactive “potion” and visual effects.
-- Features: Multi-canvas effects, touch-friendly UI, motion controls (with permission)
-- Tags: Physics, Toy, Visual
-
-### ⚙️ [Physics Toy](https://timelessp.github.io/idlegames/physics-toy.html)
-Simple sandbox with bouncing balls and gravity/friction. A calming pocket physics demo.
-- Features: Reset, theme toggle, responsive canvas
-- Tags: Physics, Sandbox, Casual
-
-### 🌿 [Garden Grower](https://timelessp.github.io/idlegames/garden-grower.html)
-Casual matching-with-a-garden-flavor mini game built for phones and desktops.
-- Features: Touch first, theme toggle, quick sessions
-- Tags: Casual, Memory, Puzzle
+Tetris-inspired puzzle game with special diamond and lava pieces. Place shapes strategically to clear rows.
+- **Tags:** Puzzle, Strategy
 
 ### 🧩 [Jigsaw Puzzle](https://timelessp.github.io/idlegames/jigsaw.html)
-Satisfying, touch-friendly jigsaw with smooth pan/zoom and polished theming.
-- Features: Mobile pan/zoom, theme support, fluid UI
-- Tags: Puzzle, Casual
+Import an image and solve a satisfying jigsaw with interlocking pieces. Drag, snap, pan, and pinch-zoom.
+- **Tags:** Puzzle, Touch
 
-### 🌀 [Maze Balls](https://timelessp.github.io/idlegames/maze-balls.html)
-Guide balls through mazes using touch or device tilt. Gentle difficulty ramp and clean UI.
-- Features: Theme toggle, optional tilt controls, timer/levels
-- Tags: Puzzle, Tilt, Skill
+### 🌸 [Garden Grower](https://timelessp.github.io/idlegames/garden-grower.html)
+A calm, plant-themed memory match game. Flip cards, find matching garden symbols, and clear the board.
+- **Tags:** Memory, Puzzle, Relaxing
+
+### 🚀 [Space Scroller](https://timelessp.github.io/idlegames/space-scroller.html)
+Navigate through space in this endless scrolling adventure. Dodge obstacles, collect power-ups.
+- **Tags:** Action, Endless, Space
 
 ### 🎲 [Yahtzee](https://timelessp.github.io/idlegames/yahtzee.html)
-Classic dice game with a clean scorecard and keyboard/touch controls.
-- Features: Score categories, rolling/holding dice, light/dark themes
-- Tags: Dice, Board Game, Casual
+Classic dice game with a challenging twist! Roll for combinations, score strategically, and aim for the perfect Yahtzee.
+- **Tags:** Dice, Strategy, Classic
 
-### 🧪🖥️ [Cyber Deck](https://timelessp.github.io/idlegames/cyber-deck.html)
-Retro-styled terminal playground with theming, panels, and simulated terminal output.
-- Features: Multiple terminal themes, sticky layout, rich UI controls
-- Tags: Toy, Retro, Theming
+### 🦴 [Fossil Hunter](https://timelessp.github.io/idlegames/fossil.html)
+Archaeological discovery game with realistic sand brushing mechanics. Excavate ancient fossils.
+- **Tags:** Archaeology, Discovery, Educational
+
+### 🛠️ Tools
+
+### 📻 [AM Radio Console](https://timelessp.github.io/idlegames/am-radio.html)
+Load any audio loop into a vintage AM receiver with tuning static, fine-grain touch control, and animated gauges.
+- **Tags:** Audio, Retro, Visualizer
+
+### 🛰️ [Space Trader Starmap](https://timelessp.github.io/idlegames/space-trader-db.html)
+Explore the procedural galaxy from Space Trader with zoomable starmaps, orbit lighting, and search.
+- **Tags:** Space, Atlas, Reference
 
 ### 🎙️ [Dictaphone](https://timelessp.github.io/idlegames/dictaphone.html)
-Handy voice recorder with waveform/meter UI and export options. Built as a simple, elegant SPA.
-- Features: Record/playback, trimming/jumping, gain/volume controls, theme support
-- Tags: Utility, Audio, SPA
+Professional audio recording tool with real-time position seeking, volume control, and export capabilities.
+- **Tags:** Audio, Recording, Utility
 
-### 🌀📡 [Feed Cycle](https://timelessp.github.io/idlegames/feedcycle.html)
-Delightful, local-first RSS/Atom reader that supports OPML import/export and direct editing. Plays podcasts (audio/video), renders images, tagging, favoriting, read/unread, powerful combined search, and responsive touch/mouse/keyboard UI with system/light/dark themes. Data stored in LocalStorage with optional Cache API for responses.
-- Features: OPML import/export/edit, media playback, categories/filters, favorites/tags, unified search (substring/regex/soundex/cosine), refresh schedules, caching, responsive UI
-- Tags: Utility, Reader, SPA
+### 🌀 [Feed Cycle](https://timelessp.github.io/idlegames/feedcycle.html)
+Local-first RSS/Atom reader with OPML tools, media playback, smart tagging, filters, and themes.
+- **Tags:** Reader, Utility, Local
 
-### 🔄 [QR Loop](https://timelessp.github.io/idlegames/qrloop.html)
-Advanced file transfer via chunked QR codes. Transfer files of any size by automatically cycling through QR codes with universal accessibility.
-- Features: Chunked transmission, automatic looping, URL-based QR codes, universal QR reader compatibility, 512-byte chunks, 1-second intervals
-- Tags: Utility, File Transfer, QR Codes, Chunked
+### 🎡 [Smart Spinners](https://timelessp.github.io/idlegames/spinners.html)
+Create unlimited customizable spin wheels with per-wheel palettes, advanced spin physics, and accessible inline results.
+- **Tags:** Randomizer, Classroom, Utility
+
+### ⏱️ [Timers Studio](https://timelessp.github.io/idlegames/timers.html)
+Run infinite countdown timers with customizable durations, per-timer sound/notification overrides.
+- **Tags:** Productivity, Utility
+
+### 🧊 [Voxel Paint Studio](https://timelessp.github.io/idlegames/voxel-paint.html)
+Create illuminated 3D voxel dioramas with lighting controls, SSAO, nav cube navigation, and export tools.
+- **Tags:** 3D, Creative, Tool
 
 ### 🗂️ [Personal Organiser](https://timelessp.github.io/idlegames/po.html)
-Adorable, mobile-first organiser with Notes, Calendar, Tasks, Flip Cards, and Calculator — all local-first.
-- Features: Scalable UI, drag-and-drop sorting (touch + mouse), fullscreen, JSON import/export, mode persistence, autosizing calculator
-- Tags: Utility, Productivity, Notes, Calendar, Tasks
+Complete productivity suite with accessible material UI. Manage notes, calendar events, tasks, cards.
+- **Tags:** Productivity, Utility, Local
+
+### 💿 [RPM Disc Encoder](https://timelessp.github.io/idlegames/rpm.html)
+Encode short audio clips into a visual "RPM" disc PNG and decode them back.
+- **Tags:** Audio, Tool, Experimental
+
+### 🔄 [QR Loop](https://timelessp.github.io/idlegames/qrloop.html)
+Advanced file transfer via chunked QR codes. Transfer files of any size by automatically cycling through QR codes.
+- **Tags:** QR Code, Utility, Transfer
 
 ## ✨ Features
 
@@ -210,12 +226,17 @@ If you ever see two workflows running in parallel on GitHub Actions ("pages buil
 
 ## 🎮 Categories
 
-- 🧩 Puzzle/Casual: Fit the Shapes, Jigsaw Puzzle, Yahtzee, Maze Balls, Garden Grower
-- 🧪 Physics/Toys: Magic Potion, Physics Toy, Cyber Deck
-- 🎯 Action/Arcade: Lumen Drift, Space Scroller
-- 🎯 Artillery/Strategy: Ballistic Warfare
-- 🚀 Simulation/Sci-Fi: Space Trader
-- 🛠️ Utilities/Extras: Dictaphone, QR Loop, Feed Cycle, Personal Organiser
+### Games
+- **🧩 Puzzle & Strategy:** Fit the Shapes, Jigsaw Puzzle, Sheepdog, Yahtzee, Garden Grower
+- **🧪 Physics & Simulation:** Strange Pebbles, Ballistic Warfare
+- **🚀 Action & Adventure:** Space Trader, Space Scroller, Lumen Drift, Fossil Hunter
+- **🎄 Seasonal:** Tree Decorator, Festive Advent
+
+### Tools
+- **🎙️ Audio:** AM Radio Console, Dictaphone, RPM Disc Encoder
+- **🛠️ Productivity:** Feed Cycle, Personal Organiser, Timers Studio
+- **🎨 Creative:** Voxel Paint Studio, Smart Spinners
+- **🔧 Utilities:** QR Loop, Space Trader Starmap
 
 ## 🤝 Contributing
 
