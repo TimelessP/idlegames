@@ -446,6 +446,15 @@
         const PLAYER_COLOR = '#4ecdc4';
         const PLAYER_NAME = 'Shadow Dragon';
 
+        // Potion Types
+        const POTION_TYPES = [
+            { type: 'health', color: '#e74c3c', effect: 'HP +50%', apply: (p) => { p.health = Math.min(100, p.health + 50); } },
+            { type: 'stamina', color: '#f1c40f', effect: 'Stamina +50%', apply: (p) => { p.stamina = Math.min(STAMINA_MAX, p.stamina + 50); } },
+            { type: 'mixed', color: '#9b59b6', effect: 'HP/Stamina +25%', apply: (p) => { p.health = Math.min(100, p.health + 25); p.stamina = Math.min(STAMINA_MAX, p.stamina + 25); } },
+            { type: 'full', color: '#2ecc71', effect: 'Full Restore!', apply: (p) => { p.health = 100; p.stamina = STAMINA_MAX; } },
+            { type: 'chi', color: '#3498db', effect: 'Chi Shield!', apply: (p) => { p.invulnerable = true; p.chiShieldTimer = 10000; } }
+        ];
+
         // ==================== AUDIO SYSTEM ====================
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         const audioCtx = new AudioContext();
@@ -644,8 +653,15 @@
         let currentRound = 1;
         let lives = 5;
         let koTimer = 0;
+        let roundTime = 0; // Time elapsed in current round
+        let leftPotionSpawned = false; // Timed spawn tracking
+        let rightPotionSpawned = false;
+        const POTION_SPAWN_TIME = 10; // Seconds before side potions spawn
+        const LEFT_POTION_X = 80; // Left side spawn position
+        const RIGHT_POTION_X = ARENA_WIDTH - 80; // Right side spawn position
         let player;
         let enemies = []; // Array of Fighter objects
+        let potions = []; // Array of Potion objects
         let keys = {};
         let lastTime = 0;
         
@@ -725,6 +741,8 @@
                 this.aiStats = { aggression: 0.5, block: 0.5, jump: 0.5, punch: 0.5, kick: 0.5, sprint: 0.5 };
                 this.deathTimer = 0;
                 this.hasDealtDamage = false;
+                this.chiShieldTimer = 0;
+                this.droppedPotion = false;
             }
 
             snapToPose(pose) {
@@ -806,6 +824,20 @@
                 // Minion death cleanup
                 if (this.isMinion && this.health <= 0 && this.onGround) {
                     this.deathTimer += dt;
+                    // Drop potion on death
+                    if (!this.droppedPotion) {
+                        this.droppedPotion = true;
+                        spawnPotion(this.x);
+                    }
+                }
+
+                // Chi Shield Timer
+                if (this.chiShieldTimer > 0) {
+                    this.chiShieldTimer -= dt * 1000;
+                    if (this.chiShieldTimer <= 0) {
+                        this.invulnerable = false;
+                        this.chiShieldTimer = 0;
+                    }
                 }
 
                 // Bounds
@@ -984,6 +1016,12 @@
                 
                 ctx.save();
                 
+                // Chi Shield glow effect
+                if (this.chiShieldTimer > 0) {
+                    ctx.shadowColor = '#3498db';
+                    ctx.shadowBlur = 20 + Math.sin(performance.now() / 100) * 10;
+                }
+
                 // Stunned flash
                 if (this.stunTimer > 0 && Math.floor(this.stunTimer / 50) % 2 === 0) {
                     ctx.globalAlpha = 0.5;
@@ -1101,6 +1139,161 @@
                 const b = Math.max(0, Math.min(255, parseInt(hex.substr(4, 2), 16) + amount));
                 return `rgb(${r},${g},${b})`;
             }
+        }
+
+        // ==================== POTION CLASS ====================
+        class Potion {
+            constructor(x) {
+                this.x = x;
+                this.y = GROUND_Y;
+                this.bobTimer = Math.random() * Math.PI * 2;
+                
+                // Random potion type
+                const typeData = POTION_TYPES[Math.floor(Math.random() * POTION_TYPES.length)];
+                this.type = typeData.type;
+                this.color = typeData.color;
+                this.effect = typeData.effect;
+                this.apply = typeData.apply;
+                
+                this.collected = false;
+            }
+
+            update(dt) {
+                this.bobTimer += dt * 3;
+            }
+
+            draw(ctx) {
+                if (this.collected) return;
+                
+                const bobY = Math.sin(this.bobTimer) * 3;
+                const x = this.x;
+                const y = this.y - 20 + bobY;
+                const w = 16;
+                const h = 24;
+                
+                ctx.save();
+                
+                // Shadow
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.beginPath();
+                ctx.ellipse(x, GROUND_Y + 2, 10, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Bottle outline (glass)
+                ctx.fillStyle = 'rgba(200, 220, 255, 0.3)';
+                ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+                ctx.lineWidth = 1.5;
+                
+                // Bottle body
+                ctx.beginPath();
+                ctx.moveTo(x - w/2, y - h/2 + 6); // Left neck bottom
+                ctx.lineTo(x - w/2, y + h/2 - 4); // Left body bottom
+                ctx.quadraticCurveTo(x - w/2, y + h/2, x - w/2 + 4, y + h/2); // Bottom left curve
+                ctx.lineTo(x + w/2 - 4, y + h/2); // Bottom
+                ctx.quadraticCurveTo(x + w/2, y + h/2, x + w/2, y + h/2 - 4); // Bottom right curve
+                ctx.lineTo(x + w/2, y - h/2 + 6); // Right body top
+                ctx.lineTo(x + w/4, y - h/2 + 6); // Shoulder right
+                ctx.lineTo(x + w/4, y - h/2); // Neck right
+                ctx.lineTo(x - w/4, y - h/2); // Neck top
+                ctx.lineTo(x - w/4, y - h/2 + 6); // Neck left
+                ctx.lineTo(x - w/2, y - h/2 + 6); // Shoulder left
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+                
+                // Liquid inside (filled ~70%)
+                const liquidTop = y - h/2 + 10;
+                const liquidBot = y + h/2 - 2;
+                ctx.fillStyle = this.color;
+                ctx.globalAlpha = 0.8;
+                ctx.beginPath();
+                ctx.moveTo(x - w/2 + 2, liquidTop);
+                ctx.lineTo(x - w/2 + 2, liquidBot - 4);
+                ctx.quadraticCurveTo(x - w/2 + 2, liquidBot, x - w/2 + 6, liquidBot);
+                ctx.lineTo(x + w/2 - 6, liquidBot);
+                ctx.quadraticCurveTo(x + w/2 - 2, liquidBot, x + w/2 - 2, liquidBot - 4);
+                ctx.lineTo(x + w/2 - 2, liquidTop);
+                ctx.closePath();
+                ctx.fill();
+                ctx.globalAlpha = 1;
+                
+                // Shine spot on shoulder (SVG-like ellipse)
+                ctx.fillStyle = 'rgba(255,255,255,0.7)';
+                ctx.beginPath();
+                ctx.ellipse(x - w/4, y - h/2 + 8, 3, 5, -0.3, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Small secondary shine
+                ctx.fillStyle = 'rgba(255,255,255,0.4)';
+                ctx.beginPath();
+                ctx.ellipse(x - w/4 + 2, y - h/2 + 14, 2, 3, -0.3, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Cork
+                ctx.fillStyle = '#8B4513';
+                ctx.fillRect(x - w/4 + 1, y - h/2 - 4, w/2 - 2, 5);
+                
+                ctx.restore();
+            }
+
+            getHitbox() {
+                return {
+                    x: this.x - 12,
+                    y: this.y - 40,
+                    w: 24,
+                    h: 40
+                };
+            }
+        }
+
+        function spawnPotion(x) {
+            potions.push(new Potion(x));
+            SoundFX.playTone(800, 'sine', 0.1, 0.1, 200); // Spawn sound
+        }
+
+        function hasPotionNear(x, range = 50) {
+            return potions.some(p => !p.collected && Math.abs(p.x - x) < range);
+        }
+
+        function checkTimedPotionSpawns() {
+            if (roundTime >= POTION_SPAWN_TIME) {
+                // Left side spawn
+                if (!leftPotionSpawned && !hasPotionNear(LEFT_POTION_X)) {
+                    leftPotionSpawned = true;
+                    spawnPotion(LEFT_POTION_X);
+                }
+                // Right side spawn
+                if (!rightPotionSpawned && !hasPotionNear(RIGHT_POTION_X)) {
+                    rightPotionSpawned = true;
+                    spawnPotion(RIGHT_POTION_X);
+                }
+            }
+        }
+
+        function checkPotionPickup() {
+            if (!player || player.health <= 0) return;
+            
+            const playerBox = {
+                x: player.x - 20,
+                y: player.y - 80,
+                w: 40,
+                h: 80
+            };
+            
+            potions.forEach(potion => {
+                if (potion.collected) return;
+                
+                const potionBox = potion.getHitbox();
+                if (rectsOverlap(playerBox, potionBox)) {
+                    potion.collected = true;
+                    potion.apply(player);
+                    showMessage(potion.effect, potion.color);
+                    SoundFX.playTone(600, 'sine', 0.15, 0.15, 400); // Pickup sound
+                }
+            });
+            
+            // Remove collected potions
+            potions = potions.filter(p => !p.collected);
         }
 
         // ==================== COLLISION DETECTION ====================
@@ -1622,6 +1815,18 @@
                 // Remove dead minions
                 enemies = enemies.filter(e => !(e.isMinion && e.health <= 0 && e.deathTimer > 2));
                 
+                // Update potions
+                potions.forEach(p => p.update(dt));
+                
+                // Track round time and check for timed potion spawns
+                if (gameState === 'fighting') {
+                    roundTime += dt;
+                    checkTimedPotionSpawns();
+                }
+                
+                // Check potion pickup
+                if (gameState === 'fighting') checkPotionPickup();
+                
                 // Process attacks
                 if (gameState === 'fighting') processAttacks();
                 
@@ -1655,6 +1860,9 @@
             // Actually, simple loop is fine.
             
             allFighters.forEach(f => f.draw(ctx));
+            
+            // Draw potions
+            potions.forEach(p => p.draw(ctx));
 
             if (gameState === 'paused') {
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
@@ -1838,6 +2046,10 @@
 
         function startRound() {
             enemies = [];
+            potions = []; // Clear potions on new round
+            roundTime = 0; // Reset round timer
+            leftPotionSpawned = false; // Reset timed spawn flags
+            rightPotionSpawned = false;
             let bossName, bossColor, bossStyle, bossStats;
 
             if (currentRound <= 8) {
