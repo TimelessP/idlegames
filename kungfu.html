@@ -483,6 +483,7 @@
 
             draw(ctx) {
                 if (this.owner) return; // Don't draw if being held - fighter draws it
+                if (!this.onGround) return; // Don't draw if in-flight as projectile
                 
                 const bobY = Math.sin(this.bobTimer) * 3;
                 const x = this.x;
@@ -652,7 +653,7 @@
                 this.vy = 0;
                 this.rotation = 0;
                 this.returning = false;
-                this.hasHit = false;
+                this.hitFighters = new Set(); // Track fighters hit during this flight
                 this.type = weapon.type;
             }
 
@@ -689,6 +690,10 @@
                         this.weapon.y = GROUND_Y;
                         this.weapon.onGround = true;
                         this.weapon.owner = null;
+                        // Ensure weapon is in weapons array for pickup
+                        if (!weapons.includes(this.weapon)) {
+                            weapons.push(this.weapon);
+                        }
                         return true; // Remove projectile
                     } else if (this.type === 'fan') {
                         // Fan returns
@@ -1705,20 +1710,26 @@
                         break;
                         
                     case 'fan':
-                        // Held closed in hand
-                        const fanAngle = this.facingRight ? -Math.PI/4 : Math.PI + Math.PI/4;
+                        // Fan held open in hand, similar to sword grip
+                        // drawWeapon draws fan pointing up (-Y), handle at +Y
+                        // We want fan to point toward enemy
+                        let fanAngle;
+                        if (this.state === 'punching' || this.state === 'jumpPunch') {
+                            // Throwing pose - fan forward
+                            fanAngle = this.facingRight ? Math.PI/2 : -Math.PI/2;
+                        } else {
+                            // Idle - held ready, fan angled up and forward
+                            fanAngle = this.facingRight ? Math.PI/4 : -Math.PI/4;
+                        }
+                        
+                        // Offset so hand holds the handle (handle center ~7px from origin)
                         ctx.save();
                         ctx.translate(fistX, fistY);
                         ctx.rotate(fanAngle);
-                        ctx.scale(0.6, 0.6);
-                        // Closed fan (just the ribs)
-                        ctx.beginPath();
-                        ctx.moveTo(0, 0);
-                        ctx.lineTo(0, -30);
-                        ctx.stroke();
-                        ctx.fillStyle = '#8B4513';
-                        ctx.fillRect(-2, 0, 4, 12);
-                        ctx.strokeRect(-2, 0, 4, 12);
+                        ctx.translate(0, -7); // Shift so handle is at fist
+                        
+                        this.weapon.drawWeapon(ctx, 0, 0, 0, 0.6);
+                        
                         ctx.restore();
                         break;
                 }
@@ -2238,6 +2249,8 @@
                     if (fighter === proj.thrower) continue;
                     if (fighter.health <= 0) continue;
                     if (fighter.invulnerable) continue;
+                    // Skip fighters already hit during this flight
+                    if (proj.hitFighters.has(fighter)) continue;
                     
                     const fBoxes = fighter.getHitboxes();
                     if (rectsOverlap(projBox, fBoxes.head) || rectsOverlap(projBox, fBoxes.body)) {
@@ -2245,20 +2258,24 @@
                         const damage = PUNCH_DAMAGE * WEAPON_DAMAGE_MULT;
                         const knockDir = proj.vx > 0 ? 1 : -1;
                         fighter.takeDamage(damage, knockDir, 'projectile');
+                        proj.hitFighters.add(fighter); // Track this fighter as hit
                         
                         if (proj.type === 'star') {
                             SoundFX.starHit();
-                            // Star drops to ground
-                            proj.weapon.x = fighter.x;
+                            // Star drops to ground at projectile position (not fighter position)
+                            proj.weapon.x = proj.x;
                             proj.weapon.y = GROUND_Y;
                             proj.weapon.onGround = true;
                             proj.weapon.owner = null;
+                            // Ensure weapon is in weapons array for pickup
+                            if (!weapons.includes(proj.weapon)) {
+                                weapons.push(proj.weapon);
+                            }
                             return false; // Remove projectile
                         } else if (proj.type === 'fan') {
                             SoundFX.fanHit();
-                            // Fan returns after hit
+                            // Fan returns after hit (continues through, can hit others)
                             proj.returning = true;
-                            proj.hasHit = true;
                         }
                     }
                 }
