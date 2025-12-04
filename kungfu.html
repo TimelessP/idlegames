@@ -578,6 +578,9 @@
             { type: 'full', color: '#2ecc71', effect: 'Full Restore!', apply: (p) => { p.health = 100; p.stamina = STAMINA_MAX; } },
             { type: 'chi', color: '#3498db', effect: 'Chi Shield!', apply: (p) => { if (p.activateChiShield) p.activateChiShield(10000); } }
         ];
+        
+        // Special Traitor Potion (turns a minion against their boss)
+        const TRAITOR_POTION = { type: 'traitor', color: '#ff00ff', effect: 'Traitor!', apply: (p) => { turnMinionTraitor(); } };
 
         // ==================== WEAPON SYSTEM ====================
         const WEAPON_TYPES = ['sword', 'pole', 'star', 'fan'];
@@ -4509,6 +4512,7 @@
                 this.name = name;
                 this.facingRight = isPlayer;
                 this.isMinion = isMinion;
+                this.turnedTraitor = false; // For minions who turn against their boss
                 
                 this.health = 100;
                 this.stamina = STAMINA_MAX;
@@ -5243,13 +5247,19 @@
 
         // ==================== POTION CLASS ====================
         class Potion {
-            constructor(x) {
+            constructor(x, forceTraitor = false) {
                 this.x = x;
                 this.y = GROUND_Y;
                 this.bobTimer = Math.random() * Math.PI * 2;
                 
-                // Random potion type
-                const typeData = POTION_TYPES[Math.floor(Math.random() * POTION_TYPES.length)];
+                // Determine potion type - may be traitor potion if minions available
+                let typeData;
+                if (forceTraitor || (canSpawnTraitorPotion() && Math.random() < 0.25)) {
+                    // 25% chance of traitor potion when minions are available
+                    typeData = TRAITOR_POTION;
+                } else {
+                    typeData = POTION_TYPES[Math.floor(Math.random() * POTION_TYPES.length)];
+                }
                 this.type = typeData.type;
                 this.color = typeData.color;
                 this.effect = typeData.effect;
@@ -5272,6 +5282,31 @@
                 const h = 24;
                 
                 ctx.save();
+                
+                // Special glow for traitor potion
+                if (this.type === 'traitor') {
+                    // Pulsing magenta glow
+                    const glowSize = 20 + Math.sin(this.bobTimer * 2) * 5;
+                    const gradient = ctx.createRadialGradient(x, y, 0, x, y, glowSize);
+                    gradient.addColorStop(0, 'rgba(255, 0, 255, 0.4)');
+                    gradient.addColorStop(0.5, 'rgba(255, 0, 255, 0.15)');
+                    gradient.addColorStop(1, 'rgba(255, 0, 255, 0)');
+                    ctx.fillStyle = gradient;
+                    ctx.beginPath();
+                    ctx.arc(x, y, glowSize, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Swirling particles
+                    for (let i = 0; i < 3; i++) {
+                        const angle = this.bobTimer * 2 + (i * Math.PI * 2 / 3);
+                        const px = x + Math.cos(angle) * 12;
+                        const py = y + Math.sin(angle) * 8;
+                        ctx.fillStyle = 'rgba(255, 100, 255, 0.8)';
+                        ctx.beginPath();
+                        ctx.arc(px, py, 2, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
                 
                 // Shadow
                 ctx.fillStyle = 'rgba(0,0,0,0.3)';
@@ -5349,6 +5384,38 @@
         function spawnPotion(x) {
             potions.push(new Potion(x));
             SoundFX.playTone(800, 'sine', 0.1, 0.1, 200); // Spawn sound
+        }
+        
+        // Check if there are any minions that could be turned traitor
+        function canSpawnTraitorPotion() {
+            // Need at least one living minion that hasn't turned yet
+            return enemies.some(e => e.isMinion && e.health > 0 && !e.turnedTraitor);
+        }
+        
+        // Turn the nearest non-traitor minion into a traitor
+        function turnMinionTraitor() {
+            // Find nearest living minion to the player that hasn't turned yet
+            let nearestMinion = null;
+            let minDist = Infinity;
+            
+            enemies.forEach(e => {
+                if (e.isMinion && e.health > 0 && !e.turnedTraitor) {
+                    const dist = Math.abs(e.x - player.x);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearestMinion = e;
+                    }
+                }
+            });
+            
+            if (nearestMinion) {
+                nearestMinion.turnedTraitor = true;
+                nearestMinion.color = '#4ecdc4'; // Change to player's color!
+                // Rising victory sounds (staggered)
+                SoundFX.playTone(440, 'sine', 0.15, 0.2);
+                setTimeout(() => SoundFX.playTone(550, 'sine', 0.15, 0.2), 100);
+                setTimeout(() => SoundFX.playTone(660, 'sine', 0.15, 0.2), 200);
+            }
         }
 
         function hasPotionNear(x, range = 50) {
@@ -5666,12 +5733,13 @@
 
         // ==================== GAME LOGIC ====================
         function processAttacks() {
-            // Check player attacks
+            // Check player attacks (only hit non-traitor enemies)
             if (player.attackTimer > 0 && !player.hasDealtDamage && player.attackTimer > player.attackDuration - 100) {
                 const attackType = player.state;
                 let hitAny = false;
                 
                 enemies.forEach(enemy => {
+                    if (enemy.turnedTraitor) return; // Don't hurt your allies!
                     if (enemy.health > 0 && checkAttackHit(player, enemy, attackType)) {
                         let damage = calculateDamage(attackType, player.weapon);
                         const knockDir = player.facingRight ? 1 : -1;
@@ -5686,18 +5754,51 @@
                 }
             }
             
-            // Check enemy attacks
+            // Check enemy attacks (including traitor attacks against their former allies)
             enemies.forEach(enemy => {
                 if (enemy.health <= 0) return;
                 
                 if (enemy.attackTimer > 0 && !enemy.hasDealtDamage && enemy.attackTimer > enemy.attackDuration - 100) {
                     const attackType = enemy.state;
-                    if (checkAttackHit(enemy, player, attackType)) {
-                        let damage = calculateDamage(attackType, enemy.weapon);
-                        const knockDir = enemy.facingRight ? 1 : -1;
-                        player.takeDamage(damage, knockDir, attackType);
-                        enemy.hasDealtDamage = true;
-                        playWeaponHitSound(enemy.weapon);
+                    
+                    if (enemy.turnedTraitor) {
+                        // Traitor attacks other enemies (boss and non-traitor minions)
+                        enemies.forEach(target => {
+                            if (target === enemy) return; // Don't attack self
+                            if (target.health <= 0) return;
+                            if (target.turnedTraitor) return; // Don't attack fellow traitors
+                            
+                            if (checkAttackHit(enemy, target, attackType)) {
+                                let damage = calculateDamage(attackType, enemy.weapon);
+                                const knockDir = enemy.facingRight ? 1 : -1;
+                                target.takeDamage(damage, knockDir, attackType);
+                                enemy.hasDealtDamage = true;
+                                playWeaponHitSound(enemy.weapon);
+                            }
+                        });
+                    } else {
+                        // Normal enemy attacks player (and traitors)
+                        // Attack player
+                        if (checkAttackHit(enemy, player, attackType)) {
+                            let damage = calculateDamage(attackType, enemy.weapon);
+                            const knockDir = enemy.facingRight ? 1 : -1;
+                            player.takeDamage(damage, knockDir, attackType);
+                            enemy.hasDealtDamage = true;
+                            playWeaponHitSound(enemy.weapon);
+                        }
+                        // Also attack traitor minions
+                        enemies.forEach(target => {
+                            if (!target.turnedTraitor) return;
+                            if (target.health <= 0) return;
+                            
+                            if (checkAttackHit(enemy, target, attackType)) {
+                                let damage = calculateDamage(attackType, enemy.weapon);
+                                const knockDir = enemy.facingRight ? 1 : -1;
+                                target.takeDamage(damage, knockDir, attackType);
+                                enemy.hasDealtDamage = true;
+                                playWeaponHitSound(enemy.weapon);
+                            }
+                        });
                     }
                 }
             });
@@ -5747,6 +5848,9 @@
                 const projBox = proj.getHitbox();
                 const allFighters = [player, ...enemies];
                 
+                // Determine thrower's allegiance
+                const throwerIsPlayerSide = proj.thrower === player || proj.thrower.turnedTraitor;
+                
                 for (let fighter of allFighters) {
                     // Never damage the thrower
                     if (fighter === proj.thrower) continue;
@@ -5755,9 +5859,13 @@
                     // Skip fighters already hit during this flight
                     if (proj.hitFighters.has(fighter)) continue;
                     
+                    // Check allegiance - don't hit allies
+                    const targetIsPlayerSide = fighter === player || fighter.turnedTraitor;
+                    if (throwerIsPlayerSide === targetIsPlayerSide) continue; // Same team
+                    
                     const fBoxes = fighter.getHitboxes();
                     if (rectsOverlap(projBox, fBoxes.head) || rectsOverlap(projBox, fBoxes.body)) {
-                        // Hit a non-thrower!
+                        // Hit an enemy!
                         const damage = PUNCH_DAMAGE * WEAPON_DAMAGE_MULT;
                         const knockDir = proj.vx > 0 ? 1 : -1;
                         fighter.takeDamage(damage, knockDir, 'projectile');
@@ -5996,11 +6104,14 @@
                 
                 // Update AI (only if fighting)
                 if (gameState === 'fighting') {
-                    // Find nearest living enemy for coordination
+                    // Build list of player-faction targets (player + traitor minions)
+                    const playerFaction = [player, ...enemies.filter(e => e.turnedTraitor && e.health > 0)];
+                    
+                    // Find nearest living non-traitor enemy for coordination
                     let nearestEnemy = null;
                     let minDist = Infinity;
                     enemies.forEach(e => {
-                        if (e.health > 0) {
+                        if (e.health > 0 && !e.turnedTraitor) {
                             const d = Math.abs(e.x - player.x);
                             if (d < minDist) { minDist = d; nearestEnemy = e; }
                         }
@@ -6008,24 +6119,54 @@
 
                     enemies.forEach(enemy => {
                         if (enemy.health > 0) {
-                            const isNearest = (enemy === nearestEnemy);
-                            let overlapDir = 0;
+                            // Traitor minions target enemies instead of player
+                            if (enemy.turnedTraitor) {
+                                // Find nearest non-traitor enemy to attack
+                                let traitorTarget = null;
+                                let targetDist = Infinity;
+                                enemies.forEach(e => {
+                                    if (e !== enemy && e.health > 0 && !e.turnedTraitor) {
+                                        const d = Math.abs(e.x - enemy.x);
+                                        if (d < targetDist) { targetDist = d; traitorTarget = e; }
+                                    }
+                                });
+                                if (traitorTarget) {
+                                    updateAI(enemy, traitorTarget, dt, true, 0);
+                                }
+                            } else {
+                                // Normal enemy AI - target nearest player-faction character
+                                // Find nearest player-faction target for this enemy
+                                let aiTarget = player;
+                                let aiTargetDist = Math.abs(enemy.x - player.x);
+                                playerFaction.forEach(pf => {
+                                    if (pf.health > 0) {
+                                        const d = Math.abs(enemy.x - pf.x);
+                                        if (d < aiTargetDist) {
+                                            aiTargetDist = d;
+                                            aiTarget = pf;
+                                        }
+                                    }
+                                });
+                                
+                                const isNearest = (enemy === nearestEnemy);
+                                let overlapDir = 0;
 
-                            if (!isNearest) {
-                                for (let other of enemies) {
-                                    if (other !== enemy && other.health > 0) {
-                                        const dx = enemy.x - other.x;
-                                        if (Math.abs(dx) < 60) {
-                                            // Move away from the other enemy
-                                            overlapDir = dx > 0 ? 1 : -1;
-                                            if (dx === 0) overlapDir = Math.random() < 0.5 ? 1 : -1;
-                                            break;
+                                if (!isNearest) {
+                                    for (let other of enemies) {
+                                        if (other !== enemy && other.health > 0 && !other.turnedTraitor) {
+                                            const dx = enemy.x - other.x;
+                                            if (Math.abs(dx) < 60) {
+                                                // Move away from the other enemy
+                                                overlapDir = dx > 0 ? 1 : -1;
+                                                if (dx === 0) overlapDir = Math.random() < 0.5 ? 1 : -1;
+                                                break;
+                                            }
                                         }
                                     }
                                 }
+                                
+                                updateAI(enemy, aiTarget, dt, isNearest, overlapDir);
                             }
-                            
-                            updateAI(enemy, player, dt, isNearest, overlapDir);
                         }
                     });
                     
@@ -6034,11 +6175,11 @@
                 }
                 
                 // Update fighters
-                // Find nearest enemy for player facing
+                // Find nearest enemy for player facing (exclude traitors - they're allies!)
                 let nearestEnemy = enemies[0];
                 let minDist = Infinity;
                 enemies.forEach(e => {
-                    if (e.health > 0) {
+                    if (e.health > 0 && !e.turnedTraitor) {
                         const d = Math.abs(e.x - player.x);
                         if (d < minDist) { minDist = d; nearestEnemy = e; }
                     }
@@ -6046,8 +6187,32 @@
                 
                 player.update(dt, nearestEnemy);
                 
+                // Build player faction list for enemy facing
+                const playerFactionForFacing = [player, ...enemies.filter(e => e.turnedTraitor && e.health > 0)];
+                
                 enemies.forEach(enemy => {
-                    enemy.update(dt, player);
+                    // Determine what this enemy should face
+                    let faceTarget = player;
+                    if (enemy.turnedTraitor) {
+                        // Traitor faces nearest non-traitor enemy
+                        let targetDist = Infinity;
+                        enemies.forEach(e => {
+                            if (e !== enemy && e.health > 0 && !e.turnedTraitor) {
+                                const d = Math.abs(e.x - enemy.x);
+                                if (d < targetDist) { targetDist = d; faceTarget = e; }
+                            }
+                        });
+                    } else {
+                        // Boss/loyal minion faces nearest player-faction character
+                        let targetDist = Infinity;
+                        playerFactionForFacing.forEach(pf => {
+                            if (pf.health > 0) {
+                                const d = Math.abs(enemy.x - pf.x);
+                                if (d < targetDist) { targetDist = d; faceTarget = pf; }
+                            }
+                        });
+                    }
+                    enemy.update(dt, faceTarget);
                 });
 
                 // Remove dead minions
