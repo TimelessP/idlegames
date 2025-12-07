@@ -683,6 +683,7 @@
         updateCrabBehavior(entity, dt) {
             const behavior = entity.behavior;
             const physics = entity.physics;
+            const eco = entity.ecosystem;
 
             // Don't act while being grabbed
             if (interactionSystem.grabbed === entity) {
@@ -694,11 +695,65 @@
             if (behavior.eatTimer > 0) {
                 behavior.eatTimer -= dt;
             }
+            
+            // Check hunger level
+            const isHungry = eco && eco.hunger > eco.maxHunger * 0.4;
+            
+            // Look for snails (easy prey when hungry)
+            const snails = state.entities.filter(e => e.type === 'snail');
+            
+            // Look for settled food to ambush fish near
+            const settledFood = state.entities.filter(e => 
+                e.type === 'food' && 
+                e.position.y >= CONFIG.physics.floorY - 30 // Food near the sand
+            );
 
             // State machine
             switch (behavior.state) {
                 case 'idle':
                     behavior.scuttleTimer -= dt;
+                    
+                    // Priority 1: If hungry and snails exist, hunt them!
+                    if (isHungry && snails.length > 0) {
+                        // Find closest snail
+                        let closestSnail = null;
+                        let closestDist = Infinity;
+                        for (const snail of snails) {
+                            const d = Math.abs(snail.position.x - entity.position.x);
+                            if (d < closestDist) {
+                                closestDist = d;
+                                closestSnail = snail;
+                            }
+                        }
+                        
+                        if (closestSnail) {
+                            behavior.state = 'hunt';
+                            behavior.target = closestSnail;
+                            behavior.facingLeft = closestSnail.position.x < entity.position.x;
+                        }
+                    }
+                    // Priority 2: If no snails but there's settled food, ambush fish
+                    else if (settledFood.length > 0 && snails.length === 0 && Math.random() < 0.3) {
+                        // Find closest settled food
+                        let closestFood = null;
+                        let closestDist = Infinity;
+                        for (const food of settledFood) {
+                            const d = Math.abs(food.position.x - entity.position.x);
+                            if (d < closestDist) {
+                                closestDist = d;
+                                closestFood = food;
+                            }
+                        }
+                        
+                        if (closestFood && closestDist > 30) {
+                            // Move toward the food to ambush
+                            behavior.state = 'ambush';
+                            behavior.targetX = closestFood.position.x;
+                            behavior.ambushTimer = 8 + Math.random() * 5; // Wait up to 13 seconds
+                            behavior.facingLeft = closestFood.position.x < entity.position.x;
+                        }
+                    }
+                    
                     // Only scuttle if on the ground or in water and settled
                     const canMove = physics.onGround || (Math.abs(physics.velocity.y) < 20);
                     if (behavior.scuttleTimer <= 0 && canMove) {
@@ -714,6 +769,63 @@
                         
                         // Face movement direction
                         behavior.facingLeft = behavior.targetVelX < 0;
+                    }
+                    break;
+                
+                case 'hunt':
+                    // Chase the snail!
+                    const snail = behavior.target;
+                    if (!snail || !state.entities.includes(snail)) {
+                        // Snail is gone, go back to idle
+                        behavior.state = 'idle';
+                        behavior.scuttleTimer = 0.5;
+                        break;
+                    }
+                    
+                    const dxSnail = snail.position.x - entity.position.x;
+                    behavior.facingLeft = dxSnail < 0;
+                    
+                    // Move toward snail (faster than normal scuttle)
+                    const huntSpeed = 70;
+                    physics.velocity.x += (Math.sign(dxSnail) * huntSpeed - physics.velocity.x) * dt * 4;
+                    
+                    // If close enough, the eating system will handle it
+                    // If snail gets too far, give up
+                    if (Math.abs(dxSnail) > 400) {
+                        behavior.state = 'idle';
+                        behavior.scuttleTimer = 1;
+                    }
+                    break;
+                
+                case 'ambush':
+                    // Move toward ambush position
+                    const dx = behavior.targetX - entity.position.x;
+                    if (Math.abs(dx) > 20) {
+                        // Scuttle toward the food
+                        const speed = 50;
+                        physics.velocity.x += (Math.sign(dx) * speed - physics.velocity.x) * dt * 3;
+                        behavior.facingLeft = dx < 0;
+                    } else {
+                        // At position - wait patiently
+                        physics.velocity.x *= 0.9;
+                    }
+                    
+                    behavior.ambushTimer -= dt;
+                    
+                    // If a snail appears while we're ambushing and we're hungry, switch to hunt
+                    if (isHungry && snails.length > 0) {
+                        behavior.state = 'idle'; // Will trigger hunt on next frame
+                        break;
+                    }
+                    
+                    // If the food we're ambushing is gone, or timer expired, go back to idle
+                    const foodStillThere = settledFood.some(f => 
+                        Math.abs(f.position.x - behavior.targetX) < 50
+                    );
+                    
+                    if (!foodStillThere || behavior.ambushTimer <= 0) {
+                        behavior.state = 'idle';
+                        behavior.scuttleTimer = 1 + Math.random() * 2;
                     }
                     break;
 
@@ -897,6 +1009,7 @@
             );
             
             const isStarving = entity.ecosystem && entity.ecosystem.hunger > entity.ecosystem.maxHunger * 0.9;
+            const isHungry = entity.ecosystem && entity.ecosystem.hunger > entity.ecosystem.maxHunger * 0.5;
             
             if (pointerDist < 100 && behavior.state !== 'flee' && !isStarving) {
                 behavior.state = 'flee';
@@ -910,8 +1023,28 @@
                 behavior.targetY = entity.position.y + Math.sin(angle) * 200;
             }
             
-            // When hungry (after ~2 days), seek food
-            const isHungry = entity.ecosystem && entity.ecosystem.hunger > entity.ecosystem.maxHunger * 0.67;
+            // Flee from crabs - but not when hungry (desperate for food!)
+            if (!isHungry && behavior.state !== 'flee') {
+                const nearbyCrab = state.entities.find(e => {
+                    if (e.type !== 'crab') return false;
+                    const d = Math.hypot(e.position.x - entity.position.x, e.position.y - entity.position.y);
+                    return d < 80; // Flee range from crab
+                });
+                
+                if (nearbyCrab) {
+                    behavior.state = 'flee';
+                    behavior.fleeTimer = 2;
+                    // Flee away from crab (upward and away)
+                    const angle = Math.atan2(
+                        entity.position.y - nearbyCrab.position.y - 50, // Bias upward
+                        entity.position.x - nearbyCrab.position.x
+                    );
+                    behavior.targetX = entity.position.x + Math.cos(angle) * 150;
+                    behavior.targetY = Math.max(waterY + 30, entity.position.y + Math.sin(angle) * 150);
+                }
+            }
+            
+            // When hungry (after ~1.5 days), seek food
             if (isHungry && behavior.state === 'swim') {
                 // Look for nearby food
                 const nearbyFood = state.entities.filter(e => e.type === 'food');
@@ -1171,12 +1304,23 @@
                 // Eating seaweed/kelp - nibble segments off the top
                 if (target.type === 'seaweed' || target.type === 'kelp') {
                     if (target.rig && target.rig.segments && target.rig.segments.length > 2) {
-                        // Nibble! One segment at a time
+                        // Nibble! One segment fully satiates the snail
                         target.rig.segments.pop();
-                        eco.hunger = Math.max(0, eco.hunger - 15);
-                        // Cooldown before next bite (snails are slow eaters!)
+                        eco.hunger = 0; // Fully satisfied - good for 1 day
+                        console.log('🐌 Snail munched some ' + target.type + '!');
+                        
+                        // If plant is now too small, remove it entirely
+                        if (target.rig.segments.length <= 2) {
+                            const idx = entities.indexOf(target);
+                            if (idx !== -1) {
+                                entities.splice(idx, 1);
+                                console.log('🥀 ' + target.type + ' was eaten completely!');
+                            }
+                        }
+                        
+                        // No more eating for a while - wander around
                         if (entity.behavior) {
-                            entity.behavior.eatTimer = 2.0; // 2 seconds between bites
+                            entity.behavior.eatTimer = 60; // Won't look for food for 60 seconds
                         }
                         return; // One bite per eating attempt
                     }
@@ -1215,8 +1359,12 @@
                     }
                 }
                 
-                // Fish eating food particles
+                // Fish eating food particles - only when hungry!
                 if (entity.type === 'fish' && target.type === 'food') {
+                    // Fish only eat when hungry (hunger > 50% of max)
+                    const isHungry = eco.hunger > eco.maxHunger * 0.5;
+                    if (!isHungry) continue;
+                    
                     const idx = entities.indexOf(target);
                     if (idx !== -1) {
                         entities.splice(idx, 1);
@@ -1237,6 +1385,8 @@
     // ═══════════════════════════════════════════════════════════════════════════
     const spawnSystem = {
         seaweedSpawnTimer: 0,
+        emergencySpawnTimer: 0, // Backup timer to ensure spawning even if tide events missed
+        lastHighTideTime: 0,    // Track when we last processed a high tide
         
         init() {
             eventBus.on('highTide', () => this.onHighTide());
@@ -1262,11 +1412,33 @@
                     console.log('🌿 New seaweed drifted in!');
                 }
             }
+            
+            // Emergency spawn check - if no high tide event for 2 full tide cycles, force spawn
+            this.emergencySpawnTimer += dt;
+            const timeSinceHighTide = state.gameTime - this.lastHighTideTime;
+            
+            if (timeSinceHighTide > CONFIG.cycles.tideLength * 2) {
+                // It's been too long since a high tide event - check if we need to spawn
+                this.emergencySpawnTimer = 0;
+                this.lastHighTideTime = state.gameTime; // Reset to prevent spam
+                
+                const fishCount = entities.filter(e => e.type === 'fish').length;
+                const crabCount = entities.filter(e => e.type === 'crab').length;
+                const snailCount = entities.filter(e => e.type === 'snail').length;
+                const foodCount = entities.filter(e => e.type === 'food').length;
+                
+                // Emergency spawns if populations are too low
+                if (fishCount === 0 || foodCount < 3) {
+                    console.log('🆘 Emergency spawn triggered - restocking pool');
+                    this.onHighTide(); // Trigger a full high tide spawn
+                }
+            }
         },
 
         onHighTide() {
             // Chance to spawn new creatures and plants
             console.log('🌊 High tide - things may drift in!');
+            this.lastHighTideTime = state.gameTime;
             
             // Maybe spawn a snail
             if (Math.random() < 0.3) {
@@ -1696,16 +1868,20 @@
 
         drawEntities(entities, underwaterPass) {
             const waterY = tideSystem.getWaterY();
-            // Sort by Y position, with type order for layering:
-            // snails (back) → seaweed/kelp → crabs → food → fish (front)
-            const typeOrder = { snail: 0, seaweed: 1, kelp: 1, crab: 2, food: 2.5, fish: 3 };
+            // Sort by type order first for proper layering, then by Y position within same type
+            // Back to front: seaweed/kelp → fish → snail → crab → food
+            const typeOrder = { seaweed: 0, kelp: 0, fish: 1, snail: 2, crab: 3, food: 3.5 };
             const sorted = [...entities].sort((a, b) => {
-                const yDiff = a.position.y - b.position.y;
-                if (Math.abs(yDiff) < 30) {
-                    // Similar Y - use type order for proper layering
-                    return (typeOrder[a.type] ?? 1.5) - (typeOrder[b.type] ?? 1.5);
+                const typeA = typeOrder[a.type] ?? 1.5;
+                const typeB = typeOrder[b.type] ?? 1.5;
+                
+                // Different types - sort by type order
+                if (typeA !== typeB) {
+                    return typeA - typeB;
                 }
-                return yDiff;
+                
+                // Same type - sort by Y position (lower Y drawn first)
+                return a.position.y - b.position.y;
             });
 
             for (const entity of sorted) {
@@ -2440,6 +2616,8 @@
                     facingLeft: Math.random() > 0.5,
                     scuttleTimer: 0,
                     eatTimer: 0, // Cooldown between eating
+                    targetX: x,  // For ambush positioning
+                    ambushTimer: 0, // How long to wait at ambush spot
                 },
                 ecosystem: {
                     hunger: 20 + Math.random() * 30, // Start somewhat hungry
@@ -2660,9 +2838,9 @@
                     eatTimer: 0,
                 },
                 ecosystem: {
-                    hunger: 20 + Math.random() * 20, // Start somewhat hungry
-                    maxHunger: 100,
-                    hungerRate: 1.5, // Hunger per second - snails are slow metabolizers
+                    hunger: Math.random() * 30, // Start recently fed
+                    maxHunger: 100, // Dies at 2 days without food (240s)
+                    hungerRate: 0.42, // 100 / 240 seconds (2 days at 120s/day)
                     eats: ['seaweed', 'kelp'],
                     eatRange: 25,
                     edibleBy: ['crab'],
@@ -2739,11 +2917,24 @@
     // MAIN LOOP - Fixed timestep with deltaTime
     // ═══════════════════════════════════════════════════════════════════════════
     let lastTime = 0;
+    let pageHidden = false;
+
+    // Handle page visibility changes (mobile backgrounding, tab switching)
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            pageHidden = true;
+            console.log('🌙 Page hidden - pausing updates');
+        } else {
+            pageHidden = false;
+            lastTime = 0; // Reset timing to avoid huge dt jumps
+            console.log('☀️ Page visible - resuming');
+        }
+    });
 
     function gameLoop(currentTime) {
         requestAnimationFrame(gameLoop);
 
-        if (state.paused) return;
+        if (state.paused || pageHidden) return;
 
         // Calculate delta time in seconds
         if (lastTime === 0) lastTime = currentTime;
