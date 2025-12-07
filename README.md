@@ -262,4 +262,4 @@ This collection aims to provide:
 
 ### 🌟 Enjoy the games and happy playing! 🌟
 
-*Built with ❤️ for the joy of simple, elegant gaming experiences.*
+*Built with ❤️ and 🤖 for the joy of simple, elegant gaming experiences.*
