@@ -826,6 +826,11 @@
             // Track if fish is in water for rendering
             entity.inWater = inWater;
             
+            // Decrease eat timer
+            if (behavior.eatTimer > 0) {
+                behavior.eatTimer -= dt;
+            }
+            
             // Handle grabbed state - don't process physics while held
             if (interactionSystem.grabbed === entity) {
                 behavior.state = 'grabbed';
@@ -885,13 +890,15 @@
                 return;
             }
             
-            // Check for pointer/threat - flee if close
+            // Check for pointer/threat - flee if close (but not when starving - desperate!)
             const pointerDist = Math.hypot(
                 interactionSystem.pointerPos.x - entity.position.x,
                 interactionSystem.pointerPos.y - entity.position.y
             );
             
-            if (pointerDist < 100 && behavior.state !== 'flee') {
+            const isStarving = entity.ecosystem && entity.ecosystem.hunger > entity.ecosystem.maxHunger * 0.9;
+            
+            if (pointerDist < 100 && behavior.state !== 'flee' && !isStarving) {
                 behavior.state = 'flee';
                 behavior.fleeTimer = 1.5;
                 // Flee away from pointer
@@ -901,6 +908,31 @@
                 );
                 behavior.targetX = entity.position.x + Math.cos(angle) * 200;
                 behavior.targetY = entity.position.y + Math.sin(angle) * 200;
+            }
+            
+            // When hungry (after ~2 days), seek food
+            const isHungry = entity.ecosystem && entity.ecosystem.hunger > entity.ecosystem.maxHunger * 0.67;
+            if (isHungry && behavior.state === 'swim') {
+                // Look for nearby food
+                const nearbyFood = state.entities.filter(e => e.type === 'food');
+                if (nearbyFood.length > 0) {
+                    // Find closest food
+                    let closestFood = null;
+                    let closestDist = Infinity;
+                    for (const food of nearbyFood) {
+                        const d = Math.hypot(food.position.x - entity.position.x, food.position.y - entity.position.y);
+                        if (d < closestDist) {
+                            closestDist = d;
+                            closestFood = food;
+                        }
+                    }
+                    if (closestFood && closestDist < 300) {
+                        // Target the food!
+                        behavior.targetX = closestFood.position.x;
+                        behavior.targetY = closestFood.position.y;
+                        behavior.turnTimer = 0.5; // Keep updating target
+                    }
+                }
             }
             
             switch (behavior.state) {
@@ -979,7 +1011,7 @@
             
             // Clamp target to stay in water
             const minY = waterY + 25;
-            const maxY = CONFIG.physics.floorY - 30;
+            const maxY = CONFIG.physics.floorY - 15; // Fish can swim close to floor (crabs can catch them!)
             const minX = CONFIG.physics.leftWall + 30;
             const maxX = CONFIG.physics.rightWall - 30;
             
@@ -1019,6 +1051,12 @@
                     this.updatePlantGrowth(entity, dt);
                 }
                 
+                // Food particle physics and lifetime
+                if (entity.type === 'food') {
+                    this.updateFood(entity, dt, toRemove);
+                    continue;
+                }
+                
                 if (!entity.ecosystem) continue;
 
                 // Increase hunger over time
@@ -1040,6 +1078,41 @@
             for (const dead of toRemove) {
                 const idx = entities.indexOf(dead);
                 if (idx !== -1) entities.splice(idx, 1);
+            }
+        },
+        
+        updateFood(entity, dt, toRemove) {
+            // Update lifetime
+            entity.lifetime += dt;
+            if (entity.lifetime >= entity.maxLifetime) {
+                toRemove.push(entity);
+                return;
+            }
+            
+            // Drift and sink
+            entity.wobblePhase += dt * 2;
+            entity.position.x += entity.velocity.x * dt;
+            entity.position.y += entity.velocity.y * dt;
+            
+            // Gentle wobble in water current
+            entity.velocity.x += Math.sin(entity.wobblePhase) * 5 * dt;
+            entity.velocity.x *= 0.98; // Water drag
+            
+            // Settle on floor (at same height fish can swim to)
+            if (entity.position.y >= CONFIG.physics.floorY - 15) {
+                entity.position.y = CONFIG.physics.floorY - 15;
+                entity.velocity.y = 0;
+                entity.velocity.x *= 0.9; // More drag on floor
+            }
+            
+            // Bounce off walls
+            if (entity.position.x < CONFIG.physics.leftWall + 10) {
+                entity.position.x = CONFIG.physics.leftWall + 10;
+                entity.velocity.x = Math.abs(entity.velocity.x) * 0.5;
+            }
+            if (entity.position.x > CONFIG.physics.rightWall - 10) {
+                entity.position.x = CONFIG.physics.rightWall - 10;
+                entity.velocity.x = -Math.abs(entity.velocity.x) * 0.5;
             }
         },
         
@@ -1141,6 +1214,20 @@
                         return;
                     }
                 }
+                
+                // Fish eating food particles
+                if (entity.type === 'fish' && target.type === 'food') {
+                    const idx = entities.indexOf(target);
+                    if (idx !== -1) {
+                        entities.splice(idx, 1);
+                        eco.hunger = 0; // Fully satiated!
+                        if (entity.behavior) {
+                            entity.behavior.eatTimer = 0.5; // Quick bite
+                            entity.behavior.state = 'swim'; // Go back to swimming
+                        }
+                        return;
+                    }
+                }
             }
         },
     };
@@ -1199,9 +1286,9 @@
                 console.log('🌾 New kelp took root!');
             }
             
-            // Maybe spawn a crab
+            // Maybe spawn a crab (max 1 - they're voracious!)
             const crabCount = state.entities.filter(e => e.type === 'crab').length;
-            if (crabCount < 4 && Math.random() < 0.25) {
+            if (crabCount < 1 && Math.random() < 0.3) {
                 const x = CONFIG.physics.leftWall + 50 + Math.random() * (CONFIG.physics.rightWall - CONFIG.physics.leftWall - 100);
                 state.entities.push(entityFactory.createCrab(x, CONFIG.physics.floorY));
                 console.log('🦀 A crab scuttled in!');
@@ -1216,6 +1303,18 @@
                 state.entities.push(entityFactory.createFish(x, y));
                 console.log('🐟 A fish swam in!');
             }
+            
+            // Spawn food particles with the tide
+            const foodCount = state.entities.filter(e => e.type === 'food').length;
+            const numToSpawn = Math.floor(3 + Math.random() * 5); // 3-7 food particles
+            const waterY = tideSystem.getWaterY();
+            
+            for (let i = 0; i < numToSpawn && foodCount + i < 15; i++) {
+                const x = CONFIG.physics.leftWall + 30 + Math.random() * (CONFIG.physics.rightWall - CONFIG.physics.leftWall - 60);
+                const y = waterY + 10 + Math.random() * 30; // Near the surface
+                state.entities.push(entityFactory.createFood(x, y));
+            }
+            console.log('🍽️ Food particles washed in!');
         },
 
         onLowTide() {
@@ -1332,11 +1431,11 @@
 
             // Draw layers in order
             this.drawBackground();
+            this.drawWater();
+            this.drawWaterSurface();
             this.drawSand();
             this.drawRocks();
-            this.drawWater();
             this.drawEntities(entities, true);  // Underwater entities
-            this.drawWaterSurface();
             this.drawEntities(entities, false); // Above-water entities
             this.drawRockOverlay(); // Foreground rock edges
 
@@ -1424,6 +1523,12 @@
             ctx.closePath();
             ctx.fill();
             
+            // Caustic light patterns on sand (when daytime and underwater)
+            const waterY = tideSystem.getWaterY();
+            if (timeSystem.isDay && waterY < sandY) {
+                this.drawCaustics(sandY, waterY);
+            }
+            
             // Sand texture - subtle dots
             ctx.fillStyle = 'rgba(160, 120, 60, 0.3)';
             for (let i = 0; i < 50; i++) {
@@ -1434,6 +1539,86 @@
                 ctx.arc(x, y, r, 0, Math.PI * 2);
                 ctx.fill();
             }
+        },
+        
+        drawCaustics(sandY, waterY) {
+            // Realistic caustic network - light refracting through water surface
+            // Creates a web of bright curved lines on the sand
+            const time = state.gameTime * 0.3;
+            const leftX = CONFIG.physics.leftWall;
+            const rightX = CONFIG.physics.rightWall;
+            const waterDepth = sandY - waterY;
+            
+            // Caustic intensity based on water depth and time of day
+            const depthFactor = Math.min(1, waterDepth / 150);
+            const dayBrightness = Math.sin(timeSystem.dayProgress * Math.PI); // peaks at noon
+            const intensity = depthFactor * dayBrightness * 0.15;
+            
+            if (intensity < 0.02) return; // Too dim to bother
+            
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            
+            // Draw multiple layers of caustic lines for depth
+            for (let layer = 0; layer < 3; layer++) {
+                const layerTime = time + layer * 0.7;
+                const layerAlpha = intensity * (1 - layer * 0.25);
+                
+                ctx.strokeStyle = `rgba(255, 250, 220, ${layerAlpha})`;
+                ctx.lineWidth = 2 - layer * 0.5;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                
+                // Horizontal wavy lines
+                const numLines = 6 + layer * 2;
+                for (let i = 0; i < numLines; i++) {
+                    const baseY = sandY + 5 + (i / numLines) * 55;
+                    ctx.beginPath();
+                    
+                    let firstPoint = true;
+                    for (let x = leftX; x <= rightX; x += 15) {
+                        // Multiple sine waves combined for organic look
+                        const wave1 = Math.sin(x * 0.03 + layerTime + i) * 8;
+                        const wave2 = Math.sin(x * 0.05 - layerTime * 1.3 + i * 0.7) * 5;
+                        const wave3 = Math.sin(x * 0.02 + layerTime * 0.7 + layer) * 6;
+                        const y = baseY + wave1 + wave2 + wave3;
+                        
+                        if (firstPoint) {
+                            ctx.moveTo(x, y);
+                            firstPoint = false;
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+                    }
+                    ctx.stroke();
+                }
+                
+                // Diagonal connecting lines for the network effect
+                const numDiagonals = 8 + layer * 3;
+                for (let i = 0; i < numDiagonals; i++) {
+                    const baseX = leftX + (i / numDiagonals) * (rightX - leftX);
+                    ctx.beginPath();
+                    
+                    let firstPoint = true;
+                    for (let y = sandY + 5; y < sandY + 60; y += 12) {
+                        const wave1 = Math.sin(y * 0.08 + layerTime * 1.2 + i * 0.5) * 15;
+                        const wave2 = Math.sin(y * 0.05 - layerTime + i) * 10;
+                        const x = baseX + wave1 + wave2;
+                        
+                        if (x >= leftX && x <= rightX) {
+                            if (firstPoint) {
+                                ctx.moveTo(x, y);
+                                firstPoint = false;
+                            } else {
+                                ctx.lineTo(x, y);
+                            }
+                        }
+                    }
+                    ctx.stroke();
+                }
+            }
+            
+            ctx.restore();
         },
 
         drawRocks() {
@@ -1507,32 +1692,18 @@
             ctx.fillRect(CONFIG.physics.leftWall - 5, waterY, 
                         CONFIG.physics.rightWall - CONFIG.physics.leftWall + 10, 
                         bottomY - waterY);
-
-            // Caustic light patterns (when daytime)
-            if (timeSystem.isDay) {
-                ctx.fillStyle = 'rgba(255, 255, 200, 0.1)';
-                const time = state.gameTime * 0.5;
-                for (let i = 0; i < 8; i++) {
-                    const x = CONFIG.physics.leftWall + 50 + Math.sin(time + i * 1.3) * 100 + i * 80;
-                    const y = waterY + 30 + Math.cos(time * 0.7 + i) * 20 + i * 30;
-                    const w = 30 + Math.sin(time + i) * 10;
-                    const h = 20 + Math.cos(time * 1.2 + i) * 8;
-                    ctx.beginPath();
-                    ctx.ellipse(x, y, w, h, time * 0.1 + i, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-            }
         },
 
         drawEntities(entities, underwaterPass) {
             const waterY = tideSystem.getWaterY();
-            // Sort by Y position, but draw snails before crabs (snails are behind on ground)
-            const typeOrder = { snail: 0, crab: 1 };
+            // Sort by Y position, with type order for layering:
+            // snails (back) → seaweed/kelp → crabs → food → fish (front)
+            const typeOrder = { snail: 0, seaweed: 1, kelp: 1, crab: 2, food: 2.5, fish: 3 };
             const sorted = [...entities].sort((a, b) => {
                 const yDiff = a.position.y - b.position.y;
-                if (Math.abs(yDiff) < 20) {
-                    // Similar Y - use type order (snails before crabs)
-                    return (typeOrder[a.type] ?? 0.5) - (typeOrder[b.type] ?? 0.5);
+                if (Math.abs(yDiff) < 30) {
+                    // Similar Y - use type order for proper layering
+                    return (typeOrder[a.type] ?? 1.5) - (typeOrder[b.type] ?? 1.5);
                 }
                 return yDiff;
             });
@@ -1569,6 +1740,9 @@
                     break;
                 case 'snail':
                     this.drawSnail(entity);
+                    break;
+                case 'food':
+                    this.drawFood(entity);
                     break;
                 // TODO: case 'anemone': this.drawAnemone(entity); break;
                 // TODO: case 'octopus': this.drawOctopus(entity); break;
@@ -2117,6 +2291,42 @@
             ctx.restore();
         },
 
+        drawFood(entity) {
+            const size = entity.size;
+            const wobble = Math.sin(entity.wobblePhase + state.gameTime * 3) * 2;
+            
+            ctx.fillStyle = entity.color;
+            ctx.globalAlpha = 0.8;
+            
+            // Draw as small irregular blob
+            ctx.beginPath();
+            if (entity.foodType === 'plankton') {
+                // Tiny dots cluster
+                for (let i = 0; i < 3; i++) {
+                    const ox = Math.cos(i * 2.1 + entity.wobblePhase) * size * 0.5;
+                    const oy = Math.sin(i * 2.1 + entity.wobblePhase) * size * 0.5 + wobble * 0.3;
+                    ctx.beginPath();
+                    ctx.arc(ox, oy, size * 0.6, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            } else if (entity.foodType === 'algae') {
+                // Stringy bit
+                ctx.beginPath();
+                ctx.moveTo(-size, wobble);
+                ctx.quadraticCurveTo(0, -size + wobble * 0.5, size, wobble * 0.8);
+                ctx.lineWidth = size * 0.8;
+                ctx.strokeStyle = entity.color;
+                ctx.stroke();
+            } else {
+                // Detritus - irregular blob
+                ctx.beginPath();
+                ctx.ellipse(0, wobble * 0.3, size, size * 0.7, wobble * 0.1, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            ctx.globalAlpha = 1;
+        },
+
         drawWaterSurface() {
             const waterY = tideSystem.getWaterY();
             
@@ -2236,7 +2446,7 @@
                     maxHunger: 150, // Crabs can go longer without food
                     hungerRate: 0.8, // Hunger per second - slower than snails
                     eats: ['fish', 'snail', 'shrimp'],
-                    eatRange: 35,
+                    eatRange: 40, // Reach up to grab fish swimming near the floor
                     fishEatenToday: 0, // Track daily fish limit
                     edibleBy: ['octopus'],
                 },
@@ -2377,12 +2587,50 @@
                     turnTimer: 2 + Math.random() * 3,
                     speed: 80 + Math.random() * 40,
                     fleeTimer: 0,
+                    eatTimer: 0,
                 },
                 grabbable: true, // Can grab the slippery fish!
                 size,
                 bodyColor: `hsl(${hue}, ${scheme.s}%, ${scheme.l}%)`,
                 finColor: `hsl(${hue + 20}, ${scheme.s - 10}%, ${scheme.l - 10}%)`,
                 bellyColor: `hsl(${hue}, ${scheme.s - 20}%, ${scheme.l + 20}%)`,
+                ecosystem: {
+                    hunger: Math.random() * 40, // Start with varied hunger (0-40%)
+                    maxHunger: 100, // Dies at 3 days without food
+                    hungerRate: 0.28, // 100 / 360 seconds (3 days at 120s/day)
+                    eats: ['food'],
+                    eatRange: 30, // Reach to snap up nearby food
+                    edibleBy: ['crab', 'octopus'],
+                },
+            };
+        },
+
+        createFood(x, y) {
+            // Food particle - small organic matter drifting down
+            const types = ['plankton', 'algae', 'detritus'];
+            const foodType = types[Math.floor(Math.random() * types.length)];
+            
+            const colors = {
+                plankton: { h: 120, s: 40, l: 50 },  // Greenish
+                algae: { h: 90, s: 50, l: 45 },     // Yellow-green
+                detritus: { h: 30, s: 30, l: 40 },  // Brown
+            };
+            const color = colors[foodType];
+            
+            return {
+                id: this.nextId++,
+                type: 'food',
+                foodType,
+                position: { x, y },
+                velocity: { 
+                    x: (Math.random() - 0.5) * 10, // Slight horizontal drift
+                    y: 8 + Math.random() * 12  // Slowly sinking (8-20 px/s)
+                },
+                size: 2 + Math.random() * 3, // Small particles
+                color: `hsl(${color.h + Math.random() * 20 - 10}, ${color.s}%, ${color.l}%)`,
+                wobblePhase: Math.random() * Math.PI * 2,
+                lifetime: 0, // Track how long it's been around
+                maxLifetime: 60, // Disappear after 60 seconds if not eaten
             };
         },
 
@@ -2448,36 +2696,41 @@
         // TODO: Generate procedural rock formation
         // TODO: Spawn initial creatures
 
-        // Spawn some test entities
-        state.entities.push(entityFactory.createCrab(200, 400));
-        state.entities.push(entityFactory.createCrab(400, 420));
-        state.entities.push(entityFactory.createCrab(600, 380));
+        // Helper to get X position as fraction of playable width
+        const spawnX = (fraction) => {
+            const left = CONFIG.physics.leftWall + 30;
+            const right = CONFIG.physics.rightWall - 30;
+            return left + fraction * (right - left);
+        };
+
+        // Spawn a single crab (they're voracious predators!)
+        state.entities.push(entityFactory.createCrab(spawnX(0.5), CONFIG.physics.floorY));
 
         // Spawn seaweed along the bottom
-        state.entities.push(entityFactory.createSeaweed(100, CONFIG.physics.floorY));
-        state.entities.push(entityFactory.createSeaweed(150, CONFIG.physics.floorY));
-        state.entities.push(entityFactory.createSeaweed(180, CONFIG.physics.floorY));
-        state.entities.push(entityFactory.createSeaweed(500, CONFIG.physics.floorY));
-        state.entities.push(entityFactory.createSeaweed(530, CONFIG.physics.floorY));
-        state.entities.push(entityFactory.createSeaweed(700, CONFIG.physics.floorY));
-        state.entities.push(entityFactory.createSeaweed(720, CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createSeaweed(spawnX(0.05), CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createSeaweed(spawnX(0.12), CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createSeaweed(spawnX(0.18), CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createSeaweed(spawnX(0.6), CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createSeaweed(spawnX(0.65), CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createSeaweed(spawnX(0.88), CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createSeaweed(spawnX(0.92), CONFIG.physics.floorY));
 
         // Spawn tall kelp that reaches toward the surface
-        state.entities.push(entityFactory.createKelp(250, CONFIG.physics.floorY));
-        state.entities.push(entityFactory.createKelp(350, CONFIG.physics.floorY));
-        state.entities.push(entityFactory.createKelp(580, CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createKelp(spawnX(0.28), CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createKelp(spawnX(0.42), CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createKelp(spawnX(0.72), CONFIG.physics.floorY));
 
         // Spawn some fish swimming in the water (relative to floor, they'll find the water)
         const fishY = CONFIG.physics.floorY - 80; // Comfortably above floor, should be in water
-        state.entities.push(entityFactory.createFish(200, fishY));
-        state.entities.push(entityFactory.createFish(400, fishY - 30));
-        state.entities.push(entityFactory.createFish(500, fishY + 20));
-        state.entities.push(entityFactory.createFish(300, fishY - 50));
-        state.entities.push(entityFactory.createFish(600, fishY - 10));
+        state.entities.push(entityFactory.createFish(spawnX(0.2), fishY));
+        state.entities.push(entityFactory.createFish(spawnX(0.45), fishY - 30));
+        state.entities.push(entityFactory.createFish(spawnX(0.6), fishY + 20));
+        state.entities.push(entityFactory.createFish(spawnX(0.35), fishY - 50));
+        state.entities.push(entityFactory.createFish(spawnX(0.75), fishY - 10));
 
         // Spawn some snails to munch on seaweed
-        state.entities.push(entityFactory.createSnail(120, CONFIG.physics.floorY));
-        state.entities.push(entityFactory.createSnail(520, CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createSnail(spawnX(0.1), CONFIG.physics.floorY));
+        state.entities.push(entityFactory.createSnail(spawnX(0.63), CONFIG.physics.floorY));
 
         console.log('🦀🌿🐟🐌🌊 Tide Pool ready!');
     }
