@@ -1838,25 +1838,48 @@
             // Sky gradient that changes with time of day
             const dayProgress = timeSystem.dayProgress;
             
-            // Interpolate colors based on time
-            let skyTop, skyBottom;
-            if (dayProgress < 0.2 || dayProgress > 0.8) {
-                // Night
-                skyTop = '#0a0a1a';
-                skyBottom = '#1a2a3a';
-            } else if (dayProgress < 0.3) {
-                // Dawn
-                skyTop = '#4a3050';
-                skyBottom = '#d06040';
-            } else if (dayProgress > 0.7) {
-                // Dusk
-                skyTop = '#3a2040';
-                skyBottom = '#c05030';
-            } else {
-                // Day
-                skyTop = '#5a9ece';
-                skyBottom = '#8ac4e0';
+            // Sky phases with their peak times and colors
+            // Each phase is centered at its time, with smooth transitions between
+            const skyPhases = [
+                { time: 0.0, top: '#0a0a1a', bottom: '#1a2a3a' },  // Midnight
+                { time: 0.25, top: '#4a3050', bottom: '#d06040' }, // Dawn
+                { time: 0.5, top: '#5a9ece', bottom: '#8ac4e0' },  // Noon
+                { time: 0.75, top: '#3a2040', bottom: '#c05030' }, // Dusk
+                { time: 1.0, top: '#0a0a1a', bottom: '#1a2a3a' },  // Midnight (wrap)
+            ];
+            
+            // Find the two phases we're between
+            let phase1, phase2, t;
+            for (let i = 0; i < skyPhases.length - 1; i++) {
+                if (dayProgress >= skyPhases[i].time && dayProgress <= skyPhases[i + 1].time) {
+                    phase1 = skyPhases[i];
+                    phase2 = skyPhases[i + 1];
+                    // Calculate progress between phases (0-1)
+                    const range = phase2.time - phase1.time;
+                    t = (dayProgress - phase1.time) / range;
+                    break;
+                }
             }
+            
+            // Ease the transition (smooth step for natural feel)
+            const eased = t * t * (3 - 2 * t);
+            
+            // Interpolate colors
+            const lerpColor = (c1, c2, amt) => {
+                const r1 = parseInt(c1.slice(1, 3), 16);
+                const g1 = parseInt(c1.slice(3, 5), 16);
+                const b1 = parseInt(c1.slice(5, 7), 16);
+                const r2 = parseInt(c2.slice(1, 3), 16);
+                const g2 = parseInt(c2.slice(3, 5), 16);
+                const b2 = parseInt(c2.slice(5, 7), 16);
+                const r = Math.round(r1 + (r2 - r1) * amt);
+                const g = Math.round(g1 + (g2 - g1) * amt);
+                const b = Math.round(b1 + (b2 - b1) * amt);
+                return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+            };
+            
+            const skyTop = lerpColor(phase1.top, phase2.top, eased);
+            const skyBottom = lerpColor(phase1.bottom, phase2.bottom, eased);
             
             const grad = ctx.createLinearGradient(0, 0, 0, CONFIG.height * 0.5);
             grad.addColorStop(0, skyTop);
@@ -1864,29 +1887,73 @@
             ctx.fillStyle = grad;
             ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
 
-            // Sun or moon
-            const celestialY = 60 + Math.sin(dayProgress * Math.PI) * 40;
-            const celestialX = CONFIG.width * 0.2 + dayProgress * CONFIG.width * 0.6;
+            // Sun during day (0.25-0.75), Moon during night (0.75-1.0, 0.0-0.25)
+            const isDay = dayProgress >= 0.25 && dayProgress < 0.75;
             
-            if (timeSystem.isDay) {
-                // Sun
+            if (isDay) {
+                // Sun arcs from dawn (0.25) to dusk (0.75)
+                const sunProgress = (dayProgress - 0.25) / 0.5; // 0-1 across day
+                const sunX = CONFIG.width * 0.15 + sunProgress * CONFIG.width * 0.7;
+                const sunY = 80 - Math.sin(sunProgress * Math.PI) * 50; // Arc up and down
+                
                 ctx.fillStyle = '#ffe080';
                 ctx.shadowColor = '#ffcc00';
                 ctx.shadowBlur = 30;
                 ctx.beginPath();
-                ctx.arc(celestialX, celestialY, 25, 0, Math.PI * 2);
+                ctx.arc(sunX, sunY, 25, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.shadowBlur = 0;
             } else {
-                // Moon
+                // Moon arcs from dusk (0.75) to dawn (0.25)
+                // Normalize night progress: 0.75->1.0 becomes 0->0.5, 0->0.25 becomes 0.5->1.0
+                let moonProgress;
+                if (dayProgress >= 0.75) {
+                    moonProgress = (dayProgress - 0.75) / 0.5; // 0.75-1.0 -> 0-0.5
+                } else {
+                    moonProgress = 0.5 + dayProgress / 0.5; // 0-0.25 -> 0.5-1.0
+                }
+                
+                const moonX = CONFIG.width * 0.15 + moonProgress * CONFIG.width * 0.7;
+                const moonY = 80 - Math.sin(moonProgress * Math.PI) * 50; // Arc up and down
+                
+                // Draw moon with phase
                 const phase = timeSystem.moonPhase;
-                ctx.fillStyle = '#e8e8d0';
-                ctx.shadowColor = '#ccccaa';
+                const radius = 20;
+                
+                ctx.save();
+                ctx.shadowColor = '#aaaaaa';
                 ctx.shadowBlur = 15;
+                
+                // Full moon base (always draw the lit portion)
+                ctx.fillStyle = '#e8e8d0';
                 ctx.beginPath();
-                ctx.arc(celestialX, celestialY, 20, 0, Math.PI * 2);
+                ctx.arc(moonX, moonY, radius, 0, Math.PI * 2);
                 ctx.fill();
+                
+                // Shadow portion based on phase
+                // phase 0 = new moon (all shadow), 0.5 = full moon (no shadow)
+                // 0-0.5 = waxing (shadow on left shrinks), 0.5-1 = waning (shadow on right grows)
                 ctx.shadowBlur = 0;
+                ctx.fillStyle = '#1a2a3a'; // Match night sky
+                
+                if (phase < 0.5) {
+                    // Waxing: shadow on the left, shrinking
+                    const shadowAmount = 1 - phase * 2; // 1 at new, 0 at full
+                    ctx.beginPath();
+                    ctx.arc(moonX, moonY, radius, Math.PI * 0.5, Math.PI * 1.5);
+                    // Ellipse to create crescent effect
+                    ctx.ellipse(moonX, moonY, radius * shadowAmount, radius, 0, Math.PI * 1.5, Math.PI * 0.5);
+                    ctx.fill();
+                } else {
+                    // Waning: shadow on the right, growing
+                    const shadowAmount = (phase - 0.5) * 2; // 0 at full, 1 at new
+                    ctx.beginPath();
+                    ctx.arc(moonX, moonY, radius, -Math.PI * 0.5, Math.PI * 0.5);
+                    ctx.ellipse(moonX, moonY, radius * shadowAmount, radius, 0, Math.PI * 0.5, -Math.PI * 0.5);
+                    ctx.fill();
+                }
+                
+                ctx.restore();
             }
         },
 
