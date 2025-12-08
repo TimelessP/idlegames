@@ -88,6 +88,46 @@
                 font-size: 0.75rem;
             }
         }
+
+        /* Toggle switch */
+        .toggle-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            background: rgba(0,0,0,0.2);
+            padding: 0.3rem 0.6rem;
+            border-radius: 1rem;
+            backdrop-filter: blur(4px);
+            pointer-events: auto;
+            cursor: pointer;
+            user-select: none;
+        }
+        .toggle-switch {
+            position: relative;
+            width: 32px;
+            height: 18px;
+            background: rgba(255,255,255,0.3);
+            border-radius: 9px;
+            transition: background 0.2s;
+        }
+        .toggle-switch::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 14px;
+            height: 14px;
+            background: white;
+            border-radius: 50%;
+            transition: transform 0.2s;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        .toggle-item.active .toggle-switch {
+            background: rgba(100,200,255,0.7);
+        }
+        .toggle-item.active .toggle-switch::after {
+            transform: translateX(14px);
+        }
     </style>
 </head>
 <body>
@@ -102,6 +142,9 @@
             <span class="info-item">🌊 <span id="tide-state">High Tide</span></span>
             <span class="info-item">☀️ <span id="time-of-day">Day</span></span>
             <span class="info-item">🦀 <span id="creature-count">0</span></span>
+            <span class="toggle-item active" id="thought-toggle" title="Toggle thought bubbles">
+                💭 <span class="toggle-switch"></span>
+            </span>
         </div>
     </div>
 
@@ -727,7 +770,7 @@
                         }
                         
                         if (closestSnail) {
-                            behavior.state = 'hunt';
+                            thoughtBubbleSystem.setState(entity, 'hunt');
                             behavior.target = closestSnail;
                             behavior.facingLeft = closestSnail.position.x < entity.position.x;
                         }
@@ -766,7 +809,7 @@
                         const crabDistToFood = bestFood ? Math.abs(bestFood.position.x - entity.position.x) : 0;
                         if (bestFood && crabDistToFood > 30 && bestScore < 500) {
                             // Move toward the food to ambush
-                            behavior.state = 'ambush';
+                            thoughtBubbleSystem.setState(entity, 'ambush');
                             behavior.targetX = bestFood.position.x;
                             behavior.ambushTimer = 8 + Math.random() * 5; // Wait up to 13 seconds
                             behavior.facingLeft = bestFood.position.x < entity.position.x;
@@ -882,7 +925,9 @@
             
             // Don't act while being grabbed
             if (interactionSystem.grabbed === entity) {
-                behavior.state = 'grabbed';
+                if (behavior.state !== 'grabbed') {
+                    thoughtBubbleSystem.setState(entity, 'grabbed');
+                }
                 return;
             }
             
@@ -932,6 +977,7 @@
                         
                         if (nearestFood) {
                             behavior.targetX = nearestFood.position.x;
+                            thoughtBubbleSystem.showThought(entity, 'crawl'); // Thinking about plants!
                         } else {
                             // No food left! Wander randomly looking for any
                             behavior.targetX = entity.position.x + (Math.random() - 0.5) * 150;
@@ -970,13 +1016,15 @@
             
             // Handle grabbed state - don't process physics while held
             if (interactionSystem.grabbed === entity) {
-                behavior.state = 'grabbed';
+                if (behavior.state !== 'grabbed') {
+                    thoughtBubbleSystem.setState(entity, 'grabbed');
+                }
                 return;
             }
             
             // Just released?
             if (behavior.state === 'grabbed') {
-                behavior.state = inWater ? 'flee' : 'falling';
+                thoughtBubbleSystem.setState(entity, 'flee');
                 behavior.fleeTimer = 2;
                 // Start with zero velocity on release
                 vel.x = 0;
@@ -1037,7 +1085,7 @@
             const isHungry = entity.ecosystem && entity.ecosystem.hunger > entity.ecosystem.maxHunger * 0.5;
             
             if (pointerDist < 100 && behavior.state !== 'flee' && !isStarving) {
-                behavior.state = 'flee';
+                thoughtBubbleSystem.setState(entity, 'flee');
                 behavior.fleeTimer = 1.5;
                 // Flee away from pointer
                 const angle = Math.atan2(
@@ -1057,7 +1105,7 @@
                 });
                 
                 if (nearbyCrab) {
-                    behavior.state = 'flee';
+                    thoughtBubbleSystem.setState(entity, 'flee');
                     behavior.fleeTimer = 2;
                     // Flee away from crab (upward and away)
                     const angle = Math.atan2(
@@ -1089,6 +1137,14 @@
                         behavior.targetX = closestFood.position.x;
                         behavior.targetY = closestFood.position.y;
                         behavior.turnTimer = 0.5; // Keep updating target
+                        
+                        // Show thought bubble when first noticing food
+                        if (!behavior.seekingFood) {
+                            thoughtBubbleSystem.showThought(entity, 'seekFood');
+                            behavior.seekingFood = true;
+                        }
+                    } else {
+                        behavior.seekingFood = false;
                     }
                 }
             }
@@ -1646,6 +1702,108 @@
     };
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // THOUGHT BUBBLE SYSTEM - Shows what creatures are thinking on state change
+    // ═══════════════════════════════════════════════════════════════════════════
+    const thoughtBubbleSystem = {
+        enabled: true, // Toggle for showing thought bubbles
+        
+        // Thought configurations: emoji/text to show for each state
+        thoughts: {
+            crab: {
+                hunt: { emoji: '🐌', duration: 2.5 },      // Hunting snail
+                ambush: { emoji: '🐟', duration: 2 },      // Waiting for fish
+                hungry: { emoji: '🍖', duration: 2 },      // Getting hungry
+                grabbed: { emoji: '😱', duration: 1 },     // Scared!
+            },
+            fish: {
+                flee: { emoji: '😰', duration: 1.5 },      // Fleeing!
+                seekFood: { emoji: '🍽️', duration: 2 },    // Looking for food
+                hungry: { emoji: '😋', duration: 2 },      // Getting hungry
+                grabbed: { emoji: '😱', duration: 1 },     // Scared!
+            },
+            snail: {
+                crawl: { emoji: '🌿', duration: 2 },       // Looking for plants
+                hungry: { emoji: '😋', duration: 2 },      // Getting hungry
+                grabbed: { emoji: '😱', duration: 1 },     // Scared!
+            },
+        },
+        
+        init() {
+            // Load saved preference from localStorage
+            const saved = localStorage.getItem('tidepool-thought-bubbles');
+            if (saved !== null) {
+                this.enabled = saved === 'true';
+            }
+            
+            // Set up toggle click handler
+            const toggle = document.getElementById('thought-toggle');
+            if (toggle) {
+                // Sync UI with saved state
+                toggle.classList.toggle('active', this.enabled);
+                
+                toggle.addEventListener('click', () => {
+                    this.enabled = !this.enabled;
+                    toggle.classList.toggle('active', this.enabled);
+                    localStorage.setItem('tidepool-thought-bubbles', this.enabled);
+                });
+            }
+        },
+
+        // Set a thought bubble on an entity
+        showThought(entity, thoughtKey) {
+            if (!this.enabled) return; // Respect toggle
+            if (!entity || !entity.type) return;
+            
+            const thoughtConfig = this.thoughts[entity.type]?.[thoughtKey];
+            if (!thoughtConfig) return;
+            
+            // Initialize thought bubble state if needed
+            if (!entity.thought) {
+                entity.thought = { emoji: null, timer: 0, alpha: 0 };
+            }
+            
+            entity.thought.emoji = thoughtConfig.emoji;
+            entity.thought.timer = thoughtConfig.duration;
+            entity.thought.alpha = 1;
+        },
+
+        // Helper to change state and show appropriate thought
+        setState(entity, newState, thoughtKey = null) {
+            if (!entity.behavior) return;
+            
+            const oldState = entity.behavior.state;
+            entity.behavior.state = newState;
+            
+            // Show thought if provided, or auto-detect from state
+            if (thoughtKey) {
+                this.showThought(entity, thoughtKey);
+            } else if (newState !== oldState) {
+                // Auto-show thought for certain state changes
+                this.showThought(entity, newState);
+            }
+        },
+
+        // Update all thought bubble timers
+        update(dt, entities) {
+            for (const entity of entities) {
+                if (!entity.thought) continue;
+                
+                if (entity.thought.timer > 0) {
+                    entity.thought.timer -= dt;
+                    
+                    // Fade out in last 0.5 seconds
+                    if (entity.thought.timer < 0.5) {
+                        entity.thought.alpha = entity.thought.timer / 0.5;
+                    }
+                } else {
+                    entity.thought.emoji = null;
+                    entity.thought.alpha = 0;
+                }
+            }
+        },
+    };
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // RENDER SYSTEM - Canvas drawing
     // ═══════════════════════════════════════════════════════════════════════════
     const renderSystem = {
@@ -1996,6 +2154,45 @@
                     ctx.fill();
             }
 
+            // Draw thought bubble if active
+            this.drawThoughtBubble(entity);
+
+            ctx.restore();
+        },
+
+        drawThoughtBubble(entity) {
+            if (!entity.thought || !entity.thought.emoji || entity.thought.alpha <= 0) return;
+            
+            const alpha = entity.thought.alpha;
+            
+            // Position bubble above the entity (raised higher to avoid overlap)
+            let bubbleY = -50;
+            if (entity.type === 'snail') bubbleY = -35;
+            if (entity.type === 'fish') bubbleY = -30;
+            
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            
+            // Small circles leading up to thought bubble
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+            ctx.beginPath();
+            ctx.arc(3, bubbleY + 18, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(6, bubbleY + 10, 4, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Main bubble
+            ctx.beginPath();
+            ctx.ellipse(8, bubbleY, 16, 14, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Emoji inside bubble
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(entity.thought.emoji, 8, bubbleY);
+            
             ctx.restore();
         },
 
@@ -2936,6 +3133,7 @@
         // Initialize systems that need setup
         spawnSystem.init();
         interactionSystem.init();
+        thoughtBubbleSystem.init();
 
         // TODO: Generate procedural rock formation
         // TODO: Spawn initial creatures
@@ -3015,6 +3213,7 @@
         ecosystemSystem.update(dt, state.entities);
         physicsSystem.update(dt, state.entities);
         rigSystem.update(dt, state.entities);
+        thoughtBubbleSystem.update(dt, state.entities);
 
         // Render every frame for smooth visuals
         renderSystem.render(state.entities);
