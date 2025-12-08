@@ -162,6 +162,10 @@
 
     const canvas = document.getElementById('pool-canvas');
     const ctx = canvas.getContext('2d');
+    
+    // Offscreen canvas for soft caustic effects
+    const causticCanvas = document.createElement('canvas');
+    const causticCtx = causticCanvas.getContext('2d');
 
     // ═══════════════════════════════════════════════════════════════════════════
     // CONFIGURATION
@@ -2009,81 +2013,99 @@
         },
         
         drawCaustics(sandY, waterY) {
-            // Realistic caustic network - light refracting through water surface
-            // Creates a web of bright curved lines on the sand
-            const time = state.gameTime * 0.3;
+            // Caustics using layered scrolling noise - bright lines between cells
+            const time = state.gameTime * 3; // Faster animation
             const leftX = CONFIG.physics.leftWall;
             const rightX = CONFIG.physics.rightWall;
             const waterDepth = sandY - waterY;
             
             // Caustic intensity based on water depth and time of day
             const depthFactor = Math.min(1, waterDepth / 150);
-            const dayBrightness = Math.sin(timeSystem.dayProgress * Math.PI); // peaks at noon
-            const intensity = depthFactor * dayBrightness * 0.15;
+            const dayBrightness = Math.sin(timeSystem.dayProgress * Math.PI);
+            const intensity = depthFactor * dayBrightness;
             
-            if (intensity < 0.02) return; // Too dim to bother
+            if (intensity < 0.1) return;
             
-            ctx.save();
-            ctx.globalCompositeOperation = 'lighter';
+            // Setup offscreen canvas - start higher to cover sand peaks
+            const startY = sandY - 15; // Start above sand to cover wave peaks
+            causticCanvas.width = CONFIG.width;
+            causticCanvas.height = 115; // Extra height for the offset
+            causticCtx.clearRect(0, 0, causticCanvas.width, causticCanvas.height);
             
-            // Draw multiple layers of caustic lines for depth
-            for (let layer = 0; layer < 3; layer++) {
-                const layerTime = time + layer * 0.7;
-                const layerAlpha = intensity * (1 - layer * 0.25);
-                
-                ctx.strokeStyle = `rgba(255, 250, 220, ${layerAlpha})`;
-                ctx.lineWidth = 2 - layer * 0.5;
-                ctx.lineCap = 'round';
-                ctx.lineJoin = 'round';
-                
-                // Horizontal wavy lines
-                const numLines = 6 + layer * 2;
-                for (let i = 0; i < numLines; i++) {
-                    const baseY = sandY + 5 + (i / numLines) * 55;
-                    ctx.beginPath();
+            // Sample caustic brightness at each pixel using layered noise
+            const imageData = causticCtx.createImageData(causticCanvas.width, causticCanvas.height);
+            const data = imageData.data;
+            
+            for (let py = 0; py < 115; py++) {
+                const worldY = startY + py;
+                for (let px = 0; px < causticCanvas.width; px++) {
+                    // Skip pixels outside the pool walls
+                    if (px < leftX - 10 || px > rightX + 10) continue;
                     
-                    let firstPoint = true;
-                    for (let x = leftX; x <= rightX; x += 15) {
-                        // Multiple sine waves combined for organic look
-                        const wave1 = Math.sin(x * 0.03 + layerTime + i) * 8;
-                        const wave2 = Math.sin(x * 0.05 - layerTime * 1.3 + i * 0.7) * 5;
-                        const wave3 = Math.sin(x * 0.02 + layerTime * 0.7 + layer) * 6;
-                        const y = baseY + wave1 + wave2 + wave3;
-                        
-                        if (firstPoint) {
-                            ctx.moveTo(x, y);
-                            firstPoint = false;
-                        } else {
-                            ctx.lineTo(x, y);
-                        }
-                    }
-                    ctx.stroke();
-                }
-                
-                // Diagonal connecting lines for the network effect
-                const numDiagonals = 8 + layer * 3;
-                for (let i = 0; i < numDiagonals; i++) {
-                    const baseX = leftX + (i / numDiagonals) * (rightX - leftX);
-                    ctx.beginPath();
+                    const worldX = px;
                     
-                    let firstPoint = true;
-                    for (let y = sandY + 5; y < sandY + 60; y += 12) {
-                        const wave1 = Math.sin(y * 0.08 + layerTime * 1.2 + i * 0.5) * 15;
-                        const wave2 = Math.sin(y * 0.05 - layerTime + i) * 10;
-                        const x = baseX + wave1 + wave2;
-                        
-                        if (x >= leftX && x <= rightX) {
-                            if (firstPoint) {
-                                ctx.moveTo(x, y);
-                                firstPoint = false;
-                            } else {
-                                ctx.lineTo(x, y);
-                            }
-                        }
-                    }
-                    ctx.stroke();
+                    // Layer 1: Large slow-moving cells
+                    const n1 = Math.sin(worldX * 0.04 + time * 0.5) * 
+                               Math.sin(worldY * 0.05 + time * 0.4) *
+                               Math.sin((worldX + worldY) * 0.03 - time * 0.3);
+                    
+                    // Layer 2: Medium faster cells, different direction
+                    const n2 = Math.sin(worldX * 0.06 - time * 0.7) * 
+                               Math.sin(worldY * 0.04 + time * 0.6) *
+                               Math.cos((worldX - worldY) * 0.04 + time * 0.5);
+                    
+                    // Layer 3: Small quick shimmer
+                    const n3 = Math.sin(worldX * 0.1 + time * 1.2) * 
+                               Math.sin(worldY * 0.08 - time * 0.9);
+                    
+                    // Combine layers
+                    let cellValue = (n1 * 0.5 + n2 * 0.35 + n3 * 0.15);
+                    
+                    // INVERT: bright at edges (where value crosses zero), dim in centers
+                    // Use 1 - abs(value) so edges (near 0) are bright, peaks/troughs are dim
+                    let brightness = 1 - Math.abs(cellValue) * 2.5;
+                    brightness = Math.max(0, brightness);
+                    brightness = brightness * brightness; // Square for sharper lines
+                    brightness *= intensity * 0.18; // Subtle, not glaring
+                    
+                    // Fade out at edges and bottom
+                    const edgeFade = Math.min(1, (px - leftX + 20) / 40, (rightX - px + 20) / 40);
+                    const depthFade = 1 - (py / 115) * 0.5;
+                    brightness *= edgeFade * depthFade;
+                    
+                    const idx = (py * causticCanvas.width + px) * 4;
+                    const b = Math.min(255, brightness * 255);
+                    data[idx] = 255;     // R
+                    data[idx + 1] = 252; // G
+                    data[idx + 2] = 220; // B (warm white)
+                    data[idx + 3] = b;   // A
                 }
             }
+            
+            causticCtx.putImageData(imageData, 0, 0);
+            
+            // Apply blur for softness
+            causticCtx.filter = 'blur(5px)';
+            causticCtx.drawImage(causticCanvas, 0, 0);
+            causticCtx.filter = 'none';
+            
+            // Draw to main canvas, clipped to sand
+            ctx.save();
+            
+            ctx.beginPath();
+            ctx.moveTo(CONFIG.physics.leftWall - 10, sandY);
+            for (let x = CONFIG.physics.leftWall; x <= CONFIG.physics.rightWall; x += 40) {
+                const waveY = sandY + Math.sin(x * 0.02 + 1) * 8;
+                ctx.lineTo(x, waveY);
+            }
+            ctx.lineTo(CONFIG.physics.rightWall + 10, sandY);
+            ctx.lineTo(CONFIG.physics.rightWall + 10, CONFIG.height);
+            ctx.lineTo(CONFIG.physics.leftWall - 10, CONFIG.height);
+            ctx.closePath();
+            ctx.clip();
+            
+            ctx.globalCompositeOperation = 'lighter';
+            ctx.drawImage(causticCanvas, 0, startY);
             
             ctx.restore();
         },
