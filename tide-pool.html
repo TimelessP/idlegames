@@ -141,7 +141,6 @@
             <span class="info-item">🌙 <span id="moon-phase">Full Moon</span></span>
             <span class="info-item">🌊 <span id="tide-state">High Tide</span></span>
             <span class="info-item">☀️ <span id="time-of-day">Day</span></span>
-            <span class="info-item">🦀 <span id="creature-count">0</span></span>
             <span class="toggle-item active" id="thought-toggle" title="Toggle thought bubbles">
                 💭 <span class="toggle-switch"></span>
             </span>
@@ -709,6 +708,12 @@
     const behaviorSystem = {
         update(dt, entities) {
             for (const entity of entities) {
+                // Handle treasure chests separately (no behavior property)
+                if (entity.type === 'treasureChest') {
+                    this.updateTreasureChest(entity, dt);
+                    continue;
+                }
+                
                 if (!entity.behavior) continue;
 
                 switch (entity.type) {
@@ -723,6 +728,79 @@
                         break;
                     // TODO: case 'anemone': Sway, retract when touched
                     // TODO: case 'octopus': Hunt, hide, squeeze through gaps
+                }
+            }
+        },
+
+        updateTreasureChest(entity, dt) {
+            const waterY = tideSystem.getWaterY();
+            const chestTop = entity.position.y - entity.height;
+            
+            // Only animate if underwater
+            if (chestTop > waterY) {
+                // Lid timer countdown
+                entity.lidTimer -= dt;
+                
+                if (entity.lidTimer <= 0 && !entity.isOpening) {
+                    // Time to open!
+                    entity.isOpening = true;
+                    entity.lidTargetAngle = 0.6 + Math.random() * 0.3; // How far to open
+                    
+                    // Spawn bubbles when opening starts
+                    const numBubbles = 3 + Math.floor(Math.random() * 6);
+                    for (let i = 0; i < numBubbles; i++) {
+                        // Stagger spawn slightly for visual effect
+                        setTimeout(() => {
+                            if (entity.bubbles) { // Check entity still exists
+                                const bx = (Math.random() - 0.5) * entity.width * 0.5;
+                                const by = -entity.height * 0.8; // Near the opening
+                                const size = 3 + Math.random() * 5;
+                                entity.bubbles.push(entityFactory.createBubble(bx, by, size));
+                            }
+                        }, i * 80); // Stagger by 80ms each
+                    }
+                }
+                
+                if (entity.isOpening) {
+                    // Open the lid
+                    entity.lidAngle += (entity.lidTargetAngle - entity.lidAngle) * dt * 4;
+                    
+                    // Check if fully open
+                    if (Math.abs(entity.lidAngle - entity.lidTargetAngle) < 0.05) {
+                        entity.lidAngle = entity.lidTargetAngle;
+                        // Start closing after a moment
+                        setTimeout(() => {
+                            entity.lidTargetAngle = 0;
+                        }, 500 + Math.random() * 500);
+                    }
+                    
+                    // Check if fully closed
+                    if (entity.lidTargetAngle === 0 && entity.lidAngle < 0.05) {
+                        entity.lidAngle = 0;
+                        entity.isOpening = false;
+                        entity.lidTimer = 5 + Math.random() * 10; // Next open in 5-15 seconds
+                    }
+                }
+            }
+            
+            // Update bubbles (float toward water surface)
+            for (let i = entity.bubbles.length - 1; i >= 0; i--) {
+                const bubble = entity.bubbles[i];
+                
+                // Rise upward with wobble
+                bubble.y -= bubble.riseSpeed * dt;
+                bubble.x += Math.sin(bubble.wobblePhase + state.gameTime * bubble.wobbleSpeed) * 0.5;
+                
+                // Convert bubble position to world coords to check against water
+                const worldY = entity.position.y + bubble.y;
+                
+                // Pop when reaching water surface
+                if (worldY < waterY) {
+                    // Fade out quickly at surface
+                    bubble.alpha -= dt * 3;
+                    if (bubble.alpha <= 0) {
+                        entity.bubbles.splice(i, 1);
+                    }
                 }
             }
         },
@@ -1895,10 +1973,10 @@
             const isDay = dayProgress >= 0.25 && dayProgress < 0.75;
             
             if (isDay) {
-                // Sun arcs from dawn (0.25) to dusk (0.75)
+                // Sun arcs from dawn (0.25) to dusk (0.75) - full sky width
                 const sunProgress = (dayProgress - 0.25) / 0.5; // 0-1 across day
-                const sunX = CONFIG.width * 0.15 + sunProgress * CONFIG.width * 0.7;
-                const sunY = 80 - Math.sin(sunProgress * Math.PI) * 50; // Arc up and down
+                const sunX = sunProgress * CONFIG.width; // Full width arc
+                const sunY = 90 - Math.sin(sunProgress * Math.PI) * 60; // Arc up and down
                 
                 ctx.fillStyle = '#ffe080';
                 ctx.shadowColor = '#ffcc00';
@@ -1917,8 +1995,8 @@
                     moonProgress = 0.5 + dayProgress / 0.5; // 0-0.25 -> 0.5-1.0
                 }
                 
-                const moonX = CONFIG.width * 0.15 + moonProgress * CONFIG.width * 0.7;
-                const moonY = 80 - Math.sin(moonProgress * Math.PI) * 50; // Arc up and down
+                const moonX = moonProgress * CONFIG.width; // Full width arc
+                const moonY = 90 - Math.sin(moonProgress * Math.PI) * 60; // Arc up and down
                 
                 // Draw moon with phase
                 const phase = timeSystem.moonPhase;
@@ -2019,12 +2097,27 @@
             const rightX = CONFIG.physics.rightWall;
             const waterDepth = sandY - waterY;
             
+            // Only show caustics during daytime (0.25 to 0.75)
+            const dayProgress = timeSystem.dayProgress;
+            if (dayProgress < 0.25 || dayProgress >= 0.75) return;
+            
+            // Calculate daytime progress (0-1 within day period)
+            const daytimeProgress = (dayProgress - 0.25) / 0.5; // 0 at dawn, 1 at dusk
+            
+            // Fade in during first 10% of day, fade out during last 10%
+            let dayFade = 1;
+            if (daytimeProgress < 0.1) {
+                dayFade = daytimeProgress / 0.1; // 0 to 1 over first 10%
+            } else if (daytimeProgress > 0.9) {
+                dayFade = (1 - daytimeProgress) / 0.1; // 1 to 0 over last 10%
+            }
+            
             // Caustic intensity based on water depth and time of day
             const depthFactor = Math.min(1, waterDepth / 150);
-            const dayBrightness = Math.sin(timeSystem.dayProgress * Math.PI);
-            const intensity = depthFactor * dayBrightness;
+            const dayBrightness = Math.sin(dayProgress * Math.PI);
+            const intensity = depthFactor * dayBrightness * dayFade;
             
-            if (intensity < 0.1) return;
+            if (intensity < 0.05) return;
             
             // Setup offscreen canvas - start higher to cover sand peaks
             const startY = sandY - 15; // Start above sand to cover wave peaks
@@ -2178,8 +2271,9 @@
             grad.addColorStop(1, 'rgba(30, 80, 100, 0.55)');
             
             ctx.fillStyle = grad;
-            ctx.fillRect(CONFIG.physics.leftWall - 5, waterY, 
-                        CONFIG.physics.rightWall - CONFIG.physics.leftWall + 10, 
+            // Extend water wider to cover gaps at rock bases
+            ctx.fillRect(CONFIG.physics.leftWall - 20, waterY, 
+                        CONFIG.physics.rightWall - CONFIG.physics.leftWall + 40, 
                         bottomY - waterY);
         },
 
@@ -2233,6 +2327,9 @@
                     break;
                 case 'snail':
                     this.drawSnail(entity);
+                    break;
+                case 'treasureChest':
+                    this.drawTreasureChest(entity);
                     break;
                 case 'food':
                     this.drawFood(entity);
@@ -2823,6 +2920,168 @@
             ctx.restore();
         },
 
+        drawTreasureChest(entity) {
+            const w = entity.width;
+            const h = entity.height;
+            const lidHeight = h * 0.35;
+            const bodyHeight = h - lidHeight;
+            const lidAngle = entity.lidAngle;
+            
+            // Shadow under chest
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.beginPath();
+            ctx.ellipse(0, bodyHeight * 0.1, w * 0.55, bodyHeight * 0.15, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // === CHEST BODY (bottom part) ===
+            ctx.save();
+            
+            // Main body
+            ctx.fillStyle = entity.woodColor;
+            ctx.beginPath();
+            ctx.roundRect(-w / 2, -bodyHeight, w, bodyHeight, 3);
+            ctx.fill();
+            
+            // Wood grain / planks (horizontal lines)
+            ctx.strokeStyle = entity.woodDark;
+            ctx.lineWidth = 1;
+            for (let i = 1; i < 3; i++) {
+                const y = -bodyHeight + (bodyHeight / 3) * i;
+                ctx.beginPath();
+                ctx.moveTo(-w / 2 + 3, y);
+                ctx.lineTo(w / 2 - 3, y);
+                ctx.stroke();
+            }
+            
+            // Metal bands (horizontal)
+            ctx.fillStyle = entity.metalColor;
+            ctx.fillRect(-w / 2 - 1, -bodyHeight, w + 2, 3);
+            ctx.fillRect(-w / 2 - 1, -bodyHeight * 0.5, w + 2, 2);
+            
+            // Metal corner pieces
+            ctx.fillStyle = entity.metalHighlight;
+            ctx.beginPath();
+            ctx.arc(-w / 2, -bodyHeight, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(w / 2, -bodyHeight, 4, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.restore();
+            
+            // === CHEST LID (hinged at back) ===
+            ctx.save();
+            
+            // Pivot point at back top of body
+            ctx.translate(0, -bodyHeight);
+            ctx.rotate(-lidAngle); // Negative to open upward/backward
+            
+            // Lid (curved top)
+            ctx.fillStyle = entity.woodColor;
+            ctx.beginPath();
+            ctx.moveTo(-w / 2, 0);
+            ctx.lineTo(-w / 2, -lidHeight * 0.5);
+            ctx.quadraticCurveTo(-w / 2, -lidHeight, 0, -lidHeight);
+            ctx.quadraticCurveTo(w / 2, -lidHeight, w / 2, -lidHeight * 0.5);
+            ctx.lineTo(w / 2, 0);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Lid highlight (top curve)
+            ctx.fillStyle = entity.woodHighlight;
+            ctx.beginPath();
+            ctx.moveTo(-w / 2 + 3, -lidHeight * 0.4);
+            ctx.quadraticCurveTo(-w / 2 + 3, -lidHeight + 3, 0, -lidHeight + 3);
+            ctx.quadraticCurveTo(w / 2 - 3, -lidHeight + 3, w / 2 - 3, -lidHeight * 0.4);
+            ctx.lineTo(w / 2 - 3, -lidHeight * 0.6);
+            ctx.quadraticCurveTo(w / 2 - 3, -lidHeight + 6, 0, -lidHeight + 6);
+            ctx.quadraticCurveTo(-w / 2 + 3, -lidHeight + 6, -w / 2 + 3, -lidHeight * 0.6);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Metal band on lid
+            ctx.fillStyle = entity.metalColor;
+            ctx.fillRect(-w / 2 - 1, -2, w + 2, 3);
+            
+            // Lock/clasp (front center of lid)
+            ctx.fillStyle = entity.metalHighlight;
+            ctx.beginPath();
+            ctx.roundRect(-4, -1, 8, 5, 1);
+            ctx.fill();
+            
+            // Keyhole
+            ctx.fillStyle = '#333';
+            ctx.beginPath();
+            ctx.arc(0, 2, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.restore();
+            
+            // Gold glint when open (inside the chest)
+            if (lidAngle > 0.2) {
+                ctx.save();
+                ctx.globalAlpha = Math.min(1, lidAngle * 1.5) * 0.7;
+                ctx.fillStyle = '#FFD700';
+                const glintY = -bodyHeight + 3;
+                const glintW = w * 0.6;
+                ctx.beginPath();
+                ctx.ellipse(0, glintY, glintW / 2, bodyHeight * 0.25, 0, 0, Math.PI * 2);
+                ctx.fill();
+                // Sparkles
+                ctx.fillStyle = '#FFEC8B';
+                const sparkleTime = state.gameTime * 5;
+                for (let i = 0; i < 3; i++) {
+                    const sx = Math.sin(sparkleTime + i * 2) * glintW * 0.3;
+                    const sy = glintY + Math.cos(sparkleTime + i * 1.5) * 3;
+                    ctx.beginPath();
+                    ctx.arc(sx, sy, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
+            
+            // === BUBBLES (draw last so they float in front of everything) ===
+            for (const bubble of entity.bubbles) {
+                this.drawBubble(bubble, entity.position);
+            }
+        },
+
+        drawBubble(bubble, chestPos) {
+            // Bubble position is relative to chest, but we draw in world coords
+            // Actually, we're already translated to chest position in drawEntity
+            // So bubble.x and bubble.y are relative to chest origin
+            
+            ctx.save();
+            ctx.globalAlpha = bubble.alpha;
+            
+            // Bubble body
+            const gradient = ctx.createRadialGradient(
+                bubble.x - bubble.size * 0.3, bubble.y - bubble.size * 0.3, 0,
+                bubble.x, bubble.y, bubble.size
+            );
+            gradient.addColorStop(0, 'rgba(255, 255, 255, 0.8)');
+            gradient.addColorStop(0.5, 'rgba(200, 230, 255, 0.4)');
+            gradient.addColorStop(1, 'rgba(150, 200, 255, 0.1)');
+            
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(bubble.x, bubble.y, bubble.size, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Highlight
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+            ctx.beginPath();
+            ctx.arc(
+                bubble.x - bubble.size * 0.3,
+                bubble.y - bubble.size * 0.3,
+                bubble.size * 0.25,
+                0, Math.PI * 2
+            );
+            ctx.fill();
+            
+            ctx.restore();
+        },
+
         drawFood(entity) {
             const size = entity.size;
             const wobble = Math.sin(entity.wobblePhase + state.gameTime * 3) * 2;
@@ -2901,14 +3160,12 @@
             moonPhase: document.getElementById('moon-phase'),
             tideState: document.getElementById('tide-state'),
             timeOfDay: document.getElementById('time-of-day'),
-            creatureCount: document.getElementById('creature-count'),
         },
 
         update() {
             this.elements.moonPhase.textContent = timeSystem.getMoonPhaseName();
             this.elements.tideState.textContent = tideSystem.getTideStateName();
             this.elements.timeOfDay.textContent = timeSystem.getTimeOfDayName();
-            this.elements.creatureCount.textContent = state.entities.length;
         },
     };
 
@@ -3211,6 +3468,55 @@
             };
         },
 
+        createTreasureChest(x, y, options = {}) {
+            // ~3x snail height (doubled from 1.5x) - chest sits on sand
+            const width = options.width || 56 + Math.random() * 12;
+            const height = options.height || 40 + Math.random() * 8;
+            
+            // Wood colors - warm browns
+            const woodHue = 25 + Math.random() * 15;
+            const woodSat = 40 + Math.random() * 20;
+            const woodLight = 25 + Math.random() * 15;
+            
+            return {
+                id: this.nextId++,
+                type: 'treasureChest',
+                position: { x, y },
+                physics: {
+                    velocity: { x: 0, y: 0 },
+                    mass: 5, // Heavy, sits on sand
+                    buoyancy: 0.1, // Barely floats
+                },
+                grabbable: false, // Can't pick it up
+                width,
+                height,
+                woodColor: `hsl(${woodHue}, ${woodSat}%, ${woodLight}%)`,
+                woodHighlight: `hsl(${woodHue}, ${woodSat - 5}%, ${woodLight + 15}%)`,
+                woodDark: `hsl(${woodHue}, ${woodSat + 10}%, ${woodLight - 10}%)`,
+                metalColor: '#8B7355', // Bronze/aged metal bands
+                metalHighlight: '#A89070',
+                // Lid animation state
+                lidAngle: 0, // 0 = closed, up to ~0.8 = open
+                lidTargetAngle: 0,
+                lidTimer: 3 + Math.random() * 5, // Time until next open (3-8 seconds)
+                isOpening: false,
+                // Bubbles spawned from this chest
+                bubbles: [],
+            };
+        },
+
+        createBubble(x, y, size) {
+            return {
+                x,
+                y,
+                size: size || 4 + Math.random() * 6,
+                wobblePhase: Math.random() * Math.PI * 2,
+                wobbleSpeed: 2 + Math.random() * 2,
+                riseSpeed: 25 + Math.random() * 35, // Pixels per second
+                alpha: 0.7 + Math.random() * 0.25,
+            };
+        },
+
         // TODO: createAnemone(x, y)
         // TODO: createOctopus(x, y)
         // TODO: createShrimp(x, y)
@@ -3267,7 +3573,10 @@
         state.entities.push(entityFactory.createSnail(spawnX(0.1), CONFIG.physics.floorY));
         state.entities.push(entityFactory.createSnail(spawnX(0.63), CONFIG.physics.floorY));
 
-        console.log('🦀🌿🐟🐌🌊 Tide Pool ready!');
+        // Spawn a treasure chest in the sand
+        state.entities.push(entityFactory.createTreasureChest(spawnX(0.42), CONFIG.physics.floorY));
+
+        console.log('🦀🌿🐟🐌🏴‍☠️🌊 Tide Pool ready!');
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
