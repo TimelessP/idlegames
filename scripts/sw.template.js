@@ -116,8 +116,43 @@ self.addEventListener('fetch', (event) => {
 
   if (event.request.cache === 'only-if-cached' && event.request.mode !== 'same-origin') return;
 
-  const handleNetworkFirst = async () => {
+  const handleRequest = async (isNavigation) => {
     const cache = await caches.open(CACHE_NAME);
+    
+    // For navigation requests on cold start, try cache first with fast network race
+    if (isNavigation) {
+      const cached = await cache.match(event.request, { ignoreSearch: true });
+      
+      // Race network against a timeout - show cached content quickly if network is slow
+      const networkPromise = fetch(event.request, { cache: 'no-store' })
+        .then(async (response) => {
+          if (response && response.ok && (response.type === 'basic' || response.type === 'cors')) {
+            await cache.put(event.request, response.clone());
+          }
+          return response;
+        })
+        .catch(() => null);
+      
+      // If we have cache, race with short timeout; otherwise wait for network
+      if (cached) {
+        const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 2000));
+        const networkResult = await Promise.race([networkPromise, timeoutPromise]);
+        // Return network if it won and succeeded, otherwise return cache
+        return networkResult && networkResult.ok ? networkResult : cached;
+      }
+      
+      // No cache - must wait for network or fail
+      const networkResult = await networkPromise;
+      if (networkResult) return networkResult;
+      
+      // Last resort: try index.html from cache
+      const fallback = await cache.match('./index.html');
+      if (fallback) return fallback;
+      
+      throw new Error('No cached content available');
+    }
+    
+    // Non-navigation: network first with cache fallback
     try {
       const networkResponse = await fetch(event.request, { cache: 'no-store' });
       if (networkResponse && networkResponse.ok && (networkResponse.type === 'basic' || networkResponse.type === 'cors')) {
@@ -127,20 +162,11 @@ self.addEventListener('fetch', (event) => {
     } catch (error) {
       const cached = await cache.match(event.request, { ignoreSearch: true });
       if (cached) return cached;
-      if (event.request.mode === 'navigate') {
-        const fallback = await cache.match('./index.html');
-        if (fallback) return fallback;
-      }
       throw error;
     }
   };
 
-  if (event.request.mode === 'navigate') {
-    event.respondWith(handleNetworkFirst());
-    return;
-  }
-
-  event.respondWith(handleNetworkFirst());
+  event.respondWith(handleRequest(event.request.mode === 'navigate'));
 });
 
 self.addEventListener('message', (event) => {
