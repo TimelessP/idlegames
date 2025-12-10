@@ -36,6 +36,37 @@ _A quick orientation for AI agents contributing to this repo._
 - Enforcement logic lives in `parental.js`. Every playable HTML page includes this script in its tail section (usually the last few lines) so hidden titles stay inaccessible even if a user opens the page directly.
 - When creating a new page, copy the existing pattern: load your game scripts, then finish with `<script src="parental.js" defer></script>` (and `assets/js/pwa.js` if needed) so the parental gating and launcher stay in sync.
 
+## ⚠️ CRITICAL: Service Worker URL Handling
+**This section exists because of a production outage that stranded users with broken PWAs.**
+
+### The Problem
+Users share and bookmark the site as `https://timelessp.github.io/idlegames/` (trailing slash, no `index.html`). When the PWA launches, it requests this exact URL. If the service worker can't find it in cache, the app shows a blank screen — and because the SW blocks loading, users can never receive the fix.
+
+### The Solution (Already Implemented)
+The service worker in `scripts/sw.template.js` **normalizes directory URLs** to their index file before cache lookup:
+```javascript
+// Normalize /idlegames/ → /idlegames/index.html
+if (requestURL.pathname.endsWith('/')) {
+  const indexUrl = new URL(requestURL.href);
+  indexUrl.pathname = requestURL.pathname + 'index.html';
+  normalizedRequest = new Request(indexUrl.href, ...);
+}
+```
+
+### Rules to Prevent Future Breakage
+1. **NEVER remove or break the URL normalization logic** in `sw.template.js`. It's load-bearing.
+2. **Test PWA cold starts** with the exact URL users have bookmarked (`/idlegames/`, not `/idlegames/index.html`).
+3. **Test with Chrome completely closed** on mobile, then launch the PWA icon — this is the "cold start" scenario.
+4. Service worker bugs are **unrecoverable for end users** — the broken SW prevents the fix from loading. Triple-check any SW changes.
+5. The `manifest.webmanifest` has `"start_url": "./index.html"` but Android/Chrome may still request the directory URL on launch.
+
+### Testing Checklist for SW Changes
+- [ ] `npm run build && npm run serve`
+- [ ] Open `http://localhost:4173/` (trailing slash) — should load
+- [ ] Open `http://localhost:4173/index.html` — should load  
+- [ ] Install as PWA, close browser completely, tap PWA icon — should load
+- [ ] Airplane mode after install — should load from cache
+
 ## Deployment/release expectations
 1. **Bump Version:** Update `package.json` version (+0.0.1).
 2. **Build:** Run `npm install && npm run build`. This updates `package-lock.json` and regenerates `assets/js/version.js`.
