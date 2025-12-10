@@ -96,6 +96,11 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
+    // Enable navigation preload if supported - this fixes cold-start blank screen
+    if (self.registration.navigationPreload) {
+      await self.registration.navigationPreload.enable();
+    }
+    
     const keys = await caches.keys();
     await Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)));
     await self.clients.claim();
@@ -116,18 +121,45 @@ self.addEventListener('fetch', (event) => {
 
   if (event.request.cache === 'only-if-cached' && event.request.mode !== 'same-origin') return;
 
-  const handleRequest = async (isNavigation) => {
+  // Normalize directory URLs to index.html (e.g., /idlegames/ -> /idlegames/index.html)
+  let normalizedRequest = event.request;
+  if (requestURL.pathname.endsWith('/')) {
+    const indexUrl = new URL(requestURL.href);
+    indexUrl.pathname = requestURL.pathname + 'index.html';
+    normalizedRequest = new Request(indexUrl.href, {
+      method: event.request.method,
+      headers: event.request.headers,
+      mode: event.request.mode,
+      credentials: event.request.credentials,
+      redirect: event.request.redirect
+    });
+  }
+
+  const handleRequest = async (isNavigation, preloadResponse, request) => {
     const cache = await caches.open(CACHE_NAME);
     
-    // For navigation requests on cold start, try cache first with fast network race
+    // For navigation requests, use preload response if available (fixes cold-start)
     if (isNavigation) {
-      const cached = await cache.match(event.request, { ignoreSearch: true });
+      // Try navigation preload first (already started in parallel)
+      if (preloadResponse) {
+        try {
+          const response = await preloadResponse;
+          if (response && response.ok) {
+            cache.put(request, response.clone());
+            return response;
+          }
+        } catch (e) {
+          // Preload failed, fall through to cache
+        }
+      }
+      
+      const cached = await cache.match(request, { ignoreSearch: true });
       
       // Race network against a timeout - show cached content quickly if network is slow
-      const networkPromise = fetch(event.request, { cache: 'no-store' })
+      const networkPromise = fetch(request, { cache: 'no-store' })
         .then(async (response) => {
           if (response && response.ok && (response.type === 'basic' || response.type === 'cors')) {
-            await cache.put(event.request, response.clone());
+            await cache.put(request, response.clone());
           }
           return response;
         })
@@ -154,19 +186,20 @@ self.addEventListener('fetch', (event) => {
     
     // Non-navigation: network first with cache fallback
     try {
-      const networkResponse = await fetch(event.request, { cache: 'no-store' });
+      const networkResponse = await fetch(request, { cache: 'no-store' });
       if (networkResponse && networkResponse.ok && (networkResponse.type === 'basic' || networkResponse.type === 'cors')) {
-        await cache.put(event.request, networkResponse.clone());
+        await cache.put(request, networkResponse.clone());
       }
       return networkResponse;
     } catch (error) {
-      const cached = await cache.match(event.request, { ignoreSearch: true });
+      const cached = await cache.match(request, { ignoreSearch: true });
       if (cached) return cached;
       throw error;
     }
   };
 
-  event.respondWith(handleRequest(event.request.mode === 'navigate'));
+  const isNavigation = event.request.mode === 'navigate';
+  event.respondWith(handleRequest(isNavigation, isNavigation ? event.preloadResponse : null, normalizedRequest));
 });
 
 self.addEventListener('message', (event) => {
