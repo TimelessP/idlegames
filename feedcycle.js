@@ -1602,23 +1602,43 @@
     state.feeds = state.feeds.filter(f=> f.id!==feedId);
     // Purge posts for this feed
     for(const [pid,p] of Object.entries(posts)){
-      if(p.feedId === feedId){ delete posts[pid]; delete state.read[pid]; delete state.favorites[pid]; if(state.autoTags) delete state.autoTags[pid]; }
+      if(p.feedId === feedId){ delete posts[pid]; delete state.read[pid]; delete state.favorites[pid]; delete state.tags[pid]; if(state.autoTags) delete state.autoTags[pid]; }
     }
     delete state.lastFetch[feedId];
     const lastUrl = state.lastFetchUrl?.[feedId];
     delete state.lastFetchUrl[feedId];
     saveState();
     // Attempt cache cleanup (best effort, non-blocking UI)
-    try{
-      if(typeof caches !== 'undefined'){
-        const cache = await caches.open('feedcycle-cache-v2');
-        if(feed?.url){ await cache.delete(new Request(feed.url)); }
-        if(lastUrl && lastUrl!==feed?.url){ await cache.delete(new Request(lastUrl)); }
-      }
-    }catch(e){ console.warn('Cache purge skipped', e); }
+    if(feed?.url){
+      cleanupCacheForFeed(feed.url, lastUrl).catch(e => console.warn('Cache purge failed', e));
+    }
     // Refresh UI without re-fetching
     renderSubscriptionsList();
     renderArticles();
+  }
+
+  // Remove all cache entries related to a feed URL (including proxied variants)
+  async function cleanupCacheForFeed(feedUrl, lastFetchUrl){
+    if(typeof caches === 'undefined') return;
+    const cache = await caches.open(CACHE_NAME);
+    const keys = await cache.keys();
+    let deleted = 0;
+    // Normalize the feed URL for matching
+    const normalizedFeed = feedUrl.toLowerCase().replace(/^https?:\/\//, '');
+    for(const req of keys){
+      const url = req.url;
+      // Delete if: exact match, proxied URL containing the feed, or lastFetchUrl
+      const shouldDelete = 
+        url === feedUrl ||
+        url === lastFetchUrl ||
+        url.toLowerCase().includes(encodeURIComponent(feedUrl)) ||
+        url.toLowerCase().includes(normalizedFeed);
+      if(shouldDelete){
+        await cache.delete(req);
+        deleted++;
+      }
+    }
+    if(deleted > 0) console.log(`[FeedCycle] Cleaned ${deleted} cache entries for removed feed`);
   }
 
   // ---------- Time / formatting helpers ----------
