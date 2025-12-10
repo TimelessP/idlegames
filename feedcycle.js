@@ -43,9 +43,12 @@
 (function(){
   'use strict';
 
-  const VERSION = '2.0.2';
+  const VERSION = '2.0.3';
   const LS_KEY = 'feedcycle-v2';
+  const DEBUG = false; // Set true for verbose console output
   const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{}, proxyScores:{}, proxyScoresResetAt:0 }; // posts ephemeral + tags mapping postId -> [tag]
+  // Quiet logging - only shows in console when DEBUG is true
+  const dbg = (...args) => { if(DEBUG) console.log('[FeedCycle]', ...args); };
   // state will be loaded after proxy scoring utilities are defined
   let state; // defer assignment
   let posts = {}; // id -> post (ephemeral)
@@ -122,8 +125,8 @@
       });
       state.proxyScoresResetAt = NOW;
       saveState();
-      console.info('[FeedCycle v2] Proxy scores rebased (monthly normalization)');
-    }catch(e){ console.warn('Proxy score rebase skipped', e); }
+      dbg('Proxy scores rebased (monthly normalization)');
+    }catch(e){ dbg('Proxy score rebase skipped', e); }
   }
   maybeRebaseProxyScores();
   function buildProxiedUrl(targetUrl, proxySpec){
@@ -1076,7 +1079,7 @@
       const ct = res.headers.get('content-type')||'';
       if(!/audio|video|application\/(octet-stream|mpegurl|x-mpegURL)/i.test(ct)){
         // Still accept but note
-        console.info('[FeedCycle v2] Fetch media content-type', ct);
+        dbg('Fetch media content-type', ct);
       }
       const blob = await res.blob();
       return URL.createObjectURL(blob);
@@ -1097,7 +1100,7 @@
         try{ el.load?.(); el.play?.().catch(()=>{}); }catch{}
         return true;
       }
-    }catch(err){ console.warn('[FeedCycle v2] Blob fallback failed', err); }
+    }catch(err){ dbg('Blob fallback failed', err); }
     return false;
   }
   function prepareMediaElementSource(el, media){
@@ -1138,7 +1141,7 @@
       attemptBlobFallback(el).then(success=>{
         if(success) return;
       const info = mediaFallbacks.get(el);
-      console.warn('[FeedCycle v2] Media fallback exhausted for', info?.original || 'unknown media');
+      dbg('Media fallback exhausted for', info?.original || 'unknown media');
         try{
           const evt = new CustomEvent('feedcycle:media-fallback-exhausted',{detail:{url:info?.original||'', element:el}});
           window.dispatchEvent(evt);
@@ -1147,7 +1150,7 @@
       return;      
     }
     const resume = el.play?.();
-    if(resume?.catch){ resume.catch(err=> console.warn('Playback fallback blocked', err)); }
+    if(resume?.catch){ resume.catch(err=> dbg('Playback fallback blocked', err)); }
   }
   function shouldUseCrossOrigin(url){
     if(!url) return false;
@@ -1275,7 +1278,7 @@
       mp.updateFavorite?.();
       mp.syncPlaybackButtons?.();
       if(audio.paused){
-        audio.play().catch(err=> console.warn('Playback start blocked', err));
+        audio.play().catch(err=> dbg('Playback start blocked', err));
       } else {
         audio.currentTime = 0;
       }
@@ -1293,7 +1296,7 @@
   audio.currentTime = 0;
     const playPromise = audio.play();
     if(playPromise && playPromise.catch){
-      playPromise.catch(err=> console.warn('Playback start blocked', err));
+      playPromise.catch(err=> dbg('Playback start blocked', err));
     }
   }
   function removeTagFromPost(postId, tag){
@@ -1610,7 +1613,7 @@
     saveState();
     // Attempt cache cleanup (best effort, non-blocking UI)
     if(feed?.url){
-      cleanupCacheForFeed(feed.url, lastUrl).catch(e => console.warn('Cache purge failed', e));
+      cleanupCacheForFeed(feed.url, lastUrl).catch(e => dbg('Cache purge failed', e));
     }
     // Refresh UI without re-fetching
     renderSubscriptionsList();
@@ -1638,7 +1641,7 @@
         deleted++;
       }
     }
-    if(deleted > 0) console.log(`[FeedCycle] Cleaned ${deleted} cache entries for removed feed`);
+    if(deleted > 0) dbg(`Cleaned ${deleted} cache entries for removed feed`);
   }
 
   // ---------- Time / formatting helpers ----------
@@ -2038,7 +2041,7 @@
           }
           // Don't log 403/CORS errors for Open Graph - they're expected
           if (!e.message?.includes('403') && !e.message?.includes('CORS')) {
-            console.warn('[Feed Cycle] Open Graph proxy attempt failed:', e.message);
+            dbg('Open Graph proxy attempt failed:', e.message);
           }
         }
       }
@@ -2063,7 +2066,7 @@
       
       return null;
     } catch (e) {
-      console.warn('Failed to extract Open Graph image from', articleUrl, e);
+      dbg('Failed to extract Open Graph image from', articleUrl, e);
       return null;
     }
   }
@@ -2110,11 +2113,11 @@
   async function refreshAll(force=false){
     const usedProxies = new Set();
     // Prune old cache entries before refreshing
-    pruneCacheEntries().catch(e => console.warn('Cache prune failed', e));
+    pruneCacheEntries().catch(e => dbg('Cache prune failed', e));
     for(const f of state.feeds){
       const rateLimit = getFeedRateLimit(f.id);
       if(rateLimit){
-        console.info('Feed refresh skipped due to backoff', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
+        dbg('Feed refresh skipped due to backoff', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
         continue;
       }
       try{
@@ -2123,10 +2126,10 @@
         // Yield to browser after each feed to prevent freezing
         renderArticles();
         await new Promise(resolve => setTimeout(resolve, 100));
-      }catch(e){ console.warn('Feed fail', f.url, e); }
+      }catch(e){ dbg('Feed fail', f.url, e); }
     }
     saveState(); renderArticles();
-    if(usedProxies.size){ console.log('[FeedCycle v2] Proxies used:', [...usedProxies].join(', ')); }
+    if(usedProxies.size){ dbg('Proxies used:', [...usedProxies].join(', ')); }
   }
   async function refreshFeed(feed, { force=false, usedProxies=new Set() }={}){
     const activeRateLimit = getFeedRateLimit(feed.id);
@@ -2219,7 +2222,7 @@
     });
     if(!stale.length) return; // all fresh
     // Prune old cache entries before refreshing (non-blocking)
-    pruneCacheEntries().catch(e => console.warn('Cache prune failed', e));
+    pruneCacheEntries().catch(e => dbg('Cache prune failed', e));
     // Refresh feeds one at a time with yielding to prevent browser freeze
     await refreshFeedsWithYield(stale);
     saveState();
@@ -2231,7 +2234,7 @@
     for(const f of feedList){
       const rateLimit = getFeedRateLimit(f.id);
       if(rateLimit){
-        console.info('Feed refresh skipped (rate limit)', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
+        dbg('Feed refresh skipped (rate limit)', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
         continue;
       }
       try{ 
@@ -2241,7 +2244,7 @@
         renderArticles();
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      catch(e){ console.warn('Feed refresh failed', f.url, e); }
+      catch(e){ dbg('Feed refresh failed', f.url, e); }
     }
   }
 
@@ -2291,7 +2294,7 @@
         pruned++;
       }
     }
-    if(pruned > 0) console.log(`[FeedCycle] Pruned ${pruned} old cache entries`);
+    if(pruned > 0) dbg(`Pruned ${pruned} old cache entries`);
   }
 
   async function hydrateFromCache(){
@@ -2325,7 +2328,7 @@
       if(updatedAnyTitle){
         renderSubscriptionsList();
       }
-    }catch(e){ console.warn('Hydrate from cache failed', e); }
+    }catch(e){ dbg('Hydrate from cache failed', e); }
   }
 
   // ---------- Data Actions ----------
@@ -2512,7 +2515,7 @@
     playBtn.addEventListener('click', ()=>{
       const media = getMedia();
       if(!mp.current || !media) return;
-      media.play().catch(err=> console.warn('Playback resume blocked', err));
+      media.play().catch(err=> dbg('Playback resume blocked', err));
     });
     pauseBtn.addEventListener('click', ()=>{
       const media = getMedia();
@@ -2714,7 +2717,7 @@
           if(rateLimit){
             return;
           }
-          refreshFeed(f).then(()=>{ state.lastFetch[f.id]=Date.now(); saveState(); renderArticles(); }).catch(e=> console.warn('Scheduled refresh fail', f.url, e));
+          refreshFeed(f).then(()=>{ state.lastFetch[f.id]=Date.now(); saveState(); renderArticles(); }).catch(e=> dbg('Scheduled refresh fail', f.url, e));
         }
       });
     }, 60*1000); // check every minute
