@@ -43,7 +43,7 @@
 (function(){
   'use strict';
 
-  const VERSION = '2.0.1';
+  const VERSION = '2.0.2';
   const LS_KEY = 'feedcycle-v2';
   const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{}, proxyScores:{}, proxyScoresResetAt:0 }; // posts ephemeral + tags mapping postId -> [tag]
   // state will be loaded after proxy scoring utilities are defined
@@ -52,7 +52,9 @@
   let lastFilteredPosts = [];
   let lastRenderedCount = 0;
   let pendingListRefresh = false;
+  let isInitialLoading = true; // true until first hydration/refresh completes
   const INITIAL_RENDER_COUNT = 120;
+  const CACHE_MAX_AGE_DAYS = 30; // prune cache entries older than this
   const CHUNK_SIZE = 120;
 
   // ---------- Proxy & Caching (ported/minimal from v1) ----------
@@ -704,13 +706,14 @@
     const filtered = getFilteredPosts();
     lastFilteredPosts = filtered;
     const total = filtered.length;
+    const emptyMessage = isInitialLoading ? 'Loading articles…' : 'No articles match these filters.';
     if(suspendListRenders){
       pendingListRefresh = true;
       lastRenderedCount = Math.min(lastRenderedCount, total);
       if(total===0){
         if(!list.querySelector('.empty')){
           list.innerHTML='';
-          list.append(el('div',{class:'empty'},'No articles match these filters.'));
+          list.append(el('div',{class:'empty'}, emptyMessage));
         }
       }
       return;
@@ -718,7 +721,7 @@
     pendingListRefresh = false;
     list.innerHTML='';
     if(!total){
-      list.append(el('div',{class:'empty'},'No articles match these filters.'));
+      list.append(el('div',{class:'empty'}, emptyMessage));
       lastRenderedCount = 0;
       return;
     }
@@ -2086,6 +2089,8 @@
   // ---------- Basic Feed Refresh (placeholder) ----------
   async function refreshAll(force=false){
     const usedProxies = new Set();
+    // Prune old cache entries before refreshing
+    pruneCacheEntries().catch(e => console.warn('Cache prune failed', e));
     for(const f of state.feeds){
       const rateLimit = getFeedRateLimit(f.id);
       if(rateLimit){
@@ -2095,6 +2100,9 @@
       try{
         await refreshFeed(f, { force, usedProxies });
         state.lastFetch[f.id]=Date.now();
+        // Yield to browser after each feed to prevent freezing
+        renderArticles();
+        await new Promise(resolve => setTimeout(resolve, 100));
       }catch(e){ console.warn('Feed fail', f.url, e); }
     }
     saveState(); renderArticles();
@@ -2179,6 +2187,7 @@
   // ---------- Startup Hydration & Selective Refresh ----------
   async function hydrateFromCacheThenSelectiveRefresh(){
     try{ await hydrateFromCache(); }catch{}
+    isInitialLoading = false;
     renderArticles();
     const now = Date.now();
     const globalInt = (state.settings.refreshMinutes||30)*60*1000;
@@ -2189,17 +2198,80 @@
       return now - last >= interval;
     });
     if(!stale.length) return; // all fresh
-    for(const f of stale){
-      const rateLimit = getFeedRateLimit(f.id);
-      if(rateLimit){
-        console.info('Initial refresh skipped (rate limit)', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
-        continue;
-      }
-      try{ await refreshFeed(f, { usedProxies:new Set() }); state.lastFetch[f.id]=Date.now(); }
-      catch(e){ console.warn('Initial selective refresh failed', f.url, e); }
-    }
+    // Prune old cache entries before refreshing (non-blocking)
+    pruneCacheEntries().catch(e => console.warn('Cache prune failed', e));
+    // Refresh feeds one at a time with yielding to prevent browser freeze
+    await refreshFeedsWithYield(stale);
     saveState();
     renderArticles();
+  }
+
+  // Refresh feeds one by one with yielding to keep browser responsive
+  async function refreshFeedsWithYield(feedList){
+    for(const f of feedList){
+      const rateLimit = getFeedRateLimit(f.id);
+      if(rateLimit){
+        console.info('Feed refresh skipped (rate limit)', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
+        continue;
+      }
+      try{ 
+        await refreshFeed(f, { usedProxies:new Set() }); 
+        state.lastFetch[f.id]=Date.now();
+        // Yield to browser and update UI after each feed
+        renderArticles();
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      catch(e){ console.warn('Feed refresh failed', f.url, e); }
+    }
+  }
+
+  // Prune cache entries older than CACHE_MAX_AGE_DAYS, but preserve entries for manually-tagged posts
+  async function pruneCacheEntries(){
+    if(typeof caches === 'undefined') return;
+    const cache = await caches.open(CACHE_NAME);
+    const keys = await cache.keys();
+    const now = Date.now();
+    const maxAgeMs = CACHE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+    
+    // Build set of URLs we must keep (posts with manual tags)
+    const keepUrls = new Set();
+    if(state.tags && state.autoTags){
+      for(const postId of Object.keys(state.tags)){
+        const manualTags = (state.tags[postId] || []).filter(tag => {
+          const autoTags = state.autoTags[postId] || [];
+          return !autoTags.includes(tag);
+        });
+        if(manualTags.length > 0){
+          // This post has manual tags - find its cached URL
+          const post = posts[postId];
+          if(post && post.link) keepUrls.add(post.link);
+          // Also keep feed URL for this post's feed
+          const feed = state.feeds.find(f => f.id === post?.feedId);
+          if(feed){
+            keepUrls.add(feed.url);
+            if(state.lastFetchUrl[feed.id]) keepUrls.add(state.lastFetchUrl[feed.id]);
+          }
+        }
+      }
+    }
+    
+    let pruned = 0;
+    for(const req of keys){
+      // Skip if this URL must be kept
+      if(keepUrls.has(req.url)) continue;
+      
+      const res = await cache.match(req);
+      if(!res) continue;
+      const dateHeader = res.headers.get('date');
+      if(!dateHeader) continue;
+      const cacheTime = new Date(dateHeader).getTime();
+      if(isNaN(cacheTime)) continue;
+      if(now - cacheTime > maxAgeMs){
+        await cache.delete(req);
+        pruned++;
+      }
+    }
+    if(pruned > 0) console.log(`[FeedCycle] Pruned ${pruned} old cache entries`);
   }
 
   async function hydrateFromCache(){
