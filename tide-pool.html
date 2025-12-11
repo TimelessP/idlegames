@@ -188,6 +188,218 @@
             rightWall: 765,      // Right rock boundary
         },
 
+        // Oriented bounding-box overlap approximation for creature bodies.
+        // Uses each entity's rendering dimensions to build rotated OBBs and
+        // applies a simple SAT test over the two boxes' axes. This is an
+        // inexpensive, robust approximation of ellipse/oval overlap for game use.
+        obbOverlap(entityA, entityB) {
+            if (!entityA || !entityB) return false;
+
+            // Helper to build an OBB from an entity
+            function buildOBB(e) {
+                const cx = e.position.x;
+                const cy = e.position.y;
+
+                // Default extents and rotation
+                let rx = 20, ry = 10, rot = 0;
+
+                if (e.type === 'crab' && e.rig) {
+                    rx = (e.rig.bodyWidth || 40) * 0.5;
+                    ry = (e.rig.bodyHeight || 24) * 0.5;
+                    rot = 0; // crab body doesn't tilt much
+                } else if (e.type === 'fish') {
+                    const sz = e.size || 1;
+                    rx = 18 * sz;
+                    ry = 8 * sz;
+                    const facing = e.behavior?.facingLeft ? -1 : 1;
+                    const moveAngle = Math.atan2((e.velocity?.y) || 0, Math.abs((e.velocity?.x) || 0)) * facing;
+                    rot = moveAngle * 0.3; // match visual tilt used in rendering
+
+                    // Compute body center offset (entity.position is at the fish head).
+                    // Transform local center (-bodyLength/2, 0) by scale(facing,1) then rotate(rot)
+                    if (e.rig && e.rig.segments) {
+                        const bodyLen = e.rig.segments.reduce((s, seg) => s + (seg.length || 0), 0);
+                        const localCx = -bodyLen * 0.5;
+                        const sx = facing * localCx;
+                        const sy = 0;
+                        const cc = Math.cos(rot), ss = Math.sin(rot);
+                        const worldCx = cx + (cc * sx - ss * sy);
+                        const worldCy = cy + (ss * sx + cc * sy);
+                        return { cx: worldCx, cy: worldCy, ux: { x: Math.cos(rot) * facing, y: Math.sin(rot) * facing }, vx: { x: -Math.sin(rot), y: Math.cos(rot) }, rx, ry };
+                    }
+                } else if (e.type === 'snail') {
+                    const sz = e.size || 1;
+                    rx = 18 * sz;
+                    ry = 6 * sz;
+                    rot = 0;
+                } else {
+                    const sz = e.size || 1;
+                    rx = 16 * sz;
+                    ry = 8 * sz;
+                    rot = 0;
+                }
+
+                const ux = { x: Math.cos(rot), y: Math.sin(rot) };
+                const vx = { x: -Math.sin(rot), y: Math.cos(rot) };
+
+                return { cx, cy, ux, vx, rx, ry };
+            }
+
+            const A = buildOBB(entityA);
+            const B = buildOBB(entityB);
+
+            // Axes to test: A.ux, A.vx, B.ux, B.vx
+            const axes = [A.ux, A.vx, B.ux, B.vx];
+
+            // Center distance
+            const dx = B.cx - A.cx;
+            const dy = B.cy - A.cy;
+
+            // Quick rejection using bounding circles (fast guard against distant false positives)
+            const approxA = Math.hypot(A.rx, A.ry);
+            const approxB = Math.hypot(B.rx, B.ry);
+            const centerDist = Math.hypot(dx, dy);
+            if (centerDist > (approxA + approxB) * 1.25) return false;
+
+            for (const axis of axes) {
+                // Normalize axis (they should already be unit, but be safe)
+                const len = Math.hypot(axis.x, axis.y) || 1;
+                const ax = axis.x / len;
+                const ay = axis.y / len;
+
+                // Project center distance onto axis
+                const proj = Math.abs(dx * ax + dy * ay);
+
+                // Radius of projection for A
+                const rA = Math.abs(A.rx * (A.ux.x * ax + A.ux.y * ay)) + Math.abs(A.ry * (A.vx.x * ax + A.vx.y * ay));
+                const rB = Math.abs(B.rx * (B.ux.x * ax + B.ux.y * ay)) + Math.abs(B.ry * (B.vx.x * ax + B.vx.y * ay));
+
+                if (proj > rA + rB) return false; // Separating axis found
+            }
+
+            return true; // No separation found
+        },
+
+        // OBB overlap with optional inflation factors for each entity's radii.
+        obbOverlapInflated(entityA, entityB, inflateA = 1, inflateB = 1) {
+            if (!entityA || !entityB) return false;
+
+            // Inline buildOBB to allow easy inflation
+            function buildOBB(e, inflate) {
+                const cx = e.position.x;
+                const cy = e.position.y;
+                let rx = 20, ry = 10, rot = 0;
+
+                if (e.type === 'crab' && e.rig) {
+                    rx = (e.rig.bodyWidth || 40) * 0.5 * 0.9 * inflate; // slight reduction baseline
+                    ry = (e.rig.bodyHeight || 24) * 0.5 * 0.9 * inflate;
+                    rot = 0;
+                } else if (e.type === 'fish') {
+                    const sz = e.size || 1;
+                    rx = 18 * sz * inflate;
+                    ry = 8 * sz * inflate;
+                    const facing = e.behavior?.facingLeft ? -1 : 1;
+                    const moveAngle = Math.atan2((e.velocity?.y) || 0, Math.abs((e.velocity?.x) || 0)) * facing;
+                    rot = moveAngle * 0.3;
+                    if (e.rig && e.rig.segments) {
+                        const bodyLen = e.rig.segments.reduce((s, seg) => s + (seg.length || 0), 0);
+                        const localCx = -bodyLen * 0.5;
+                        const sx = facing * localCx;
+                        const sy = 0;
+                        const cc = Math.cos(rot), ss = Math.sin(rot);
+                        const worldCx = cx + (cc * sx - ss * sy);
+                        const worldCy = cy + (ss * sx + cc * sy);
+                        const ux = { x: Math.cos(rot) * facing, y: Math.sin(rot) * facing };
+                        const vx = { x: -Math.sin(rot), y: Math.cos(rot) };
+                        return { cx: worldCx, cy: worldCy, ux, vx, rx, ry };
+                    }
+                } else if (e.type === 'snail') {
+                    const sz = e.size || 1;
+                    rx = 18 * sz * inflate;
+                    ry = 6 * sz * inflate;
+                    rot = 0;
+                } else {
+                    const sz = e.size || 1;
+                    rx = 16 * sz * inflate;
+                    ry = 8 * sz * inflate;
+                    rot = 0;
+                }
+
+                const ux = { x: Math.cos(rot), y: Math.sin(rot) };
+                const vx = { x: -Math.sin(rot), y: Math.cos(rot) };
+                return { cx, cy, ux, vx, rx, ry };
+            }
+
+            const A = buildOBB(entityA, inflateA);
+            const B = buildOBB(entityB, inflateB);
+
+            // Quick rejection using bounding circles
+            const dx = B.cx - A.cx;
+            const dy = B.cy - A.cy;
+            const approxA = Math.hypot(A.rx, A.ry);
+            const approxB = Math.hypot(B.rx, B.ry);
+            const centerDist = Math.hypot(dx, dy);
+            if (centerDist > (approxA + approxB) * 1.25) return false;
+
+            const axes = [A.ux, A.vx, B.ux, B.vx];
+            for (const axis of axes) {
+                const len = Math.hypot(axis.x, axis.y) || 1;
+                const ax = axis.x / len;
+                const ay = axis.y / len;
+                const proj = Math.abs(dx * ax + dy * ay);
+                const rA = Math.abs(A.rx * (A.ux.x * ax + A.ux.y * ay)) + Math.abs(A.ry * (A.vx.x * ax + A.vx.y * ay));
+                const rB = Math.abs(B.rx * (B.ux.x * ax + B.ux.y * ay)) + Math.abs(B.ry * (B.vx.x * ax + B.vx.y * ay));
+                if (proj > rA + rB) return false;
+            }
+
+            return true;
+        },
+
+        // Return OBB parameters for an entity: center, rx, ry, and rotation (radians)
+        getOBB(entity) {
+            if (!entity) return null;
+            let rx = 20, ry = 10, rot = 0;
+
+            if (entity.type === 'crab' && entity.rig) {
+                rx = (entity.rig.bodyWidth || 40) * 0.5;
+                ry = (entity.rig.bodyHeight || 24) * 0.5;
+                rot = 0;
+                // Slightly reduce crab OBB to avoid leg/claw reach causing body overlap
+                rx *= 0.9;
+                ry *= 0.9;
+                // Inflate when snapping for visual tuning happens in draw logic
+            } else if (entity.type === 'fish') {
+                const sz = entity.size || 1;
+                rx = 18 * sz;
+                ry = 8 * sz;
+                const facing = entity.behavior?.facingLeft ? -1 : 1;
+                const moveAngle = Math.atan2((entity.velocity?.y) || 0, Math.abs((entity.velocity?.x) || 0)) * facing;
+                rot = moveAngle * 0.3;
+                // Move OBB center from head to body center (approx)
+                if (entity.rig && entity.rig.segments) {
+                    const bodyLen = entity.rig.segments.reduce((s, seg) => s + (seg.length || 0), 0);
+                    const localCx = -bodyLen * 0.5;
+                    const sx = facing * localCx;
+                    const sy = 0;
+                    const cc = Math.cos(rot), ss = Math.sin(rot);
+                    const worldCx = entity.position.x + (cc * sx - ss * sy);
+                    const worldCy = entity.position.y + (ss * sx + cc * sy);
+                    return { cx: worldCx, cy: worldCy, rx, ry, rot };
+                }
+            } else if (entity.type === 'snail') {
+                const sz = entity.size || 1;
+                rx = 18 * sz;
+                ry = 6 * sz;
+                rot = 0;
+            } else {
+                const sz = entity.size || 1;
+                rx = 16 * sz;
+                ry = 8 * sz;
+                rot = 0;
+            }
+
+            return { cx: entity.position.x, cy: entity.position.y, rx, ry, rot };
+        },
         // Time cycles (in real seconds)
         cycles: {
             dayLength: 120,      // 2 minutes = 1 full day
@@ -253,6 +465,59 @@
         gameTime: 0,         // Total elapsed game time (seconds)
         paused: false,
     };
+
+    // Debug helper: toggleable via typing the sequence 'debug'
+    const debug = {
+        enabled: false,
+        keyBuffer: '',
+    };
+
+    // Keyboard handling: type 'debug' to toggle, and when in debug mode press 'h' to make creatures hungry
+    window.addEventListener('keydown', (e) => {
+        // Ignore if modifier keys pressed
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+        const k = e.key;
+        // In debug mode 'h' forces creatures to just-become-hungry
+        if ((k === 'h' || k === 'H') && debug.enabled) {
+            for (const entity of state.entities) {
+                if (!entity.ecosystem) continue;
+                const eco = entity.ecosystem;
+                // Crabs require a higher threshold (~67%)
+                if (entity.type === 'crab') {
+                    eco.hunger = eco.maxHunger * 0.68;
+                } else {
+                    // Fish/snail/etc use ~50%
+                    eco.hunger = eco.maxHunger * 0.51;
+                }
+                // Reset per-entity eat cooldowns so debug forces re-eat availability
+                eco.fishEatenToday = 0;
+                eco.recentEatTimer = 0;
+                if (entity.behavior) {
+                    entity.behavior.eatTimer = 0;
+                    entity.behavior.snapCooldown = 0;
+                }
+                // Trigger a hungry thought bubble where available
+                if (thoughtBubbleSystem && thoughtBubbleSystem.showThought) {
+                    thoughtBubbleSystem.showThought(entity, 'hungry');
+                }
+            }
+            console.log('🛠️ Debug: set creatures to hungry levels and cleared eat cooldowns');
+            return; // handled
+        }
+
+        // Capture alphabetic characters into buffer (for toggling debug)
+        if (k.length === 1 && /[a-zA-Z]/.test(k)) {
+            debug.keyBuffer += k.toLowerCase();
+            if (debug.keyBuffer.length > 10) debug.keyBuffer = debug.keyBuffer.slice(-10);
+            if (debug.keyBuffer.endsWith('debug')) {
+                debug.enabled = !debug.enabled;
+                debug.keyBuffer = '';
+                console.log('🛠️ Debug mode', debug.enabled ? 'ON' : 'OFF');
+            }
+            return;
+        }
+    });
 
     // ═══════════════════════════════════════════════════════════════════════════
     // EVENT BUS - Decoupled communication between systems
@@ -815,10 +1080,45 @@
                 behavior.state = 'grabbed';
                 return;
             }
+
+            // Separation: avoid overlapping other crabs by applying a small repulsive force
+            // This reduces stacking/jitter when multiple crabs converge on the same spot
+            const separationRadius = 44; // px
+            const separationStrength = 220; // force magnitude
+            for (const other of state.entities) {
+                if (other === entity) continue;
+                if (other.type !== 'crab') continue;
+                if (!other.position) continue;
+
+                const dx = entity.position.x - other.position.x;
+                const dy = entity.position.y - other.position.y;
+                const dist = Math.hypot(dx, dy);
+                if (dist > 0 && dist < separationRadius) {
+                    // Push away proportionally to overlap amount
+                    const pushFactor = (separationRadius - dist) / separationRadius;
+                    const nx = dx / dist;
+                    // Apply lateral push to velocity (small, blended) to avoid instant teleport
+                    physics.velocity.x += nx * separationStrength * pushFactor * dt;
+                    // Slight vertical nudge if both are on ground to avoid exact stacking
+                    if (physics.onGround && other.physics?.onGround) {
+                        physics.velocity.y -= 30 * pushFactor * dt;
+                    }
+                }
+            }
             
             // Decrease eat timer
             if (behavior.eatTimer > 0) {
                 behavior.eatTimer -= dt;
+            }
+
+            // Always decrement snap cooldown/active windows so they expire regardless of state
+            if (behavior.snapCooldown && behavior.snapCooldown > 0) {
+                behavior.snapCooldown -= dt;
+                if (behavior.snapCooldown < 0) behavior.snapCooldown = 0;
+            }
+            if (behavior.snapActive && behavior.snapActive > 0) {
+                behavior.snapActive -= dt;
+                if (behavior.snapActive < 0) behavior.snapActive = 0;
             }
             
             // Check hunger level - must match eating threshold (67%) to hunt
@@ -897,6 +1197,29 @@
                             behavior.facingLeft = bestFood.position.x < entity.position.x;
                         }
                     }
+                    // Priority 3: If hungry with no snails and no settled food, pursue nearest fish
+                    else if (isHungry && snails.length === 0 && settledFood.length === 0) {
+                        const fishList = state.entities.filter(e => e.type === 'fish');
+                        if (fishList.length > 0) {
+                            // Find closest fish
+                            let closestFish = null;
+                            let closestDist = Infinity;
+                            for (const f of fishList) {
+                                const d = Math.hypot(f.position.x - entity.position.x, f.position.y - entity.position.y);
+                                if (d < closestDist) {
+                                    closestDist = d;
+                                    closestFish = f;
+                                }
+                            }
+
+                            if (closestFish) {
+                                thoughtBubbleSystem.setState(entity, 'hunt');
+                                behavior.target = closestFish; // store reference to chase
+                                behavior.facingLeft = closestFish.position.x < entity.position.x;
+                                behavior.state = 'huntFish';
+                            }
+                        }
+                    }
                     
                     // Only scuttle if on the ground or in water and settled
                     const canMove = physics.onGround || (Math.abs(physics.velocity.y) < 20);
@@ -907,7 +1230,8 @@
                         
                         // Pick a random horizontal direction (crabs move sideways!)
                         const direction = Math.random() > 0.5 ? 1 : -1;
-                        const speed = 60 + Math.random() * 40;
+                        // If hungry, scuttle faster with purpose
+                        const speed = (isHungry ? 140 : 60) + Math.random() * 40;
                         behavior.targetVelX = direction * speed;
                         behavior.targetVelY = -20 + Math.random() * 10; // Slight upward to help movement
                         
@@ -933,8 +1257,9 @@
                     if (distToSnail > 15) {
                         behavior.facingLeft = dxSnail < 0;
                         // Move toward snail (faster than normal scuttle)
-                        const huntSpeed = 70;
-                        physics.velocity.x += (Math.sign(dxSnail) * huntSpeed - physics.velocity.x) * dt * 4;
+                        // Increase crab hunting speed for snails
+                        const huntSpeed = isHungry ? 180 : 110; // much faster when hungry
+                        physics.velocity.x += (Math.sign(dxSnail) * huntSpeed - physics.velocity.x) * dt * 8;
                     } else {
                         // Close enough - stop and let the eating system handle it
                         physics.velocity.x *= 0.8;
@@ -946,34 +1271,187 @@
                         behavior.scuttleTimer = 1;
                     }
                     break;
+
+                case 'huntFish':
+                    // Retarget each frame: chase the nearest fish (don't lock on one)
+                    const fishList = state.entities.filter(e => e.type === 'fish');
+                    if (fishList.length === 0) {
+                        behavior.state = 'idle';
+                        behavior.scuttleTimer = 0.5;
+                        break;
+                    }
+
+                    // If a snail appears while we're hunting fish, switch to snail hunt (higher priority)
+                    if (snails.length > 0) {
+                        // Find nearest snail
+                        let closestSnail = null;
+                        let closestSnailDist = Infinity;
+                        for (const s of snails) {
+                            const d = Math.hypot(s.position.x - entity.position.x, s.position.y - entity.position.y);
+                            if (d < closestSnailDist) {
+                                closestSnailDist = d;
+                                closestSnail = s;
+                            }
+                        }
+                        if (closestSnail) {
+                            thoughtBubbleSystem.setState(entity, 'hunt');
+                            behavior.target = closestSnail;
+                            behavior.state = 'hunt';
+                            break;
+                        }
+                    }
+
+                    // If food has recently settled on the floor, prefer ambushing that food
+                    if (settledFood.length > 0) {
+                        // Pick the settled food nearest the crab
+                        let nearestFood = null;
+                        let nfDist = Infinity;
+                        for (const f of settledFood) {
+                            const d = Math.abs(f.position.x - entity.position.x);
+                            if (d < nfDist) {
+                                nfDist = d;
+                                nearestFood = f;
+                            }
+                        }
+                        if (nearestFood) {
+                            thoughtBubbleSystem.setState(entity, 'ambush');
+                            behavior.targetX = nearestFood.position.x;
+                            behavior.ambushTimer = 6 + Math.random() * 6;
+                            behavior.facingLeft = nearestFood.position.x < entity.position.x;
+                            behavior.state = 'ambush';
+                            break;
+                        }
+                    }
+
+                    // Find the nearest fish each tick
+                    let closestFish = null;
+                    let closestDist = Infinity;
+                    for (const f of fishList) {
+                        const d = Math.hypot(f.position.x - entity.position.x, f.position.y - entity.position.y);
+                        if (d < closestDist) {
+                            closestDist = d;
+                            closestFish = f;
+                        }
+                    }
+
+                    if (!closestFish) {
+                        behavior.state = 'idle';
+                        behavior.scuttleTimer = 0.5;
+                        break;
+                    }
+
+                    // Keep a lightweight reference for UI and thought bubbles (not a locked target)
+                    behavior.target = closestFish;
+
+                    const dxFish = closestFish.position.x - entity.position.x;
+                    const distToFish = Math.hypot(dxFish, closestFish.position.y - entity.position.y);
+
+                    // Update facing only when significantly offset to avoid flip-flop when near
+                    if (distToFish > 20) {
+                        if (Math.abs(dxFish) > 12) behavior.facingLeft = dxFish < 0;
+                        const huntSpeedFish = isHungry ? 180 : 120;
+                        physics.velocity.x += (Math.sign(dxFish) * huntSpeedFish - physics.velocity.x) * dt * 8;
+
+                        // Allow snap jump while actively hunting a fish (if hungry and on ground)
+                        if (isHungry && physics.onGround && (!behavior.snapCooldown || behavior.snapCooldown <= 0)) {
+                            const distForSnap = Math.hypot(dxFish, closestFish.position.y - entity.position.y);
+                            if (distForSnap < 140) {
+                                const dir = Math.sign(closestFish.position.x - entity.position.x) || (behavior.facingLeft ? -1 : 1);
+                                physics.velocity.x = dir * 260;
+                                physics.velocity.y = -520; // stronger upward snap (2x)
+                                behavior.snapCooldown = 2.0;
+                                behavior.snapActive = 0.6;
+                                   // Immediate consume attempt for any overlapping fish at snap start
+                                   if (ecosystemSystem.tryConsumeFishImmediate(entity, 100, 80)) return;
+                                thoughtBubbleSystem.showThought(entity, 'ambush');
+                            }
+                        }
+                    } else {
+                        // Close enough - slow down to let eat system handle capture and avoid flip-flop
+                        physics.velocity.x *= 0.6;
+                    }
+
+                    // If the nearest fish drifts far away, give up and return to idle
+                    if (distToFish > 700) {
+                        behavior.state = 'idle';
+                        behavior.scuttleTimer = 1;
+                    }
+                    break;
                 
                 case 'ambush':
-                    // Move toward ambush position (faster when hungry - 1.5x normal)
-                    const dx = behavior.targetX - entity.position.x;
-                    if (Math.abs(dx) > 20) {
-                        // Scuttle toward the food with purpose
-                        const speed = 90; // 1.5x normal scuttle speed (~60)
-                        physics.velocity.x += (Math.sign(dx) * speed - physics.velocity.x) * dt * 3;
-                        behavior.facingLeft = dx < 0;
-                    } else {
-                        // At position - wait patiently, slow down smoothly
-                        physics.velocity.x *= 0.85;
+                    // Move toward ambush position (purposeful movement)
+                    {
+                        const dx = behavior.targetX - entity.position.x;
+                        // If far away, move quickly toward ambush spot
+                        if (Math.abs(dx) > 20) {
+                            const baseSpeed = 120; // purposeful ambush speed
+                            const speed = (isHungry ? baseSpeed * 1.6 : baseSpeed);
+                            // Faster lerp when hungry so ambush movement is snappy
+                            physics.velocity.x += (Math.sign(dx) * speed - physics.velocity.x) * dt * (isHungry ? 6 : 4);
+                            behavior.facingLeft = dx < 0;
+                        } else {
+                            // At ambush spot - wait patiently, keep low movement
+                            physics.velocity.x *= 0.7;
+                        }
                     }
-                    
+
                     behavior.ambushTimer -= dt;
-                    
+
+                    // While ambushing, look for nearby hungry fish approaching the food we're guarding
+                    if (behavior.targetX !== undefined) {
+                        // Find food entity nearest to our ambush X
+                        const guardedFood = settledFood.reduce((best, f) => {
+                            const d = Math.abs(f.position.x - behavior.targetX);
+                            return (d < (best?.d ?? Infinity)) ? { f, d } : best;
+                        }, null)?.f;
+
+                        if (guardedFood) {
+                            // Find the closest hungry fish to that food
+                            const hungryFish = state.entities.filter(e => e.type === 'fish' && e.ecosystem && e.ecosystem.hunger > e.ecosystem.maxHunger * 0.5);
+                            let closestFish = null;
+                            let closestFishDist = Infinity;
+                            for (const f of hungryFish) {
+                                const fd = Math.hypot(f.position.x - guardedFood.position.x, f.position.y - guardedFood.position.y);
+                                if (fd < closestFishDist) {
+                                    closestFishDist = fd;
+                                    closestFish = f;
+                                }
+                            }
+
+                            // If a hungry fish is approaching close to the guarded food, wait and prepare to snap
+                            if (closestFish && closestFishDist < 160) {
+                                // Stop moving and wait with intent
+                                physics.velocity.x *= 0.2;
+                                // If fish comes very close to the food or to the crab, perform a snap/jump
+                                const distCrabToFish = Math.hypot(closestFish.position.x - entity.position.x, closestFish.position.y - entity.position.y);
+                                const fishNearFood = Math.hypot(closestFish.position.x - guardedFood.position.x, closestFish.position.y - guardedFood.position.y) < 40;
+
+                                if (fishNearFood && distCrabToFish < 90 && physics.onGround && (!behavior.snapCooldown || behavior.snapCooldown <= 0)) {
+                                    // Snap jump: lunge toward fish
+                                    const dir = Math.sign(closestFish.position.x - entity.position.x) || (behavior.facingLeft ? -1 : 1);
+                                    physics.velocity.x = dir * 240; // strong lateral lunge
+                                    physics.velocity.y = -520; // quick upward snap (2x)
+                                    behavior.snapCooldown = 2.0; // cooldown before next snap
+                                    behavior.snapActive = 0.6; // short window where catch range is increased
+                                    // Immediate consume attempt for any overlapping fish at snap start
+                                    if (ecosystemSystem.tryConsumeFishImmediate(entity, 120, 80)) return;
+                                    thoughtBubbleSystem.showThought(entity, 'ambush');
+                                }
+                            }
+                        }
+                    }
+
+                    // (timers handled globally above)
+
                     // If a snail appears while we're ambushing and we're hungry, switch to hunt
                     if (isHungry && snails.length > 0) {
                         behavior.state = 'idle'; // Will trigger hunt on next frame
                         break;
                     }
-                    
+
                     // If the food we're ambushing is gone, or timer expired, go back to idle
-                    const foodStillThere = settledFood.some(f => 
-                        Math.abs(f.position.x - behavior.targetX) < 50
-                    );
-                    
-                    if (!foodStillThere || behavior.ambushTimer <= 0) {
+                    const foodStillThere2 = settledFood.some(f => Math.abs(f.position.x - behavior.targetX) < 50);
+                    if (!foodStillThere2 || behavior.ambushTimer <= 0) {
                         behavior.state = 'idle';
                         behavior.scuttleTimer = 1 + Math.random() * 2;
                     }
@@ -1221,7 +1699,15 @@
                     if (closestFood && closestDist < 300) {
                         // Target the food!
                         behavior.targetX = closestFood.position.x;
-                        behavior.targetY = closestFood.position.y;
+                        // If the food is settled on the floor, fish should dip lower so their mouth reaches it
+                        if (closestFood.position.y >= CONFIG.physics.floorY - 16) {
+                            // Aim lower and mark that we're seeking floor food so clamps relax
+                            behavior.targetY = Math.max(behavior.targetY || waterY + 30, CONFIG.physics.floorY - 12);
+                            behavior.seekingFloorFood = true;
+                        } else {
+                            behavior.targetY = closestFood.position.y;
+                            behavior.seekingFloorFood = false;
+                        }
                         behavior.turnTimer = 0.5; // Keep updating target
                         
                         // Show thought bubble when first noticing food
@@ -1252,8 +1738,8 @@
                         const dist = Math.sqrt(dx * dx + dy * dy);
                         
                         // If close to target, slow down and drift
-                        if (dist < 30) {
-                            // Drift to a stop, pick new target soon
+                        if (dist < 30 && !behavior.seekingFloorFood) {
+                            // Drift to a stop (unless seeking floor food)
                             vel.x *= 0.95;
                             vel.y *= 0.95;
                             behavior.turnTimer = Math.min(behavior.turnTimer, 0.5);
@@ -1262,6 +1748,31 @@
                             const targetVelY = (dy / dist) * behavior.speed;
                             vel.x += (targetVelX - vel.x) * dt * 3;
                             vel.y += (targetVelY - vel.y) * dt * 3;
+                        }
+
+                        // If intentionally seeking floor food, and we're near horizontally, nudge downward so mouth can reach
+                        if (behavior.seekingFloorFood) {
+                            const horizontalDist = Math.abs(behavior.targetX - entity.position.x);
+                            if (horizontalDist < 80) {
+                                // Compute mouth world position (approx) to see if we still need to move lower
+                                const sz = entity.size || 1;
+                                const facing = behavior.facingLeft ? -1 : 1;
+                                const moveAngle = Math.atan2(entity.velocity.y, Math.abs(entity.velocity.x)) * facing;
+                                const mouthLocal = { x: facing * 8 * sz, y: 4 * sz };
+                                const cosA = Math.cos(moveAngle), sinA = Math.sin(moveAngle);
+                                const mouthWorldX = entity.position.x + (cosA * mouthLocal.x - sinA * mouthLocal.y);
+                                const mouthWorldY = entity.position.y + (sinA * mouthLocal.x + cosA * mouthLocal.y);
+                                const mouthDist = Math.hypot(mouthWorldX - behavior.targetX, mouthWorldY - behavior.targetY);
+                                const mouthRange = Math.max(10, (entity.ecosystem?.eatRange || 30) * 0.45);
+
+                                if (mouthDist > mouthRange) {
+                                    // Nudge downward toward the food (but respect hard clamps later)
+                                    const desiredDy = (behavior.targetY - mouthWorldY);
+                                    vel.y += Math.sign(desiredDy) * Math.min(120, Math.abs(desiredDy)) * dt * 0.9;
+                                    // Also gently adjust horizontal velocity toward target
+                                    vel.x += (Math.sign(behavior.targetX - entity.position.x) * behavior.speed * 0.4 - vel.x) * dt * 2;
+                                }
+                            }
                         }
                     }
                     break;
@@ -1311,7 +1822,8 @@
             
             // Clamp target to stay in water
             const minY = waterY + 25;
-            const maxY = CONFIG.physics.floorY - 15; // Fish can swim close to floor (crabs can catch them!)
+            // Allow fish to dip lower when intentionally seeking floor food
+            const maxY = (behavior.seekingFloorFood) ? (CONFIG.physics.floorY - 6) : (CONFIG.physics.floorY - 15);
             const minX = CONFIG.physics.leftWall + 30;
             const maxX = CONFIG.physics.rightWall - 30;
             
@@ -1361,6 +1873,11 @@
 
                 // Increase hunger over time
                 entity.ecosystem.hunger += entity.ecosystem.hungerRate * dt;
+                // Decrease recent-eat timer (prevents immediate repeated eats)
+                if (entity.ecosystem.recentEatTimer && entity.ecosystem.recentEatTimer > 0) {
+                    entity.ecosystem.recentEatTimer -= dt;
+                    if (entity.ecosystem.recentEatTimer < 0) entity.ecosystem.recentEatTimer = 0;
+                }
                 
                 // Check for food nearby
                 if (entity.ecosystem.eats && entity.ecosystem.eats.length > 0) {
@@ -1484,7 +2001,10 @@
                 const dist = Math.sqrt(dx * dx + dy * dy);
                 
                 const eatRange = eco.eatRange || 30;
-                if (dist > eatRange) continue;
+                // Allow crab->fish logic to consider targets beyond the small default eatRange
+                if (!(entity.type === 'crab' && target.type === 'fish')) {
+                    if (dist > eatRange) continue;
+                }
                 
                 // Eating seaweed/kelp - chomp 3 segments in one meal
                 if (target.type === 'seaweed' || target.type === 'kelp') {
@@ -1513,27 +2033,53 @@
                     }
                 }
                 
-                // Crab eating fish - only when hungry and max one per day!
+                // Crab eating fish - only when hungry
                 if (entity.type === 'crab' && target.type === 'fish') {
                     // Crab only hunts fish when hungry
                     const isHungry = eco.hunger > eco.maxHunger * 0.67;
                     if (!isHungry) continue;
-                    
-                    // Check daily limit
-                    if (eco.fishEatenToday >= 1) continue;
-                    
-                    // Got one! Remove the fish
-                    const idx = entities.indexOf(target);
-                    if (idx !== -1) {
-                        entities.splice(idx, 1);
-                        eco.hunger = 0; // Fully satiated after a fish!
-                        eco.fishEatenToday = 1;
-                        console.log('🦀 Crab caught a fish! 🐟');
-                        if (entity.behavior) {
-                            entity.behavior.eatTimer = 3.0; // Satisfied for a while
-                            entity.behavior.state = 'idle'; // Stop hunting/ambushing
+
+                    // Prevent immediate repeated eats: short cooldown per-crab
+                    if (eco.recentEatTimer && eco.recentEatTimer > 0) continue;
+
+                    // Check daily limit (allow up to 3 per day)
+                    if (!eco.fishEatenToday) eco.fishEatenToday = 0;
+                    if (eco.fishEatenToday >= 3) continue;
+
+                    // Got one candidate
+                    const dist = Math.hypot(target.position.x - entity.position.x, target.position.y - entity.position.y);
+                    // Normal reach
+                    const reach = eco.eatRange || 40;
+                    // If a snap jump was just performed, allow larger catch window
+                    const snapActive = entity.behavior && entity.behavior.snapActive && entity.behavior.snapActive > 0;
+                    const snapReach = snapActive ? Math.max(reach, 110) : reach;
+
+                    // Use oriented bounding-box (OBB) overlap as primary test.
+                    // During snapActive, test against an inflated crab OBB instead
+                    let caught = false;
+                    if (snapActive) {
+                        caught = CONFIG.obbOverlapInflated(entity, target, 1.6, 1);
+                    } else {
+                        caught = CONFIG.obbOverlap(entity, target);
+                        // Allow normal close-range reach when not snapping
+                        if (!caught && dist <= reach) caught = true;
+                    }
+
+                    if (caught) {
+                        const idx = entities.indexOf(target);
+                        if (idx !== -1) {
+                            entities.splice(idx, 1);
+                            eco.hunger = 0; // Fully satiated after a fish!
+                            eco.fishEatenToday = (eco.fishEatenToday || 0) + 1;
+                            eco.recentEatTimer = 1.0;
+                            console.log('🦀 Crab caught a fish! 🐟');
+                            if (entity.behavior) {
+                                entity.behavior.eatTimer = 3.0; // Satisfied for a while
+                                entity.behavior.state = 'idle'; // Stop hunting/ambushing
+                                entity.behavior.snapActive = 0; // consume active window
+                            }
+                            return;
                         }
-                        return;
                     }
                 }
                 
@@ -1561,7 +2107,25 @@
                     // Fish only eat when hungry (hunger > 50% of max)
                     const isHungry = eco.hunger > eco.maxHunger * 0.5;
                     if (!isHungry) continue;
-                    
+
+                    // Compute mouth world position using movement angle so tilted fish can reach
+                    const sz = entity.size || 1;
+                    const facing = entity.behavior?.facingLeft ? -1 : 1;
+                    // Approximate movement angle (used elsewhere for tilt)
+                    const moveAngle = Math.atan2(entity.velocity.y, Math.abs(entity.velocity.x)) * facing;
+
+                    // Local mouth offset (in fish local coords). Positive x is forward when facingRight.
+                    const mouthLocal = { x: facing * 8 * sz, y: 4 * sz };
+                    // Rotate local offset by moveAngle to get world offset
+                    const cosA = Math.cos(moveAngle), sinA = Math.sin(moveAngle);
+                    const mouthWorldX = entity.position.x + (cosA * mouthLocal.x - sinA * mouthLocal.y);
+                    const mouthWorldY = entity.position.y + (sinA * mouthLocal.x + cosA * mouthLocal.y);
+
+                    const mouthDist = Math.hypot(mouthWorldX - target.position.x, mouthWorldY - target.position.y);
+                    const mouthRange = Math.max(10, (eco.eatRange || 30) * 0.45);
+
+                    if (mouthDist > mouthRange) continue; // Not close enough with mouth
+
                     const idx = entities.indexOf(target);
                     if (idx !== -1) {
                         entities.splice(idx, 1);
@@ -1569,11 +2133,67 @@
                         if (entity.behavior) {
                             entity.behavior.eatTimer = 0.5; // Quick bite
                             entity.behavior.state = 'swim'; // Go back to swimming
+                            entity.behavior.seekingFood = false;
+                            entity.behavior.seekingFloorFood = false;
                         }
                         return;
                     }
                 }
             }
+        },
+
+        // Immediate consume helper used at snap initiation: aggressively remove any fish
+        // within a generous box around the crab. Respects hunger and daily limits.
+        tryConsumeFishImmediate(crab, halfWidth = 180, halfHeight = 180) {
+            if (!crab || crab.type !== 'crab' || !crab.ecosystem) return false;
+            const eco = crab.ecosystem;
+            const isHungry = eco.hunger > eco.maxHunger * 0.67;
+            if (!isHungry) return false;
+            if (eco.recentEatTimer && eco.recentEatTimer > 0) return false;
+            if (!eco.fishEatenToday) eco.fishEatenToday = 0;
+            if (eco.fishEatenToday >= 3) return false;
+
+            // Scan for fish in the rectangle centered on crab (use global state.entities)
+            const list = state.entities;
+            for (let i = list.length - 1; i >= 0; i--) {
+                const target = list[i];
+                if (!target || target.type !== 'fish') continue;
+                const dx = Math.abs(target.position.x - crab.position.x);
+                const dy = Math.abs(target.position.y - crab.position.y);
+                // Primary: use precise OBB overlap test between crab and fish (inflate crab during snap)
+                const snapInflate = (crab.behavior && crab.behavior.snapActive > 0) ? 1.4 : 1.0;
+                if (CONFIG.obbOverlapInflated(crab, target, snapInflate, 1)) {
+                    // Remove the fish immediately
+                    list.splice(i, 1);
+                    eco.hunger = 0;
+                    eco.fishEatenToday = (eco.fishEatenToday || 0) + 1;
+                    eco.recentEatTimer = 1.0;
+                    console.log('🦀 Crab instantly grabbed a fish on snap! 🐟');
+                    if (crab.behavior) {
+                        crab.behavior.eatTimer = 3.0;
+                        crab.behavior.state = 'idle';
+                        crab.behavior.snapActive = 0;
+                    }
+                    return true;
+                }
+                // Fallback generous rectangle only if fish center is reasonably close
+                const centerDist = Math.hypot(target.position.x - crab.position.x, target.position.y - crab.position.y);
+                const maxFallback = Math.max(120, Math.max(halfWidth, halfHeight));
+                if (centerDist <= maxFallback && dx <= halfWidth && dy <= halfHeight) {
+                    list.splice(i, 1);
+                    eco.hunger = 0;
+                    eco.fishEatenToday = (eco.fishEatenToday || 0) + 1;
+                    eco.recentEatTimer = 1.0;
+                    console.log('🦀 Crab instantly grabbed a fish on snap! (rect fallback) 🐟');
+                    if (crab.behavior) {
+                        crab.behavior.eatTimer = 3.0;
+                        crab.behavior.state = 'idle';
+                        crab.behavior.snapActive = 0;
+                    }
+                    return true;
+                }
+            }
+            return false;
         },
     };
 
@@ -2346,6 +2966,59 @@
 
             // Draw thought bubble if active
             this.drawThoughtBubble(entity);
+            // Debug: draw OBB overlay when requested
+            if (typeof debug !== 'undefined' && debug.enabled) {
+                try {
+                    const obb = CONFIG.getOBB(entity);
+                    if (obb) {
+                        try {
+                            // Use world-space corner math so we don't need to replicate draw transforms
+                            let rx = obb.rx, ry = obb.ry, rot = obb.rot;
+                            if (entity.type === 'crab' && entity.behavior && entity.behavior.snapActive > 0) {
+                                rx *= 1.5;
+                                ry *= 1.2;
+                            }
+
+                            const facing = entity.behavior?.facingLeft ? -1 : 1;
+                            const ux = { x: Math.cos(rot) * facing, y: Math.sin(rot) * facing };
+                            const vx = { x: -Math.sin(rot), y: Math.cos(rot) };
+
+                            const cx = obb.cx;
+                            const cy = obb.cy;
+
+                            // Compute four corners in world coords
+                            const corners = [
+                                { x: cx + ux.x * rx + vx.x * ry, y: cy + ux.y * rx + vx.y * ry },
+                                { x: cx - ux.x * rx + vx.x * ry, y: cy - ux.y * rx + vx.y * ry },
+                                { x: cx - ux.x * rx - vx.x * ry, y: cy - ux.y * rx - vx.y * ry },
+                                { x: cx + ux.x * rx - vx.x * ry, y: cy + ux.y * rx - vx.y * ry },
+                            ];
+
+                            // Convert to local canvas coords (we are translated to entity.position already)
+                            ctx.save();
+                            ctx.lineWidth = 1 / (scale || 1);
+                            if (entity.type === 'crab') ctx.strokeStyle = 'rgba(255,50,50,0.9)';
+                            else if (entity.type === 'fish') ctx.strokeStyle = 'rgba(50,220,100,0.9)';
+                            else ctx.strokeStyle = 'rgba(80,160,255,0.9)';
+                            ctx.beginPath();
+                            for (let i = 0; i < corners.length; i++) {
+                                const p = corners[i];
+                                const lx = p.x - entity.position.x;
+                                const ly = p.y - entity.position.y;
+                                if (i === 0) ctx.moveTo(lx, ly);
+                                else ctx.lineTo(lx, ly);
+                            }
+                            ctx.closePath();
+                            ctx.stroke();
+                            ctx.restore();
+                        } catch (e) {
+                            // ignore per-entity debug draw errors
+                        }
+                    }
+                } catch (e) {
+                    // ignore debug drawing errors
+                }
+            }
 
             ctx.restore();
         },
