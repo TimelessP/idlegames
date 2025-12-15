@@ -71,7 +71,7 @@ function readState() {
         if (now < base.sessionExpiry) {
           // only start timer if we don't already have one for same expiry
           if (!_sessionExpiry || _sessionExpiry !== base.sessionExpiry) {
-            _transientLoggedIn = true;
+            // Do NOT set _transientLoggedIn here; only set timer for expiry cleanup
             _clearSessionTimer();
             _sessionExpiry = base.sessionExpiry;
             const remaining = Math.max(0, base.sessionExpiry - now);
@@ -133,6 +133,27 @@ function randSaltBase64(len = 16) {
 
 // Public API
 window.parental = {
+    // --- Schedule Enforcement ---
+    _getSchedules() {
+      try { return JSON.parse(localStorage.getItem('idlegames-parental-schedule')) || []; } catch(e) { return []; }
+    },
+    _isNowAllowed() {
+      const schedules = window.parental._getSchedules();
+      if (!schedules || !schedules.length) return true; // No restriction
+      const now = new Date();
+      const day = now.getDay();
+      const mins = now.getHours()*60 + now.getMinutes();
+      for (const s of schedules) {
+        if (!s.days || !s.days.length) continue;
+        if (!s.days.includes(day)) continue;
+        if (!s.from || !s.to) continue;
+        const [fh,fm] = s.from.split(':').map(Number);
+        const [th,tm] = s.to.split(':').map(Number);
+        const fromMins = fh*60+fm, toMins = th*60+tm;
+        if (fromMins <= mins && mins < toMins) return true;
+      }
+      return false;
+    },
   isEnabled() {
     const s = readState();
     return !!s.enabled;
@@ -215,6 +236,11 @@ window.parental = {
     if (!s.enabled) return true; // no enforcement
     // if logged in, allow
     if (s.session && s.session.loggedIn) return true;
+    // Enforce schedule
+    if (!window.parental._isNowAllowed()) {
+      try { window.location.replace('index.html'); } catch (e) { window.location.href = 'index.html'; }
+      return false;
+    }
     const allowed = (s.allowed && s.allowed[currentHref]) !== false; // default true
     if (!allowed) {
       // redirect to index
@@ -230,8 +256,27 @@ window.parental = {
   try {
     const path = window.location.pathname.split('/').pop() || 'index.html';
     if (path !== 'index.html') {
-      // run check; if blocked it will redirect
-      parental.checkAccessOrRedirect(path);
+      // Always start the schedule enforcement timer
+      if (!window._parentalScheduleInterval) {
+        window._parentalScheduleInterval = setInterval(() => {
+          const s = readState();
+          // Only enforce if parental controls are enabled and not in admin mode
+          if (!s.enabled) return;
+          if (s.session && s.session.loggedIn) return;
+          const allowed = window.parental._isNowAllowed();
+          if (!allowed) {
+            try { window.location.replace('index.html'); } catch (e) { window.location.href = 'index.html'; }
+          }
+        }, 60000); // 1 minute
+      }
+      // Also check immediately on load, not just after 1 minute
+      const s = readState();
+      if (s.enabled && !(s.session && s.session.loggedIn)) {
+        const allowed = window.parental._isNowAllowed();
+        if (!allowed) {
+          try { window.location.replace('index.html'); } catch (e) { window.location.href = 'index.html'; }
+        }
+      }
     }
   } catch (e) {
     // ignore
