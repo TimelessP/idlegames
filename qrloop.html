@@ -796,6 +796,12 @@
         this.setupEventHandlers();
         this.checkUrlParameters();
         this.updateUI();
+        // Restore any persisted received file from previous session
+        try {
+          this.restoreReceivedFromStorage();
+        } catch (e) {
+          console.warn('Restore on init failed', e);
+        }
       }
       
       initializeElements() {
@@ -1610,6 +1616,13 @@
         }
 
         this.updateUI();
+
+        // Persist received file to localStorage (with a sensible size cap)
+        try {
+          this.persistReceivedToStorage();
+        } catch (e) {
+          console.warn('Persist receive error:', e);
+        }
         
         // Auto-stop camera when reception is complete
         if (this.scanning) {
@@ -1669,6 +1682,13 @@
         if (this.elements.textPreviewContainer) this.elements.textPreviewContainer.classList.add('hidden');
         if (this.elements.textPreview) this.elements.textPreview.value = '';
         if (this.elements.copyText) this.elements.copyText.disabled = true;
+        // Remove persisted receive data
+        try {
+          localStorage.removeItem('qrloop-received-filename');
+          localStorage.removeItem('qrloop-received-data');
+        } catch (e) {
+          console.warn('Failed to clear persisted receive data', e);
+        }
         this.updateUI();
         this.showStatus('Receive data cleared', 'info');
       }
@@ -1863,6 +1883,75 @@
           'mp3': 'audio/mpeg'
         };
         return map[ext] || 'application/octet-stream';
+      }
+
+      // Convert base64 string to Uint8Array
+      base64ToBytes(b64) {
+        try {
+          const binary = atob(b64);
+          const len = binary.length;
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          return bytes;
+        } catch (e) {
+          console.warn('base64ToBytes failed', e);
+          return null;
+        }
+      }
+
+      // Persist the fully received file (filename + base64 bytes) to localStorage
+      persistReceivedToStorage() {
+        if (!this.receivedFileData || !this.elements.saveFilename.value) return;
+
+        const MAX_PERSIST_BYTES = 5 * 1024 * 1024; // 5 MB cap to avoid blowing localStorage
+        if (this.receivedFileData.length > MAX_PERSIST_BYTES) {
+          this.showStatus('File too large to persist locally (>5MB).', 'warning');
+          return;
+        }
+
+        try {
+          const b64 = this.bytesToBase64(this.receivedFileData);
+          localStorage.setItem('qrloop-received-filename', this.elements.saveFilename.value);
+          localStorage.setItem('qrloop-received-data', b64);
+          // Also store mime if possible
+          localStorage.setItem('qrloop-received-mtime', Date.now().toString());
+        } catch (e) {
+          console.warn('Failed to persist received file', e);
+        }
+      }
+
+      // Restore persisted received file from localStorage, if any
+      restoreReceivedFromStorage() {
+        try {
+          const fname = localStorage.getItem('qrloop-received-filename');
+          const b64 = localStorage.getItem('qrloop-received-data');
+          if (!fname || !b64) return;
+
+          const bytes = this.base64ToBytes(b64);
+          if (!bytes) return;
+
+          this.receivedFileData = bytes;
+          this.elements.saveFilename.value = fname;
+
+          // Show preview depending on type
+          if (this.isTextLike(bytes)) {
+            const decoder = new TextDecoder('utf-8', { fatal: false });
+            this.elements.textPreview.value = decoder.decode(bytes);
+          } else {
+            const mime = this.guessMime(fname || 'file');
+            this.elements.textPreview.value = `data:${mime};base64,${b64}`;
+          }
+
+          if (this.elements.textPreviewContainer) this.elements.textPreviewContainer.classList.remove('hidden');
+          if (this.elements.copyText) this.elements.copyText.disabled = false;
+
+          this.showStatus(`Restored received file: ${fname}`, 'info');
+          this.updateUI();
+        } catch (e) {
+          console.warn('Failed to restore persisted file', e);
+        }
       }
       
       checkUrlParameters() {
