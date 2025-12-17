@@ -733,6 +733,14 @@
           <button class="btn secondary" id="stopCamera" disabled>⏹️ Stop Camera</button>
           
           <input type="text" id="saveFilename" placeholder="filename.txt" class="filename-input" />
+          <!-- Text preview for text-like received files (shown before filename) -->
+          <div id="textPreviewContainer" class="hidden">
+            <textarea id="textPreview" class="text-input" placeholder="Preview of received text file..." readonly></textarea>
+            <div style="display:flex; gap:8px; margin-top:8px;">
+              <button class="btn" id="copyText" disabled>📋 Copy</button>
+            </div>
+          </div>
+
           <button class="btn" id="saveFile" disabled>💾 Save File</button>
           
           <div class="control-row">
@@ -816,6 +824,10 @@
           mirrorCamera: document.getElementById('mirrorCamera'),
           stopCamera: document.getElementById('stopCamera'),
           saveFilename: document.getElementById('saveFilename'),
+          // Text preview elements for text-like received files
+          textPreviewContainer: document.getElementById('textPreviewContainer'),
+          textPreview: document.getElementById('textPreview'),
+          copyText: document.getElementById('copyText'),
           saveFile: document.getElementById('saveFile'),
           clearReceive: document.getElementById('clearReceive'),
           receivePanel: document.getElementById('receive-panel'),
@@ -918,6 +930,25 @@
         this.elements.saveFilename.addEventListener('input', () => {
           this.updateUI();
         });
+
+        // Copy previewed text to clipboard
+        if (this.elements.copyText) {
+          this.elements.copyText.addEventListener('click', () => {
+            try {
+              const text = this.elements.textPreview.value || '';
+              if (!text) return;
+              navigator.clipboard.writeText(text).then(() => {
+                this.showStatus('Text copied to clipboard', 'success');
+              }).catch((err) => {
+                console.error('Copy failed', err);
+                this.showStatus('Copy failed', 'error');
+              });
+            } catch (e) {
+              console.error('Copy error', e);
+              this.showStatus('Copy failed', 'error');
+            }
+          });
+        }
         
         // Modal handlers
         this.elements.qrModal.addEventListener('click', (e) => {
@@ -1541,6 +1572,43 @@
         
         this.receivedFileData = fileData;
         this.elements.saveFilename.value = this.currentFilename;
+
+        // If the received file looks like text, show a preview textarea and enable copy
+        try {
+          if (this.isTextLike(fileData)) {
+            const decoder = new TextDecoder('utf-8', { fatal: false });
+            const text = decoder.decode(fileData);
+            if (this.elements.textPreview) {
+              this.elements.textPreview.value = text;
+            }
+            if (this.elements.textPreviewContainer) {
+              this.elements.textPreviewContainer.classList.remove('hidden');
+            }
+            if (this.elements.copyText) {
+              this.elements.copyText.disabled = false;
+            }
+          } else {
+            // For non-text files, show a Data URL (base64) in the preview so users can copy it
+            try {
+              const mime = this.guessMime(this.currentFilename || 'file');
+              const base64 = this.bytesToBase64(this.receivedFileData);
+              const dataUrl = `data:${mime};base64,${base64}`;
+              if (this.elements.textPreview) {
+                this.elements.textPreview.value = dataUrl;
+              }
+              if (this.elements.textPreviewContainer) this.elements.textPreviewContainer.classList.remove('hidden');
+              if (this.elements.copyText) this.elements.copyText.disabled = false;
+            } catch (e) {
+              console.warn('Failed to create data URL preview:', e);
+              if (this.elements.textPreviewContainer) this.elements.textPreviewContainer.classList.add('hidden');
+              if (this.elements.textPreview) this.elements.textPreview.value = '';
+              if (this.elements.copyText) this.elements.copyText.disabled = true;
+            }
+          }
+        } catch (e) {
+          console.warn('Text preview error:', e);
+        }
+
         this.updateUI();
         
         // Auto-stop camera when reception is complete
@@ -1597,6 +1665,10 @@
         this.elements.receiveInfo.textContent = '';
         this.elements.receiveProgress.classList.add('hidden');
         this.elements.saveFilename.value = '';
+        // Hide and clear text preview
+        if (this.elements.textPreviewContainer) this.elements.textPreviewContainer.classList.add('hidden');
+        if (this.elements.textPreview) this.elements.textPreview.value = '';
+        if (this.elements.copyText) this.elements.copyText.disabled = true;
         this.updateUI();
         this.showStatus('Receive data cleared', 'info');
       }
@@ -1607,6 +1679,11 @@
         
         this.elements.startLoop.disabled = !hasData || this.looping;
         this.elements.saveFile.disabled = !hasReceivedFile;
+        // Enable/disable copy button based on preview availability
+        if (this.elements.copyText) {
+          const hasPreview = this.elements.textPreview && this.elements.textPreview.value && this.elements.textPreview.value.trim();
+          this.elements.copyText.disabled = !hasPreview;
+        }
       }
       
       async waitForQRious() {
@@ -1711,6 +1788,81 @@
         const sizes = ['Bytes', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+      }
+
+      // Heuristic: determine if a received Uint8Array is likely text
+      isTextLike(bytes) {
+        if (!bytes || bytes.length === 0) return false;
+
+        // Reject obvious binary with NUL bytes
+        for (let i = 0; i < Math.min(bytes.length, 512); i++) {
+          if (bytes[i] === 0) return false;
+        }
+
+        // Try to decode a sample and check control-char ratio
+        try {
+          const sample = bytes.subarray(0, Math.min(bytes.length, 4096));
+          const decoder = new TextDecoder('utf-8', { fatal: false });
+          const text = decoder.decode(sample);
+          if (!text) return false;
+
+          let controlCount = 0;
+          for (let i = 0; i < text.length; i++) {
+            const ch = text.charCodeAt(i);
+            // allow common whitespace
+            if (ch === 9 || ch === 10 || ch === 13) continue;
+            if (ch < 32) controlCount++;
+          }
+
+          const ratio = controlCount / text.length;
+          return ratio < 0.1; // treat as text if fewer than 10% control chars
+        } catch (e) {
+          return false;
+        }
+      }
+
+      // Convert Uint8Array to base64 string (chunked to avoid stack limits)
+      bytesToBase64(bytes) {
+        const CHUNK_SIZE = 0x8000; // 32KB
+        let index = 0;
+        const length = bytes.length;
+        let result = '';
+        while (index < length) {
+          const slice = bytes.subarray(index, Math.min(index + CHUNK_SIZE, length));
+          result += String.fromCharCode.apply(null, slice);
+          index += CHUNK_SIZE;
+        }
+        try {
+          return btoa(result);
+        } catch (e) {
+          // Fallback: convert using a slower method
+          let binary = '';
+          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+          return btoa(binary);
+        }
+      }
+
+      // Very small mime-type guesser based on filename extension
+      guessMime(filename) {
+        const ext = (filename || '').split('.').pop().toLowerCase();
+        const map = {
+          'txt': 'text/plain',
+          'csv': 'text/csv',
+          'json': 'application/json',
+          'html': 'text/html',
+          'htm': 'text/html',
+          'png': 'image/png',
+          'jpg': 'image/jpeg',
+          'jpeg': 'image/jpeg',
+          'gif': 'image/gif',
+          'webp': 'image/webp',
+          'svg': 'image/svg+xml',
+          'pdf': 'application/pdf',
+          'zip': 'application/zip',
+          'mp4': 'video/mp4',
+          'mp3': 'audio/mpeg'
+        };
+        return map[ext] || 'application/octet-stream';
       }
       
       checkUrlParameters() {
