@@ -129,7 +129,9 @@ self.addEventListener('fetch', (event) => {
     normalizedRequest = new Request(indexUrl.href, {
       method: event.request.method,
       headers: event.request.headers,
-      mode: event.request.mode,
+      // The Request constructor rejects `mode: 'navigate'`. Normalize to 'same-origin'
+      // when dealing with navigations so we can construct a valid Request.
+      mode: event.request.mode === 'navigate' ? 'same-origin' : event.request.mode,
       credentials: event.request.credentials,
       redirect: event.request.redirect
     });
