@@ -70,7 +70,7 @@ if (requestURL.pathname.endsWith('/')) {
 ## Deployment/release expectations
 1. **Bump Version:** Update `package.json` version (+0.0.1).
 2. **Build:** Run `npm install && npm run build`. This updates `package-lock.json` and regenerates `assets/js/version.js`.
-3. **Push:** Commit and push to `main`. The GitHub Action `build-and-deploy.yml` handles the rest.
+3. **Push:** Commit *all* changed files and push to `main`. The GitHub Action `build-and-deploy.yml` handles the rest.
 
 **Pro Tip:** We use the **"GitHub Actions"** source setting in GitHub Pages (not "Deploy from a branch"). This prevents the default Pages workflow from racing with our custom PWA build. If deployments break, check that this setting hasn't reverted!
 
