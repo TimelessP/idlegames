@@ -35,14 +35,11 @@ function promptReload(worker, versionHint) {
     return;
   }
   const versionLabel = version === 'latest' ? 'the latest version' : `v${version}`;
-  const shouldReload = window.confirm(`IdleGames has been updated to ${versionLabel}. Reload now to use the newest build?`);
-  if (shouldReload) {
-    promptedVersions.add(version);
-    worker.postMessage({ type: 'idle-games-skip-waiting' });
-  } else {
-    // Remember that we've already asked this session to avoid immediate repeat prompts.
-    promptedVersions.add(version);
-  }
+  // Auto-apply updates without asking: the app always prefers the newest build.
+  // Keep a session-level dedupe so we don't repeatedly re-activate the same version.
+  promptedVersions.add(version);
+  console.info(`IdleGames: activating updated service worker ${versionLabel} without prompting.`);
+  worker.postMessage({ type: 'idle-games-skip-waiting' });
 }
 
 if ('serviceWorker' in navigator) {
@@ -138,6 +135,48 @@ if ('serviceWorker' in navigator) {
 
       console.info(`IdleGames ${resolvedVersion} ready. Service worker scope:`, registration.scope);
 
+      // Transient update notification: show a small non-blocking banner for 5s
+      function showTransientNotification(message, duration = 5000) {
+        try {
+          const id = 'idle-games-update-notif';
+          // Avoid duplicating
+          if (document.getElementById(id)) return;
+          const el = document.createElement('div');
+          el.id = id;
+          el.textContent = message;
+          el.style.position = 'fixed';
+          el.style.left = '50%';
+          el.style.transform = 'translateX(-50%)';
+          el.style.bottom = '20px';
+          el.style.zIndex = 100000;
+          el.style.background = 'rgba(0,0,0,0.85)';
+          el.style.color = '#fff';
+          el.style.padding = '10px 16px';
+          el.style.borderRadius = '8px';
+          el.style.boxShadow = '0 6px 24px rgba(0,0,0,0.4)';
+          el.style.fontSize = '14px';
+          el.style.fontFamily = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+          document.body.appendChild(el);
+          setTimeout(() => {
+            try { el.style.transition = 'opacity 300ms ease'; el.style.opacity = '0'; } catch (e) {}
+            setTimeout(() => { try { el.remove(); } catch (e) {} }, 350);
+          }, duration);
+        } catch (e) {
+          console.warn('Failed to show transient notification', e);
+        }
+      }
+      // If the service worker has a stored version and we haven't shown the "updated" notice
+      // for that version yet, show a short 5s notification once.
+      try {
+        const swVer = localStorage.getItem('idle-games-sw-version');
+        const lastNotified = localStorage.getItem('idle-games-last-notified-version');
+        if (swVer && swVer !== lastNotified) {
+          showTransientNotification('Idle Games updated', 5000);
+          localStorage.setItem('idle-games-last-notified-version', swVer);
+        }
+      } catch (e) {
+        // ignore storage errors
+      }
       const trackInstalling = (worker) => {
         if (!worker) return;
         worker.addEventListener('statechange', () => {
