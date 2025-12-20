@@ -357,6 +357,13 @@
                     </label>
                 </div>
             </div>
+
+            <div class="options-group">
+                <label>
+                    <input type="checkbox" id="optGuaranteed" checked>
+                    Guaranteed winnable deal (reverse-generated)
+                </label>
+            </div>
             
             <div class="modal-buttons">
                 <button class="modal-btn secondary" id="btnCancelNew">Cancel</button>
@@ -416,7 +423,7 @@
             stock: [], // face down pile
             waste: [], // face up pile
             foundations: [[], [], [], []], // 4 foundation piles
-            settings: { draw: 1, score: 'standard' },
+            settings: { draw: 1, score: 'standard', guaranteed: false },
             moves: 0,
             score: 0,
             startTime: null,
@@ -622,14 +629,153 @@
             }
             return deck;
         }
+
+        function createSolvedFoundations() {
+            // Fixed-suit foundations: 0=♠, 1=♥, 2=♣, 3=♦
+            return SUITS.map(suit => RANKS.map(rank => ({ suit, rank, faceUp: true })));
+        }
+
+        function validateFullDeckState(state) {
+            const seen = new Set();
+            const add = (card) => {
+                const key = `${card.rank}${card.suit}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            };
+
+            for (const col of state.columns) for (const c of col) if (!add(c)) return false;
+            for (const c of state.stock) if (!add(c)) return false;
+            for (const c of state.waste) if (!add(c)) return false;
+            for (const pile of state.foundations) for (const c of pile) if (!add(c)) return false;
+            return seen.size === 52;
+        }
+
+        function generateGuaranteedStartState(settings) {
+            // Generate a guaranteed-solvable deal that still looks like a normal Klondike start:
+            // - 7 tableau columns sized 1..7
+            // - only the top card in each column face-up
+            // - foundations empty
+            // - waste empty
+            // - stock contains the remaining 24 cards face-down
+            //
+            // This is constructed by reversing from a solved state (all cards in foundations).
+            // We only use operations that are inverses of legal forward moves and/or the game's deterministic auto-flip.
+
+            const state = {
+                columns: Array.from({ length: 7 }, () => []),
+                stock: [],
+                waste: [],
+                foundations: createSolvedFoundations()
+            };
+
+            const pickFoundationIndex = () => {
+                const idxs = state.foundations
+                    .map((p, i) => (p.length > 0 ? i : -1))
+                    .filter(i => i >= 0);
+                if (idxs.length === 0) return -1;
+                return idxs[Math.floor(Math.random() * idxs.length)];
+            };
+
+            const popFoundationTop = () => {
+                const fIdx = pickFoundationIndex();
+                if (fIdx < 0) return null;
+                const card = state.foundations[fIdx].pop();
+                card.faceUp = true;
+                return card;
+            };
+
+            // 1) Build tableau to the classic shape.
+            for (let col = 0; col < 7; col++) {
+                // Place (col) facedown cards.
+                for (let i = 0; i < col; i++) {
+                    const card = popFoundationTop();
+                    if (!card) return null;
+                    state.columns[col].push(card);
+                    // Reverse of auto-flip: bury this card facedown.
+                    state.columns[col][state.columns[col].length - 1].faceUp = false;
+                }
+
+                // Top card face-up.
+                const top = popFoundationTop();
+                if (!top) return null;
+                top.faceUp = true;
+                state.columns[col].push(top);
+            }
+
+            // 2) Move remaining cards into stock via waste, using inverse-of-draw groups.
+            // Remaining should be exactly 24, divisible by both draw=1 and draw=3.
+            while (true) {
+                const card = popFoundationTop();
+                if (!card) break;
+                state.waste.push(card);
+            }
+
+            const drawCount = settings.draw;
+            while (state.waste.length > 0) {
+                const count = Math.min(drawCount, state.waste.length);
+                for (let i = 0; i < count; i++) {
+                    const card = state.waste.pop();
+                    card.faceUp = false;
+                    state.stock.push(card);
+                }
+            }
+
+            // 3) Clear foundations (they should already be empty) and validate.
+            state.foundations = [[], [], [], []];
+
+            const expectedSizes = [1, 2, 3, 4, 5, 6, 7];
+            for (let i = 0; i < 7; i++) {
+                if (state.columns[i].length !== expectedSizes[i]) return null;
+                const top = state.columns[i][state.columns[i].length - 1];
+                if (!top.faceUp) return null;
+                for (let j = 0; j < state.columns[i].length - 1; j++) {
+                    if (state.columns[i][j].faceUp) return null;
+                }
+            }
+            if (state.waste.length !== 0) return null;
+            if (state.stock.length !== 24) return null;
+            if (!validateFullDeckState(state)) return null;
+
+            return state;
+        }
         
-        function initGame(settings = { draw: 1, score: 'standard' }) {
+        function initGame(settings = { draw: 1, score: 'standard', guaranteed: false }) {
+            const normalizedSettings = {
+                draw: settings.draw ?? 1,
+                score: settings.score ?? 'standard',
+                guaranteed: !!settings.guaranteed
+            };
+
+            if (normalizedSettings.guaranteed) {
+                const startState = generateGuaranteedStartState(normalizedSettings);
+                if (startState) {
+                    gameState.columns = startState.columns;
+                    gameState.stock = startState.stock;
+                    gameState.waste = startState.waste;
+                    gameState.foundations = startState.foundations;
+                    gameState.settings = normalizedSettings;
+
+                    gameState.moves = 0;
+                    gameState.score = normalizedSettings.score === 'vegas' ? -52 : 0;
+                    gameState.startTime = Date.now();
+                    gameState.elapsedSeconds = 0;
+                    gameState.history = [];
+
+                    startTimer();
+                    saveGame();
+                    render();
+                    updateStats();
+                    return;
+                }
+            }
+
             const deck = createDeck();
             
             gameState.columns = Array.from({length: 7}, () => []);
             gameState.foundations = [[], [], [], []];
             gameState.waste = [];
-            gameState.settings = settings;
+            gameState.settings = normalizedSettings;
             
             // Deal tableau
             // Col 0: 1 card, Col 1: 2 cards, ... Col 6: 7 cards
@@ -646,7 +792,7 @@
             gameState.stock = deck.slice(cardIdx);
             
             gameState.moves = 0;
-            gameState.score = settings.score === 'vegas' ? -52 : 0;
+            gameState.score = normalizedSettings.score === 'vegas' ? -52 : 0;
             gameState.startTime = Date.now();
             gameState.elapsedSeconds = 0;
             gameState.history = [];
@@ -1417,7 +1563,12 @@
                     gameState.stock = data.stock || [];
                     gameState.waste = data.waste || [];
                     gameState.foundations = data.foundations || [[],[],[],[]];
-                    gameState.settings = data.settings || { draw: 1, score: 'standard' };
+                    gameState.settings = {
+                        draw: 1,
+                        score: 'standard',
+                        guaranteed: false,
+                        ...(data.settings || {})
+                    };
                     gameState.score = data.score || 0;
                     gameState.moves = data.moves || 0;
                     gameState.startTime = data.startTime || Date.now();
@@ -1498,9 +1649,10 @@
             document.getElementById('btnStartNew').addEventListener('click', () => {
                 const draw = parseInt(document.querySelector('input[name="draw"]:checked').value);
                 const score = document.querySelector('input[name="score"]:checked').value;
+                const guaranteed = !!document.getElementById('optGuaranteed')?.checked;
                 document.getElementById('modalNewGame').classList.remove('active');
                 document.getElementById('winOverlay').classList.remove('active');
-                initGame({ draw, score });
+                initGame({ draw, score, guaranteed });
             });
             document.getElementById('btnCloseHelp').addEventListener('click', () => document.getElementById('modalHelp').classList.remove('active'));
             document.getElementById('btnPlayAgain').addEventListener('click', () => {
