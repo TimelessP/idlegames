@@ -37,7 +37,7 @@ await fs.writeFile(versionModulePath, versionModuleContent, 'utf8');
 await cleanDist();
 await fs.mkdir(distDir, { recursive: true });
 
-const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.github', '.vscode', 'scripts']);
+const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.github', '.vscode', '.venv', 'scripts']);
 const EXCLUDED_FILES = new Set(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'pnpm-lock.yml', 'yarn.lock']);
 
 async function copyTree(from, to) {

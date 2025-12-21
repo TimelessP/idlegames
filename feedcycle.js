@@ -46,7 +46,7 @@
   const VERSION = '2.0.3';
   const LS_KEY = 'feedcycle-v2';
   const DEBUG = false; // Set true for verbose console output
-  const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{}, proxyScores:{}, proxyScoresResetAt:0 }; // posts ephemeral + tags mapping postId -> [tag]
+  const DEFAULTS = { theme:'system', feeds:[], categories:[], lastFetch:{}, lastFetchUrl:{}, settings:{ refreshMinutes:30, cacheMaxAgeMinutes:60, corsProxy:'' }, read:{}, favorites:{}, tags:{}, autoTags:{}, proxyScores:{}, proxyScoresResetAt:0, feedRateLimits:{}, lastFetchAttempt:{}, feed404Counts:{} }; // posts ephemeral + tags mapping postId -> [tag]
   // Quiet logging - only shows in console when DEBUG is true
   const dbg = (...args) => { if(DEBUG) console.log('[FeedCycle]', ...args); };
   // state will be loaded after proxy scoring utilities are defined
@@ -62,10 +62,10 @@
 
   // ---------- Proxy & Caching (ported/minimal from v1) ----------
   const PROXIES = [
-    { name: 'AllOrigins', kind: 'param-enc', base: 'https://api.allorigins.win/raw?url=' },
-    { name: 'corsproxy.io', kind: 'param-enc', base: 'https://corsproxy.io/?' },
-    { name: 'CodeTabs', kind: 'param-enc', base: 'https://api.codetabs.com/v1/proxy?quest=' },
-    { name: 'JinaMirror', kind: 'prefix', base: 'https://r.jina.ai/' }
+    // AllOrigins: use JSON endpoint (better CORS reliability) and unwrap via maybeExtractXmlFromJson
+    { name: 'AllOrigins', kind: 'param-enc', base: 'https://api.allorigins.win/get?url=' },
+    { name: 'corsproxy.io', kind: 'param-enc', base: 'https://corsproxy.io/?url=' },
+    { name: 'CodeTabs', kind: 'param-enc', base: 'https://api.codetabs.com/v1/proxy?quest=' }
   ];
   const proxyStats = new Map(); // name -> {success, fail, lastSuccess, lastFail, score}
   const proxyTempDisabledUntil = new Map(); // name -> ts
@@ -75,6 +75,15 @@
   const RATE_LIMIT_BACKOFF_BASE_MS = 60*1000;
   const RATE_LIMIT_BACKOFF_MAX_MS = 30*60*1000;
   const feedRateLimit = new Map(); // feedId -> { attempt, until, delay }
+
+  function hydrateFeedRateLimitsFromState(){
+    if(!state?.feedRateLimits) return;
+    Object.entries(state.feedRateLimits).forEach(([fid, rec])=>{
+      if(!fid || !rec || typeof rec !== 'object') return;
+      if(feedRateLimit.has(fid)) return;
+      feedRateLimit.set(fid, { attempt: rec.attempt||0, until: rec.until||0, delay: rec.delay||0 });
+    });
+  }
 
   // Enhanced proxy scoring with decay and weighted penalties
   const PROXY_FAIL_WEIGHT = 3;
@@ -153,15 +162,20 @@
     return targetUrl;
   }
   function getProxyCandidates(){
-    const arr = [];
-    const manual = state.settings.corsProxy?.trim(); if(manual) arr.push(manual);
+    const manual = state.settings.corsProxy?.trim();
+    if(manual){
+      // When a manual proxy is configured, only use that (plus the direct fallback later)
+      return [manual];
+    }
     const now = Date.now();
-    const active = PROXIES.filter(p=> !(proxyTempDisabledUntil.get(p.name)>now));
+    let active = PROXIES.filter(p=> !(proxyTempDisabledUntil.get(p.name)>now));
+    // If all public proxies are temporarily disabled, fall back to the full set instead of going direct.
+    if(!active.length) active = [...PROXIES];
     // Ensure each has an initialized score object (prevents NaN sorting jitter)
     for(const p of active){ if(!proxyStats.has(p.name)) proxyStats.set(p.name, {success:0,fail:0,lastSuccess:0,lastFail:0,score:0}); }
     // Order by score (descending)
     active.sort((a,b)=> proxyScore(b)-proxyScore(a));
-    return arr.concat(active);
+    return active;
   }
   async function fetchWithCache(url){
     const maxAge = clamp((state.settings.cacheMaxAgeMinutes||60)*60*1000, 5*60*1000, 24*60*60*1000);
@@ -179,21 +193,31 @@
         let res;
         try{ res = await fetch(req, { signal: controller.signal }); }
         finally{ clearTimeout(to); }
-        const text = await res.text();
+        let text = '';
+        try{ text = await res.text(); }catch{}
         if(res.ok){
           const stored = new Response(text, { headers:{ 'content-type': res.headers.get('content-type')||'text/xml; charset=utf-8', 'date': new Date().toUTCString() }});
           try{ await cache.put(req, stored); }catch{}
           return text;
         }
         if(hit) return hit.text();
-        throw new Error('HTTP '+res.status);
+        const snippet = (text||'').slice(0,240).replace(/\s+/g,' ').trim();
+        const detail = snippet ? ` (${snippet})` : '';
+        throw new Error(`HTTP ${res.status} ${res.statusText||''}${detail} @ ${url}`.trim());
       }
     }catch(e){ /* fall through to no-cache fetch below */ }
     const controller = new AbortController();
     const to = setTimeout(()=> controller.abort(), FETCH_TIMEOUT_MS);
-    let res; try{ res = await fetch(url, { signal: controller.signal }); } finally { clearTimeout(to); }
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    return res.text();
+    let res; let text='';
+    try{ res = await fetch(url, { signal: controller.signal }); }
+    finally { clearTimeout(to); }
+    try{ text = await res.text(); }catch{}
+    if(!res.ok){
+      const snippet = (text||'').slice(0,240).replace(/\s+/g,' ').trim();
+      const detail = snippet ? ` (${snippet})` : '';
+      throw new Error(`HTTP ${res.status} ${res.statusText||''}${detail} @ ${url}`.trim());
+    }
+    return text;
   }
   function xmlHasParserError(xml){
     try{ const doc = new DOMParser().parseFromString(xml,'text/xml'); return !!doc.querySelector('parsererror'); }catch{ return true; }
@@ -210,11 +234,14 @@
     if(!entry) return null;
     if(entry.until <= Date.now()){
       feedRateLimit.delete(feedId);
+      if(state.feedRateLimits) delete state.feedRateLimits[feedId];
+      saveState();
       return null;
     }
     return { ...entry, retryIn: Math.max(0, entry.until - Date.now()) };
   }
-  function applyFeedRateLimit(feedId){
+  function applyFeedRateLimit(feed){
+    const feedId = typeof feed === 'string' ? feed : feed?.id;
     if(!feedId) return null;
     const now = Date.now();
     const existing = feedRateLimit.get(feedId);
@@ -224,9 +251,51 @@
     const delay = Math.min(RATE_LIMIT_BACKOFF_BASE_MS * (2 ** (attempt - 1)), RATE_LIMIT_BACKOFF_MAX_MS);
     const entry = { attempt, until: now + delay, delay };
     feedRateLimit.set(feedId, entry);
+    state.feedRateLimits = state.feedRateLimits || {};
+    state.feedRateLimits[feedId] = entry;
+    state.lastFetchAttempt = state.lastFetchAttempt || {};
+    state.lastFetchAttempt[feedId] = now;
+    state.lastFetch[feedId] = now;
+    if(feed && typeof feed === 'object'){
+      const current = feed.refreshMinutes || state.settings.refreshMinutes || 30;
+      const nextMinutes = clamp(current + 5, 5, 24*60);
+      feed.refreshMinutes = nextMinutes;
+    }
+    saveState();
     return { ...entry, retryIn: delay };
   }
-  function clearFeedRateLimit(feedId){ if(feedId) feedRateLimit.delete(feedId); }
+  function clearFeedRateLimit(feedId){
+    if(!feedId) return;
+    let changed = false;
+    if(feedRateLimit.delete(feedId)) changed = true;
+    if(state.feedRateLimits && feedId in state.feedRateLimits){
+      delete state.feedRateLimits[feedId];
+      changed = true;
+    }
+    if(changed) saveState();
+  }
+
+  function isFeedEnabled(feed){ return feed?.enabled !== false; }
+  function resetFeed404(feedId){
+    if(!feedId) return;
+    if(state.feed404Counts && state.feed404Counts[feedId]){
+      delete state.feed404Counts[feedId];
+      saveState();
+    }
+  }
+  function incrementFeed404(feed){
+    const feedId = typeof feed==='string'? feed : feed?.id;
+    if(!feedId) return 0;
+    state.feed404Counts = state.feed404Counts || {};
+    const next = (state.feed404Counts[feedId]||0)+1;
+    state.feed404Counts[feedId] = next;
+    if(next >= 3){
+      const f = state.feeds.find(x=> x.id===feedId);
+      if(f){ f.enabled = false; }
+    }
+    saveState();
+    return next;
+  }
 
   // ---------- Utilities ----------
   const $ = sel=> document.querySelector(sel);
@@ -253,6 +322,13 @@
         proxyStats.forEach((v,k)=>{ out[k] = { success:v.success||0, fail:v.fail||0, lastSuccess:v.lastSuccess||0, lastFail:v.lastFail||0, score:v.score||0 }; });
         state.proxyScores = out;
       }
+      if(feedRateLimit && typeof feedRateLimit.forEach==='function'){
+        const out = {};
+        feedRateLimit.forEach((v,k)=>{ out[k] = { attempt:v.attempt||0, until:v.until||0, delay:v.delay||0 }; });
+        state.feedRateLimits = out;
+      }
+      state.lastFetchAttempt = state.lastFetchAttempt || {};
+      state.feed404Counts = state.feed404Counts || {};
       localStorage.setItem(LS_KEY, JSON.stringify(state));
     }catch(e){ console.warn('Save failed', e);} }
   function loadState(){
@@ -266,6 +342,15 @@
           proxyStats.set(name, { success:s.success||0, fail:s.fail||0, lastSuccess:s.lastSuccess||0, lastFail:s.lastFail||0, score:s.score||0 });
         });
       }
+      if(merged.feedRateLimits){
+        Object.entries(merged.feedRateLimits).forEach(([fid, rec])=>{
+          if(!rec || typeof rec !== 'object') return;
+          feedRateLimit.set(fid, { attempt: rec.attempt||0, until: rec.until||0, delay: rec.delay||0 });
+        });
+      }
+      merged.lastFetchAttempt = merged.lastFetchAttempt || {};
+      merged.feed404Counts = merged.feed404Counts && typeof merged.feed404Counts==='object' ? merged.feed404Counts : {};
+      merged.feeds = (merged.feeds||[]).map(f=> ({ ...f, enabled: f?.enabled !== false }));
       return merged;
     }catch{ return {...DEFAULTS}; }
   }
@@ -847,6 +932,7 @@
     state.feeds.sort((a,b)=> (a.category||'').localeCompare(b.category||'') || (a.title||'').localeCompare(b.title||'')).forEach(f=>{
       const row = el('div',{class:'row'});
       const titleBlock = el('strong',{}, f.title||f.url);
+      if(!isFeedEnabled(f)) titleBlock.append(el('span',{class:'muted', style:'margin-left:8px;'}, '(disabled)'));
       const catLabel = el('span',{class:'muted'}, f.category? `(${f.category})`:'');
       const actions = el('div',{class:'subs-actions'});
       const editBtn = el('button',{title:'Edit subscription', 'aria-label':'Edit '+(f.title||f.url), onclick:()=>{ showPanel('subscriptionEdit', { data: f.id }); }}, 'Edit');
@@ -1036,20 +1122,21 @@
     };
     const isHttp = /^http:\/\//i.test(original);
     const isHttps = /^https:\/\//i.test(original);
+    const manual = state?.settings?.corsProxy?.trim();
+    if(manual){
+      try{ add(buildProxiedUrl(original, manual)); }
+      catch{ /* ignore malformed manual proxy */ }
+      add(original); // allow direct as last resort
+      return candidates;
+    }
     if(isHttp){ add('https://'+original.slice(7)); }
     add(original);
     if(typeof location !== 'undefined' && location.protocol === 'https:'){
-      const manual = state?.settings?.corsProxy?.trim();
-      if(manual){
-        try{ add(buildProxiedUrl(original, manual)); }
-        catch{ /* ignore malformed manual proxy */ }
-      }
       const mediaProxyBuilders = [];
       if(isHttp){
         mediaProxyBuilders.push(u=>`https://cors.isomorphic-git.org/${u}`);
         mediaProxyBuilders.push(u=>`https://thingproxy.freeboard.io/fetch/${u}`);
       }
-      mediaProxyBuilders.push(u=>`https://corsproxy.io/?${encodeURIComponent(u)}`);
       mediaProxyBuilders.push(u=>`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`);
       if(isHttp){ mediaProxyBuilders.push(u=>`https://r.jina.ai/http://${u.slice(7)}`); }
       const sharedProxySpecs = PROXIES || [];
@@ -1565,6 +1652,7 @@
     const urlInput = byId('subEditUrlInput');
     const catInput = byId('subEditCategoryInput');
     const refreshInput = byId('subEditRefreshInput');
+    const enabledInput = byId('subEditEnabledInput');
     const statusEl = byId('subEditStatus');
     // Populate datalist of categories
     const dl = byId('categoryOptions');
@@ -1580,6 +1668,7 @@
     urlInput.value = feed.url;
     catInput.value = feed.category||'';
     refreshInput.value = feed.refreshMinutes||'';
+    if(enabledInput) enabledInput.checked = isFeedEnabled(feed);
     form.addEventListener('submit', e=>{
       e.preventDefault();
       statusEl.textContent='';
@@ -1591,6 +1680,11 @@
       feed.url = url;
       feed.category = catInput.value.trim();
       const rm = parseInt(refreshInput.value,10); if(!isNaN(rm) && rm>=5) feed.refreshMinutes = rm; else delete feed.refreshMinutes;
+      if(enabledInput){
+        const wasDisabled = !isFeedEnabled(feed);
+        feed.enabled = enabledInput.checked;
+        if(feed.enabled && wasDisabled){ resetFeed404(feed.id); }
+      }
       saveState();
       statusEl.textContent='Saved.';
       renderSubscriptionsList();
@@ -1610,6 +1704,7 @@
     delete state.lastFetch[feedId];
     const lastUrl = state.lastFetchUrl?.[feedId];
     delete state.lastFetchUrl[feedId];
+    if(state.feed404Counts) delete state.feed404Counts[feedId];
     saveState();
     // Attempt cache cleanup (best effort, non-blocking UI)
     if(feed?.url){
@@ -1765,6 +1860,10 @@
     
     return ogImage;
   }
+
+  // Global limiter for Open Graph fetches so we don't hammer proxies or hosts.
+  const ogFetchLimits = { defaultMax: 6, manualMax: 2, hostCooldownMs: 5*60*1000, manualHostCooldownMs: 10*60*1000 };
+  const ogFetchState = { attempts: 0, hostBackoff: new Map(), inFlight: new Map(), cache: new Map() };
 
   const placeholderCache = new Map();
   const PLACEHOLDER_VERSION = 2;
@@ -2021,54 +2120,84 @@
 
   async function extractOpenGraphImage(articleUrl) {
     if (!articleUrl) return null;
-    
-    try {
-      // Use the same proxy/fetch system as feeds for CORS handling
-      const candidates = getProxyCandidates();
+
+    const manualOnlyProxy = !!(state.settings.corsProxy && state.settings.corsProxy.trim());
+    const maxAttempts = manualOnlyProxy ? ogFetchLimits.manualMax : ogFetchLimits.defaultMax;
+    if (ogFetchState.attempts >= maxAttempts) return null;
+
+    let normalized = articleUrl.split('#')[0];
+    try { normalized = new URL(articleUrl, location.href).href.split('#')[0]; }catch{}
+
+    if (ogFetchState.cache.has(normalized)) return ogFetchState.cache.get(normalized);
+
+    const host = safeHost(normalized) || '';
+    const until = ogFetchState.hostBackoff.get(host) || 0;
+    if (until && Date.now() < until) return null;
+
+    if (ogFetchState.inFlight.has(normalized)) return ogFetchState.inFlight.get(normalized);
+
+    const task = (async ()=>{
+      ogFetchState.attempts += 1;
       let html = '';
       let lastErr = null;
-      
-      for (const c of candidates.slice(0, 2)) { // Limit to 2 proxy attempts for performance
-        const proxied = buildProxiedUrl(articleUrl, c);
-        try {
-          html = await fetchWithCache(proxied);
-          if (html) break;
-        } catch (e) {
-          lastErr = e;
-          // Silently handle common CORS/403 errors for Open Graph fetching
-          if (typeof c !== 'string') {
-            recordProxyResult(c.name, false);
-          }
-          // Don't log 403/CORS errors for Open Graph - they're expected
-          if (!e.message?.includes('403') && !e.message?.includes('CORS')) {
-            dbg('Open Graph proxy attempt failed:', e.message);
+      try {
+        const candidates = getProxyCandidates();
+        const slice = manualOnlyProxy ? 1 : 2; // keep it cheap; manual proxy already chosen
+        for (const c of candidates.slice(0, slice)) {
+          const proxied = buildProxiedUrl(articleUrl, c);
+          try {
+            html = await fetchWithCache(proxied);
+            if (html) break;
+          } catch (e) {
+            lastErr = e;
+            if (typeof c !== 'string') {
+              recordProxyResult(c.name, false);
+            }
+            const msg = e?.message||'';
+            if (!/403|CORS/i.test(msg)) {
+              dbg('Open Graph proxy attempt failed:', msg);
+            }
           }
         }
-      }
-      
-      if (!html) {
-        try {
-          html = await fetchWithCache(articleUrl);
-        } catch (e) {
-          lastErr = e;
-          // Don't log direct fetch errors for Open Graph - they're expected for many sites
+
+        if (!html && !manualOnlyProxy) {
+          try {
+            html = await fetchWithCache(articleUrl);
+          } catch (e) {
+            lastErr = e;
+          }
         }
+
+        if (!html) {
+          if (lastErr && /HTTP 429/.test(lastErr.message||'')) {
+            const cooldown = manualOnlyProxy ? ogFetchLimits.manualHostCooldownMs : ogFetchLimits.hostCooldownMs;
+            ogFetchState.hostBackoff.set(host, Date.now() + cooldown);
+          }
+          return null;
+        }
+
+        const ogImageMatch = /<meta\s+property\s*=\s*["']og:image["']\s+content\s*=\s*["']([^"']+)["']/i.exec(html);
+        if (ogImageMatch) {
+          const ogImageUrl = ogImageMatch[1];
+          return safeImageUrl(ogImageUrl);
+        }
+        return null;
+      } catch (e) {
+        const msg = e?.message||'';
+        if (/HTTP 429/.test(msg)) {
+          const cooldown = manualOnlyProxy ? ogFetchLimits.manualHostCooldownMs : ogFetchLimits.hostCooldownMs;
+          ogFetchState.hostBackoff.set(host, Date.now() + cooldown);
+        }
+        dbg('Failed to extract Open Graph image from', articleUrl, e);
+        return null;
       }
-      
-      if (!html) return null;
-      
-      // Parse HTML to extract Open Graph image
-      const ogImageMatch = /<meta\s+property\s*=\s*["']og:image["']\s+content\s*=\s*["']([^"']+)["']/i.exec(html);
-      if (ogImageMatch) {
-        const ogImageUrl = ogImageMatch[1];
-        return safeImageUrl(ogImageUrl);
-      }
-      
-      return null;
-    } catch (e) {
-      dbg('Failed to extract Open Graph image from', articleUrl, e);
-      return null;
-    }
+    })();
+
+    ogFetchState.inFlight.set(normalized, task);
+    const result = await task.catch(()=>null);
+    ogFetchState.cache.set(normalized, result);
+    ogFetchState.inFlight.delete(normalized);
+    return result;
   }
 
   function extractChannelImages(doc){
@@ -2111,13 +2240,15 @@
 
   // ---------- Basic Feed Refresh (placeholder) ----------
   async function refreshAll(force=false){
+    hydrateFeedRateLimitsFromState();
     const usedProxies = new Set();
     // Prune old cache entries before refreshing
     pruneCacheEntries().catch(e => dbg('Cache prune failed', e));
     for(const f of state.feeds){
+      if(!isFeedEnabled(f)) continue;
       const rateLimit = getFeedRateLimit(f.id);
       if(rateLimit){
-        dbg('Feed refresh skipped due to backoff', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
+        console.info('Feed refresh skipped due to backoff', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
         continue;
       }
       try{
@@ -2132,6 +2263,14 @@
     if(usedProxies.size){ dbg('Proxies used:', [...usedProxies].join(', ')); }
   }
   async function refreshFeed(feed, { force=false, usedProxies=new Set() }={}){
+    if(!isFeedEnabled(feed)){
+      const err = new Error('Feed disabled');
+      err.code = 'DISABLED';
+      throw err;
+    }
+    state.lastFetchAttempt = state.lastFetchAttempt || {};
+    state.lastFetchAttempt[feed.id] = Date.now();
+    const manualOnlyProxy = !!(state.settings.corsProxy && state.settings.corsProxy.trim());
     const activeRateLimit = getFeedRateLimit(feed.id);
     if(activeRateLimit){
       const err = new Error('Rate limit active');
@@ -2145,9 +2284,10 @@
       if(typeof c !== 'string'){
         const until = proxyTempDisabledUntil.get(c.name)||0; if(until && Date.now()<until) continue;
       }
-      const proxied = buildProxiedUrl(feed.url, c);
-      for(let attempt=0; attempt<2; attempt++){
-        const url = attempt? addCacheBuster(proxied) : proxied;
+      const maxAttempts = manualOnlyProxy ? 1 : 2;
+      for(let attempt=0; attempt<maxAttempts; attempt++){
+        const target = attempt ? addCacheBuster(feed.url) : feed.url;
+        const url = buildProxiedUrl(target, c);
         try{
           let text = await fetchWithCache(url);
           if(xmlHasParserError(text)){
@@ -2160,7 +2300,15 @@
           if(typeof c !== 'string'){
             recordProxyResult(c.name, false);
             const msg = String(e && e.message || e || '');
-            if(/HTTP 429|HTTP 5\d\d/.test(msg) || /Failed to fetch|TypeError|NetworkError|ERR_/i.test(msg)){
+            // If the proxy returns 400, our request format/target is rejected; cooldown this proxy to stop repeats.
+            if(/HTTP 400/.test(msg)){
+              proxyTempDisabledUntil.set(c.name, Date.now()+PROXY_DISABLE_MS);
+              break; // try next proxy without retrying this one
+            }
+            // Aggressively back off noisy/blocked proxies (other 4xx/5xx/429) to avoid repeated hammering
+            if(/HTTP 4\d\d/.test(msg) && !/HTTP 429/.test(msg)){
+              proxyTempDisabledUntil.set(c.name, Date.now()+PROXY_DISABLE_MS);
+            } else if(/HTTP 429|HTTP 5\d\d/.test(msg) || /Failed to fetch|TypeError|NetworkError|ERR_/i.test(msg)){
               proxyTempDisabledUntil.set(c.name, Date.now()+PROXY_DISABLE_MS/2); // shorter initial cooldown
             }
           }
@@ -2169,12 +2317,18 @@
       if(used) break;
     }
     if(!used){
-      try{ xml = await fetchWithCache(feed.url); if(xmlHasParserError(xml)) throw new Error('XML parse error'); used='Direct'; usedUrl=feed.url; }
-      catch(e){ lastErr=e; }
-    }
-    if(!used){
-      if(lastErr && /HTTP 429/.test(lastErr.message||'')){
-        const penalty = applyFeedRateLimit(feed.id);
+      const msg = lastErr && lastErr.message || '';
+      if(/HTTP 404/.test(msg)){
+        const hits = incrementFeed404(feed);
+        const disabled = !isFeedEnabled(feed);
+        renderSubscriptionsList();
+        renderArticles();
+        const err = new Error(disabled ? 'HTTP 404 (auto-disabled after 3 failures)' : `HTTP 404 (${hits}/3)`);
+        err.code = 'NOT_FOUND';
+        throw err;
+      }
+      if(/HTTP 429/.test(msg)){
+        const penalty = applyFeedRateLimit(feed);
         const err = new Error(`HTTP 429 (retry in ${penalty? Math.ceil(penalty.delay/1000)+'s' : 'later'})`);
         err.code = 'RATE_LIMIT';
         err.retryIn = penalty?.delay || RATE_LIMIT_BACKOFF_BASE_MS;
@@ -2186,6 +2340,7 @@
     if(used) usedProxies.add(used);
     state.lastFetchUrl[feed.id] = usedUrl;
   clearFeedRateLimit(feed.id);
+  resetFeed404(feed.id);
     // Parse & merge posts
     const doc = new DOMParser().parseFromString(xml,'text/xml');
     const updatedTitle = extractFeedTitle(doc);
@@ -2210,14 +2365,18 @@
   // ---------- Startup Hydration & Selective Refresh ----------
   async function hydrateFromCacheThenSelectiveRefresh(){
     try{ await hydrateFromCache(); }catch{}
+    hydrateFeedRateLimitsFromState();
     isInitialLoading = false;
     renderArticles();
     const now = Date.now();
     const globalInt = (state.settings.refreshMinutes||30)*60*1000;
     // Build list of feeds needing refresh
     const stale = state.feeds.filter(f=>{
+      if(!isFeedEnabled(f)) return false;
       const last = state.lastFetch[f.id]||0;
       const interval = (f.refreshMinutes||state.settings.refreshMinutes||30)*60*1000;
+      const rl = getFeedRateLimit(f.id);
+      if(rl) return false; // skip if backoff active
       return now - last >= interval;
     });
     if(!stale.length) return; // all fresh
@@ -2232,6 +2391,7 @@
   // Refresh feeds one by one with yielding to keep browser responsive
   async function refreshFeedsWithYield(feedList){
     for(const f of feedList){
+      if(!isFeedEnabled(f)) continue;
       const rateLimit = getFeedRateLimit(f.id);
       if(rateLimit){
         dbg('Feed refresh skipped (rate limit)', f.url, Math.ceil(rateLimit.retryIn/1000)+'s');
@@ -2344,7 +2504,7 @@
   function importOPMLText(xml){
     const doc = new DOMParser().parseFromString(xml,'text/xml');
     const outlines = [...doc.querySelectorAll('outline[xmlUrl]')];
-    const list = outlines.map(o=>({ id: hashId(o.getAttribute('xmlUrl')), url:o.getAttribute('xmlUrl'), title:o.getAttribute('text')||o.getAttribute('title')||o.getAttribute('xmlUrl'), category:o.getAttribute('category')||'' }));
+    const list = outlines.map(o=>({ id: hashId(o.getAttribute('xmlUrl')), url:o.getAttribute('xmlUrl'), title:o.getAttribute('text')||o.getAttribute('title')||o.getAttribute('xmlUrl'), category:o.getAttribute('category')||'', enabled:true }));
     const map = new Map(state.feeds.map(f=> [f.url,f]));
     for(const f of list){ map.set(f.url, {...map.get(f.url), ...f}); }
     state.feeds = [...map.values()].sort((a,b)=> (a.category||'').localeCompare(b.category||'') || (a.title||'').localeCompare(b.title||''));
@@ -2362,15 +2522,39 @@
   function sanitizeHtml(html){
     const t=document.createElement('div');
     t.innerHTML=html||'';
-    t.querySelectorAll('script,style,iframe,object,embed,link,meta,noscript,template,base,title,head').forEach(n=>n.remove());
+
+    // Drop obviously unsafe/irrelevant nodes entirely
+    const BLOCK = 'script,style,iframe,object,embed,link,meta,noscript,template,base,title,head';
+    t.querySelectorAll(BLOCK).forEach(n=>n.remove());
+
+    const shouldDropUrl = (val)=>{
+      if(!val) return false;
+      const v = String(val).trim().toLowerCase();
+      if(v.startsWith('javascript:') || v.startsWith('vbscript:')) return true;
+      if(v.startsWith('data:') && !v.startsWith('data:image/')) return true;
+      if(/\.(css|m?js)([?#].*)?$/i.test(v)) return true; // strip stylesheet/script links used as tracking
+      return false;
+    };
+
     t.querySelectorAll('*').forEach(n=>{
       [...n.attributes].forEach(a=>{
-        if(!['href','src','alt','title'].includes(a.name)) n.removeAttribute(a.name);
+        const name = a.name.toLowerCase();
+        if(name==='href' || name==='src'){
+          if(shouldDropUrl(a.value)){
+            n.removeAttribute(a.name);
+            return;
+          }
+        } else if(name!=='alt' && name!=='title'){
+          n.removeAttribute(a.name);
+        }
       });
+
       if(n.nodeName==='A'){
+        if(!n.getAttribute('href')){ n.remove(); return; }
         n.setAttribute('target','_blank');
         n.setAttribute('rel','noopener noreferrer');
       }
+      if(n.nodeName==='IMG' && !n.getAttribute('src')){ n.remove(); return; }
     });
     return t.innerHTML;
   }
@@ -2669,6 +2853,14 @@
 
   // ---------- Init ----------
   function start(){
+    // Clean up previously auto-set proxy pointing to local demo server; default must remain user-controlled.
+    try{
+      const autoProxy = `${location.origin}/raw?url=`;
+      if(state.settings.corsProxy === autoProxy){
+        state.settings.corsProxy = '';
+        saveState();
+      }
+    }catch{}
     applyTheme();
     initMediaPlayer();
     setupFullscreenToggle();
