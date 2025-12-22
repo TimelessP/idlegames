@@ -607,11 +607,256 @@
         const drainPipe = state.grid[state.drain.y][state.drain.x];
         if (drainPipe.hasWater && !state.won) {
             state.won = true;
-            setTimeout(showWinModal, 300);
+            // Animation triggered from handleClick after render
         }
 
         // Update caustics mask to follow water
         updateWaterMask();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // WIN ANIMATION
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function findWinningPath() {
+        // BFS from source to drain through connected pipes
+        const queue = [{ pos: state.source, path: [state.source] }];
+        const visited = new Set();
+        visited.add(`${state.source.x},${state.source.y}`);
+
+        while (queue.length > 0) {
+            const { pos, path } = queue.shift();
+            
+            if (pos.x === state.drain.x && pos.y === state.drain.y) {
+                return path;
+            }
+
+            const pipe = state.grid[pos.y][pos.x];
+            
+            for (let dir = 0; dir < 4; dir++) {
+                if (!pipe.connectsTo(dir)) continue;
+                
+                const nx = pos.x + DIR_VECTORS[dir].x;
+                const ny = pos.y + DIR_VECTORS[dir].y;
+                const key = `${nx},${ny}`;
+                
+                if (nx < 0 || nx >= state.gridSize ||
+                    ny < 0 || ny >= state.gridSize ||
+                    visited.has(key)) continue;
+                
+                const neighbor = state.grid[ny][nx];
+                const oppositeDir = (dir + 2) % 4;
+                
+                if (neighbor.connectsTo(oppositeDir) && neighbor.hasWater) {
+                    visited.add(key);
+                    queue.push({
+                        pos: { x: nx, y: ny },
+                        path: [...path, { x: nx, y: ny }]
+                    });
+                }
+            }
+        }
+        
+        return [state.source, state.drain]; // Fallback
+    }
+
+    function playWinAnimation() {
+        const path = findWinningPath();
+        const tileSize = 400 / state.gridSize;
+        
+        // Create splash container
+        const splashGroup = document.createElementNS(NS, 'g');
+        splashGroup.id = 'win-splashes';
+        svg.appendChild(splashGroup);
+        
+        // Calculate path points (center of each tile)
+        const points = path.map(p => ({
+            x: p.x * tileSize + tileSize / 2,
+            y: p.y * tileSize + tileSize / 2
+        }));
+        
+        // Total animation duration based on path length
+        const splashInterval = 240; // ms between splashes (doubled for epic effect)
+        const totalPathTime = (points.length - 1) * splashInterval;
+        
+        // Launch splashes along the path
+        for (let i = 0; i < points.length; i++) {
+            setTimeout(() => {
+                createSplash(splashGroup, points[i].x, points[i].y, tileSize * 0.15, false);
+            }, i * splashInterval);
+        }
+        
+        // Big splash at the end
+        setTimeout(() => {
+            const drain = points[points.length - 1];
+            createBigSplash(splashGroup, drain.x, drain.y, tileSize * 0.4);
+            
+            // Play splash sound
+            if (state.sound) {
+                playSplashSound();
+            }
+        }, totalPathTime);
+        
+        // Show modal 2 seconds after big splash starts
+        setTimeout(() => {
+            showWinModal();
+        }, totalPathTime + 2000);
+    }
+
+    function createSplash(group, cx, cy, size, isBig) {
+        const numDroplets = isBig ? 12 : 5;
+        const isDark = state.darkMode;
+        
+        for (let i = 0; i < numDroplets; i++) {
+            const droplet = document.createElementNS(NS, 'circle');
+            const angle = (i / numDroplets) * Math.PI * 2 + Math.random() * 0.5;
+            const distance = size * (1 + Math.random() * 2);
+            const dropSize = size * (0.2 + Math.random() * 0.3);
+            const duration = 800 + Math.random() * 400;
+            
+            droplet.setAttribute('cx', cx);
+            droplet.setAttribute('cy', cy);
+            droplet.setAttribute('r', dropSize);
+            droplet.setAttribute('fill', isDark ? '#6ab4e8' : '#4a90c2');
+            
+            group.appendChild(droplet);
+            
+            // Manual animation
+            const startTime = performance.now();
+            const startX = cx;
+            const startY = cy;
+            const endX = cx + Math.cos(angle) * distance;
+            const peakY = cy - distance * 0.5; // Arc upward
+            const endY = cy + distance * 0.3;  // Fall down
+            
+            function animateDroplet(now) {
+                const elapsed = now - startTime;
+                const t = Math.min(1, elapsed / duration);
+                
+                // Parabolic arc
+                const x = startX + (endX - startX) * t;
+                const y = startY + (peakY - startY) * 2 * t * (1 - t) + (endY - startY) * t * t;
+                const currentSize = dropSize * (1 - t * 0.7);
+                const opacity = 1 - t;
+                
+                droplet.setAttribute('cx', x);
+                droplet.setAttribute('cy', y);
+                droplet.setAttribute('r', Math.max(0.5, currentSize));
+                droplet.setAttribute('opacity', opacity);
+                
+                if (t < 1) {
+                    requestAnimationFrame(animateDroplet);
+                } else {
+                    droplet.remove();
+                }
+            }
+            
+            requestAnimationFrame(animateDroplet);
+        }
+    }
+
+    function createBigSplash(group, cx, cy, size) {
+        const isDark = state.darkMode;
+        
+        // Central burst
+        const burst = document.createElementNS(NS, 'circle');
+        burst.setAttribute('cx', cx);
+        burst.setAttribute('cy', cy);
+        burst.setAttribute('r', size * 0.3);
+        burst.setAttribute('fill', isDark ? '#8ad4ff' : '#6ab4e8');
+        group.appendChild(burst);
+        
+        // Animate burst
+        const burstStart = performance.now();
+        function animateBurst(now) {
+            const t = Math.min(1, (now - burstStart) / 1200);
+            const r = size * 0.3 + size * 1.2 * t;
+            burst.setAttribute('r', r);
+            burst.setAttribute('opacity', 1 - t);
+            
+            if (t < 1) {
+                requestAnimationFrame(animateBurst);
+            } else {
+                burst.remove();
+            }
+        }
+        requestAnimationFrame(animateBurst);
+        
+        // Ring
+        const ring = document.createElementNS(NS, 'circle');
+        ring.setAttribute('cx', cx);
+        ring.setAttribute('cy', cy);
+        ring.setAttribute('r', size * 0.5);
+        ring.setAttribute('fill', 'none');
+        ring.setAttribute('stroke', isDark ? '#8ad4ff' : '#4a90c2');
+        ring.setAttribute('stroke-width', size * 0.15);
+        group.appendChild(ring);
+        
+        // Animate ring
+        const ringStart = performance.now();
+        function animateRing(now) {
+            const t = Math.min(1, (now - ringStart) / 1600);
+            const r = size * 0.5 + size * 1.5 * t;
+            const sw = size * 0.15 * (1 - t * 0.9);
+            ring.setAttribute('r', r);
+            ring.setAttribute('stroke-width', Math.max(0.5, sw));
+            ring.setAttribute('opacity', 0.8 * (1 - t));
+            
+            if (t < 1) {
+                requestAnimationFrame(animateRing);
+            } else {
+                ring.remove();
+            }
+        }
+        requestAnimationFrame(animateRing);
+        
+        // Many droplets
+        createSplash(group, cx, cy, size, true);
+        
+        // Second wave of droplets
+        setTimeout(() => {
+            createSplash(group, cx, cy, size * 0.7, true);
+        }, 300);
+        
+        // Cleanup
+        setTimeout(() => {
+            const splashGroup = document.getElementById('win-splashes');
+            if (splashGroup) splashGroup.remove();
+        }, 2500);
+    }
+
+    function playSplashSound() {
+        try {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            
+            // White noise burst for splash
+            const bufferSize = audioCtx.sampleRate * 0.3;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            
+            for (let i = 0; i < bufferSize; i++) {
+                const t = i / bufferSize;
+                const envelope = Math.exp(-t * 8) * (1 - t);
+                data[i] = (Math.random() * 2 - 1) * envelope * 0.3;
+            }
+            
+            const noise = audioCtx.createBufferSource();
+            noise.buffer = buffer;
+            
+            // Low-pass filter for water sound
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 1500;
+            
+            const gain = audioCtx.createGain();
+            gain.gain.value = 0.4;
+            
+            noise.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            noise.start();
+        } catch (e) {}
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1256,6 +1501,11 @@
         updateWaterFlow();
         render();
         updateUI();
+        
+        // If we just won, start the splash animation after render
+        if (state.won) {
+            playWinAnimation();
+        }
     }
 
     function playClickSound() {
