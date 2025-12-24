@@ -517,6 +517,24 @@
             50% { background: var(--accent-delete); color: white; }
         }
 
+        /* Sleep Timer Widget */
+        .sleep-timer-widget .timer-display {
+            background: linear-gradient(135deg, rgba(90, 60, 120, 0.15), rgba(60, 40, 90, 0.1));
+        }
+
+        .sleep-timer-widget .timer-value {
+            color: #9a7acc;
+        }
+
+        [data-theme="dark"] .sleep-timer-widget .timer-value {
+            color: #b99adc;
+        }
+
+        .sleep-timer-widget .sleep-icon {
+            margin-left: 4px;
+            opacity: 0.7;
+        }
+
         /* Notepad Widget */
         .notepad-content {
             flex: 1;
@@ -1395,6 +1413,11 @@
                 name: 'Fish pond',
                 size: '2x2',
                 create: createBoidsWidget
+            },
+            sleep: {
+                name: 'Sleep',
+                size: '1x1',
+                create: createSleepTimerWidget
             }
         };
 
@@ -2278,6 +2301,50 @@
             return tile;
         }
 
+        // Service Worker timer sync (for background notifications)
+        const DENSITY_PAGE_URL = window.location.href;
+
+        function postTimerMessageToServiceWorker(message) {
+            if (!('serviceWorker' in navigator) || !message) return;
+            navigator.serviceWorker.ready.then((registration) => {
+                const target = registration.active || navigator.serviceWorker.controller;
+                target?.postMessage(message);
+            }).catch(() => {});
+        }
+
+        function syncTimerWithServiceWorker(timerId, timerName, endTime) {
+            if (!endTime) {
+                postTimerMessageToServiceWorker({ type: 'timer-cancel', timerId });
+            } else {
+                postTimerMessageToServiceWorker({
+                    type: 'timer-sync',
+                    timers: [{
+                        id: timerId,
+                        name: timerName || 'Timer',
+                        endTime: endTime,
+                        startUrl: DENSITY_PAGE_URL,
+                        notify: true
+                    }]
+                });
+            }
+        }
+
+        // Listen for service worker timer completion
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.addEventListener('message', (event) => {
+                if (!event.data || event.data.type !== 'timer-finished') return;
+                // Timer finished in background - find matching widget and trigger alarm
+                const timerId = event.data.timerId;
+                document.querySelectorAll('.timer-widget').forEach(tile => {
+                    const widgetId = tile.dataset.widgetId;
+                    if (widgetId === timerId) {
+                        // Dispatch a custom event the widget can listen for
+                        tile.dispatchEvent(new CustomEvent('timer-background-finish'));
+                    }
+                });
+            });
+        }
+
         // Timer Widget
         function createTimerWidget(widget) {
             const data = widget.data;
@@ -2386,6 +2453,7 @@
                     isRunning = false;
                     data.endTime = null;
                     updateWidgetData(widget.id, { endTime: null });
+                    syncTimerWithServiceWorker(widget.id, 'Timer', null);
                     triggerAlarm();
                 }
             }
@@ -2409,6 +2477,7 @@
                 }
                 isRunning = true;
                 updateWidgetData(widget.id, { endTime: data.endTime });
+                syncTimerWithServiceWorker(widget.id, 'Timer', data.endTime);
                 intervalId = setInterval(tick, 100);
             }
 
@@ -2424,6 +2493,7 @@
                 remainingMs = Math.max(0, data.endTime - Date.now());
                 data.endTime = null;
                 updateWidgetData(widget.id, { endTime: null });
+                syncTimerWithServiceWorker(widget.id, 'Timer', null);
                 isPaused = true;
                 pauseBtn.classList.add('active');
             }
@@ -2436,6 +2506,7 @@
                 isPaused = false;
                 data.endTime = null;
                 updateWidgetData(widget.id, { endTime: null });
+                syncTimerWithServiceWorker(widget.id, 'Timer', null);
                 pauseBtn.classList.remove('active');
                 updateFromData();
             }
@@ -2627,10 +2698,25 @@
                 btn.addEventListener('touchcancel', stopAdjust);
             });
 
+            // Handle background timer completion
+            tile.addEventListener('timer-background-finish', () => {
+                clearInterval(intervalId);
+                intervalId = null;
+                isRunning = false;
+                data.endTime = null;
+                remainingMs = 0;
+                updateDisplay();
+                updateWidgetData(widget.id, { endTime: null });
+                if (document.visibilityState === 'visible') {
+                    triggerAlarm();
+                }
+            });
+
             // Control buttons
             tile.querySelector('.widget-header .btn').addEventListener('click', () => {
                 stopAlarm();
                 clearInterval(intervalId);
+                syncTimerWithServiceWorker(widget.id, 'Timer', null);
                 document.removeEventListener('visibilitychange', handleVisibilityChange);
                 removeWidget(widget.id);
             });
@@ -2638,6 +2724,269 @@
             pauseBtn.addEventListener('click', pauseTimer);
             tile.querySelector('.timer-reset').addEventListener('click', resetTimer);
             soundBtn.addEventListener('click', toggleSound);
+
+            // Initialize and restore running timer if applicable
+            updateFromData();
+            restoreRunningTimer();
+            return tile;
+        }
+
+        // Sleep Timer Widget - redirects to index.html when timer expires
+        function createSleepTimerWidget(widget) {
+            const data = widget.data;
+            if (data.hours === undefined) data.hours = 0;
+            if (data.minutes === undefined) data.minutes = 30;
+            if (data.seconds === undefined) data.seconds = 0;
+            // endTime stores absolute timestamp (no background needed - only works on page)
+            if (data.endTime === undefined) data.endTime = null;
+
+            const tile = document.createElement('div');
+            tile.className = `tile size-${widgetTypes.sleep.size} timer-widget sleep-timer-widget`;
+            tile.dataset.widgetId = widget.id;
+
+            tile.innerHTML = `
+                <div class="widget-header">
+                    <span class="drag-handle" title="Drag to reorder">${icons.drag}</span>
+                    <span class="widget-title">Sleep<span class="sleep-icon">💤</span></span>
+                    <button class="btn btn-small accent-delete" title="Remove widget">${icons.close}</button>
+                </div>
+                <div class="timer-display">
+                    <div class="timer-segment">
+                        <div class="timer-value" data-unit="hours" tabindex="0">00</div>
+                        <div class="timer-adjust">
+                            <button class="timer-adjust-btn" data-unit="hours" data-dir="1" title="Increase hours">${icons.up}</button>
+                            <button class="timer-adjust-btn" data-unit="hours" data-dir="-1" title="Decrease hours">${icons.down}</button>
+                        </div>
+                    </div>
+                    <span class="timer-colon">:</span>
+                    <div class="timer-segment">
+                        <div class="timer-value" data-unit="minutes" tabindex="0">30</div>
+                        <div class="timer-adjust">
+                            <button class="timer-adjust-btn" data-unit="minutes" data-dir="1" title="Increase minutes">${icons.up}</button>
+                            <button class="timer-adjust-btn" data-unit="minutes" data-dir="-1" title="Decrease minutes">${icons.down}</button>
+                        </div>
+                    </div>
+                    <span class="timer-colon">:</span>
+                    <div class="timer-segment">
+                        <div class="timer-value" data-unit="seconds" tabindex="0">00</div>
+                        <div class="timer-adjust">
+                            <button class="timer-adjust-btn" data-unit="seconds" data-dir="1" title="Increase seconds">${icons.up}</button>
+                            <button class="timer-adjust-btn" data-unit="seconds" data-dir="-1" title="Decrease seconds">${icons.down}</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="timer-controls">
+                    <button class="btn btn-small accent-spin timer-start" title="Start">${icons.play}</button>
+                    <button class="btn btn-small accent-spin timer-pause" title="Pause">${icons.pause}</button>
+                    <button class="btn btn-small accent-reset timer-reset" title="Reset">${icons.reset}</button>
+                </div>
+            `;
+
+            const hoursEl = tile.querySelector('[data-unit="hours"].timer-value');
+            const minutesEl = tile.querySelector('[data-unit="minutes"].timer-value');
+            const secondsEl = tile.querySelector('[data-unit="seconds"].timer-value');
+            const startBtn = tile.querySelector('.timer-start');
+            const pauseBtn = tile.querySelector('.timer-pause');
+
+            let remainingMs = 0;
+            let intervalId = null;
+            let isRunning = false;
+            let isPaused = false;
+
+            function pad(n) {
+                return String(n).padStart(2, '0');
+            }
+
+            function updateDisplay() {
+                const totalSec = Math.ceil(remainingMs / 1000);
+                const h = Math.floor(totalSec / 3600);
+                const m = Math.floor((totalSec % 3600) / 60);
+                const s = totalSec % 60;
+                hoursEl.textContent = pad(h);
+                minutesEl.textContent = pad(m);
+                secondsEl.textContent = pad(s);
+            }
+
+            function updateFromData() {
+                remainingMs = (data.hours * 3600 + data.minutes * 60 + data.seconds) * 1000;
+                updateDisplay();
+            }
+
+            function adjustUnit(unit, dir) {
+                if (isRunning && !isPaused) return;
+                const limits = { hours: 99, minutes: 59, seconds: 59 };
+                data[unit] = Math.max(0, Math.min(limits[unit], data[unit] + dir));
+                updateFromData();
+                updateWidgetData(widget.id, { hours: data.hours, minutes: data.minutes, seconds: data.seconds });
+            }
+
+            function tick() {
+                if (!data.endTime) return;
+                remainingMs = Math.max(0, data.endTime - Date.now());
+                updateDisplay();
+                if (remainingMs <= 0) {
+                    // Sleep timer finished - redirect to index to stop all audio
+                    clearInterval(intervalId);
+                    data.endTime = null;
+                    updateWidgetData(widget.id, { endTime: null });
+                    window.location.href = 'index.html';
+                }
+            }
+
+            function startTimer() {
+                if (isRunning && !isPaused) return;
+                if (isPaused) {
+                    isPaused = false;
+                    pauseBtn.classList.remove('active');
+                    data.endTime = Date.now() + remainingMs;
+                } else {
+                    updateFromData();
+                    if (remainingMs <= 0) return;
+                    data.endTime = Date.now() + remainingMs;
+                }
+                isRunning = true;
+                updateWidgetData(widget.id, { endTime: data.endTime });
+                intervalId = setInterval(tick, 100);
+            }
+
+            function pauseTimer() {
+                if (!isRunning || isPaused) return;
+                clearInterval(intervalId);
+                intervalId = null;
+                remainingMs = Math.max(0, data.endTime - Date.now());
+                data.endTime = null;
+                updateWidgetData(widget.id, { endTime: null });
+                isPaused = true;
+                pauseBtn.classList.add('active');
+            }
+
+            function resetTimer() {
+                clearInterval(intervalId);
+                intervalId = null;
+                isRunning = false;
+                isPaused = false;
+                data.endTime = null;
+                updateWidgetData(widget.id, { endTime: null });
+                pauseBtn.classList.remove('active');
+                updateFromData();
+            }
+
+            // Restore running sleep timer on page load
+            function restoreRunningTimer() {
+                if (data.endTime) {
+                    const remaining = data.endTime - Date.now();
+                    if (remaining > 0) {
+                        remainingMs = remaining;
+                        isRunning = true;
+                        isPaused = false;
+                        if (!intervalId) {
+                            intervalId = setInterval(tick, 100);
+                        }
+                        updateDisplay();
+                    } else {
+                        // Timer finished while away - redirect now
+                        data.endTime = null;
+                        updateWidgetData(widget.id, { endTime: null });
+                        window.location.href = 'index.html';
+                    }
+                }
+            }
+
+            // Handle direct value editing
+            function handleValueClick(el, unit) {
+                if (isRunning && !isPaused) return;
+                el.classList.add('editing');
+                const currentVal = data[unit];
+                el.textContent = '';
+                el.contentEditable = true;
+                el.focus();
+
+                const finishEdit = () => {
+                    el.contentEditable = false;
+                    el.classList.remove('editing');
+                    const val = parseInt(el.textContent) || 0;
+                    const limits = { hours: 99, minutes: 59, seconds: 59 };
+                    data[unit] = Math.max(0, Math.min(limits[unit], val));
+                    updateFromData();
+                    updateWidgetData(widget.id, { hours: data.hours, minutes: data.minutes, seconds: data.seconds });
+                };
+
+                el.addEventListener('blur', finishEdit, { once: true });
+                el.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        el.blur();
+                    } else if (e.key === 'Escape') {
+                        el.textContent = pad(currentVal);
+                        el.blur();
+                    } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        adjustUnit(unit, 1);
+                        el.blur();
+                    } else if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        adjustUnit(unit, -1);
+                        el.blur();
+                    }
+                });
+            }
+
+            // Keyboard navigation on timer values
+            [hoursEl, minutesEl, secondsEl].forEach(el => {
+                const unit = el.dataset.unit;
+                el.addEventListener('click', () => handleValueClick(el, unit));
+                el.addEventListener('keydown', (e) => {
+                    if (el.contentEditable === 'true') return;
+                    if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        adjustUnit(unit, 1);
+                    } else if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        adjustUnit(unit, -1);
+                    } else if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleValueClick(el, unit);
+                    }
+                });
+            });
+
+            // Adjust buttons
+            tile.querySelectorAll('.timer-adjust-btn').forEach(btn => {
+                const unit = btn.dataset.unit;
+                const dir = parseInt(btn.dataset.dir);
+                
+                let adjIntervalId = null;
+                let timeoutId = null;
+
+                const startAdjust = (e) => {
+                    e.preventDefault();
+                    adjustUnit(unit, dir);
+                    timeoutId = setTimeout(() => {
+                        adjIntervalId = setInterval(() => adjustUnit(unit, dir), 100);
+                    }, 400);
+                };
+
+                const stopAdjust = () => {
+                    clearTimeout(timeoutId);
+                    clearInterval(adjIntervalId);
+                };
+
+                btn.addEventListener('mousedown', startAdjust);
+                btn.addEventListener('mouseup', stopAdjust);
+                btn.addEventListener('mouseleave', stopAdjust);
+                btn.addEventListener('touchstart', startAdjust, { passive: false });
+                btn.addEventListener('touchend', stopAdjust);
+                btn.addEventListener('touchcancel', stopAdjust);
+            });
+
+            // Control buttons
+            tile.querySelector('.widget-header .btn').addEventListener('click', () => {
+                clearInterval(intervalId);
+                removeWidget(widget.id);
+            });
+            startBtn.addEventListener('click', startTimer);
+            pauseBtn.addEventListener('click', pauseTimer);
+            tile.querySelector('.timer-reset').addEventListener('click', resetTimer);
 
             // Initialize and restore running timer if applicable
             updateFromData();
