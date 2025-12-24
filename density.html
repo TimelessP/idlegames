@@ -2159,6 +2159,8 @@
             if (data.minutes === undefined) data.minutes = 5;
             if (data.seconds === undefined) data.seconds = 0;
             if (data.soundEnabled === undefined) data.soundEnabled = true;
+            // endTime stores the absolute timestamp when timer will finish (for background handling)
+            if (data.endTime === undefined) data.endTime = null;
 
             const tile = document.createElement('div');
             tile.className = `tile size-${widgetTypes.timer.size} timer-widget`;
@@ -2248,6 +2250,20 @@
                 updateWidgetData(widget.id, { hours: data.hours, minutes: data.minutes, seconds: data.seconds });
             }
 
+            function tick() {
+                if (!data.endTime) return;
+                remainingMs = Math.max(0, data.endTime - Date.now());
+                updateDisplay();
+                if (remainingMs <= 0) {
+                    clearInterval(intervalId);
+                    intervalId = null;
+                    isRunning = false;
+                    data.endTime = null;
+                    updateWidgetData(widget.id, { endTime: null });
+                    triggerAlarm();
+                }
+            }
+
             function startTimer() {
                 if (isAlarming) {
                     stopAlarm();
@@ -2255,29 +2271,19 @@
                 }
                 if (isRunning && !isPaused) return;
                 if (isPaused) {
-                    // Resume
+                    // Resume - set new endTime based on remaining time
                     isPaused = false;
                     pauseBtn.classList.remove('active');
+                    data.endTime = Date.now() + remainingMs;
                 } else {
                     // Fresh start
                     updateFromData();
                     if (remainingMs <= 0) return;
+                    data.endTime = Date.now() + remainingMs;
                 }
                 isRunning = true;
-                const startTime = Date.now();
-                const startRemaining = remainingMs;
-
-                intervalId = setInterval(() => {
-                    const elapsed = Date.now() - startTime;
-                    remainingMs = Math.max(0, startRemaining - elapsed);
-                    updateDisplay();
-                    if (remainingMs <= 0) {
-                        clearInterval(intervalId);
-                        intervalId = null;
-                        isRunning = false;
-                        triggerAlarm();
-                    }
-                }, 100);
+                updateWidgetData(widget.id, { endTime: data.endTime });
+                intervalId = setInterval(tick, 100);
             }
 
             function pauseTimer() {
@@ -2288,6 +2294,10 @@
                 }
                 clearInterval(intervalId);
                 intervalId = null;
+                // Capture remaining time
+                remainingMs = Math.max(0, data.endTime - Date.now());
+                data.endTime = null;
+                updateWidgetData(widget.id, { endTime: null });
                 isPaused = true;
                 pauseBtn.classList.add('active');
             }
@@ -2298,9 +2308,43 @@
                 intervalId = null;
                 isRunning = false;
                 isPaused = false;
+                data.endTime = null;
+                updateWidgetData(widget.id, { endTime: null });
                 pauseBtn.classList.remove('active');
                 updateFromData();
             }
+
+            // Restore running timer on page load/visibility change
+            function restoreRunningTimer() {
+                if (data.endTime) {
+                    const remaining = data.endTime - Date.now();
+                    if (remaining > 0) {
+                        remainingMs = remaining;
+                        isRunning = true;
+                        isPaused = false;
+                        if (!intervalId) {
+                            intervalId = setInterval(tick, 100);
+                        }
+                        updateDisplay();
+                    } else {
+                        // Timer finished while away
+                        data.endTime = null;
+                        updateWidgetData(widget.id, { endTime: null });
+                        remainingMs = 0;
+                        updateDisplay();
+                        triggerAlarm();
+                    }
+                }
+            }
+
+            // Handle visibility change
+            function handleVisibilityChange() {
+                if (document.visibilityState === 'visible') {
+                    restoreRunningTimer();
+                }
+            }
+
+            document.addEventListener('visibilitychange', handleVisibilityChange);
 
             function triggerAlarm() {
                 isAlarming = true;
@@ -2461,6 +2505,7 @@
             tile.querySelector('.widget-header .btn').addEventListener('click', () => {
                 stopAlarm();
                 clearInterval(intervalId);
+                document.removeEventListener('visibilitychange', handleVisibilityChange);
                 removeWidget(widget.id);
             });
             startBtn.addEventListener('click', startTimer);
@@ -2468,7 +2513,9 @@
             tile.querySelector('.timer-reset').addEventListener('click', resetTimer);
             soundBtn.addEventListener('click', toggleSound);
 
+            // Initialize and restore running timer if applicable
             updateFromData();
+            restoreRunningTimer();
             return tile;
         }
 
