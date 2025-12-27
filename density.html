@@ -1491,6 +1491,65 @@
             });
         }
 
+                // Check whether a given cacheKey is referenced by any widget
+                function isCacheKeyInUse(cacheKey, excludingWidgetId = null) {
+                    if (!cacheKey) return false;
+                    for (const w of widgets) {
+                        if (excludingWidgetId != null && w.id === excludingWidgetId) continue;
+                        if (!w.data) continue;
+                        if (w.type === 'audio' && Array.isArray(w.data.tracks)) {
+                            if (w.data.tracks.some(t => t && t.cacheKey === cacheKey)) return true;
+                        }
+                        if (w.type === 'dictaphone') {
+                            if (w.data.cacheKey === cacheKey) return true;
+                        }
+                    }
+                    return false;
+                }
+
+                // Cleanup a list of cacheKeys: delete from IndexedDB if unused and remove lingering refs from saved localStorage
+                async function cleanupUnusedAudioKeys(keys, excludingWidgetId = null) {
+                    if (!Array.isArray(keys) || keys.length === 0) return;
+                    for (const key of keys) {
+                        try {
+                            if (!key) continue;
+                            if (!isCacheKeyInUse(key, excludingWidgetId)) {
+                                try {
+                                    await deleteAudioBlob(key);
+                                } catch (e) {
+                                    console.error('Failed to delete audio blob during cleanup:', key, e);
+                                }
+
+                                // Remove any lingering references from persisted widget list
+                                try {
+                                    const raw = localStorage.getItem('density-widgets');
+                                    if (raw) {
+                                        const arr = JSON.parse(raw);
+                                        let changed = false;
+                                        for (const w of arr) {
+                                            if (!w.data) continue;
+                                            if (w.type === 'audio' && Array.isArray(w.data.tracks)) {
+                                                const before = w.data.tracks.length;
+                                                w.data.tracks = w.data.tracks.filter(t => t && t.cacheKey !== key);
+                                                if (w.data.tracks.length !== before) changed = true;
+                                            }
+                                            if (w.type === 'dictaphone' && w.data.cacheKey === key) {
+                                                w.data.cacheKey = null;
+                                                changed = true;
+                                            }
+                                        }
+                                        if (changed) localStorage.setItem('density-widgets', JSON.stringify(arr));
+                                    }
+                                } catch (e) {
+                                    console.error('Failed to remove cacheKey from saved widgets:', e);
+                                }
+                            }
+                        } catch (e) {
+                            console.error('Error while cleaning up audio key', key, e);
+                        }
+                    }
+                }
+
         // State
         let widgets = [];
         let widgetIdCounter = 0;
@@ -1498,6 +1557,48 @@
         // Theme Management
         function getSystemTheme() {
             return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        // Enumerate all stored audio keys in IndexedDB
+        async function listAllAudioKeys() {
+            const db = await openAudioDB();
+            return new Promise((resolve, reject) => {
+                try {
+                    const tx = db.transaction(AUDIO_STORE_NAME, 'readonly');
+                    const store = tx.objectStore(AUDIO_STORE_NAME);
+                    const keys = [];
+                    const req = store.openCursor();
+                    req.onsuccess = (e) => {
+                        const cursor = e.target.result;
+                        if (cursor) {
+                            if (cursor.key) keys.push(cursor.key);
+                            cursor.continue();
+                        }
+                    };
+                    tx.oncomplete = () => { db.close(); resolve(keys); };
+                    tx.onerror = () => { db.close(); reject(tx.error); };
+                } catch (err) {
+                    db.close();
+                    reject(err);
+                }
+            });
+        }
+
+        // Scan IndexedDB for orphaned audio blobs (no widget/localStorage refs) and delete them
+        async function scanAndCleanupOrphanedAudio() {
+            try {
+                const allKeys = await listAllAudioKeys();
+                if (!allKeys || allKeys.length === 0) return;
+                const toDelete = [];
+                for (const key of allKeys) {
+                    if (!isCacheKeyInUse(key, null)) toDelete.push(key);
+                }
+                if (toDelete.length === 0) return;
+                console.info('Density: removing orphaned audio keys:', toDelete);
+                await cleanupUnusedAudioKeys(toDelete, null);
+            } catch (e) {
+                console.error('Failed to scan/cleanup orphaned audio:', e);
+            }
         }
 
         function applyTheme(theme) {
@@ -2219,7 +2320,8 @@
                 if (data.tracks.length === 0) return;
                 const track = data.tracks[data.currentIndex];
                 try {
-                    await deleteAudioBlob(track.cacheKey);
+                    // Only delete the blob if no other widget references this cacheKey
+                    await cleanupUnusedAudioKeys([track.cacheKey], widget.id);
                 } catch (e) {
                     console.error('Failed to delete from storage:', e);
                 }
@@ -2282,8 +2384,15 @@
             });
 
             // Event listeners
-            tile.querySelector('.widget-header .btn').addEventListener('click', () => {
+            tile.querySelector('.widget-header .btn').addEventListener('click', async () => {
                 stopTrack();
+                // Clean up any audio blobs owned by this widget that are not referenced elsewhere
+                try {
+                    const keys = (data.tracks || []).map(t => t && t.cacheKey).filter(Boolean);
+                    await cleanupUnusedAudioKeys(keys, widget.id);
+                } catch (e) {
+                    console.error('Error cleaning up audio for removed widget:', e);
+                }
                 removeWidget(widget.id);
             });
             tile.querySelector('.audio-add').addEventListener('click', () => fileInput.click());
@@ -4112,7 +4221,13 @@
             });
 
             tile.querySelector('.widget-header .btn').addEventListener('click', async () => {
-                if (cacheKey) await deleteAudioBlob(cacheKey);
+                if (cacheKey) {
+                    try {
+                        await cleanupUnusedAudioKeys([cacheKey], widget.id);
+                    } catch (e) {
+                        console.error('Failed to cleanup dictaphone audio on widget removal:', e);
+                    }
+                }
                 removeWidget(widget.id);
             });
 
@@ -5389,6 +5504,11 @@
             const grid = document.getElementById('widgetGrid');
             grid.appendChild(createAddWidgetTile());
             loadWidgets();
+            // Perform a one-time sweep to remove orphaned audio blobs left from prior versions
+            // (safely checks for references before deleting)
+            setTimeout(() => {
+                scanAndCleanupOrphanedAudio();
+            }, 2000);
             initDragAndDrop();
         }
 
