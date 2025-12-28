@@ -253,11 +253,14 @@
             justify-content: center;
             text-align: center;
             padding: 8px;
-            color: var(--text-muted);
+            color: var(--text-color);
+            background: rgba(var(--tile-bg-rgb), 0.5);
             font-size: 13px;
             pointer-events: none;
             line-height: 1.2;
             word-break: break-word;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.12);
         }
 
         /* Add Widget Tile */
@@ -1599,6 +1602,7 @@
         // Back here geolocation tracking
         let _backHereWatchId = null;
         let _lastGeoPos = null;
+        let _geoHistory = [];
         let _prevGeoPos = null;
         let _movementHeadingDegrees = null; // derived from GPS movement, degrees
         const _backHereListeners = new Map(); // widgetId -> updater fn
@@ -1730,32 +1734,43 @@
             if (_backHereWatchId !== null) return;
             if (!navigator.geolocation) return;
             _backHereWatchId = navigator.geolocation.watchPosition((pos) => {
-                // compute movement heading from previous fix if available
-                if (_lastGeoPos) {
-                    try {
-                        const prev = _lastGeoPos.coords;
+                // maintain a short history of fixes to compute heading over >=1s intervals
+                try {
+                    // push current pos into history
+                    _geoHistory.push(pos);
+                    const nowTs = pos.timestamp || Date.now();
+                    // prune old entries >5s to keep array small
+                    while (_geoHistory.length > 0 && (nowTs - (_geoHistory[0].timestamp || nowTs)) > 5000) _geoHistory.shift();
+
+                    // find earliest entry at least 1000ms older than now
+                    let older = null;
+                    for (let i = 0; i < _geoHistory.length; i++) {
+                        const ent = _geoHistory[i];
+                        const dt = nowTs - (ent.timestamp || nowTs);
+                        if (dt >= 1000) { older = ent; break; }
+                    }
+
+                    if (older && _lastGeoPos) {
+                        const prev = older.coords;
                         const cur = pos.coords;
                         const moved = _computeDistanceMeters(prev.latitude, prev.longitude, cur.latitude, cur.longitude);
-                        const dt = (pos.timestamp || Date.now()) - (_lastGeoPos.timestamp || Date.now());
-                        // Reject absurd dt values and tiny intervals
-                        if (dt > 0 && dt <= 60000 && moved > 1 && dt > 250) {
-                            // Prefer device-reported speed when available
+                        const dt = (pos.timestamp || Date.now()) - (older.timestamp || Date.now());
+                        if (dt > 0 && dt <= 60000 && moved > 1) {
+                            // prefer reported speed on the newest fix
                             let speed_m_s = null;
                             if (typeof cur.speed === 'number' && !isNaN(cur.speed) && cur.speed >= 0) {
                                 speed_m_s = cur.speed;
                             } else {
-                                // fallback to computed speed from moved/dt
                                 speed_m_s = moved / (dt / 1000);
                             }
-                            // Require a minimum movement speed before trusting bearing
                             if (typeof speed_m_s === 'number' && speed_m_s > 0.5) {
                                 _movementHeadingDegrees = _computeBearingDegrees(prev.latitude, prev.longitude, cur.latitude, cur.longitude);
+                                _prevGeoPos = older;
                             }
                         }
-                    } catch (e) {
-                        console.warn('Failed to compute movement heading', e);
                     }
-                    _prevGeoPos = _lastGeoPos;
+                } catch (e) {
+                    console.warn('Failed to compute movement heading', e);
                 }
                 // If any backhere widget hasn't had its initial `here` set yet, set it now
                 try {
@@ -4900,17 +4915,13 @@
                 } catch (e) { currentSpeed = null; }
                 // Use movement-derived heading exclusively (no magnetic support).
                 let deviceHeading = (typeof _movementHeadingDegrees === 'number') ? _movementHeadingDegrees : 0;
-                // If speed is too slow, hide directional UI and prompt user to move
+                // If speed is too slow, do not update needle/dot but show overlay prompt
                 const SPEED_THRESHOLD = 0.5; // m/s
-                if (typeof currentSpeed !== 'number' || currentSpeed <= SPEED_THRESHOLD) {
-                    // hide pointer and dot and show overlay prompt (do not replace metrics)
-                    if (dot) dot.style.display = 'none';
-                    if (arrow) arrow.style.display = 'none';
+                const shouldUpdateDirection = (typeof currentSpeed === 'number' && currentSpeed > SPEED_THRESHOLD);
+                if (!shouldUpdateDirection) {
                     if (overlay) { overlay.style.display = 'flex'; overlay.textContent = 'move for direction'; }
-                    // continue to compute and render metrics below
+                    // leave dot/arrow visible but don't update their position below
                 } else {
-                    if (dot) dot.style.display = '';
-                    if (arrow) arrow.style.display = '';
                     if (overlay) overlay.style.display = 'none';
                 }
                 // Compute destination vector robustly on the sphere: ECEF -> local ENU at current position
@@ -4946,15 +4957,19 @@
                 const hdRad = toRad(hd);
                 const cH = Math.cos(hdRad), sH = Math.sin(hdRad);
                 // Rotate world vector into device-local coordinates (forward = +Y)
-                const xRel = east * cH + north * sH; // local right (east) component
-                const yRel = -east * sH + north * cH; // local forward (north) component
+                // use rotation sign so deviceHeading aligns forward correctly
+                const xRel = east * cH - north * sH; // local right (east) component
+                const yRel = east * sH + north * cH; // local forward (north) component
                 // angle where 0 = forward/up, positive clockwise
                 const angle = Math.atan2(xRel, yRel);
                 const r = 30;
                 const cx = 50 + Math.sin(angle) * r;
                 const cy = 50 - Math.cos(angle) * r;
-                dot.setAttribute('cx', String(cx));
-                dot.setAttribute('cy', String(cy));
+                // only update dot position when we have recent movement-based heading
+                if (shouldUpdateDirection) {
+                    dot.setAttribute('cx', String(cx));
+                    dot.setAttribute('cy', String(cy));
+                }
                 const formatDistance = (m) => m < 1000 ? `${Math.round(m)}m` : `${(m/1000).toFixed(2)}km`;
                 const distanceStr = formatDistance(d);
                 // Mode 0: distance only
