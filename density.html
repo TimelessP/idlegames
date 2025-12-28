@@ -1422,6 +1422,11 @@
                 size: '1x1',
                 create: createBackHereWidget
             },
+            'debug-orientation': {
+                name: 'Orientation Debug',
+                size: '2x2',
+                create: createDebugWidget
+            },
             sleep: {
                 name: 'Sleep',
                 size: '1x1',
@@ -4825,6 +4830,7 @@
 
             const closeBtn = tile.querySelector('.widget-header .btn');
             const dot = tile.querySelector('.backhere-dot');
+            const arrow = tile.querySelector('.backhere-arrow');
             const distEl = tile.querySelector('.backhere-distance');
 
 
@@ -4892,6 +4898,20 @@
             ensureBackHereWatchStarted();
             // Start device orientation watch (for facing direction)
             ensureDeviceOrientationStarted();
+
+            // Clicking the arrow opens a debug widget (one only)
+            if (arrow) {
+                arrow.style.cursor = 'pointer';
+                arrow.title = 'Show orientation debug';
+                arrow.addEventListener('click', (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    // Only create one debug widget at a time
+                    if (!widgets.some(w => w.type === 'debug-orientation')) {
+                        addWidget('debug-orientation', { linkedTo: widget.id });
+                    }
+                });
+            }
 
 
             // Cleanup when removed: remove listener and stop global watch if none remain
@@ -5546,6 +5566,114 @@
                 }
                 touchStartPos = null;
             }, { passive: true });
+
+            return tile;
+        }
+
+        // Orientation Debug Widget
+        function createDebugWidget(widget) {
+            const tile = document.createElement('div');
+            tile.className = `tile size-${widgetTypes['debug-orientation'].size} debug-widget`;
+            tile.dataset.widgetId = widget.id;
+
+            tile.innerHTML = `
+                <div class="widget-header">
+                    <span class="drag-handle" title="Drag to reorder">${icons.drag}</span>
+                    <span class="widget-title">Orientation Debug</span>
+                    <button class="btn btn-small accent-delete" title="Remove widget">${icons.close}</button>
+                </div>
+                <div class="widget-content" style="display:flex;flex-direction:column;gap:6px;padding:8px;">
+                    <div class="dbg-orient">alpha: <span class="dbg-alpha">—</span>°</div>
+                    <div class="dbg-orient">beta: <span class="dbg-beta">—</span>°</div>
+                    <div class="dbg-orient">gamma: <span class="dbg-gamma">—</span>°</div>
+                    <div class="dbg-orient">Vx: <span class="dbg-vx">—</span> Vy: <span class="dbg-vy">—</span></div>
+                    <div class="dbg-orient">heading: <span class="dbg-heading">—</span>°</div>
+                    <hr />
+                    <div class="dbg-gps">lat: <span class="dbg-lat">—</span></div>
+                    <div class="dbg-gps">lon: <span class="dbg-lon">—</span></div>
+                    <div class="dbg-gps">alt: <span class="dbg-alt">—</span></div>
+                </div>
+            `;
+
+            const closeBtn = tile.querySelector('.widget-header .btn');
+            const elAlpha = tile.querySelector('.dbg-alpha');
+            const elBeta = tile.querySelector('.dbg-beta');
+            const elGamma = tile.querySelector('.dbg-gamma');
+            const elVx = tile.querySelector('.dbg-vx');
+            const elVy = tile.querySelector('.dbg-vy');
+            const elHeading = tile.querySelector('.dbg-heading');
+            const elLat = tile.querySelector('.dbg-lat');
+            const elLon = tile.querySelector('.dbg-lon');
+            const elAlt = tile.querySelector('.dbg-alt');
+
+            // Orientation handler for this debug widget
+            let orientationHandler = (e) => {
+                const a = (typeof e.alpha === 'number') ? e.alpha : null;
+                const b = (typeof e.beta === 'number') ? e.beta : null;
+                const g = (typeof e.gamma === 'number') ? e.gamma : null;
+                elAlpha.textContent = (a === null) ? '—' : a.toFixed(1);
+                elBeta.textContent = (b === null) ? '—' : b.toFixed(1);
+                elGamma.textContent = (g === null) ? '—' : g.toFixed(1);
+
+                // compute Vx,Vy and heading using same math as global
+                if (a !== null && b !== null && g !== null) {
+                    const degtorad = Math.PI/180;
+                    const _x = b * degtorad;
+                    const _y = g * degtorad;
+                    const _z = a * degtorad;
+                    const cX = Math.cos(_x), cY = Math.cos(_y), cZ = Math.cos(_z);
+                    const sX = Math.sin(_x), sY = Math.sin(_y), sZ = Math.sin(_z);
+                    const Vx = - cZ * sY - sZ * sX * cY;
+                    const Vy = - sZ * sY + cZ * sX * cY;
+                    elVx.textContent = Vx.toFixed(3);
+                    elVy.textContent = Vy.toFixed(3);
+                    let heading = Math.atan2(Vx, Vy) * 180 / Math.PI;
+                    if (heading < 0) heading += 360;
+                    elHeading.textContent = heading.toFixed(1);
+                }
+            };
+
+            // GPS watcher for this debug widget
+            let geoWatchId = null;
+            function updateFromGeo(pos) {
+                if (!pos || !pos.coords) return;
+                elLat.textContent = pos.coords.latitude.toFixed(6);
+                elLon.textContent = pos.coords.longitude.toFixed(6);
+                elAlt.textContent = (pos.coords.altitude === null) ? '—' : pos.coords.altitude.toFixed(1) + ' m';
+            }
+
+            // Start sensors
+            try { ensureDeviceOrientationStarted(); } catch (e) {}
+            window.addEventListener('deviceorientation', orientationHandler, true);
+            try {
+                if (navigator.geolocation) {
+                    // use watch so updates come in; ensureBackHereWatchStarted to reuse existing promise/state
+                    geoWatchId = navigator.geolocation.watchPosition((p) => {
+                        updateFromGeo(p);
+                    }, () => {}, { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
+                }
+            } catch (e) {}
+
+            // Initialize display from globals if available
+            if (_lastGeoPos) updateFromGeo(_lastGeoPos);
+            if (typeof _deviceHeading === 'number') elHeading.textContent = _deviceHeading.toFixed(1);
+
+            // Cleanup on removal
+            const observer = new MutationObserver((mutations) => {
+                for (const mutation of mutations) {
+                    for (const node of mutation.removedNodes) {
+                        if (node === tile || node.contains?.(tile)) {
+                            try { window.removeEventListener('deviceorientation', orientationHandler, true); } catch (e) {}
+                            if (geoWatchId !== null && navigator.geolocation) try { navigator.geolocation.clearWatch(geoWatchId); } catch (e) {}
+                            observer.disconnect();
+                            return;
+                        }
+                    }
+                }
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+
+            closeBtn.addEventListener('click', () => removeWidget(widget.id));
 
             return tile;
         }
