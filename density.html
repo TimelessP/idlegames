@@ -1268,6 +1268,27 @@
             }
         }
 
+        /* Back Here widget visuals */
+        .backhere-widget {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .backhere-rose {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .backhere-distance {
+            text-align: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
         @media (min-width: 900px) {
             :root {
                 --base-unit: 180px;
@@ -1395,6 +1416,11 @@
                 name: 'Fish pond',
                 size: '2x2',
                 create: createBoidsWidget
+            },
+            backhere: {
+                name: 'Back here',
+                size: '1x1',
+                create: createBackHereWidget
             },
             sleep: {
                 name: 'Sleep',
@@ -1554,6 +1580,79 @@
         let widgets = [];
         let widgetIdCounter = 0;
 
+        // Back here geolocation tracking
+        let _backHereWatchId = null;
+        let _lastGeoPos = null;
+        let _prevGeoPos = null;
+        let _movementHeadingDegrees = null; // derived from GPS movement, degrees
+        const _backHereListeners = new Map(); // widgetId -> updater fn
+
+        function _computeDistanceMeters(aLat, aLon, bLat, bLon) {
+            const R = 6371000; // metres
+            const toRad = v => v * Math.PI / 180;
+            const dLat = toRad(bLat - aLat);
+            const dLon = toRad(bLon - aLon);
+            const lat1 = toRad(aLat);
+            const lat2 = toRad(bLat);
+            const sinDLat = Math.sin(dLat/2);
+            const sinDLon = Math.sin(dLon/2);
+            const a = sinDLat*sinDLat + Math.cos(lat1)*Math.cos(lat2)*sinDLon*sinDLon;
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
+
+        function _computeBearingDegrees(aLat, aLon, bLat, bLon) {
+            const toRad = v => v * Math.PI / 180;
+            const toDeg = v => v * 180 / Math.PI;
+            const phi1 = toRad(aLat);
+            const phi2 = toRad(bLat);
+            const lambda1 = toRad(aLon);
+            const lambda2 = toRad(bLon);
+            const y = Math.sin(lambda2-lambda1) * Math.cos(phi2);
+            const x = Math.cos(phi1)*Math.sin(phi2) - Math.sin(phi1)*Math.cos(phi2)*Math.cos(lambda2-lambda1);
+            const brng = toDeg(Math.atan2(y, x));
+            return (brng + 360) % 360;
+        }
+
+        function ensureBackHereWatchStarted() {
+            if (_backHereWatchId !== null) return;
+            if (!navigator.geolocation) return;
+            _backHereWatchId = navigator.geolocation.watchPosition((pos) => {
+                // compute movement heading from previous fix if available
+                if (_lastGeoPos) {
+                    try {
+                        const prev = _lastGeoPos.coords;
+                        const cur = pos.coords;
+                        const moved = _computeDistanceMeters(prev.latitude, prev.longitude, cur.latitude, cur.longitude);
+                        const dt = (pos.timestamp || Date.now()) - (_lastGeoPos.timestamp || Date.now());
+                        // update movement heading only if movement is significant and time reasonable
+                        if (moved > 1 && dt > 250) {
+                            _movementHeadingDegrees = _computeBearingDegrees(prev.latitude, prev.longitude, cur.latitude, cur.longitude);
+                        }
+                    } catch (e) {
+                        console.warn('Failed to compute movement heading', e);
+                    }
+                    _prevGeoPos = _lastGeoPos;
+                }
+                _lastGeoPos = pos;
+                // notify listeners
+                for (const fn of _backHereListeners.values()) {
+                    try { fn(pos); } catch (e) { console.error(e); }
+                }
+            }, (err) => {
+                console.warn('BackHere geolocation error', err);
+            }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
+        }
+
+        function stopBackHereWatchIfNone() {
+            const any = widgets.some(w => w.type === 'backhere');
+            if (!any && _backHereWatchId !== null) {
+                try { navigator.geolocation.clearWatch(_backHereWatchId); } catch (e) {}
+                _backHereWatchId = null;
+                _lastGeoPos = null;
+            }
+        }
+
         // Theme Management
         function getSystemTheme() {
             return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -1707,6 +1806,8 @@
                     setTimeout(() => element.remove(), 200);
                 }
                 saveWidgets();
+                // If no more Back here widgets remain, stop the global geolocation watch
+                try { stopBackHereWatchIfNone(); } catch (e) {}
             }
         }
 
@@ -4587,6 +4688,142 @@
             observer.observe(document.body, { childList: true, subtree: true });
 
             tile.querySelector('.widget-header .btn').addEventListener('click', () => removeWidget(widget.id));
+
+            return tile;
+        }
+
+        // Back here Widget
+        function createBackHereWidget(widget) {
+            const tile = document.createElement('div');
+            tile.className = `tile size-${widgetTypes.backhere.size} backhere-widget`;
+            tile.dataset.widgetId = widget.id;
+
+            tile.innerHTML = `
+                <div class="widget-header">
+                    <span class="drag-handle" title="Drag to reorder">${icons.drag}</span>
+                    <span class="widget-title">Back here</span>
+                    <button class="btn btn-small accent-delete" title="Remove widget">${icons.close}</button>
+                </div>
+                <div style="flex:1; display:flex; align-items:center; justify-content:center; min-height:0;">
+                    <svg class="backhere-rose" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+                        <defs>
+                            <filter id="bh-shadow" x="-50%" y="-50%" width="200%" height="200%">
+                                <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="rgba(0,0,0,0.25)"/>
+                            </filter>
+                        </defs>
+                        <!-- outer circle -->
+                        <circle cx="50" cy="50" r="38" fill="none" stroke="var(--accent-add)" stroke-width="2" opacity="0.9" />
+                        <!-- destination dot (moved by JS) -->
+                        <circle class="backhere-dot" cx="50" cy="14" r="3.8" fill="var(--accent-spin)" filter="url(#bh-shadow)" />
+                        <!-- teardrop pointer: curved base around centre, tip at 80% of rose radius -->
+                        <!-- rose radius = 38 -> tip Y = 50 - 0.8*38 = 19.6 -->
+                        <path class="backhere-arrow" d="M58 50 A8 8 0 1 1 42 50 C42 50 46 36 50 19.6 C54 36 58 50 58 50 Z" fill="var(--accent-up)" />
+                    </svg>
+                </div>
+                <div class="backhere-distance">—</div>
+            `;
+
+            const closeBtn = tile.querySelector('.widget-header .btn');
+            const dot = tile.querySelector('.backhere-dot');
+            const distEl = tile.querySelector('.backhere-distance');
+
+
+            let lastPos = null;
+
+            function updateRose() {
+                const here = widget.data && widget.data.here;
+                if (!here || !lastPos) {
+                    distEl.textContent = '—';
+                    return;
+                }
+                const lat = lastPos.coords.latitude;
+                const lon = lastPos.coords.longitude;
+                const d = _computeDistanceMeters(lat, lon, here.lat, here.lon);
+                const bearing = _computeBearingDegrees(lat, lon, here.lat, here.lon);
+                // Use movement-derived heading (from GPS) if available, otherwise 0
+                const deviceHeading = (typeof _movementHeadingDegrees === 'number') ? _movementHeadingDegrees : 0;
+                // Relative angle: bearing - deviceHeading
+                const rel = ((bearing - deviceHeading) + 360) % 360;
+                const angle = rel * Math.PI / 180.0;
+                const r = 30;
+                const cx = 50 + Math.sin(angle) * r;
+                const cy = 50 - Math.cos(angle) * r;
+                dot.setAttribute('cx', String(cx));
+                dot.setAttribute('cy', String(cy));
+                distEl.textContent = d < 1000 ? `${Math.round(d)} m` : `${(d/1000).toFixed(2)} km`;
+                // Keep arrow fixed (up = device facing) — no rotation of SVG needed
+            }
+
+            function updateFromPosition(pos) {
+                lastPos = pos;
+                updateRose();
+            }
+
+            function updateFromOrientation(event) {
+                // event.alpha: 0 = north, 90 = east, 180 = south, 270 = west
+                // But we want 0 = up (device facing), so use alpha if available, else fallback
+                if (typeof event.webkitCompassHeading === 'number') {
+                    deviceHeading = event.webkitCompassHeading;
+                } else if (typeof event.alpha === 'number') {
+                    // On some devices, alpha is relative to north
+                    deviceHeading = 360 - event.alpha;
+                }
+                updateRose();
+            }
+
+            // Listen for device orientation
+            if (window.DeviceOrientationEvent) {
+                window.addEventListener('deviceorientation', updateFromOrientation, true);
+            }
+
+            // If we don't have an initial here, set it from last known pos or request one-shot
+            function ensureHereSet() {
+                if (widget.data && widget.data.here) return Promise.resolve();
+                if (_lastGeoPos) {
+                    widget.data = widget.data || {};
+                    widget.data.here = { lat: _lastGeoPos.coords.latitude, lon: _lastGeoPos.coords.longitude, ts: _lastGeoPos.timestamp };
+                    saveWidgets();
+                    return Promise.resolve();
+                }
+                return new Promise((resolve) => {
+                    if (!navigator.geolocation) return resolve();
+                    navigator.geolocation.getCurrentPosition((pos) => {
+                        widget.data = widget.data || {};
+                        widget.data.here = { lat: pos.coords.latitude, lon: pos.coords.longitude, ts: pos.timestamp };
+                        saveWidgets();
+                        resolve();
+                    }, () => resolve(), { enableHighAccuracy: true, timeout: 10000 });
+                });
+            }
+
+            // Register listener
+
+            const updater = (pos) => updateFromPosition(pos);
+            _backHereListeners.set(widget.id, updater);
+            ensureHereSet().then(() => {
+                if (_lastGeoPos) updater(_lastGeoPos);
+            });
+
+            // Start global watch
+            ensureBackHereWatchStarted();
+
+
+            // Cleanup when removed: remove listener and stop global watch if none remain
+            const observer = new MutationObserver((mutations) => {
+                for (const mutation of mutations) {
+                    for (const node of mutation.removedNodes) {
+                        if (node === tile || node.contains?.(tile)) {
+                            _backHereListeners.delete(widget.id);
+                            stopBackHereWatchIfNone();
+                            observer.disconnect();
+                            return;
+                        }
+                    }
+                }
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+
+            closeBtn.addEventListener('click', () => removeWidget(widget.id));
 
             return tile;
         }
