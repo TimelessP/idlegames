@@ -244,6 +244,22 @@
             overflow: hidden;
         }
 
+        /* Backhere overlay when stationary */
+        .backhere-overlay {
+            position: absolute;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 8px;
+            color: var(--text-muted);
+            font-size: 13px;
+            pointer-events: none;
+            line-height: 1.2;
+            word-break: break-word;
+        }
+
         /* Add Widget Tile */
         .add-widget-tile .widget-content {
             justify-content: center;
@@ -1721,9 +1737,20 @@
                         const cur = pos.coords;
                         const moved = _computeDistanceMeters(prev.latitude, prev.longitude, cur.latitude, cur.longitude);
                         const dt = (pos.timestamp || Date.now()) - (_lastGeoPos.timestamp || Date.now());
-                        // update movement heading only if movement is significant and time reasonable
-                        if (moved > 1 && dt > 250) {
-                            _movementHeadingDegrees = _computeBearingDegrees(prev.latitude, prev.longitude, cur.latitude, cur.longitude);
+                        // Reject absurd dt values and tiny intervals
+                        if (dt > 0 && dt <= 60000 && moved > 1 && dt > 250) {
+                            // Prefer device-reported speed when available
+                            let speed_m_s = null;
+                            if (typeof cur.speed === 'number' && !isNaN(cur.speed) && cur.speed >= 0) {
+                                speed_m_s = cur.speed;
+                            } else {
+                                // fallback to computed speed from moved/dt
+                                speed_m_s = moved / (dt / 1000);
+                            }
+                            // Require a minimum movement speed before trusting bearing
+                            if (typeof speed_m_s === 'number' && speed_m_s > 0.5) {
+                                _movementHeadingDegrees = _computeBearingDegrees(prev.latitude, prev.longitude, cur.latitude, cur.longitude);
+                            }
                         }
                     } catch (e) {
                         console.warn('Failed to compute movement heading', e);
@@ -4817,7 +4844,7 @@
                     <span class="widget-title">Back here</span>
                     <button class="btn btn-small accent-delete" title="Remove widget">${icons.close}</button>
                 </div>
-                <div style="flex:1; display:flex; align-items:center; justify-content:center; min-height:0;">
+                <div style="flex:1; display:flex; align-items:center; justify-content:center; min-height:0; position:relative;">
                     <svg class="backhere-rose" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
                         <defs>
                             <filter id="bh-shadow" x="-50%" y="-50%" width="200%" height="200%">
@@ -4832,19 +4859,22 @@
                         <!-- rose radius = 38 -> tip Y = 50 - 0.8*38 = 19.6 -->
                         <path class="backhere-arrow" d="M58 50 A8 8 0 1 1 42 50 C42 50 46 36 50 19.6 C54 36 58 50 58 50 Z" fill="var(--accent-up)" />
                     </svg>
+                    <div class="backhere-overlay" aria-hidden="true"></div>
                 </div>
                 <div class="backhere-distance">—</div>
             `;
 
             const closeBtn = tile.querySelector('.widget-header .btn');
             const dot = tile.querySelector('.backhere-dot');
+            const arrow = tile.querySelector('.backhere-arrow');
             const roseSvg = tile.querySelector('svg.backhere-rose');
+            const overlay = tile.querySelector('.backhere-overlay');
             const distEl = tile.querySelector('.backhere-distance');
 
 
             let lastPos = null;
 
-            let displayMode = 0; // 0=distance,1=lat,lon+distance,2=lat,lon,alt+distance
+            let displayMode = (widget.data && Number.isInteger(widget.data.displayMode)) ? widget.data.displayMode : 0; // 0=distance,1=lat,lon+distance,2=lat,lon,alt+distance,3=lat,lon+distance+speed
             function updateRose() {
                 const here = widget.data && widget.data.here;
                 if (!here || !lastPos) {
@@ -4855,8 +4885,34 @@
                 const lon = lastPos.coords.longitude;
                 const d = _computeDistanceMeters(lat, lon, here.lat, here.lon);
                 const bearing = _computeBearingDegrees(lat, lon, here.lat, here.lon);
+                // compute current speed: prefer device-reported speed, fall back to prev/last computed speed
+                let currentSpeed = null;
+                try {
+                    if (lastPos.coords && typeof lastPos.coords.speed === 'number' && !isNaN(lastPos.coords.speed) && lastPos.coords.speed >= 0) {
+                        currentSpeed = lastPos.coords.speed;
+                    } else if (_prevGeoPos && _lastGeoPos && _prevGeoPos.coords && _lastGeoPos.coords) {
+                        const movedForSpeed = _computeDistanceMeters(_prevGeoPos.coords.latitude, _prevGeoPos.coords.longitude, _lastGeoPos.coords.latitude, _lastGeoPos.coords.longitude);
+                        const dtForSpeed = (_lastGeoPos.timestamp || Date.now()) - (_prevGeoPos.timestamp || Date.now());
+                        if (dtForSpeed > 0 && dtForSpeed <= 60000) {
+                            currentSpeed = movedForSpeed / (dtForSpeed / 1000);
+                        }
+                    }
+                } catch (e) { currentSpeed = null; }
                 // Use movement-derived heading exclusively (no magnetic support).
                 let deviceHeading = (typeof _movementHeadingDegrees === 'number') ? _movementHeadingDegrees : 0;
+                // If speed is too slow, hide directional UI and prompt user to move
+                const SPEED_THRESHOLD = 0.5; // m/s
+                if (typeof currentSpeed !== 'number' || currentSpeed <= SPEED_THRESHOLD) {
+                    // hide pointer and dot and show overlay prompt (do not replace metrics)
+                    if (dot) dot.style.display = 'none';
+                    if (arrow) arrow.style.display = 'none';
+                    if (overlay) { overlay.style.display = 'flex'; overlay.textContent = 'move for direction'; }
+                    // continue to compute and render metrics below
+                } else {
+                    if (dot) dot.style.display = '';
+                    if (arrow) arrow.style.display = '';
+                    if (overlay) overlay.style.display = 'none';
+                }
                 // Relative angle: bearing - deviceHeading
                 const rel = ((bearing - deviceHeading) + 360) % 360;
                 const angle = rel * Math.PI / 180.0;
@@ -4874,9 +4930,26 @@
                     distEl.textContent = distanceStr;
                 } else if (displayMode === 1) {
                     distEl.textContent = `${lat.toFixed(6)}, ${lon.toFixed(6)} ${distanceStr}`;
-                } else {
+                } else if (displayMode === 2) {
                     const alt = (lastPos.coords.altitude === null) ? '—' : `${Math.round(lastPos.coords.altitude)}m`;
                     distEl.textContent = `${lat.toFixed(6)}, ${lon.toFixed(6)} ${alt} ${distanceStr}`;
+                } else if (displayMode === 3) {
+                    // speed in m/s: prefer device-reported speed if present, otherwise compute from prev/last with dt validation
+                    let speedStr = '—';
+                    try {
+                        if (_lastGeoPos && _lastGeoPos.coords && typeof _lastGeoPos.coords.speed === 'number' && !isNaN(_lastGeoPos.coords.speed) && _lastGeoPos.coords.speed >= 0) {
+                            speedStr = `${_lastGeoPos.coords.speed.toFixed(1)}m/s`;
+                        } else if (_prevGeoPos && _lastGeoPos && _prevGeoPos.coords && _lastGeoPos.coords) {
+                            const moved = _computeDistanceMeters(_prevGeoPos.coords.latitude, _prevGeoPos.coords.longitude, _lastGeoPos.coords.latitude, _lastGeoPos.coords.longitude);
+                            const dtMs = (_lastGeoPos.timestamp || Date.now()) - (_prevGeoPos.timestamp || Date.now());
+                            if (dtMs > 0 && dtMs <= 60000) {
+                                const speed = moved / (dtMs / 1000);
+                                speedStr = `${speed.toFixed(1)}m/s`;
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+                    const alt = (lastPos.coords.altitude === null) ? '—' : `${Math.round(lastPos.coords.altitude)}m`;
+                    distEl.textContent = `${lat.toFixed(6)}, ${lon.toFixed(6)} ${distanceStr} ${alt} ${speedStr}`;
                 }
                 // Keep arrow fixed (up = device facing) — no rotation of SVG needed
             }
@@ -4923,14 +4996,20 @@
                 roseSvg.addEventListener('click', (ev) => {
                     ev.preventDefault();
                     ev.stopPropagation();
-                    displayMode = (displayMode + 1) % 3;
+                    displayMode = (displayMode + 1) % 4;
+                    widget.data = widget.data || {};
+                    widget.data.displayMode = displayMode;
+                    saveWidgets();
                     updateRose();
                 });
                 // also handle touchend to be more responsive on mobile
                 roseSvg.addEventListener('touchend', (ev) => {
                     ev.preventDefault();
                     ev.stopPropagation();
-                    displayMode = (displayMode + 1) % 3;
+                    displayMode = (displayMode + 1) % 4;
+                    widget.data = widget.data || {};
+                    widget.data.displayMode = displayMode;
+                    saveWidgets();
                     updateRose();
                 }, { passive: false });
             }
