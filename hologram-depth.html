@@ -345,6 +345,14 @@
     let idleTime = 0;
     let _lastFrameTime = null;
 
+    // Device orientation smoothing / hysteresis state
+    let orientationSmoothedX = 0, orientationSmoothedY = 0;
+    let orientationActive = false;
+    let orientationLastUpdateTime = 0;
+    const orientationSmoothingAlpha = 0.12; // lower = smoother
+    const orientationThreshold = 1.5; // degrees; ignore smaller changes
+    const orientationActiveTimeout = 1500; // ms to keep orientation considered active
+
     const canvasWrapper = document.getElementById('canvas-wrapper');
     let canvasWidth, canvasHeight;
 
@@ -1165,7 +1173,13 @@
       }
 
       // Idle animation
-      if (cardContainer.classList.contains('visible') && !isInteracting) {
+      // Decay orientation activity flag if no recent orientation updates
+      if (orientationActive && (Date.now() - orientationLastUpdateTime) > orientationActiveTimeout) {
+        orientationActive = false;
+      }
+
+      // Idle animation (only when not interacting and orientation is not actively driving the target)
+      if (cardContainer.classList.contains('visible') && !isInteracting && !orientationActive) {
         const timeSinceInteraction = Date.now() - lastInteractionTime;
         if (timeSinceInteraction > 3000) {
           idleTime += dt * 1.0;
@@ -1229,10 +1243,10 @@
 
     cardContainer.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    // Device orientation
+    // Device orientation with smoothing + hysteresis to avoid jitter
     if (window.DeviceOrientationEvent) {
       let hasOrientationPermission = false;
-      
+
       if (typeof DeviceOrientationEvent.requestPermission === 'function') {
         document.body.addEventListener('click', async () => {
           if (hasOrientationPermission) return;
@@ -1253,12 +1267,37 @@
       function enableDeviceOrientation() {
         window.addEventListener('deviceorientation', (e) => {
           if (!cardContainer.classList.contains('visible') || isInteracting) return;
-          
+
           const beta = e.beta || 0;
           const gamma = e.gamma || 0;
-          
-          targetTiltX = gamma * 0.4;
-          targetTiltY = (beta - 45) * 0.4;
+
+          // Reduce raw sensitivity slightly and compute desired values
+          const desiredX = gamma * 0.35;
+          const desiredY = (beta - 45) * 0.35;
+
+          // Low-pass filter the sensor input
+          orientationSmoothedX = orientationSmoothedX + (desiredX - orientationSmoothedX) * orientationSmoothingAlpha;
+          orientationSmoothedY = orientationSmoothedY + (desiredY - orientationSmoothedY) * orientationSmoothingAlpha;
+
+          // Only update the visible target when the change is meaningful
+          const dx = Math.abs(orientationSmoothedX - targetTiltX);
+          const dy = Math.abs(orientationSmoothedY - targetTiltY);
+
+          if (dx > orientationThreshold || dy > orientationThreshold) {
+            targetTiltX = orientationSmoothedX;
+            targetTiltY = orientationSmoothedY;
+            orientationActive = true;
+            orientationLastUpdateTime = Date.now();
+            // Treat orientation movement like user interaction for idle logic
+            lastInteractionTime = Date.now();
+          } else {
+            // If the change is small, don't overwrite idle animation; decay orientationActive after timeout
+            if (orientationActive && (Date.now() - orientationLastUpdateTime) < orientationActiveTimeout) {
+              // keep orientationActive until timeout
+            } else {
+              orientationActive = false;
+            }
+          }
         });
       }
     }
