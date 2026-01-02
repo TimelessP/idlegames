@@ -351,7 +351,13 @@
     let orientationLastUpdateTime = 0;
     const orientationSmoothingAlpha = 0.12; // lower = smoother
     const orientationThreshold = 1.5; // degrees; ignore smaller changes
-    const orientationActiveTimeout = 1500; // ms to keep orientation considered active
+    const orientationActiveTimeout = 3000; // ms to keep orientation considered active
+    // Confirmation / inactivity timings
+    let orientationCandidateSince = 0;
+    let orientationInactiveSince = 0;
+    let prevOrientationSmoothedX = 0, prevOrientationSmoothedY = 0;
+    const orientationConfirmTime = 220; // ms of sustained movement before activating
+    const orientationInactiveTime = 900; // ms of sustained quiet before deactivating
 
     const canvasWrapper = document.getElementById('canvas-wrapper');
     let canvasWidth, canvasHeight;
@@ -1276,27 +1282,42 @@
           const desiredY = (beta - 45) * 0.35;
 
           // Low-pass filter the sensor input
+          prevOrientationSmoothedX = orientationSmoothedX;
+          prevOrientationSmoothedY = orientationSmoothedY;
           orientationSmoothedX = orientationSmoothedX + (desiredX - orientationSmoothedX) * orientationSmoothingAlpha;
           orientationSmoothedY = orientationSmoothedY + (desiredY - orientationSmoothedY) * orientationSmoothingAlpha;
 
-          // Only update the visible target when the change is meaningful
-          const dx = Math.abs(orientationSmoothedX - targetTiltX);
-          const dy = Math.abs(orientationSmoothedY - targetTiltY);
+          // How much the smoothed orientation changed this frame
+          const deltaOrient = Math.max(Math.abs(orientationSmoothedX - prevOrientationSmoothedX), Math.abs(orientationSmoothedY - prevOrientationSmoothedY));
 
-          if (dx > orientationThreshold || dy > orientationThreshold) {
+          const now = Date.now();
+
+          // If orientation mode is already active, continuously drive the target
+          if (orientationActive) {
             targetTiltX = orientationSmoothedX;
             targetTiltY = orientationSmoothedY;
-            orientationActive = true;
-            orientationLastUpdateTime = Date.now();
-            // Treat orientation movement like user interaction for idle logic
-            lastInteractionTime = Date.now();
-          } else {
-            // If the change is small, don't overwrite idle animation; decay orientationActive after timeout
-            if (orientationActive && (Date.now() - orientationLastUpdateTime) < orientationActiveTimeout) {
-              // keep orientationActive until timeout
-            } else {
-              orientationActive = false;
+            orientationLastUpdateTime = now;
+            orientationInactiveSince = 0;
+            orientationCandidateSince = 0;
+            return;
+          }
+
+          // If movement exceeds threshold, start/continue candidate timer
+          if (deltaOrient > orientationThreshold) {
+            if (!orientationCandidateSince) orientationCandidateSince = now;
+            // If movement is sustained for confirm time, activate orientation-driven mode
+            if ((now - orientationCandidateSince) >= orientationConfirmTime) {
+              orientationActive = true;
+              orientationInactiveSince = 0;
+              // Immediately apply smoothed orientation as target
+              targetTiltX = orientationSmoothedX;
+              targetTiltY = orientationSmoothedY;
+              orientationLastUpdateTime = now;
+              lastInteractionTime = now; // pause idle
             }
+          } else {
+            // Movement below threshold: reset candidate and no activation
+            orientationCandidateSince = 0;
           }
         });
       }
