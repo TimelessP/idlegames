@@ -484,16 +484,93 @@
       
       // Mark position attribute as needing update
       positions.needsUpdate = true;
-      geometry.computeVertexNormals();
+      // Apply cliff-tucking: detect large z-differences between adjacent vertices
+      // and nudge vertices toward the cliff to reduce stretching artifacts.
+      // Parameters:
+      // - only apply when edge delta >= 10% of total depth range
+      // - strength increases linearly above that threshold
+      // - nearer vertex is nudged by s*delta (toward far), far vertex nudged by 2*s*delta (toward near)
       
-      // Log displacement stats
+      // Gather z values and basic stats
       let minZ = Infinity, maxZ = -Infinity;
+      const zVals = new Float32Array(positions.count);
       for (let i = 0; i < positions.count; i++) {
         const z = positions.getZ(i);
+        zVals[i] = z;
         minZ = Math.min(minZ, z);
         maxZ = Math.max(maxZ, z);
       }
-      console.log(`Mesh Z displacement: min=${minZ.toFixed(3)}, max=${maxZ.toFixed(3)}, range=${(maxZ-minZ).toFixed(3)}`);
+
+      const depthRange = Math.max(1e-6, maxZ - minZ);
+      const cliffThreshold = 0.10 * depthRange; // 10% of total depth
+      const sMax = 0.25; // max per-edge normalized strength (keeps adjustments < ~75% of delta)
+
+      const verticesX = segmentsX + 1;
+      const verticesY = segmentsY + 1;
+      const adjustments = new Float32Array(positions.count);
+
+      // Process horizontal edges (each edge once)
+      for (let y = 0; y < verticesY; y++) {
+        for (let x = 0; x < verticesX - 1; x++) {
+          const a = y * verticesX + x;
+          const b = a + 1;
+          const za = zVals[a];
+          const zb = zVals[b];
+          const delta = za - zb;
+          const absDelta = Math.abs(delta);
+          if (absDelta < cliffThreshold) continue;
+          const cliffPercent = absDelta / depthRange;
+          const norm = Math.max(0, (cliffPercent - 0.10) / 0.90);
+          const s = norm * sMax;
+          if (delta > 0) {
+            // a is near, b is far
+            adjustments[a] += -s * delta; // bring near slightly toward far
+            adjustments[b] += s * delta * 2; // bring far more toward near
+          } else {
+            // b is near, a is far
+            adjustments[a] += s * (-delta) * 2;
+            adjustments[b] += -s * (-delta);
+          }
+        }
+      }
+
+      // Process vertical edges (each edge once)
+      for (let y = 0; y < verticesY - 1; y++) {
+        for (let x = 0; x < verticesX; x++) {
+          const a = y * verticesX + x;
+          const b = a + verticesX;
+          const za = zVals[a];
+          const zb = zVals[b];
+          const delta = za - zb;
+          const absDelta = Math.abs(delta);
+          if (absDelta < cliffThreshold) continue;
+          const cliffPercent = absDelta / depthRange;
+          const norm = Math.max(0, (cliffPercent - 0.10) / 0.90);
+          const s = norm * sMax;
+          if (delta > 0) {
+            // a is near, b is far
+            adjustments[a] += -s * delta;
+            adjustments[b] += s * delta * 2;
+          } else {
+            adjustments[a] += s * (-delta) * 2;
+            adjustments[b] += -s * (-delta);
+          }
+        }
+      }
+
+      // Apply accumulated adjustments
+      let appliedMaxAdj = 0;
+      for (let i = 0; i < positions.count; i++) {
+        if (adjustments[i] !== 0) {
+          const newZ = zVals[i] + adjustments[i];
+          appliedMaxAdj = Math.max(appliedMaxAdj, Math.abs(adjustments[i]));
+          positions.setZ(i, newZ);
+        }
+      }
+
+      positions.needsUpdate = true;
+      geometry.computeVertexNormals();
+      console.log(`Mesh Z displacement: min=${minZ.toFixed(3)}, max=${maxZ.toFixed(3)}, range=${(maxZ-minZ).toFixed(3)}, appliedMaxAdj=${appliedMaxAdj.toFixed(4)}`);
       
       // Custom shader material for holographic effect
       // Mimics the CSS approach from hologram.html: desaturated base + color blend overlay
