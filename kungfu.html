@@ -959,8 +959,8 @@
         const DEFAULT_P1_BINDINGS = {
             left: ['KeyA', {type:'axis', axis:0, dir:-1}],
             right: ['KeyD', {type:'axis', axis:0, dir:1}],
-            up: ['KeyW', {type:'button', btn:12}],  // DPad Up
-            down: ['KeyS', {type:'button', btn:13}], // DPad Down
+            up: ['KeyW', {type:'axis', axis:1, dir:-1}],  // Left stick up
+            down: ['KeyS', {type:'axis', axis:1, dir:1}], // Left stick down
             punch: ['KeyC', {type:'button', btn:2}], // X
             kick: ['KeyX', {type:'button', btn:1}],  // B
             interact: ['KeyE', {type:'button', btn:4}], // LB
@@ -972,8 +972,8 @@
         const DEFAULT_P2_BINDINGS = {
             left: ['KeyJ', {type:'axis', axis:0, dir:-1}],
             right: ['KeyL', {type:'axis', axis:0, dir:1}],
-            up: ['KeyI', {type:'button', btn:12}],
-            down: ['KeyK', {type:'button', btn:13}],
+            up: ['KeyI', {type:'axis', axis:1, dir:-1}],
+            down: ['KeyK', {type:'axis', axis:1, dir:1}],
             punch: ['KeyM', {type:'button', btn:2}],
             kick: ['KeyN', {type:'button', btn:1}],
             interact: ['KeyO', {type:'button', btn:4}],
@@ -1088,11 +1088,13 @@
         // Check if a single binding matches current gamepad state
         function bindingMatchesGamepad(binding, gamepad) {
             if (!binding || typeof binding !== 'object' || !gamepad) return false;
+            const AXIS_THRESHOLD = 0.5;
             if (binding.type === 'button') {
-                return gamepad.buttons[binding.btn]?.pressed;
+                return !!gamepad.buttons && !!gamepad.buttons[binding.btn] && !!gamepad.buttons[binding.btn].pressed;
             } else if (binding.type === 'axis') {
-                const val = gamepad.axes[binding.axis] || 0;
-                return binding.dir < 0 ? val < -0.5 : val > 0.5;
+                const axes = gamepad.axes || [];
+                const val = axes.length > binding.axis ? (axes[binding.axis] || 0) : 0;
+                return binding.dir < 0 ? val < -AXIS_THRESHOLD : val > AXIS_THRESHOLD;
             }
             return false;
         }
@@ -1122,6 +1124,44 @@
             // Legacy single binding
             if (typeof binding === 'string') return keys[binding];
             return bindingMatchesGamepad(binding, gamepad);
+        }
+
+        // -------------------- Unified input snapshots --------------------
+        // All higher-level code (menus/gameplay) should use these helpers and never
+        // directly read gamepad button/axis indices.
+        function getPlayerActionState(playerNum) {
+            const binds = getPlayerKeybinds(playerNum);
+            const gamepad = getPlayerGamepad(playerNum);
+            const state = {};
+            CONTROL_ACTIONS.forEach(action => {
+                state[action] = isActionPressed(binds, action, gamepad);
+            });
+            return state;
+        }
+
+        function getActionEdges(prevState, currState) {
+            const edges = {};
+            CONTROL_ACTIONS.forEach(action => {
+                edges[action] = !!currState[action] && !(prevState && prevState[action]);
+            });
+            return edges;
+        }
+
+        // Menu helpers (these are still configurable bindings; no hard-coded buttons)
+        function isConfirmPressed(actions) {
+            return !!(actions.punch || actions.interact);
+        }
+
+        function isConfirmEdge(edges) {
+            return !!(edges.punch || edges.interact);
+        }
+
+        function isBackPressed(actions) {
+            return !!(actions.kick || actions.pause);
+        }
+
+        function isBackEdge(edges) {
+            return !!(edges.kick || edges.pause);
         }
         
         // Format binding for display
@@ -1687,7 +1727,8 @@
                     keySpan.addEventListener('keydown', (e) => {
                         if (e.code === 'Enter' || e.code === 'Space') {
                             e.preventDefault();
-                            startListening(playerNum, action, keySpan, slot);
+                            e.stopPropagation();
+                            startListening(playerNum, action, keySpan, slot, { initiatorKeyCode: e.code });
                         }
                     });
                 });
@@ -1711,7 +1752,7 @@
             document.getElementById('gp2Status').textContent = gp2 ? (gp2.id.slice(0, 30) + '...') : 'Not Connected';
         }
         
-        function startListening(playerNum, action, element, slot = 0) {
+        function startListening(playerNum, action, element, slot = 0, options = {}) {
             // Cancel any existing listening
             if (settingsListeningFor) {
                 const oldEl = settingsListeningFor.element;
@@ -1723,9 +1764,21 @@
                 }
             }
             
-            settingsListeningFor = { player: playerNum, action, element, slot, gamepadPollId: null };
+            settingsListeningFor = {
+                player: playerNum,
+                action,
+                element,
+                slot,
+                gamepadPollId: null,
+                baseline: null,
+                ignoreKeyCode: options.initiatorKeyCode || null,
+                ignoreKeyUntil: options.initiatorKeyCode ? (performance.now() + 250) : 0
+            };
             element.classList.add('listening');
             element.textContent = '...';
+
+            // Reset last state so axis/button changes are detected reliably
+            lastGamepadState = { buttons: [], axes: [] };
             
             // Start polling for gamepad input
             startGamepadListening();
@@ -1739,6 +1792,21 @@
             
             const gamepad = getPlayerGamepad(settingsListeningFor.player);
             if (gamepad) {
+                // Capture a baseline snapshot (prevents missing axis binds when the stick
+                // was already slightly off-center, and avoids accidental instant binds).
+                if (!settingsListeningFor.baseline) {
+                    settingsListeningFor.baseline = {
+                        buttons: (gamepad.buttons || []).map(b => !!b && !!b.pressed),
+                        axes: [...(gamepad.axes || [])]
+                    };
+                    // Prime last state too
+                    lastGamepadState.buttons = [...settingsListeningFor.baseline.buttons];
+                    lastGamepadState.axes = [...settingsListeningFor.baseline.axes];
+
+                    settingsListeningFor.gamepadPollId = requestAnimationFrame(startGamepadListening);
+                    return;
+                }
+
                 // Check for new button press
                 for (let i = 0; i < gamepad.buttons.length; i++) {
                     const pressed = gamepad.buttons[i]?.pressed;
@@ -1751,12 +1819,16 @@
                 }
                 
                 // Check for axis movement
-                for (let i = 0; i < gamepad.axes.length; i++) {
-                    const val = gamepad.axes[i] || 0;
-                    const lastVal = lastGamepadState.axes[i] || 0;
-                    if (Math.abs(val) > 0.7 && Math.abs(lastVal) < 0.5) {
-                        // New axis movement detected
-                        applyGamepadBinding({ type: 'axis', axis: i, dir: val < 0 ? -1 : 1 });
+                const AXIS_BIND_DELTA = 0.65;
+                const axes = gamepad.axes || [];
+                const baselineAxes = settingsListeningFor.baseline.axes || [];
+                for (let i = 0; i < axes.length; i++) {
+                    const val = axes[i] || 0;
+                    const base = baselineAxes.length > i ? (baselineAxes[i] || 0) : 0;
+                    const delta = val - base;
+                    if (Math.abs(delta) > AXIS_BIND_DELTA) {
+                        // Axis moved far enough away from baseline
+                        applyGamepadBinding({ type: 'axis', axis: i, dir: delta < 0 ? -1 : 1 });
                         return;
                     }
                 }
@@ -1794,6 +1866,17 @@
             saveControlConfig();
             renderControlsGrid(1);
             renderControlsGrid(2);
+
+            // Prevent the newly-bound (and possibly still-held) input from immediately
+            // triggering settings navigation.
+            suppressSettingsNavUntil = performance.now() + 250;
+
+            if (gpBinding?.type === 'button') {
+                suppressSettingsNavWaitForRelease = { kind: 'gamepad-button', player, btn: gpBinding.btn };
+            } else if (gpBinding?.type === 'axis') {
+                const baseline = settingsListeningFor?.baseline?.axes?.[gpBinding.axis] ?? 0;
+                suppressSettingsNavWaitForRelease = { kind: 'gamepad-axis', player, axis: gpBinding.axis, baseline };
+            }
             
             element.classList.remove('listening');
             if (settingsListeningFor.gamepadPollId) {
@@ -1812,6 +1895,16 @@
             
             e.preventDefault();
             e.stopPropagation();
+
+            // If listening was initiated via Enter/Space on the control cell, ignore that
+            // initiating key so it can't be immediately captured as the new binding.
+            if (
+                settingsListeningFor.ignoreKeyCode &&
+                e.code === settingsListeningFor.ignoreKeyCode &&
+                performance.now() < settingsListeningFor.ignoreKeyUntil
+            ) {
+                return true;
+            }
             
             const { player, action, element, slot } = settingsListeningFor;
             const newKey = e.code;
@@ -1828,6 +1921,8 @@
                 saveControlConfig();
                 renderControlsGrid(1);
                 renderControlsGrid(2);
+
+                suppressSettingsNavUntil = performance.now() + 250;
                 element.classList.remove('listening');
                 if (settingsListeningFor.gamepadPollId) {
                     cancelAnimationFrame(settingsListeningFor.gamepadPollId);
@@ -1858,6 +1953,9 @@
             // Refresh both grids to show cleared bindings
             renderControlsGrid(1);
             renderControlsGrid(2);
+
+            suppressSettingsNavUntil = performance.now() + 250;
+            suppressSettingsNavWaitForRelease = { kind: 'key', code: newKey };
             
             element.classList.remove('listening');
             if (settingsListeningFor.gamepadPollId) {
@@ -2017,7 +2115,6 @@
             initTitleParticles();
             titleScreenLoop.lastTime = performance.now();
             requestAnimationFrame(titleScreenLoop);
-            startMenuGamepadPolling();
         }
         
         function showSettingsScreen() {
@@ -2031,7 +2128,6 @@
             renderDebugControlsGrid();
             updatePresetSlots(1);
             updatePresetSlots(2);
-            startMenuGamepadPolling();
             // Focus first tab for keyboard navigation
             document.querySelector('.settingsTab.active')?.focus();
         }
@@ -2042,7 +2138,6 @@
             document.getElementById('settingsScreen').classList.add('hidden');
             document.getElementById('hud').classList.remove('hidden');
             document.getElementById('arena').style.display = 'block';
-            stopMenuGamepadPolling();
         }
 
         // ==================== META-TEXT DIALOG SYSTEM ====================
@@ -6394,62 +6489,71 @@
         // Input handling state
         let lastTapTime = 0;
         let lastTapKey = null;
-        let lastStartBtn = false;
-        let lastPunchBtn = false;
-        let lastKickBtn = false;
+        // Track previous Player 1 action state for edge detection
+        let lastP1Actions = null;
+
+        // When rebinding controls in Settings, suppress menu navigation briefly after
+        // a bind is applied (prevents the newly-bound input from immediately acting
+        // as Back/Confirm in the same frame).
+        let suppressSettingsNavUntil = 0;
+
+        // Additionally, suppress navigation until the newly-bound input is released.
+        // This prevents special buttons (e.g., Home) from immediately triggering Back.
+        let suppressSettingsNavWaitForRelease = null;
+
+        function isSettingsNavSuppressed() {
+            if (performance.now() < suppressSettingsNavUntil) return true;
+            if (!suppressSettingsNavWaitForRelease) return false;
+
+            const s = suppressSettingsNavWaitForRelease;
+            if (s.kind === 'key') {
+                if (keys[s.code]) return true;
+                suppressSettingsNavWaitForRelease = null;
+                return false;
+            }
+
+            const gamepad = getPlayerGamepad(s.player);
+            if (!gamepad) {
+                suppressSettingsNavWaitForRelease = null;
+                return false;
+            }
+
+            if (s.kind === 'gamepad-button') {
+                if (gamepad.buttons?.[s.btn]?.pressed) return true;
+                suppressSettingsNavWaitForRelease = null;
+                return false;
+            }
+
+            if (s.kind === 'gamepad-axis') {
+                const val = (gamepad.axes?.[s.axis] ?? 0);
+                const base = (s.baseline ?? 0);
+                if (Math.abs(val - base) > 0.25) return true;
+                suppressSettingsNavWaitForRelease = null;
+                return false;
+            }
+
+            suppressSettingsNavWaitForRelease = null;
+            return false;
+        }
+
+        // Gamepad sprint (double-tap left/right action)
+        let lastMoveTapTime = 0;
+        let lastMoveTapDir = 0;
 
         // Debug state
         let debugMode = false;
         let debugBuffer = '';
         
-        // Menu gamepad state
-        let menuGamepadState = { up: false, down: false, left: false, right: false, a: false, b: false };
-        let menuGamepadPollId = null;
-        
-        function pollMenuGamepad() {
-            const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-            const gp = gamepads[0];
-            
-            if (!gp) {
-                menuGamepadPollId = requestAnimationFrame(pollMenuGamepad);
-                return;
-            }
-            
-            const threshold = 0.5;
-            const newState = {
-                up: gp.axes[1] < -threshold || gp.buttons[12]?.pressed,
-                down: gp.axes[1] > threshold || gp.buttons[13]?.pressed,
-                left: gp.axes[0] < -threshold || gp.buttons[14]?.pressed,
-                right: gp.axes[0] > threshold || gp.buttons[15]?.pressed,
-                a: gp.buttons[0]?.pressed,
-                b: gp.buttons[1]?.pressed
-            };
-            
-            // Detect rising edges
-            if (newState.up && !menuGamepadState.up) handleMenuGamepadInput('up');
-            if (newState.down && !menuGamepadState.down) handleMenuGamepadInput('down');
-            if (newState.left && !menuGamepadState.left) handleMenuGamepadInput('left');
-            if (newState.right && !menuGamepadState.right) handleMenuGamepadInput('right');
-            if (newState.a && !menuGamepadState.a) handleMenuGamepadInput('a');
-            if (newState.b && !menuGamepadState.b) handleMenuGamepadInput('b');
-            
-            menuGamepadState = newState;
-            
-            if (currentScreen === 'title' || currentScreen === 'settings') {
-                menuGamepadPollId = requestAnimationFrame(pollMenuGamepad);
-            }
-        }
-        
-        function handleMenuGamepadInput(action) {
+        function handleMenuNavAction(action) {
             if (currentScreen === 'title') {
                 if (action === 'up') updateMenuSelection(-1);
                 if (action === 'down') updateMenuSelection(1);
-                if (action === 'a') activateMenuSelection();
+                if (action === 'confirm') activateMenuSelection();
             } else if (currentScreen === 'settings') {
                 const focusedEl = document.activeElement;
                 const isInTabs = focusedEl && focusedEl.classList.contains('settingsTab');
                 
-                if (action === 'b') {
+                if (action === 'back') {
                     showTitleScreen();
                     return;
                 }
@@ -6471,7 +6575,7 @@
                         tabs[currentIdx - 1].focus();
                     } else if (action === 'down' && currentIdx < tabs.length - 1) {
                         tabs[currentIdx + 1].focus();
-                    } else if (action === 'a' || action === 'right') {
+                    } else if (action === 'confirm' || action === 'right') {
                         // Activate tab if not already active
                         if (!focusedEl.classList.contains('active')) {
                             focusedEl.click();
@@ -6493,7 +6597,7 @@
                     if (action === 'left') {
                         const activeTab = document.querySelector('.settingsTab.active');
                         if (activeTab) activeTab.focus();
-                    } else if (action === 'a') {
+                    } else if (action === 'confirm') {
                         if (focusedEl) focusedEl.click();
                     } else if (action === 'up' && currentIdx > 0) {
                         focusables[currentIdx - 1].focus();
@@ -6505,41 +6609,7 @@
                 }
             }
         }
-        
-        function startMenuGamepadPolling() {
-            if (menuGamepadPollId) cancelAnimationFrame(menuGamepadPollId);
-            menuGamepadState = { up: false, down: false, left: false, right: false, a: false, b: false };
-            menuGamepadPollId = requestAnimationFrame(pollMenuGamepad);
-        }
-        
-        function stopMenuGamepadPolling() {
-            if (menuGamepadPollId) {
-                cancelAnimationFrame(menuGamepadPollId);
-                menuGamepadPollId = null;
-            }
-        }
 
-        function getGamepadInput() {
-            const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-            const gp = gamepads[0]; // Use first gamepad
-            
-            if (!gp) return { left: false, right: false, up: false, down: false, punch: false, kick: false, sprint: false, start: false, interact: false, dpadUp: false, dpadDown: false };
-
-            const threshold = 0.5;
-            return {
-                left: gp.axes[0] < -threshold || gp.buttons[14].pressed,
-                right: gp.axes[0] > threshold || gp.buttons[15].pressed,
-                up: gp.axes[1] < -threshold || gp.buttons[12].pressed || gp.buttons[0].pressed, // Up or A
-                down: gp.axes[1] > threshold || gp.buttons[13].pressed,
-                dpadUp: gp.buttons[12]?.pressed || gp.axes[1] < -threshold,
-                dpadDown: gp.buttons[13]?.pressed || gp.axes[1] > threshold,
-                punch: gp.buttons[2].pressed || gp.buttons[3].pressed, // X or Y
-                kick: gp.buttons[1].pressed || gp.buttons[5].pressed, // B or RB (Wait, RB is sprint usually, let's use B)
-                sprint: gp.buttons[5].pressed || gp.buttons[7].pressed, // RB or RT
-                start: gp.buttons[9].pressed,
-                interact: gp.buttons[4].pressed // LB for pickup/drop weapon
-            };
-        }
 
         // ==================== FIGHTER CLASS ====================
         class Fighter {
@@ -7750,34 +7820,35 @@
         }
 
         // ==================== PLAYER INPUT ====================
-        function handlePlayerInput(fighter) {
+        function handlePlayerInput(fighter, actions, edges) {
             if (fighter.stunTimer > 0) return;
-            
-            const gamepad = getPlayerGamepad(1);
-            const binds = getPlayerKeybinds(1); // Player 1 controls
 
-            // Movement - unified bindings (keyboard + gamepad in config)
-            // Also always allow arrow keys and gamepad D-pad/stick as hardcoded fallback
+            // Movement - configurable bindings only
             let moveDir = 0;
-            const hardLeft = keys['ArrowLeft'] || (gamepad && (gamepad.axes[0] < -0.5 || gamepad.buttons[14]?.pressed));
-            const hardRight = keys['ArrowRight'] || (gamepad && (gamepad.axes[0] > 0.5 || gamepad.buttons[15]?.pressed));
-            if (isActionPressed(binds, 'left', gamepad) || hardLeft) moveDir -= 1;
-            if (isActionPressed(binds, 'right', gamepad) || hardRight) moveDir += 1;
+            if (actions.left) moveDir -= 1;
+            if (actions.right) moveDir += 1;
             
-            // Sprint (Gamepad RB)
-            const gpSprint = gamepad && gamepad.buttons[5]?.pressed;
-            if (gamepad && (gamepad.axes[0] < -0.5 || gamepad.axes[0] > 0.5 || gamepad.buttons[14]?.pressed || gamepad.buttons[15]?.pressed)) {
-                fighter.isSprinting = gpSprint;
+            // Sprint: double-tap left/right (works for both keyboard+gamepad because it's based on actions)
+            if (fighter.onGround && (edges.left || edges.right) && gameState === 'fighting') {
+                const now = performance.now();
+                const dir = edges.left ? -1 : 1;
+                if (lastMoveTapDir === dir && now - lastMoveTapTime < 300) {
+                    fighter.isSprinting = true;
+                }
+                lastMoveTapDir = dir;
+                lastMoveTapTime = now;
+            }
+            // Stop sprinting if movement is released
+            if (!actions.left && !actions.right) {
+                fighter.isSprinting = false;
             }
 
-            // Crouch - unified bindings + hardcoded fallback
-            const hardDown = keys['ArrowDown'] || (gamepad && (gamepad.axes[1] > 0.5 || gamepad.buttons[13]?.pressed));
-            const wantCrouch = isActionPressed(binds, 'down', gamepad) || hardDown;
+            // Crouch - configurable bindings
+            const wantCrouch = actions.down;
             fighter.crouch(wantCrouch && fighter.onGround);
             
-            // Jump - unified bindings + hardcoded fallback
-            const hardUp = keys['ArrowUp'] || (gamepad && (gamepad.buttons[0]?.pressed || gamepad.buttons[12]?.pressed));
-            if ((isActionPressed(binds, 'up', gamepad) || hardUp) && fighter.onGround && !wantCrouch) {
+            // Jump - configurable bindings
+            if (actions.up && fighter.onGround && !wantCrouch) {
                 fighter.jump(moveDir);
             }
             
@@ -7788,23 +7859,21 @@
                 fighter.vx = 0;
             }
             
-            // Punch - unified bindings
-            const punchKey = isActionPressed(binds, 'punch', gamepad);
-            if (punchKey && !fighter.lastPunchKey) {
+            // Punch
+            if (actions.punch && !fighter.lastPunchKey) {
                 fighter.punch(fighter.crouching);
             }
-            fighter.lastPunchKey = punchKey;
+            fighter.lastPunchKey = actions.punch;
             
-            // Kick - unified bindings (don't kick if sprinting)
-            const kickKey = isActionPressed(binds, 'kick', gamepad) && !gpSprint;
-            if (kickKey && !fighter.lastKickKey) {
+            // Kick (don't kick while sprinting)
+            const kickPressed = actions.kick && !fighter.isSprinting;
+            if (kickPressed && !fighter.lastKickKey) {
                 fighter.kick(fighter.crouching);
             }
-            fighter.lastKickKey = kickKey;
+            fighter.lastKickKey = kickPressed;
             
-            // Interact - unified bindings
-            const interactKey = isActionPressed(binds, 'interact', gamepad);
-            if (interactKey && !fighter.lastInteractKey) {
+            // Interact
+            if (actions.interact && !fighter.lastInteractKey) {
                 if (fighter.weapon) {
                     // Drop current weapon
                     fighter.dropWeapon();
@@ -7813,7 +7882,7 @@
                     tryPickupWeapon(fighter);
                 }
             }
-            fighter.lastInteractKey = interactKey;
+            fighter.lastInteractKey = actions.interact;
         }
         
         function tryPickupWeapon(fighter) {
@@ -8228,92 +8297,65 @@
         }
 
         // ==================== GAME LOOP ====================
-        // Gamepad tracking for menu navigation
-        let lastGpUp = false;
-        let lastGpDown = false;
-        
         function gameLoop(timestamp) {
             let dt = Math.min((timestamp - lastTime) / 1000, 0.05); // Cap dt to prevent huge jumps
             lastTime = timestamp;
-            
-            // Gamepad Menu Control
-            const gp = getGamepadInput();
-            
-            // Title screen gamepad navigation
+
+            // Player 1 input snapshot (bindings-driven)
+            const p1Actions = getPlayerActionState(1);
+            const p1Edges = getActionEdges(lastP1Actions, p1Actions);
+
+            // Title / Settings navigation using bindings
             if (currentScreen === 'title') {
-                // D-pad or left stick for menu navigation
-                const gpUp = gp.up || gp.dpadUp;
-                const gpDown = gp.down || gp.dpadDown;
-                
-                if (gpUp && !lastGpUp) {
-                    updateMenuSelection(-1);
-                }
-                if (gpDown && !lastGpDown) {
-                    updateMenuSelection(1);
-                }
-                lastGpUp = gpUp;
-                lastGpDown = gpDown;
-                
-                // A button or Start to select
-                const gpSelect = (gp.punch && !lastPunchBtn) || (gp.start && !lastStartBtn);
-                if (gpSelect) {
-                    activateMenuSelection();
-                }
+                if (p1Edges.up) handleMenuNavAction('up');
+                if (p1Edges.down) handleMenuNavAction('down');
+                if (isConfirmEdge(p1Edges)) handleMenuNavAction('confirm');
             } else if (currentScreen === 'settings') {
-                // B button to go back from settings
-                if (gp.kick && !lastKickBtn) {
-                    showTitleScreen();
+                // While rebinding, ignore navigation actions so gamepad presses are captured.
+                if (!settingsListeningFor && !isSettingsNavSuppressed()) {
+                    if (p1Edges.up) handleMenuNavAction('up');
+                    if (p1Edges.down) handleMenuNavAction('down');
+                    if (p1Edges.left) handleMenuNavAction('left');
+                    if (p1Edges.right) handleMenuNavAction('right');
+                    if (isConfirmEdge(p1Edges)) handleMenuNavAction('confirm');
+                    if (isBackEdge(p1Edges)) handleMenuNavAction('back');
                 }
             }
-            
-            // Pause menu gamepad navigation
+
+            // Pause menu navigation (when paused)
             if (gameState === 'paused' && currentScreen === 'game') {
-                // Navigate with D-pad
-                if (gp.dpadUp && !lastGpUp) {
-                    navigatePauseMenu(-1);
-                }
-                if (gp.dpadDown && !lastGpDown) {
-                    navigatePauseMenu(1);
-                }
-                // A button to select
-                if (gp.punch && !lastPunchBtn) {
-                    activatePauseMenuSelection();
-                }
-                // B button to resume (like pressing pause again)
-                if (gp.kick && !lastKickBtn) {
-                    togglePause();
-                }
+                if (p1Edges.up) navigatePauseMenu(-1);
+                if (p1Edges.down) navigatePauseMenu(1);
+                if (isConfirmEdge(p1Edges)) activatePauseMenuSelection();
+                // Back acts like resume
+                if (isBackEdge(p1Edges)) togglePause();
             }
-            
-            // Action buttons (punch/kick) can dismiss modals
-            const gpActionPressed = (gp.punch || gp.kick) && !(lastPunchBtn || lastKickBtn);
-            
-            if (gpActionPressed && currentScreen === 'game') {
+
+            // Dialog / end screens: confirm/back can advance
+            const actionEdge = isConfirmEdge(p1Edges) || isBackEdge(p1Edges);
+            if (actionEdge && currentScreen === 'game') {
                 if (gameState === 'dialog') {
                     advanceDialog();
                 } else if (gameState === 'gameOver' || gameState === 'victory') {
                     restartGame();
                 }
             }
-            lastPunchBtn = gp.punch;
-            lastKickBtn = gp.kick;
-            
-            // Start button for pause/unpause and modals
-            if (gp.start && !lastStartBtn && currentScreen === 'game') {
+
+            // Pause toggle in game via configured pause action
+            if (p1Edges.pause && currentScreen === 'game') {
                 if (gameState === 'gameOver' || gameState === 'victory') {
                     restartGame();
                 } else if (gameState === 'fighting' || gameState === 'paused') {
                     togglePause();
                 }
             }
-            lastStartBtn = gp.start;
 
             if (gameState === 'fighting' || gameState === 'ko') {
                 // Slow motion during KO
                 if (gameState === 'ko') dt *= 0.2;
 
                 // Handle input (only if fighting)
-                if (gameState === 'fighting') handlePlayerInput(player);
+                if (gameState === 'fighting') handlePlayerInput(player, p1Actions, p1Edges);
                 
                 // Update AI (only if fighting)
                 if (gameState === 'fighting') {
@@ -8510,6 +8552,9 @@
             render();
             
             requestAnimationFrame(gameLoop);
+
+            // Update input history after processing
+            lastP1Actions = p1Actions;
         }
 
         function render() {
