@@ -379,27 +379,91 @@
       // This ensures users never see the mesh boundaries - it looks infinite
       const meshScale = 1.26;
       
-      // Subdivided plane geometry
-      const segments = 128;
-      const geometry = new THREE.PlaneGeometry(imageAspect * meshScale, meshScale, segments, segments);
+      // Subdivided plane geometry (higher segments -> smaller triangles -> smoother surface)
+      // Create a 3x tiled plane so we can mirror topology around the central tile
+      const baseSegments = 512;
+      const tiles = 3;
+      const segmentsX = baseSegments * tiles;
+      const segmentsY = baseSegments * tiles;
+      const geometry = new THREE.PlaneGeometry(imageAspect * meshScale * tiles, meshScale * tiles, segmentsX, segmentsY);
+
+      // Modify UVs so they span across -1..2 (three tiles) allowing mirrored repeat sampling
+      const uvs = geometry.attributes.uv;
+      for (let i = 0; i < uvs.count; i++) {
+        const u0 = uvs.getX(i);
+        const v0 = uvs.getY(i);
+        // Expand range to cover three tiles and shift so center tile maps to 0..1
+        const uGlobal = u0 * tiles - 1.0; // maps 0..1 to -1..2
+        const vGlobal = v0 * tiles - 1.0;
+        uvs.setXY(i, uGlobal, vGlobal);
+      }
+      uvs.needsUpdate = true;
       
       // Displace vertices by depth
       const positions = geometry.attributes.position;
-      const uvs = geometry.attributes.uv;
-      
+      // uvs already defined above and represent global UVs spanning -1..2
+      const uvsAttr = geometry.attributes.uv;
+
+      // Compute normalized depth range (0..1) so we scale displacement based on actual depth contrast
+      let normMin = 1.0, normMax = 0.0;
+      for (let i = 0; i < depthData.length; i++) {
+        const v = depthData[i];
+        if (!isNaN(v) && isFinite(v)) {
+          normMin = Math.min(normMin, v);
+          normMax = Math.max(normMax, v);
+        }
+      }
+      if (!isFinite(normMin)) normMin = 0.0;
+      if (!isFinite(normMax)) normMax = 1.0;
+      const normRange = Math.max(0.0, normMax - normMin);
+
+      // Determine physical mesh size (world units) and take the smallest dimension
+      const meshWidth = imageAspect * meshScale;
+      const meshHeight = meshScale;
+      const smallestDim = Math.min(meshWidth, meshHeight);
+
+      // Choose a base factor for how deep the effect should be relative to the smallest dimension.
+      // Multiply by the normalized depth range so maps with little contrast don't produce huge displacement.
+      const baseFactor = 0.7; // tunable — larger = deeper (doubled per request)
+      let displacementScale = smallestDim * baseFactor * normRange;
+
+      // Clamp to reasonable bounds so we always have some depth but never a ridiculous amount
+      const minDepthFrac = 0.05; // at least 5% of smallest dimension
+      const maxDepthFrac = 0.6;  // at most 60% of smallest dimension
+      displacementScale = Math.max(displacementScale, smallestDim * minDepthFrac);
+      displacementScale = Math.min(displacementScale, smallestDim * maxDepthFrac);
+
       // Track sample statistics for debugging
       let sampledDepthMin = 1, sampledDepthMax = 0;
       let validSamples = 0;
-      
+
+      // Helper to map a global UV coordinate to a mirrored local coordinate in [0,1]
+      function mirroredLocalCoord(u) {
+        // tile index
+        let tile = Math.floor(u);
+        let local = u - tile;
+        // parity (0 = normal, 1 = mirrored)
+        const parity = ((tile % 2) + 2) % 2;
+        if (parity === 1) local = 1.0 - local;
+        // clamp
+        if (local < 0) local = 0;
+        if (local > 1) local = 1;
+        return local;
+      }
+
       for (let i = 0; i < positions.count; i++) {
-        const u = uvs.getX(i);
-        const v = uvs.getY(i);
-        
-        // Sample depth at UV coordinates with bounds checking
-        const px = Math.min(Math.max(Math.floor(u * depthWidth), 0), depthWidth - 1);
-        const py = Math.min(Math.max(Math.floor((1 - v) * depthHeight), 0), depthHeight - 1);
+        const uGlobal = uvsAttr.getX(i);
+        const vGlobal = uvsAttr.getY(i);
+
+        // Map to mirrored local UVs in [0,1]
+        const uLocal = mirroredLocalCoord(uGlobal);
+        const vLocal = mirroredLocalCoord(vGlobal);
+
+        // Sample depth at mirrored UV coordinates with bounds checking
+        const px = Math.min(Math.max(Math.floor(uLocal * depthWidth), 0), depthWidth - 1);
+        const py = Math.min(Math.max(Math.floor((1 - vLocal) * depthHeight), 0), depthHeight - 1);
         const depthIndex = py * depthWidth + px;
-        
+
         // Get depth value with fallback
         let depth = depthData[depthIndex];
         if (depth === undefined || isNaN(depth)) {
@@ -409,15 +473,14 @@
           sampledDepthMax = Math.max(sampledDepthMax, depth);
           validSamples++;
         }
-        
+
         // Displace Z based on depth - scale to visible 3D effect
         // depth 0 = far (negative Z), depth 1 = near (positive Z)
-        const displacementScale = 0.25; // Total depth range in world units
         const displacement = (depth - 0.5) * displacementScale;
         positions.setZ(i, isNaN(displacement) ? 0 : displacement);
       }
-      
-      console.log(`Depth sampling: ${validSamples}/${positions.count} valid, sampled range: ${sampledDepthMin.toFixed(3)} to ${sampledDepthMax.toFixed(3)}`);
+
+      console.log(`Depth sampling: ${validSamples}/${positions.count} valid, sampled range: ${sampledDepthMin.toFixed(3)} to ${sampledDepthMax.toFixed(3)}, displacementScale=${displacementScale.toFixed(4)}`);
       
       // Mark position attribute as needing update
       positions.needsUpdate = true;
@@ -530,12 +593,12 @@
             // Fresnel edge highlight (reduced - card overlay handles main specular)
             float fresnel = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 3.0);
             vec3 fresnelColor = hsv2rgb(vec3(fract(hue + 0.2), 0.6, 1.0));
-            holoColor += fresnelColor * fresnel * 0.08;
+            holoColor += fresnelColor * fresnel * 0.04;
             
             // Minimal specular - just subtle depth highlights, card overlay has main specular
             vec3 lightDir = normalize(vec3(-tiltX * 0.3, -tiltY * 0.3, 1.0));
             float spec = pow(max(dot(reflect(-lightDir, vNormal), viewDir), 0.0), 64.0);
-            holoColor += vec3(1.0) * spec * 0.1;
+            holoColor += vec3(1.0) * spec * 0.05;
             
             gl_FragColor = vec4(holoColor, 1.0);
           }
