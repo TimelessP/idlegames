@@ -314,6 +314,42 @@
       background: var(--btn-hover);
     }
 
+    /* TX frequency controls */
+    .freq-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
+    .freq-row label {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .freq-row input[type="number"] {
+      width: 8.5rem;
+      padding: 0.5rem 0.65rem;
+      border: 1px solid var(--border-color);
+      border-radius: 0.5rem;
+      background: var(--panel-bg);
+      color: var(--text-color);
+      font-family: inherit;
+      font-size: 0.9375rem;
+    }
+
+    .freq-row input[type="number"]:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .freq-row .btn {
+      flex: 0 0 auto;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.875rem;
+    }
+
     /* Status indicator */
     .status {
       display: flex;
@@ -625,6 +661,12 @@
         </button>
       </div>
 
+      <div class="freq-row" aria-label="Transmit tone frequency">
+        <label for="txFreqHz">Tone (Hz)</label>
+        <input id="txFreqHz" type="number" inputmode="numeric" min="200" max="4000" step="10" aria-label="Transmit tone frequency in Hz" />
+        <button class="btn btn-receive" id="txFreqResetBtn" type="button" aria-label="Reset tone frequency">Reset</button>
+      </div>
+
       <label class="io-label" for="encodedDots" style="margin-top: 1rem;">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M4 7h16" />
@@ -866,6 +908,8 @@
       WORD_PAUSE: 900          // word gap (>= ~10x)
     };
 
+    const TX_DEFAULT_FREQ = 800; // Hz (within phone band)
+
     // Audio context
     let audioCtx = null;
 
@@ -973,9 +1017,17 @@
     // State
     let isSending = false;
     let sendAbort = null;
+    let sendSource = null;
+    let sendUiTimers = [];
+    let txFrequencyHz = TX_DEFAULT_FREQ;
     let isRecording = false;
     let mediaRecorder = null;
     let audioChunks = [];
+    let lastDecodedAudioBuffer = null;
+    let isDecoding = false;
+    let pendingRedecode = false;
+    let manualEnvelopeThresholds = null; // { thOn, thOff } in envelope units
+    let forceDecodeFreqHz = null; // when user picks freq via chart
 
     // DOM elements
     const sendInput = document.getElementById('sendInput');
@@ -985,6 +1037,8 @@
     const sendDot = document.getElementById('sendDot');
     const sendStatusText = document.getElementById('sendStatusText');
     const sendViz = document.getElementById('sendViz');
+    const txFreqHzInput = document.getElementById('txFreqHz');
+    const txFreqResetBtn = document.getElementById('txFreqResetBtn');
     const encodedDots = document.getElementById('encodedDots');
     const decodeDotsBtn = document.getElementById('decodeDotsBtn');
     const copyDotsBtn = document.getElementById('copyDotsBtn');
@@ -1052,6 +1106,39 @@
       });
     }
 
+    function clamp(n, lo, hi) {
+      return Math.max(lo, Math.min(hi, n));
+    }
+
+    function sanitizeTxFrequencyHz(value) {
+      const v = Number(value);
+      if (!isFinite(v)) return TX_DEFAULT_FREQ;
+      // Keep within a reasonable phone-speaker / mic band.
+      return Math.round(clamp(v, 200, 4000));
+    }
+
+    function setTxFrequencyHz(value, opts = {}) {
+      const { updateInput = true } = opts;
+      txFrequencyHz = sanitizeTxFrequencyHz(value);
+      if (updateInput && txFreqHzInput) txFreqHzInput.value = String(txFrequencyHz);
+    }
+
+    if (txFreqHzInput) {
+      txFreqHzInput.value = String(txFrequencyHz);
+      txFreqHzInput.addEventListener('input', () => {
+        setTxFrequencyHz(txFreqHzInput.value, { updateInput: true });
+      });
+      txFreqHzInput.addEventListener('change', () => {
+        setTxFrequencyHz(txFreqHzInput.value, { updateInput: true });
+      });
+    }
+
+    if (txFreqResetBtn) {
+      txFreqResetBtn.addEventListener('click', () => {
+        setTxFrequencyHz(TX_DEFAULT_FREQ);
+      });
+    }
+
     // Play a tap sound
     async function playTap(frequency = 800) {
       const ctx = getAudioContext();
@@ -1076,10 +1163,20 @@
       gainNode.connect(ctx.destination);
       
       oscillator.start();
-      oscillator.stop(ctx.currentTime + TIMING.TAP_DURATION / 1000 + 0.02);
-      
+      const endTime = ctx.currentTime + TIMING.TAP_DURATION / 1000 + 0.02;
+      oscillator.stop(endTime);
+
+      // Resolve when the actual audio finishes (more accurate than setTimeout).
       return new Promise(resolve => {
-        setTimeout(resolve, TIMING.TAP_DURATION);
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        oscillator.onended = finish;
+        // Fallback in case onended is delayed/not fired.
+        setTimeout(finish, Math.ceil(TIMING.TAP_DURATION + 60));
       });
     }
 
@@ -1131,6 +1228,102 @@
       return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    function clearSendUiTimers() {
+      for (const t of sendUiTimers) clearTimeout(t);
+      sendUiTimers = [];
+    }
+
+    function buildSendTimeline(tapTokens) {
+      // Build absolute time events (ms) for both audio rendering and UI scheduling.
+      // Timeline begins with a warm-up silence (WORD_PAUSE) to avoid missing first tap.
+      let t = 0;
+      const events = [];
+
+      const freq = sanitizeTxFrequencyHz(txFrequencyHz);
+
+      function addSilence(ms, reason = 'pause') {
+        if (ms > 0) {
+          events.push({ kind: 'silence', reason, startMs: t, durMs: ms });
+          t += ms;
+        }
+      }
+
+      function addTap(ms, frequency, meta) {
+        events.push({ kind: 'tap', startMs: t, durMs: ms, frequency, meta });
+        t += ms;
+      }
+
+      // Warm-up
+      addSilence(TIMING.WORD_PAUSE, 'warmup');
+
+      for (let i = 0; i < tapTokens.length; i++) {
+        const tok = tapTokens[i];
+
+        if (tok.type === 'word_pause') {
+          addSilence(TIMING.WORD_PAUSE, 'word');
+          continue;
+        }
+
+        // Letter: row taps, row->col gap, col taps, optional letter gap
+        events.push({ kind: 'ui', type: 'letterStart', startMs: t, meta: { row: tok.row, col: tok.col, char: tok.char } });
+
+        for (let r = 0; r < tok.row; r++) {
+          addTap(TIMING.TAP_DURATION, freq, { phase: 'row', idx: r, ...tok });
+          if (r < tok.row - 1) addSilence(TIMING.INTRA_TAP, 'intra');
+        }
+
+        addSilence(TIMING.ROW_COL_PAUSE, 'rowcol');
+
+        for (let c = 0; c < tok.col; c++) {
+          addTap(TIMING.TAP_DURATION, freq, { phase: 'col', idx: c, ...tok });
+          if (c < tok.col - 1) addSilence(TIMING.INTRA_TAP, 'intra');
+        }
+
+        events.push({ kind: 'ui', type: 'letterEnd', startMs: t, meta: { row: tok.row, col: tok.col, char: tok.char } });
+
+        if (i < tapTokens.length - 1 && tapTokens[i + 1].type !== 'word_pause') {
+          addSilence(TIMING.LETTER_PAUSE, 'letter');
+        }
+      }
+
+      return { events, totalMs: t };
+    }
+
+    async function renderTapCodeAudioBuffer(events, sampleRate) {
+      const totalMs = Math.max(0, events.totalMs || 0);
+      const durationSec = Math.max(0.01, totalMs / 1000);
+      const length = Math.max(1, Math.ceil(sampleRate * durationSec));
+      const offline = new OfflineAudioContext(1, length, sampleRate);
+
+      // Render taps by scheduling oscillators; silences are implicit.
+      for (const ev of (events.events || [])) {
+        if (ev.kind !== 'tap') continue;
+        const osc = offline.createOscillator();
+        const g = offline.createGain();
+
+        const startSec = ev.startMs / 1000;
+        const tapDurSec = (ev.durMs || TIMING.TAP_DURATION) / 1000;
+        const endSec = startSec + tapDurSec + 0.02;
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(ev.frequency || TX_DEFAULT_FREQ, startSec);
+
+        // Envelope similar to playTap()
+        g.gain.setValueAtTime(0, startSec);
+        g.gain.linearRampToValueAtTime(0.5, startSec + 0.005);
+        g.gain.linearRampToValueAtTime(0.3, startSec + tapDurSec);
+        g.gain.linearRampToValueAtTime(0, startSec + tapDurSec + 0.01);
+
+        osc.connect(g);
+        g.connect(offline.destination);
+
+        osc.start(startSec);
+        osc.stop(endSec);
+      }
+
+      return offline.startRendering();
+    }
+
     // Send tap code
     async function sendTapCode() {
       const text = sendInput.value.trim();
@@ -1148,69 +1341,81 @@
       sendBtn.disabled = true;
       stopSendBtn.disabled = false;
       sendDot.classList.add('sending');
-      sendStatusText.textContent = 'Sending...';
+      sendStatusText.textContent = 'Encoding audio...';
       
       try {
-        // Warm up the audio output by transmitting silence for a word-length pause.
-        // This avoids missing/clipping the first tap on some audio drivers.
-        await playSilence(TIMING.WORD_PAUSE, sendAbort.signal);
+        clearSendUiTimers();
 
-        for (let i = 0; i < taps.length; i++) {
-          if (sendAbort.signal.aborted) break;
-          
-          const tap = taps[i];
-          
-          if (tap.type === 'word_pause') {
-            sendViz.textContent = '   ';
-            await sleep(TIMING.WORD_PAUSE);
-            continue;
-          }
-          
-          // Highlight the letter
-          highlightCell(tap.row, tap.col, true);
-          sendStatusText.textContent = `Sending: ${tap.char}`;
-          
-          // Build visual representation
-          let viz = '•'.repeat(tap.row) + ' ' + '•'.repeat(tap.col);
-          sendViz.textContent = viz;
-          
-          // Play row taps
-          for (let r = 0; r < tap.row; r++) {
-            if (sendAbort.signal.aborted) break;
-            await playTap(800);
-            if (r < tap.row - 1) {
-              await sleep(TIMING.INTRA_TAP);
+        // Pre-render the entire message audio, then stream it.
+        const timeline = buildSendTimeline(taps);
+        const ctx = getAudioContext();
+
+        const audioBuffer = await renderTapCodeAudioBuffer(timeline, ctx.sampleRate);
+        if (sendAbort.signal.aborted) throw new Error('aborted');
+
+        // Schedule UI updates from the same timeline (UI only).
+        const startedAt = performance.now();
+        for (const ev of timeline.events) {
+          if (ev.kind !== 'ui') continue;
+          const delay = Math.max(0, ev.startMs - (performance.now() - startedAt));
+          const timer = setTimeout(() => {
+            if (!isSending || sendAbort.signal.aborted) return;
+            if (ev.type === 'letterStart') {
+              const m = ev.meta;
+              highlightCell(m.row, m.col, true);
+              sendStatusText.textContent = `Sending: ${m.char}`;
+              sendViz.textContent = '•'.repeat(m.row) + ' ' + '•'.repeat(m.col);
+            } else if (ev.type === 'letterEnd') {
+              highlightCell(ev.meta.row, ev.meta.col, false);
             }
-          }
-          
-          if (sendAbort.signal.aborted) break;
-          
-          // Row-column pause
-          await sleep(TIMING.ROW_COL_PAUSE);
-          
-          // Play column taps
-          for (let c = 0; c < tap.col; c++) {
-            if (sendAbort.signal.aborted) break;
-            await playTap(800);
-            if (c < tap.col - 1) {
-              await sleep(TIMING.INTRA_TAP);
-            }
-          }
-          
-          if (sendAbort.signal.aborted) break;
-          
-          // Letter pause (unless last)
-          if (i < taps.length - 1 && taps[i + 1].type !== 'word_pause') {
-            await sleep(TIMING.LETTER_PAUSE);
-          }
+          }, delay);
+          sendUiTimers.push(timer);
         }
-        
+
+        sendStatusText.textContent = 'Sending...';
+
+        // Stream
+        sendSource = ctx.createBufferSource();
+        sendSource.buffer = audioBuffer;
+        sendSource.connect(ctx.destination);
+
+        await new Promise((resolve, reject) => {
+          let done = false;
+          const finish = (err) => {
+            if (done) return;
+            done = true;
+            resolve(err);
+          };
+
+          const abortHandler = () => {
+            try { sendSource.stop(); } catch {}
+            finish(new Error('aborted'));
+          };
+          if (sendAbort.signal.aborted) abortHandler();
+          else sendAbort.signal.addEventListener('abort', abortHandler, { once: true });
+
+          sendSource.onended = () => {
+            sendAbort.signal.removeEventListener('abort', abortHandler);
+            finish(null);
+          };
+
+          try {
+            sendSource.start();
+          } catch (e) {
+            sendAbort.signal.removeEventListener('abort', abortHandler);
+            reject(e);
+          }
+        });
+
         sendStatusText.textContent = sendAbort.signal.aborted ? 'Stopped' : 'Complete';
       } catch (err) {
         console.error('Send error:', err);
-        sendStatusText.textContent = 'Error: ' + err.message;
+        sendStatusText.textContent = sendAbort?.signal?.aborted ? 'Stopped' : ('Error: ' + err.message);
       } finally {
         isSending = false;
+        try { if (sendSource) sendSource.disconnect(); } catch {}
+        sendSource = null;
+        clearSendUiTimers();
         sendBtn.disabled = false;
         stopSendBtn.disabled = true;
         sendDot.classList.remove('sending');
@@ -1228,6 +1433,9 @@
       if (sendAbort) {
         sendAbort.abort();
       }
+      try {
+        if (sendSource) sendSource.stop();
+      } catch {}
     }
 
     function encodeTextToDotLines(text) {
@@ -1543,8 +1751,6 @@
 
     // --- Robust decoder: Goertzel tone detection + adaptive thresholds ---
     // Works much better than plain energy, especially with noise / speech / phone codecs.
-    const TX_DEFAULT_FREQ = 800; // Hz (within phone band)
-
     function hannMultiplier(i, n) {
       if (n <= 1) return 1;
       return 0.5 * (1 - Math.cos(2 * Math.PI * i / (n - 1)));
@@ -1695,6 +1901,197 @@
       return 'word';
     }
 
+    function computePauseBoundaries(gapsMs, unitMs) {
+      // Learn per-recording pause boundaries from the gap distribution.
+      // We fit 4 clusters to normalized gaps (in units): intra (~1u), rowcol (~3u),
+      // letter (~6u), word (~10u+). This keeps decoding stable across tempo drift.
+      const u = Math.max(1, unitMs);
+      const xs = (gapsMs || [])
+        .map(g => g / u)
+        .filter(x => isFinite(x) && x > 0.05 && x < 30)
+        .sort((a, b) => a - b);
+      if (xs.length < 4) return null;
+
+      let centers = [1.0, 3.0, 6.0, 11.0];
+      const iters = 18;
+      for (let it = 0; it < iters; it++) {
+        const buckets = [[], [], [], []];
+        for (const x of xs) {
+          let best = 0;
+          let bestD = Math.abs(x - centers[0]);
+          for (let k = 1; k < centers.length; k++) {
+            const d = Math.abs(x - centers[k]);
+            if (d < bestD) {
+              bestD = d;
+              best = k;
+            }
+          }
+          buckets[best].push(x);
+        }
+
+        const next = centers.slice();
+        for (let k = 0; k < buckets.length; k++) {
+          const b = buckets[k];
+          if (!b.length) continue;
+          // Median is robust to a few bridged/merged gaps.
+          next[k] = b[Math.floor(b.length * 0.5)];
+        }
+
+        // Enforce increasing order + minimum separation to avoid degenerate solutions.
+        for (let k = 1; k < next.length; k++) {
+          if (!(next[k] > next[k - 1] + 0.15)) next[k] = next[k - 1] + 0.15;
+        }
+
+        centers = next;
+      }
+
+      const b1 = (centers[0] + centers[1]) * 0.5;
+      const b2 = (centers[1] + centers[2]) * 0.5;
+      const b3 = (centers[2] + centers[3]) * 0.5;
+
+      // Sanity clamp in case of pathological recordings.
+      if (!(b1 > 0.6 && b2 > b1 && b3 > b2)) return null;
+      return { b1, b2, b3, centers };
+    }
+
+    function classifyPauseAdaptive(gapMs, unitMs, boundaries) {
+      if (!boundaries) return classifyPause(gapMs, unitMs);
+      const x = gapMs / Math.max(1, unitMs);
+      if (x < boundaries.b1) return 'intra';
+      if (x < boundaries.b2) return 'rowcol';
+      if (x < boundaries.b3) return 'letter';
+      return 'word';
+    }
+
+    function estimateUnitMs(taps, gapsMs) {
+      // Prefer gaps when tap segments have been widened by envelope smoothing/thresholds.
+      // If unitMs is too large, row->col gaps shrink in unit-space and get misclassified
+      // as intra, yielding 0 letters even when taps are correct.
+      const tapDurations = (taps || [])
+        .map(t => (t.end - t.start))
+        .filter(d => isFinite(d) && d > 10)
+        .sort((a, b) => a - b);
+      const tapUnit = tapDurations.length ? tapDurations[Math.floor(tapDurations.length * 0.5)] : 0;
+
+      const gaps = (gapsMs || [])
+        .filter(g => isFinite(g) && g > 10)
+        .sort((a, b) => a - b);
+      const gapUnit = gaps.length ? gaps[Math.floor(gaps.length * 0.2)] : 0;
+
+      if (tapUnit > 0 && gapUnit > 0) {
+        const hi = Math.max(tapUnit, gapUnit);
+        const lo = Math.min(tapUnit, gapUnit);
+        // If they disagree a lot, trust the smaller (usually gaps).
+        if (hi > lo * 1.7) return lo;
+        return (tapUnit * 0.6) + (gapUnit * 0.4);
+      }
+      return tapUnit || gapUnit || TIMING.INTRA_TAP;
+    }
+
+    function decodeTapsToLetters(taps, opts = {}) {
+      const maxCount = opts.maxCount ?? 5;
+      const forceRowcolInRowMode = opts.forceRowcolInRowMode ?? true;
+
+      const result = {
+        letters: [],
+        gaps: [],
+        unitMs: NaN,
+        pauseBoundaries: null,
+        pauseCounts: { intra: 0, rowcol: 0, letter: 0, word: 0 },
+        invalidLetters: 0
+      };
+
+      if (!taps || taps.length === 0) return result;
+      if (taps.length === 1) {
+        result.invalidLetters = 1;
+        return result;
+      }
+
+      const gaps = [];
+      for (let i = 1; i < taps.length; i++) gaps.push(taps[i].start - taps[i - 1].end);
+      result.gaps = gaps;
+      if (!gaps.length) {
+        result.invalidLetters = 1;
+        return result;
+      }
+
+      const unitMs = estimateUnitMs(taps, gaps);
+      result.unitMs = unitMs;
+
+      const pauseBoundaries = computePauseBoundaries(gaps, unitMs);
+      result.pauseBoundaries = pauseBoundaries;
+
+      let mode = 'row';
+      let rowCount = null;
+      let count = 1;
+
+      function commitLetter(colCount) {
+        if (rowCount !== null && rowCount >= 1 && rowCount <= maxCount && colCount >= 1 && colCount <= maxCount) {
+          result.letters.push({ row: rowCount, col: colCount });
+          return true;
+        }
+        result.invalidLetters++;
+        return false;
+      }
+
+      for (let i = 0; i < gaps.length; i++) {
+        let pauseType = classifyPauseAdaptive(gaps[i], unitMs, pauseBoundaries);
+
+        if (pauseType === 'intra') {
+          result.pauseCounts.intra++;
+          count++;
+          continue;
+        }
+
+        // Protocol-aware fallback:
+        // In tap code, the first non-intra gap after row taps is the row->col separator.
+        // If timing estimation drifts, adaptive bucketing can mislabel this as 'letter'
+        // which drops the whole letter. Prefer interpreting it as rowcol while in 'row'.
+        if (forceRowcolInRowMode && mode === 'row' && pauseType !== 'rowcol') {
+          pauseType = 'rowcol';
+        }
+
+        if (pauseType === 'rowcol') {
+          result.pauseCounts.rowcol++;
+          if (mode === 'row') {
+            rowCount = count;
+            mode = 'col';
+            count = 1;
+          } else {
+            // Unexpected rowcol while already in col: treat as letter boundary.
+            commitLetter(count);
+            mode = 'row';
+            rowCount = null;
+            count = 1;
+          }
+          continue;
+        }
+
+        if (pauseType === 'letter') result.pauseCounts.letter++;
+        if (pauseType === 'word') result.pauseCounts.word++;
+
+        // letter/word boundary
+        if (mode === 'col') {
+          commitLetter(count);
+        } else {
+          // Boundary without a row->col split.
+          result.invalidLetters++;
+        }
+
+        mode = 'row';
+        rowCount = null;
+        count = 1;
+
+        if (pauseType === 'word') result.letters.push({ type: 'space' });
+      }
+
+      // Finalize at end
+      if (mode === 'col') commitLetter(count);
+      else result.invalidLetters++;
+
+      return result;
+    }
+
     function percentile(values, p) {
       if (!values.length) return 0;
       const sorted = [...values].sort((a, b) => a - b);
@@ -1756,7 +2153,7 @@
       return { env, stepMs };
     }
 
-    function edgesFromEnvelope(env, stepMs) {
+    function edgesFromEnvelope(env, stepMs, opts = {}) {
       // Hysteresis thresholding on envelope, plus cleanup.
       const p10 = percentile(env, 0.10);
       const p50 = percentile(env, 0.50);
@@ -1764,33 +2161,16 @@
       const span = Math.max(1e-9, p90 - p10);
 
       // Thresholds relative to distribution; works even with low absolute amplitude.
-      const thOn = p10 + span * 0.45;
-      const thOff = p10 + span * 0.30;
+      const defaultThOn = p10 + span * 0.45;
+      const defaultThOff = p10 + span * 0.30;
 
       // If there's essentially no contrast, we won't detect taps.
       const hasContrast = span > Math.max(1e-6, p50 * 0.10);
 
-      const flags = new Array(env.length).fill(false);
-      let on = false;
-      for (let i = 0; i < env.length; i++) {
-        const v = env[i];
-        if (!on) {
-          if (v >= thOn) on = true;
-        } else {
-          if (v <= thOff) on = false;
-        }
-        flags[i] = on;
-      }
-
-      // Convert flags -> segments
-      let segs = segmentsFromBoolean(flags, stepMs);
-
-      // Fill tiny dropouts and ignore tiny spikes.
-      const minGapMs = Math.max(20, stepMs * 2);
-      segs = mergeShortGaps(segs, minGapMs);
-
       const minTapMs = 35;
       const maxTapMs = 600;
+      const minGapMs = Math.max(20, stepMs * 2);
+
       // In noisy/speech environments, two dots can sometimes get bridged into a single
       // long "on" segment. Recover by splitting long segments into multiple taps by
       // counting peaks using only the top 2/5 of the segment's envelope range.
@@ -1868,12 +2248,142 @@
         return out.length ? out : [seg];
       }
 
-      const splitSegs = [];
-      for (const s of segs) splitSegs.push(...splitSegmentByTopTwoFifthsPeaks(s));
+      function buildTapsFromThresholds(thOn, thOff) {
+        // 1) Hysteresis flags
+        const flags = new Array(env.length).fill(false);
+        let on = false;
+        for (let i = 0; i < env.length; i++) {
+          const v = env[i];
+          if (!on) {
+            if (v >= thOn) on = true;
+          } else {
+            if (v <= thOff) on = false;
+          }
+          flags[i] = on;
+        }
 
-      const taps = splitSegs
-        .map(s => ({ start: s.startMs, end: s.endMs, dur: s.endMs - s.startMs }))
-        .filter(t => t.dur >= minTapMs && t.dur <= maxTapMs);
+        // 2) flags -> segments
+        let segs = segmentsFromBoolean(flags, stepMs);
+
+        // Fill tiny dropouts and ignore tiny spikes.
+        segs = mergeShortGaps(segs, minGapMs);
+
+        // 3) Split suspiciously long "on" segments
+        const splitSegs = [];
+        for (const s of segs) splitSegs.push(...splitSegmentByTopTwoFifthsPeaks(s));
+
+        const taps = splitSegs
+          .map(s => ({ start: s.startMs, end: s.endMs, dur: s.endMs - s.startMs }))
+          .filter(t => t.dur >= minTapMs && t.dur <= maxTapMs);
+
+        return { taps, flags };
+      }
+
+      function letterStatsFromTaps(taps) {
+        const decoded = decodeTapsToLetters(taps, { maxCount: 5, forceRowcolInRowMode: true });
+        const validLetters = decoded.letters.filter(l => !l.type).length;
+        const invalidLetters = decoded.invalidLetters || 0;
+        const totalLetters = validLetters + invalidLetters;
+        const spaces = decoded.letters.filter(l => l.type === 'space').length;
+        const gapCount = decoded.gaps ? decoded.gaps.length : 0;
+        return {
+          unitMs: decoded.unitMs,
+          validLetters,
+          invalidLetters,
+          totalLetters,
+          spaces,
+          pauseCounts: decoded.pauseCounts,
+          gapCount
+        };
+      }
+
+      function scoreCandidate(taps, stats) {
+        // Prefer candidates that yield many valid letters and few invalid ones.
+        // Add light regularization to avoid extremely noisy solutions.
+        const tooManyTaps = Math.max(0, (taps?.length || 0) - 400);
+        const unitPenalty = (!isFinite(stats.unitMs) || stats.unitMs <= 0)
+          ? 200
+          : Math.max(0, Math.abs(stats.unitMs - TIMING.TAP_DURATION) - 60); // tolerate large jitter
+
+        // Tap-code letters require a distinct row->col separator pause (about 3x unit).
+        // If thresholds are too low, envelope valleys get eaten and rowcol gaps collapse
+        // into intra-tap gaps; decoding then fails even if peaks are clear.
+        const totalLetters = Math.max(0, stats.totalLetters || 0);
+        const rowcol = stats.pauseCounts?.rowcol || 0;
+        const gapCount = Math.max(1, stats.gapCount || 1);
+        const rowcolMissing = Math.max(0, totalLetters - rowcol);
+        const rowcolMissingPenalty = rowcolMissing * 120;
+
+        // If almost all gaps are intra, we're probably bridging pauses.
+        const intraFrac = (stats.pauseCounts?.intra || 0) / gapCount;
+        const bridgingPenalty = intraFrac > 0.92 ? (intraFrac - 0.92) * 900 : 0;
+
+        return (
+          stats.validLetters * 120
+          - stats.invalidLetters * 180
+          - (taps?.length || 0) * 0.6
+          - tooManyTaps * 5
+          - unitPenalty
+          - rowcolMissingPenalty
+          - bridgingPenalty
+        );
+      }
+
+      // Auto-tune thresholds per decode by trying a small grid and scoring
+      // how well the result groups into valid tap-code letters.
+      let thOn = defaultThOn;
+      let thOff = defaultThOff;
+      let best = null;
+
+      const forcedTh = opts && opts.forcedThresholds ? opts.forcedThresholds : null;
+      if (forcedTh && isFinite(forcedTh.thOn) && isFinite(forcedTh.thOff)) {
+        thOn = forcedTh.thOn;
+        thOff = forcedTh.thOff;
+        // Enforce hysteresis ordering.
+        if (thOff >= thOn) {
+          thOff = thOn - Math.max(span * 0.02, 1e-12);
+        }
+        best = { thOn, thOff, score: 0, built: buildTapsFromThresholds(thOn, thOff), stats: null };
+      }
+
+      if (!best && hasContrast) {
+        const evalCandidate = (candOn, candOff) => {
+          const built = buildTapsFromThresholds(candOn, candOff);
+          // Early reject: if absurdly noisy, skip expensive scoring.
+          if (built.taps.length > 900) return { score: -1e18, built };
+          const stats = letterStatsFromTaps(built.taps);
+          const score = scoreCandidate(built.taps, stats);
+          return { score, built, stats };
+        };
+
+        // Seed with default
+        {
+          const r = evalCandidate(defaultThOn, defaultThOff);
+          best = { thOn: defaultThOn, thOff: defaultThOff, ...r };
+        }
+
+        // Grid search over percent-of-span thresholds.
+        // thOnFactor picks the ON threshold, thOffFactor sits below it for hysteresis.
+        // Keep the search away from very low thresholds that tend to bridge gaps.
+        for (let onF = 0.38; onF <= 0.78; onF += 0.02) {
+          for (let delta = 0.12; delta <= 0.30; delta += 0.02) {
+            const offF = onF - delta;
+            if (offF < 0.05) continue;
+            const candOn = p10 + span * onF;
+            const candOff = p10 + span * offF;
+            const r = evalCandidate(candOn, candOff);
+            if (!best || r.score > best.score) best = { thOn: candOn, thOff: candOff, ...r };
+          }
+        }
+
+        // If scoring failed for some reason, fall back.
+        if (best && isFinite(best.thOn) && isFinite(best.thOff)) {
+          thOn = best.thOn;
+          thOff = best.thOff;
+        }
+      }
+
+      const { taps, flags } = best && best.built ? best.built : buildTapsFromThresholds(thOn, thOff);
 
       return { taps, flags, thOn, thOff, span, hasContrast };
     }
@@ -2402,18 +2912,96 @@
     function renderModal() {
       if (!dbgModal || !dbgModalCanvas || !modalType) return;
       const { ctx, w, h } = setCanvasHiDpi(dbgModalCanvas, window.innerWidth, window.innerHeight);
-      const f = lastDebug.detectedFreq;
+      const modalWantsHzSelector = (
+        modalType === 'raw-spectrum' ||
+        modalType === 'raw-waterfall' ||
+        modalType === 'filtered-spectrum' ||
+        modalType === 'filtered-waterfall'
+      );
+
+      const f = modalWantsHzSelector ? txFrequencyHz : lastDebug.detectedFreq;
+
+      const drawHzLabel = (startHz, endHz) => {
+        if (f === null || !isFinite(f)) return;
+        const x = Math.round(((f - startHz) / Math.max(1, (endHz - startHz))) * w);
+        const accent = getComputedStyle(document.documentElement).getPropertyValue('--grid-active') || '#3182ce';
+        const panelBg = getComputedStyle(document.documentElement).getPropertyValue('--panel-bg') || '#fff';
+        const text = `${Math.round(f)}Hz`;
+
+        ctx.font = '14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+        const tw = ctx.measureText(text).width;
+        const padX = 8;
+        const boxW = tw + padX * 2;
+        const boxH = 22;
+        const boxX = clamp(x - boxW / 2, 8, w - boxW - 8);
+        const boxY = 22;
+
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = panelBg;
+        ctx.fillRect(boxX, boxY, boxW, boxH);
+        ctx.globalAlpha = 1;
+
+        ctx.strokeStyle = accent;
+        ctx.globalAlpha = 0.7;
+        ctx.strokeRect(boxX + 0.5, boxY + 0.5, boxW - 1, boxH - 1);
+        ctx.globalAlpha = 1;
+
+        ctx.fillStyle = accent;
+        ctx.fillText(text, boxX + padX, boxY + 15);
+      };
 
       if (modalType === 'raw-spectrum' && lastDebug.rawSpec) {
         drawRainbowSpectrumTo(ctx, w, h, lastDebug.rawSpec, f);
+        if (modalWantsHzSelector) drawHzLabel(lastDebug.rawSpec.startHz, lastDebug.rawSpec.endHz);
       } else if (modalType === 'raw-waterfall' && lastDebug.rawWf) {
         drawSidewaysWaterfallTo(ctx, w, h, lastDebug.rawWf, f);
+        if (modalWantsHzSelector) drawHzLabel(lastDebug.rawWf.startHz, lastDebug.rawWf.endHz);
       } else if (modalType === 'filtered-spectrum' && lastDebug.filtSpec) {
         drawRainbowSpectrumTo(ctx, w, h, lastDebug.filtSpec, f);
+        if (modalWantsHzSelector) drawHzLabel(lastDebug.filtSpec.startHz, lastDebug.filtSpec.endHz);
       } else if (modalType === 'filtered-waterfall' && lastDebug.filtWf) {
         drawSidewaysWaterfallTo(ctx, w, h, lastDebug.filtWf, f);
+        if (modalWantsHzSelector) drawHzLabel(lastDebug.filtWf.startHz, lastDebug.filtWf.endHz);
       } else if (modalType === 'envelope' && lastDebug.env) {
-        drawEnvelopeTo(ctx, w, h, lastDebug.env, lastDebug.stepMs || 5, lastDebug.taps || [], lastDebug.thresholds || null);
+        const th = manualEnvelopeThresholds || lastDebug.thresholds || null;
+        drawEnvelopeTo(ctx, w, h, lastDebug.env, lastDebug.stepMs || 5, lastDebug.taps || [], th);
+
+        if (th && isFinite(th.thOn) && isFinite(th.thOff)) {
+          const max = modalEnvelopeMax();
+          const yOn = (h - 8) - (th.thOn / max) * (h - 30);
+          const yOff = (h - 8) - (th.thOff / max) * (h - 30);
+
+          const accent = getComputedStyle(document.documentElement).getPropertyValue('--grid-active') || '#3182ce';
+          const panelBg = getComputedStyle(document.documentElement).getPropertyValue('--panel-bg') || '#fff';
+          ctx.font = '14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+
+          const labelFor = (name, val, y) => {
+            const pct = Math.round((val / max) * 100);
+            const text = `${name} ${pct}%`;
+            const tw = ctx.measureText(text).width;
+            const padX = 8;
+            const boxW = tw + padX * 2;
+            const boxH = 22;
+            const boxX = 12;
+            const boxY = clamp(y - boxH / 2, 22, h - boxH - 10);
+
+            ctx.globalAlpha = 0.95;
+            ctx.fillStyle = panelBg;
+            ctx.fillRect(boxX, boxY, boxW, boxH);
+            ctx.globalAlpha = 1;
+
+            ctx.strokeStyle = accent;
+            ctx.globalAlpha = 0.7;
+            ctx.strokeRect(boxX + 0.5, boxY + 0.5, boxW - 1, boxH - 1);
+            ctx.globalAlpha = 1;
+
+            ctx.fillStyle = accent;
+            ctx.fillText(text, boxX + padX, boxY + 15);
+          };
+
+          labelFor(modalEnvelopeActiveKey === 'thOn' ? 'ON*' : 'ON', th.thOn, yOn);
+          labelFor(modalEnvelopeActiveKey === 'thOff' ? 'OFF*' : 'OFF', th.thOff, yOff);
+        }
       } else if (modalType === 'time-domain' && lastDebug.filteredSamples) {
         drawTimeDomainLevelAndEdgesTo(ctx, w, h, lastDebug.filteredSamples, lastDebug.sampleRate || 48000, lastDebug.env || null, lastDebug.stepMs || 5, lastDebug.edgeFlags || null);
       } else {
@@ -2426,6 +3014,14 @@
     function openDebugModal(type) {
       if (!dbgModal) return;
       modalType = type;
+      modalCloseArmedAfterSelect = false;
+      modalSelectingHz = false;
+      modalTapToCloseCandidate = false;
+      modalSelectMoved = false;
+      modalCloseArmedAfterEnvelope = false;
+      modalSelectingEnvelope = false;
+      modalEnvelopeTapToCloseCandidate = false;
+      modalEnvelopeMoved = false;
       dbgModal.classList.add('open');
       dbgModal.tabIndex = -1;
       dbgModal.focus({ preventScroll: true });
@@ -2436,11 +3032,105 @@
       if (!dbgModal) return;
       dbgModal.classList.remove('open');
       modalType = null;
+      modalCloseArmedAfterSelect = false;
+      modalSelectingHz = false;
+      modalTapToCloseCandidate = false;
+      modalSelectMoved = false;
+      modalCloseArmedAfterEnvelope = false;
+      modalSelectingEnvelope = false;
+      modalEnvelopeTapToCloseCandidate = false;
+      modalEnvelopeMoved = false;
     }
 
     // Avoid "click-through": do not close on pointerdown.
     // Close on pointerup/touchend/keyup and consume events while modal is shown.
     let modalArmed = false;
+    let modalCloseArmedAfterSelect = false;
+    let modalSelectingHz = false;
+    let modalTapToCloseCandidate = false;
+    let modalSelectMoved = false;
+    let modalStartX = 0;
+
+    let modalCloseArmedAfterEnvelope = false;
+    let modalSelectingEnvelope = false;
+    let modalEnvelopeTapToCloseCandidate = false;
+    let modalEnvelopeMoved = false;
+    let modalStartY = 0;
+    let modalEnvelopeActiveKey = 'thOn';
+
+    function modalSupportsHzSelector() {
+      return (
+        modalType === 'raw-spectrum' ||
+        modalType === 'raw-waterfall' ||
+        modalType === 'filtered-spectrum' ||
+        modalType === 'filtered-waterfall'
+      );
+    }
+
+    function modalSupportsEnvelopeThresholds() {
+      return modalType === 'envelope' && lastDebug && lastDebug.env && lastDebug.env.length > 2;
+    }
+
+    function modalEnvelopeMax() {
+      const env = lastDebug?.env;
+      if (!env || env.length < 2) return 0;
+      let mx = 0;
+      for (let i = 0; i < env.length; i++) if (env[i] > mx) mx = env[i];
+      return Math.max(mx, 1e-9);
+    }
+
+    function modalEnvelopeThresholdsFromClientY(clientY) {
+      if (!dbgModalCanvas || !modalSupportsEnvelopeThresholds()) return null;
+      const rect = dbgModalCanvas.getBoundingClientRect();
+      const y = clamp(clientY - rect.top, 0, rect.height);
+      const h = rect.height;
+      const max = modalEnvelopeMax();
+      const denom = Math.max(1, (h - 30));
+      const val = ((h - 8) - y) / denom * max;
+      return clamp(val, 0, max);
+    }
+
+    function modalPickNearestEnvelopeKey(clientY) {
+      if (!dbgModalCanvas || !modalSupportsEnvelopeThresholds()) return 'thOn';
+      const rect = dbgModalCanvas.getBoundingClientRect();
+      const y = clamp(clientY - rect.top, 0, rect.height);
+      const h = rect.height;
+      const max = modalEnvelopeMax();
+
+      const th = manualEnvelopeThresholds || lastDebug.thresholds;
+      const thOn = th && isFinite(th.thOn) ? th.thOn : max * 0.45;
+      const thOff = th && isFinite(th.thOff) ? th.thOff : max * 0.30;
+      const yOn = (h - 8) - (thOn / max) * (h - 30);
+      const yOff = (h - 8) - (thOff / max) * (h - 30);
+      return Math.abs(y - yOn) <= Math.abs(y - yOff) ? 'thOn' : 'thOff';
+    }
+
+    function modalHzFromClientX(clientX) {
+      if (!dbgModalCanvas) return null;
+      const rect = dbgModalCanvas.getBoundingClientRect();
+      const x = clamp(clientX - rect.left, 0, rect.width);
+
+      let startHz = 0;
+      let endHz = 0;
+      if (modalType === 'raw-spectrum' && lastDebug.rawSpec) {
+        startHz = lastDebug.rawSpec.startHz;
+        endHz = lastDebug.rawSpec.endHz;
+      } else if (modalType === 'raw-waterfall' && lastDebug.rawWf) {
+        startHz = lastDebug.rawWf.startHz;
+        endHz = lastDebug.rawWf.endHz;
+      } else if (modalType === 'filtered-spectrum' && lastDebug.filtSpec) {
+        startHz = lastDebug.filtSpec.startHz;
+        endHz = lastDebug.filtSpec.endHz;
+      } else if (modalType === 'filtered-waterfall' && lastDebug.filtWf) {
+        startHz = lastDebug.filtWf.startHz;
+        endHz = lastDebug.filtWf.endHz;
+      } else {
+        return null;
+      }
+
+      const hz = startHz + (x / Math.max(1, rect.width)) * (endHz - startHz);
+      return sanitizeTxFrequencyHz(hz);
+    }
     function consumeEvent(e) {
       // Some browsers will synthesize a click after touchend; preventDefault helps cancel it.
       if (e.cancelable) e.preventDefault();
@@ -2451,15 +3141,209 @@
     if (dbgModal) {
       dbgModal.addEventListener('pointerdown', (e) => {
         modalArmed = true;
+
+        if (modalSupportsEnvelopeThresholds()) {
+          modalSelectingEnvelope = true;
+          modalEnvelopeMoved = false;
+          modalStartY = e.clientY;
+          modalEnvelopeTapToCloseCandidate = modalCloseArmedAfterEnvelope;
+          modalEnvelopeActiveKey = modalPickNearestEnvelopeKey(e.clientY);
+
+          if (!modalEnvelopeTapToCloseCandidate) {
+            const val = modalEnvelopeThresholdsFromClientY(e.clientY);
+            if (val !== null) {
+              const max = modalEnvelopeMax();
+              const th = manualEnvelopeThresholds || lastDebug.thresholds || { thOn: max * 0.45, thOff: max * 0.30 };
+              let thOn = th.thOn;
+              let thOff = th.thOff;
+              if (modalEnvelopeActiveKey === 'thOn') thOn = val;
+              else thOff = val;
+              if (thOff >= thOn) {
+                if (modalEnvelopeActiveKey === 'thOn') thOff = thOn - max * 0.01;
+                else thOn = thOff + max * 0.01;
+              }
+              thOn = clamp(thOn, 0, max);
+              thOff = clamp(thOff, 0, max);
+              manualEnvelopeThresholds = { thOn, thOff };
+              lastDebug.thresholds = manualEnvelopeThresholds;
+              renderModal();
+            }
+          }
+
+          consumeEvent(e);
+          return;
+        }
+
+        if (modalSupportsHzSelector()) {
+          modalSelectingHz = true;
+          modalSelectMoved = false;
+          modalStartX = e.clientX;
+          modalTapToCloseCandidate = modalCloseArmedAfterSelect;
+
+          // First interaction sets the frequency immediately.
+          if (!modalTapToCloseCandidate) {
+            const hz = modalHzFromClientX(e.clientX);
+            if (hz !== null) {
+              setTxFrequencyHz(hz);
+              forceDecodeFreqHz = hz;
+              renderModal();
+            }
+          }
+        }
         consumeEvent(e);
       });
+
+      dbgModal.addEventListener('pointermove', (e) => {
+        if (modalSelectingEnvelope) {
+          consumeEvent(e);
+
+          const dy = Math.abs(e.clientY - modalStartY);
+          if (dy > 4) {
+            modalEnvelopeMoved = true;
+            modalEnvelopeTapToCloseCandidate = false;
+          }
+
+          if (!modalEnvelopeTapToCloseCandidate) {
+            const val = modalEnvelopeThresholdsFromClientY(e.clientY);
+            if (val !== null) {
+              const max = modalEnvelopeMax();
+              const th = manualEnvelopeThresholds || lastDebug.thresholds || { thOn: max * 0.45, thOff: max * 0.30 };
+              let thOn = th.thOn;
+              let thOff = th.thOff;
+              if (modalEnvelopeActiveKey === 'thOn') thOn = val;
+              else thOff = val;
+              if (thOff >= thOn) {
+                if (modalEnvelopeActiveKey === 'thOn') thOff = thOn - max * 0.01;
+                else thOn = thOff + max * 0.01;
+              }
+              thOn = clamp(thOn, 0, max);
+              thOff = clamp(thOff, 0, max);
+              manualEnvelopeThresholds = { thOn, thOff };
+              lastDebug.thresholds = manualEnvelopeThresholds;
+              renderModal();
+            }
+          }
+          return;
+        }
+        if (!modalSelectingHz) return;
+        consumeEvent(e);
+
+        const dx = Math.abs(e.clientX - modalStartX);
+        if (dx > 4) {
+          modalSelectMoved = true;
+          modalTapToCloseCandidate = false;
+        }
+
+        if (!modalTapToCloseCandidate) {
+          const hz = modalHzFromClientX(e.clientX);
+          if (hz !== null) {
+            setTxFrequencyHz(hz);
+            forceDecodeFreqHz = hz;
+            renderModal();
+          }
+        }
+      });
+
       dbgModal.addEventListener('pointerup', (e) => {
         consumeEvent(e);
+
+        if (modalSelectingEnvelope) {
+          const closeNow = modalEnvelopeTapToCloseCandidate && !modalEnvelopeMoved;
+          modalSelectingEnvelope = false;
+
+          if (closeNow) {
+            const shouldRedecode = modalCloseArmedAfterEnvelope;
+            closeDebugModal();
+            modalCloseArmedAfterEnvelope = false;
+            if (shouldRedecode && manualEnvelopeThresholds) {
+              requestRedecodeWithOverrides({
+                forcedFreqHz: forceDecodeFreqHz ?? getCurrentDecodeCenterFreqHz(),
+                forcedThresholds: manualEnvelopeThresholds
+              });
+            }
+          } else {
+            // Finish selection and arm close on next tap/key.
+            const val = modalEnvelopeThresholdsFromClientY(e.clientY);
+            if (val !== null) {
+              const max = modalEnvelopeMax();
+              const th = manualEnvelopeThresholds || lastDebug.thresholds || { thOn: max * 0.45, thOff: max * 0.30 };
+              let thOn = th.thOn;
+              let thOff = th.thOff;
+              if (modalEnvelopeActiveKey === 'thOn') thOn = val;
+              else thOff = val;
+              if (thOff >= thOn) {
+                if (modalEnvelopeActiveKey === 'thOn') thOff = thOn - max * 0.01;
+                else thOn = thOff + max * 0.01;
+              }
+              thOn = clamp(thOn, 0, max);
+              thOff = clamp(thOff, 0, max);
+              manualEnvelopeThresholds = { thOn, thOff };
+              lastDebug.thresholds = manualEnvelopeThresholds;
+              renderModal();
+            }
+            modalCloseArmedAfterEnvelope = true;
+          }
+
+          modalEnvelopeTapToCloseCandidate = false;
+          modalEnvelopeMoved = false;
+          modalArmed = false;
+          return;
+        }
+
+        if (modalSupportsHzSelector()) {
+          const closeNow = modalTapToCloseCandidate && !modalSelectMoved;
+          modalSelectingHz = false;
+
+          if (closeNow) {
+            const shouldRedecode = modalCloseArmedAfterSelect;
+            closeDebugModal();
+            modalCloseArmedAfterSelect = false;
+            if (shouldRedecode) {
+              // User picked a tone then tapped to close: re-decode using that tone.
+              requestRedecodeWithOverrides({
+                forcedFreqHz: forceDecodeFreqHz ?? txFrequencyHz,
+                forcedThresholds: manualEnvelopeThresholds
+              });
+            }
+          } else {
+            // Finish selection and arm close on next tap/key.
+            const hz = modalHzFromClientX(e.clientX);
+            if (hz !== null) {
+              setTxFrequencyHz(hz);
+              forceDecodeFreqHz = hz;
+              renderModal();
+            }
+            modalCloseArmedAfterSelect = true;
+          }
+
+          modalTapToCloseCandidate = false;
+          modalSelectMoved = false;
+          modalArmed = false;
+          return;
+        }
+
         if (modalArmed) closeDebugModal();
         modalArmed = false;
       });
       dbgModal.addEventListener('pointercancel', (e) => {
         consumeEvent(e);
+        if (modalSelectingEnvelope) {
+          modalSelectingEnvelope = false;
+          modalEnvelopeTapToCloseCandidate = false;
+          modalEnvelopeMoved = false;
+          modalCloseArmedAfterEnvelope = true;
+          modalArmed = false;
+          return;
+        }
+        if (modalSupportsHzSelector()) {
+          modalSelectingHz = false;
+          modalTapToCloseCandidate = false;
+          modalSelectMoved = false;
+          modalCloseArmedAfterSelect = true;
+          modalArmed = false;
+          return;
+        }
+
         if (modalArmed) closeDebugModal();
         modalArmed = false;
       });
@@ -2471,6 +3355,16 @@
       }, { passive: false });
       dbgModal.addEventListener('touchend', (e) => {
         consumeEvent(e);
+        if (modalSupportsEnvelopeThresholds()) {
+          modalCloseArmedAfterEnvelope = true;
+          modalArmed = false;
+          return;
+        }
+        if (modalSupportsHzSelector()) {
+          modalCloseArmedAfterSelect = true;
+          modalArmed = false;
+          return;
+        }
         if (modalArmed) closeDebugModal();
         modalArmed = false;
       }, { passive: false });
@@ -2482,7 +3376,29 @@
 
       dbgModal.addEventListener('keyup', (e) => {
         consumeEvent(e);
+        const shouldRedecodeFreq = modalSupportsHzSelector() && modalCloseArmedAfterSelect;
+        const shouldRedecodeEnv = modalSupportsEnvelopeThresholds() && modalCloseArmedAfterEnvelope;
         closeDebugModal();
+        modalCloseArmedAfterSelect = false;
+        modalSelectingHz = false;
+        modalTapToCloseCandidate = false;
+        modalSelectMoved = false;
+        modalCloseArmedAfterEnvelope = false;
+        modalSelectingEnvelope = false;
+        modalEnvelopeTapToCloseCandidate = false;
+        modalEnvelopeMoved = false;
+
+        if (shouldRedecodeFreq) {
+          requestRedecodeWithOverrides({
+            forcedFreqHz: forceDecodeFreqHz ?? txFrequencyHz,
+            forcedThresholds: manualEnvelopeThresholds
+          });
+        } else if (shouldRedecodeEnv && manualEnvelopeThresholds) {
+          requestRedecodeWithOverrides({
+            forcedFreqHz: forceDecodeFreqHz ?? getCurrentDecodeCenterFreqHz(),
+            forcedThresholds: manualEnvelopeThresholds
+          });
+        }
       });
     }
 
@@ -2505,40 +3421,60 @@
       });
     });
 
-    // Decode the recorded audio
-    async function decodeRecording() {
+    function getCurrentDecodeCenterFreqHz() {
+      const f = lastDebug?.detectedFreq;
+      return (f !== null && f !== undefined && isFinite(f)) ? f : null;
+    }
+
+    async function requestRedecodeWithOverrides(overrides = {}) {
+      if (!lastDecodedAudioBuffer || isRecording) return;
+      pendingRedecode = true;
+      if (isDecoding) return;
+      pendingRedecode = false;
+
+      const forcedFreqHz = overrides.forcedFreqHz ?? null;
+      const forcedThresholds = overrides.forcedThresholds ?? null;
+      await decodeAudioBuffer(lastDecodedAudioBuffer, { forcedFreqHz, forcedThresholds, reason: 'modal' });
+    }
+
+    async function decodeAudioBuffer(audioBuffer, opts = {}) {
+      if (!audioBuffer) return;
+      if (isDecoding) {
+        pendingRedecode = true;
+        return;
+      }
+      isDecoding = true;
+
       try {
         clearDebugCanvases();
-        const blob = new Blob(audioChunks, { type: 'audio/webm' });
-        const arrayBuffer = await blob.arrayBuffer();
-        
-        const ctx = getAudioContext();
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-        
+
         // Get audio data
         const channelData = audioBuffer.getChannelData(0);
         const sampleRate = audioBuffer.sampleRate;
-        
+
         // Frame settings: near-20ms frames work well over typical sample rates.
         const frameSize = Math.max(512, Math.min(2048, 1 << Math.round(Math.log2(sampleRate * 0.021))));
         const hopSize = Math.floor(frameSize / 2);
-        const hopMs = (hopSize / sampleRate) * 1000;
 
-        const detectedFreq = estimateToneFrequency(channelData, sampleRate, frameSize, hopSize);
-        receiveStatusText.textContent = `Filtering (tone ~${Math.round(detectedFreq)}Hz)...`;
+        const forced = opts.forcedFreqHz !== null && opts.forcedFreqHz !== undefined;
+        const forcedFreq = forced ? sanitizeTxFrequencyHz(opts.forcedFreqHz) : null;
+        const detectedFreq = forced ? forcedFreq : estimateToneFrequency(channelData, sampleRate, frameSize, hopSize);
+
+        receiveStatusText.textContent = forced
+          ? `Filtering (forced tone ${Math.round(detectedFreq)}Hz)...`
+          : `Filtering (tone ~${Math.round(detectedFreq)}Hz)...`;
 
         lastDebug.detectedFreq = detectedFreq;
         lastDebug.sampleRate = sampleRate;
 
         // Debug: raw spectrum
-        let rawSpec = null;
         try {
-          rawSpec = computeAveragedSpectrum(channelData, sampleRate, { fftSize: 2048, startHz: 0, endHz: Math.min(4000, sampleRate / 2), maxFrames: 80 });
+          const rawSpec = computeAveragedSpectrum(channelData, sampleRate, { fftSize: 2048, startHz: 0, endHz: Math.min(4000, sampleRate / 2), maxFrames: 80 });
           const peak = peakInRange(rawSpec, 500, 1500);
           drawRainbowSpectrum(dbgRawSpectrum, rawSpec, detectedFreq);
           if (dbgRawMeta) dbgRawMeta.textContent = `${rawSpec.framesUsed} frames, bin ${rawSpec.binHz.toFixed(1)}Hz, peak ${Math.round(peak.hz)}Hz`;
           lastDebug.rawSpec = rawSpec;
-        } catch (e) {
+        } catch {
           if (dbgRawMeta) dbgRawMeta.textContent = 'spectrum error';
         }
 
@@ -2548,7 +3484,7 @@
           drawSidewaysWaterfall(dbgRawWaterfall, wf, detectedFreq);
           if (dbgRawWaterMeta) dbgRawWaterMeta.textContent = `${wf.rowCount} rows, ~${wf.approxHopMs.toFixed(0)}ms/row`;
           lastDebug.rawWf = wf;
-        } catch (e) {
+        } catch {
           if (dbgRawWaterMeta) dbgRawWaterMeta.textContent = 'waterfall error';
         }
 
@@ -2563,9 +3499,11 @@
           const filtSpec = computeAveragedSpectrum(filteredSamples, sampleRate, { fftSize: 2048, startHz: 0, endHz: Math.min(4000, sampleRate / 2), maxFrames: 80 });
           const peak = peakInRange(filtSpec, 500, 1500);
           drawRainbowSpectrum(dbgFilteredSpectrum, filtSpec, detectedFreq);
-          if (dbgFiltMeta) dbgFiltMeta.textContent = `Q 8 @ ${Math.round(detectedFreq)}Hz, ${filtSpec.framesUsed} frames, peak ${Math.round(peak.hz)}Hz`;
+          if (dbgFiltMeta) {
+            dbgFiltMeta.textContent = `Q 8 @ ${Math.round(detectedFreq)}Hz, ${filtSpec.framesUsed} frames, peak ${Math.round(peak.hz)}Hz`;
+          }
           lastDebug.filtSpec = filtSpec;
-        } catch (e) {
+        } catch {
           if (dbgFiltMeta) dbgFiltMeta.textContent = 'spectrum error';
         }
 
@@ -2575,13 +3513,13 @@
           drawSidewaysWaterfall(dbgFilteredWaterfall, wf, detectedFreq);
           if (dbgFiltWaterMeta) dbgFiltWaterMeta.textContent = `Q 8 @ ${Math.round(detectedFreq)}Hz, ${wf.rowCount} rows`;
           lastDebug.filtWf = wf;
-        } catch (e) {
+        } catch {
           if (dbgFiltWaterMeta) dbgFiltWaterMeta.textContent = 'waterfall error';
         }
 
         // Pass 2: Envelope + edge detection
         const { env, stepMs } = extractEnvelope(filteredSamples, sampleRate, 5, 18);
-        const edge = edgesFromEnvelope(env, stepMs);
+        const edge = edgesFromEnvelope(env, stepMs, { forcedThresholds: opts.forcedThresholds });
         const { taps, hasContrast } = edge;
 
         lastDebug.env = env;
@@ -2594,7 +3532,7 @@
         try {
           drawEnvelope(dbgEnvelope, env, stepMs, taps, { thOn: edge.thOn, thOff: edge.thOff });
           if (dbgEnvMeta) dbgEnvMeta.textContent = `step ${stepMs}ms, span ${edge.span.toExponential(2)}`;
-        } catch (e) {
+        } catch {
           if (dbgEnvMeta) dbgEnvMeta.textContent = 'envelope error';
         }
 
@@ -2602,88 +3540,27 @@
         try {
           drawTimeDomainLevelAndEdges(dbgTimeDomain, filteredSamples, sampleRate, env, stepMs, edge.flags);
           if (dbgTimeMeta) dbgTimeMeta.textContent = `${Math.round((filteredSamples.length / sampleRate) * 1000)}ms, step ${stepMs}ms`;
-        } catch (e) {
+        } catch {
           if (dbgTimeMeta) dbgTimeMeta.textContent = 'time-domain error';
         }
 
         if (dbgModal && dbgModal.classList.contains('open')) renderModal();
 
-        receiveStatusText.textContent = `Decoding (tone ~${Math.round(detectedFreq)}Hz, taps ${taps.length})...`;
-        
+        receiveStatusText.textContent = forced
+          ? `Decoding (forced ${Math.round(detectedFreq)}Hz, taps ${taps.length})...`
+          : `Decoding (tone ~${Math.round(detectedFreq)}Hz, taps ${taps.length})...`;
+
         if (taps.length === 0) {
           receiveStatusText.textContent = hasContrast
-            ? `No taps detected after filtering (tone ~${Math.round(detectedFreq)}Hz). Try higher volume / closer mic.`
+            ? `No taps detected after filtering (${forced ? 'forced' : 'tone ~'}${Math.round(detectedFreq)}Hz). Try higher volume / closer mic.`
             : `No usable tone contrast detected. Try higher volume / quieter room.`;
           receiveOutput.value = '';
           return;
         }
-        
-        // Calculate gaps between taps
-        const gaps = [];
-        for (let i = 1; i < taps.length; i++) {
-          gaps.push(taps[i].start - taps[i - 1].end);
-        }
-        
-        if (gaps.length === 0) {
-          // Only one tap (can't form row+col)
-          receiveOutput.value = '[?]';
-          receiveStatusText.textContent = `Only one tap detected (tone ~${Math.round(detectedFreq)}Hz).`;
-          return;
-        }
-        
-        // Estimate a timing unit: prefer tap duration (more stable), fallback to smaller gaps.
-        const tapDurations = taps.map(t => t.end - t.start).filter(d => d > 10).sort((a, b) => a - b);
-        const tapUnit = tapDurations.length ? tapDurations[Math.floor(tapDurations.length * 0.5)] : 0;
-        const validGaps = gaps.filter(g => g > 10).sort((a, b) => a - b);
-        const gapUnit = validGaps.length ? validGaps[Math.floor(validGaps.length * 0.2)] : TIMING.INTRA_TAP;
-        const unitMs = tapUnit > 0 ? tapUnit : gapUnit;
-        
-        // Group taps into letters using pause classes.
-        const letters = [];
-        let mode = 'row';
-        let rowCount = null;
-        let count = 1;
 
-        function commitLetter(colCount) {
-          if (rowCount !== null && rowCount >= 1 && rowCount <= 5 && colCount >= 1 && colCount <= 5) {
-            letters.push({ row: rowCount, col: colCount });
-          }
-        }
+        const decodedTiming = decodeTapsToLetters(taps, { maxCount: 5, forceRowcolInRowMode: true });
+        const letters = decodedTiming.letters;
 
-        for (let i = 0; i < gaps.length; i++) {
-          const pauseType = classifyPause(gaps[i], unitMs);
-          if (pauseType === 'intra') {
-            count++;
-            continue;
-          }
-
-          if (pauseType === 'rowcol') {
-            if (mode === 'row') {
-              rowCount = count;
-              mode = 'col';
-              count = 1;
-            } else {
-              // If we unexpectedly hit rowcol while already in col, treat as letter boundary.
-              commitLetter(count);
-              mode = 'row';
-              rowCount = null;
-              count = 1;
-            }
-            continue;
-          }
-
-          // letter/word boundary
-          if (mode === 'col') commitLetter(count);
-          mode = 'row';
-          rowCount = null;
-          count = 1;
-
-          if (pauseType === 'word') letters.push({ type: 'space' });
-        }
-
-        // Finalize at end
-        if (mode === 'col') commitLetter(count);
-        
         // Convert to text (tap-code letters)
         let decoded = '';
         for (const letter of letters) {
@@ -2692,11 +3569,7 @@
           } else {
             const key = `${letter.row},${letter.col}`;
             const char = POS_TO_LETTER[key];
-            if (char) {
-              decoded += char;
-            } else {
-              decoded += '?';
-            }
+            decoded += char ? char : '?';
           }
         }
 
@@ -2708,7 +3581,33 @@
 
         receiveOutput.value = decodedDisplay;
         receiveStatusText.textContent = `Decoded ${letters.filter(l => !l.type).length} letters`;
-        
+      } catch (err) {
+        console.error('Decode error:', err);
+        receiveStatusText.textContent = 'Decode error: ' + err.message;
+      } finally {
+        isDecoding = false;
+        if (pendingRedecode && lastDecodedAudioBuffer && !isRecording) {
+          pendingRedecode = false;
+          // Re-run once with the latest selected tone.
+          decodeAudioBuffer(lastDecodedAudioBuffer, {
+            forcedFreqHz: forceDecodeFreqHz ?? getCurrentDecodeCenterFreqHz(),
+            forcedThresholds: manualEnvelopeThresholds,
+            reason: 'pending'
+          });
+        }
+      }
+    }
+
+    // Decode the recorded audio
+    async function decodeRecording() {
+      try {
+        const blob = new Blob(audioChunks, { type: 'audio/webm' });
+        const arrayBuffer = await blob.arrayBuffer();
+
+        const ctx = getAudioContext();
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        lastDecodedAudioBuffer = audioBuffer;
+        await decodeAudioBuffer(audioBuffer);
       } catch (err) {
         console.error('Decode error:', err);
         receiveStatusText.textContent = 'Decode error: ' + err.message;
