@@ -872,25 +872,68 @@
     }
 
     // Text preprocessing: convert to tap-codeable format
+    // Output must be only A-Z and spaces (tap code can't represent digits directly).
     function preprocessText(text) {
       let result = '';
-      const upper = text.toUpperCase();
-      
-      for (const char of upper) {
-        if (char === ' ' || char === '\n' || char === '\t') {
+      const input = String(text ?? '');
+
+      const hexDigitToTapToken = (hexDigit) => {
+        // Keep A-F as-is, convert 0-9 to their word tokens.
+        if (hexDigit >= '0' && hexDigit <= '9') return SYMBOL_MAP[hexDigit];
+        return hexDigit; // A-F
+      };
+
+      const bytesToHex = (bytes) => {
+        let hex = '';
+        for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+        return hex.toUpperCase();
+      };
+
+      const encodeCharAsHexTokens = (ch) => {
+        // Prefer UTF-8 bytes so emoji/multibyte characters are stable.
+        try {
+          if (typeof TextEncoder !== 'undefined') {
+            const bytes = new TextEncoder().encode(ch);
+            return bytesToHex(bytes);
+          }
+        } catch {
+          // fall through
+        }
+
+        // Fallback: code points to hex (best effort).
+        const cp = ch.codePointAt(0);
+        if (typeof cp === 'number') return cp.toString(16).toUpperCase();
+        return '3F';
+      };
+
+      // Iterate by Unicode code points (for..of over a string).
+      for (const rawChar of input) {
+        const charUpper = rawChar.toUpperCase();
+
+        if (rawChar === ' ' || rawChar === '\n' || rawChar === '\t') {
           result += ' ';
-        } else if (LETTER_TO_POS[char]) {
-          result += char;
-        } else if (SYMBOL_MAP[char]) {
-          result += SYMBOL_MAP[char];
-        } else {
-          // Fallback: encode as hex
-          const code = char.charCodeAt(0);
-          const hex = code.toString(16).toUpperCase();
-          result += 'HEX' + hex;
+          continue;
+        }
+
+        if (LETTER_TO_POS[charUpper]) {
+          result += charUpper;
+          continue;
+        }
+
+        if (SYMBOL_MAP[rawChar]) {
+          result += SYMBOL_MAP[rawChar];
+          continue;
+        }
+
+        // Fallback: encode unknown/unprintable characters as hex.
+        // Convert hex digits into tap-codeable tokens so encoding never emits '?'.
+        const hex = encodeCharAsHexTokens(rawChar);
+        result += 'HEX';
+        for (const hd of hex) {
+          result += hexDigitToTapToken(hd);
         }
       }
-      
+
       // Collapse multiple spaces
       return result.replace(/\s+/g, ' ').trim();
     }
@@ -1163,6 +1206,94 @@
       return { row, col };
     }
 
+    function decodeHexEscapes(text) {
+      const src = String(text ?? '');
+      const digitWords = [
+        ['ZERO', '0'],
+        ['ONE', '1'],
+        ['TWO', '2'],
+        ['THREE', '3'],
+        ['FOUR', '4'],
+        ['FIVE', '5'],
+        ['SIX', '6'],
+        ['SEVEN', '7'],
+        ['EIGHT', '8'],
+        ['NINE', '9']
+      ];
+
+      const textDecoder = (() => {
+        try {
+          if (typeof TextDecoder !== 'undefined') return new TextDecoder('utf-8', { fatal: false });
+        } catch {
+          // ignore
+        }
+        return null;
+      })();
+
+      const isHexLetter = (c) => c >= 'A' && c <= 'F';
+
+      let out = '';
+      let i = 0;
+      while (i < src.length) {
+        if (src.startsWith('HEX', i)) {
+          let j = i + 3;
+          let hexDigits = '';
+
+          while (j < src.length) {
+            // Prefer digit-words first (EIGHT starts with 'E', FIVE starts with 'F')
+            // so we don't accidentally consume just the leading hex letter.
+            let matched = false;
+            for (const [word, digit] of digitWords) {
+              if (src.startsWith(word, j)) {
+                hexDigits += digit;
+                j += word.length;
+                matched = true;
+                break;
+              }
+            }
+            if (matched) continue;
+
+            const c = src[j];
+            if (isHexLetter(c)) {
+              hexDigits += c;
+              j += 1;
+              continue;
+            }
+
+            break;
+          }
+
+          if (hexDigits.length >= 2 && hexDigits.length % 2 === 0 && textDecoder) {
+            const bytes = new Uint8Array(hexDigits.length / 2);
+            let ok = true;
+            for (let k = 0; k < hexDigits.length; k += 2) {
+              const byte = parseInt(hexDigits.slice(k, k + 2), 16);
+              if (!Number.isFinite(byte)) {
+                ok = false;
+                break;
+              }
+              bytes[k / 2] = byte;
+            }
+            if (ok) {
+              out += textDecoder.decode(bytes);
+              i = j;
+              continue;
+            }
+          }
+
+          // If invalid/unsupported, leave as literal text.
+          out += 'HEX';
+          i += 3;
+          continue;
+        }
+
+        out += src[i];
+        i += 1;
+      }
+
+      return out;
+    }
+
     function decodeDotLinesToText(dotText) {
       const lines = (dotText || '').replace(/\r\n/g, '\n').split('\n');
       let out = '';
@@ -1179,7 +1310,7 @@
         const char = POS_TO_LETTER[`${pos.row},${pos.col}`];
         out += char ? char : '?';
       }
-      return out;
+      return decodeHexEscapes(out);
     }
 
     function handleEncode() {
