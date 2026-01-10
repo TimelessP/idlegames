@@ -1055,6 +1055,11 @@
     // Play a tap sound
     async function playTap(frequency = 800) {
       const ctx = getAudioContext();
+
+      // Ensure the audio device is running (some browsers start suspended).
+      if (ctx.state === 'suspended') {
+        try { await ctx.resume(); } catch {}
+      }
       
       const oscillator = ctx.createOscillator();
       const gainNode = ctx.createGain();
@@ -1075,6 +1080,49 @@
       
       return new Promise(resolve => {
         setTimeout(resolve, TIMING.TAP_DURATION);
+      });
+    }
+
+    // Play actual silent audio for a duration (ms).
+    // This is intentionally not just a JS delay: it streams zero-valued samples
+    // so audio output paths/drivers have time to spin up before the first tone.
+    async function playSilence(ms, signal) {
+      const ctx = getAudioContext();
+
+      if (ctx.state === 'suspended') {
+        try { await ctx.resume(); } catch {}
+      }
+
+      const durationSec = Math.max(0, (ms || 0) / 1000);
+      const frameCount = Math.max(1, Math.ceil(ctx.sampleRate * durationSec));
+      const buffer = ctx.createBuffer(1, frameCount, ctx.sampleRate);
+      // AudioBuffer is zero-filled by default (silence).
+
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(ctx.destination);
+
+      let aborted = false;
+      const abortHandler = () => {
+        aborted = true;
+        try { src.stop(); } catch {}
+      };
+      if (signal) {
+        if (signal.aborted) abortHandler();
+        else signal.addEventListener('abort', abortHandler, { once: true });
+      }
+
+      return new Promise((resolve) => {
+        src.onended = () => {
+          if (signal) signal.removeEventListener('abort', abortHandler);
+          resolve(!aborted);
+        };
+        try {
+          src.start();
+        } catch {
+          if (signal) signal.removeEventListener('abort', abortHandler);
+          resolve(false);
+        }
       });
     }
 
@@ -1103,6 +1151,10 @@
       sendStatusText.textContent = 'Sending...';
       
       try {
+        // Warm up the audio output by transmitting silence for a word-length pause.
+        // This avoids missing/clipping the first tap on some audio drivers.
+        await playSilence(TIMING.WORD_PAUSE, sendAbort.signal);
+
         for (let i = 0; i < taps.length; i++) {
           if (sendAbort.signal.aborted) break;
           
