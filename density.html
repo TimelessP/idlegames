@@ -366,6 +366,31 @@
             opacity: 0.6;
         }
 
+        /* Chirper Widget (status label should not consume vertical space) */
+        .chirper-widget .chirper-display {
+            flex: 0 0 auto;
+            height: 36px;
+            justify-content: center;
+            text-align: center;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 6px 8px;
+        }
+
+        .chirper-widget .chirper-modes {
+            display: flex;
+            gap: 4px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .chirper-widget .chirper-mode-btn.active {
+            background: var(--button-active);
+            box-shadow: inset 0 2px 6px var(--inset-shadow);
+        }
+
         .audio-controls {
             display: flex;
             gap: 4px;
@@ -1419,7 +1444,11 @@
             robot: `<svg viewBox="0 0 24 24"><path d="M12 2a2 2 0 012 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 017 7h1a1 1 0 011 1v3a1 1 0 01-1 1h-1v1a2 2 0 01-2 2H6a2 2 0 01-2-2v-1H3a1 1 0 01-1-1v-3a1 1 0 011-1h1a7 7 0 017-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 012-2zM7.5 13A1.5 1.5 0 006 14.5 1.5 1.5 0 007.5 16 1.5 1.5 0 009 14.5 1.5 1.5 0 007.5 13zm9 0a1.5 1.5 0 00-1.5 1.5 1.5 1.5 0 001.5 1.5 1.5 1.5 0 001.5-1.5 1.5 1.5 0 00-1.5-1.5z"/></svg>`,
             fullscreen: `<svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>`,
             fullscreenExit: `<svg viewBox="0 0 24 24"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>`,
-            coffee: `<svg viewBox="0 0 24 24"><path d="M18.5 3H6c-1.1 0-2 .9-2 2v5.71c0 3.83 2.95 7.18 6.78 7.29 3.96.12 7.22-3.06 7.22-7v-1h.5c1.93 0 3.5-1.57 3.5-3.5S20.43 3 18.5 3zM16 5v3h2.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5H16v-1c0-2.76-2.24-5-5-5H6V5h10zM6 18h10v2H6z"/></svg>`
+            coffee: `<svg viewBox="0 0 24 24"><path d="M18.5 3H6c-1.1 0-2 .9-2 2v5.71c0 3.83 2.95 7.18 6.78 7.29 3.96.12 7.22-3.06 7.22-7v-1h.5c1.93 0 3.5-1.57 3.5-3.5S20.43 3 18.5 3zM16 5v3h2.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5H16v-1c0-2.76-2.24-5-5-5H6V5h10zM6 18h10v2H6z"/></svg>`,
+            mode1: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/></svg>`,
+            mode2: `<svg viewBox="0 0 24 24"><circle cx="9" cy="12" r="2.6"/><circle cx="15" cy="12" r="2.6"/></svg>`,
+            mode3: `<svg viewBox="0 0 24 24"><circle cx="7" cy="12" r="2.4"/><circle cx="12" cy="12" r="2.4"/><circle cx="17" cy="12" r="2.4"/></svg>`,
+            mode4: `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="6" height="6"/></svg>`
         };
 
         // Widget Types Registry
@@ -1438,6 +1467,11 @@
                 name: 'Audio',
                 size: '1x1',
                 create: createAudioWidget
+            },
+            chirper: {
+                name: 'Chirper',
+                size: '1x1',
+                create: createChirperWidget
             },
             timer: {
                 name: 'Timer',
@@ -1501,6 +1535,894 @@
 
         function registerAlarmContext(ctx) {
             activeAlarmContexts.add(ctx);
+        }
+
+        // ---------------------------------------------------------------------
+        // Chirper (SAR-style non-alarm beacon)
+        // ---------------------------------------------------------------------
+        // Design goals:
+        // - Not alarm-like: no siren warble, no panic/harsh beeps.
+        // - “Penetrating & permeating” across environments: broadband-ish energy
+        //   concentrated roughly 400–3000 Hz, with some taper > ~4 kHz.
+        // - Works on mobile/laptop speakers: avoids very low bass & extreme highs.
+        // - Procedurally generate the chirp sample ONCE (first Play), then reuse
+        //   that same sample for each emission. Temporal spacing is scheduled.
+        // - Touch/click friendly, Chrome/Safari compatible (Android/macOS/Windows/Linux).
+        const CHIRPER_DEFAULTS = {
+            // Pulse profile (a single emitted “event”)
+            chirpSeconds: 0.42,
+            attackSeconds: 0.012,
+            releaseSeconds: 0.09,
+            // Mode 2/3/4 pulse lengths (scheduler uses buffer.duration)
+            mode2Seconds: 1.25,
+            mode3Seconds: 0.62,
+            // Mode 4: deliberately “bad” locator test.
+            // A very short monotone beep can be hard to localize because it may end
+            // before a person can orient their head/ears to improve ITD/ILD cues.
+            mode4Seconds: 0.030,
+            mode4Hz: 2000,
+            mode4GapBaseSeconds: 10.0,
+            mode4GapJitterSeconds: 0.00,
+            // Temporal pattern (cognitive SAR intervals: short pulse, long gap)
+            gapBaseSeconds: 3.0,
+            gapJitterSeconds: 0.5,
+            // Spectral design
+            voices: [
+                // Two parallel sweeps (a fifth-ish apart) to support ITD/ILD cues.
+                { fStart: 480, fEnd: 2600 },
+                { fStart: 720, fEnd: 3600 }
+            ],
+            // Distance-carry assist: a subtle low-mid carrier under the chirp.
+            // This helps propagation in foliage/terrain while staying within small-speaker limits.
+            carrierHz: 560,
+            carrierHarmonics: 3,
+            carrierLevel: 0.10,
+            // Mode-specific distance assist (optional overrides)
+            mode2CarrierHz: 560,
+            mode2CarrierLevel: 0.12,
+            mode3CarrierHz: 520,
+            mode3CarrierLevel: 0.18,
+            harmonicsPerVoice: 4,
+            // Higher partials decay to keep it chime-like (not harsh).
+            harmonicFalloff: 0.22,
+            // Taper energy above ~4 kHz to avoid wasted/irritating energy.
+            highHzSoftCap: 4200,
+            highHzRolloff: 1200,
+            // Output level (kept moderate; user can raise device volume as needed).
+            masterGain: 0.22,
+            // Gentle saturation for speaker translation (adds “presence” without piercing).
+            drive: 1.15,
+            // Optional onset “air click” (very short, very quiet) to improve perceived
+            // localizability (adds broadband edges) without sounding like an alarm.
+            onsetNoiseLevel: 0.015,
+            onsetNoiseSeconds: 0.010,
+            // Stereo strategy:
+            // Emit on both channels simultaneously, but with a tiny L/R detune.
+            // This creates slow-moving beat patterns in air (and sometimes “blooms” on
+            // stereo speaker pairs) without relying on alternating channel playback.
+            stereoDetuneCents: 10,
+
+            // Output EQ (keeps energy in mobile-speaker-friendly range).
+            // These nodes are lightweight and applied at playback time.
+            hpHz: 180,
+            lpHz: 6500,
+            presenceHz: 2800,
+            presenceGainDb: 2.5,
+            presenceQ: 0.8,
+            // Scheduler
+            scheduleAheadSeconds: 2.0,
+            schedulerTickMs: 100
+        };
+
+        function createChirperWidget(widget) {
+            const data = widget.data;
+            if (!data.mode) data.mode = 1;
+
+            const tile = document.createElement('div');
+            tile.className = `tile size-${widgetTypes.chirper.size} chirper-widget`;
+            tile.dataset.widgetId = widget.id;
+
+            tile.innerHTML = `
+                <div class="widget-header">
+                    <span class="drag-handle" title="Drag to reorder">${icons.drag}</span>
+                    <span class="widget-title">Chirper</span>
+                    <button class="btn btn-small accent-delete" title="Remove widget">${icons.close}</button>
+                </div>
+                <div class="audio-display chirper-display empty">Ready</div>
+                <div class="chirper-modes">
+                    <button class="btn btn-small accent-add chirper-mode-btn" data-mode="1" title="Mode 1: SAR chirp">${icons.mode1}</button>
+                    <button class="btn btn-small accent-spin chirper-mode-btn" data-mode="2" title="Mode 2: Melody">${icons.mode2}</button>
+                    <button class="btn btn-small accent-delete chirper-mode-btn" data-mode="3" title="Mode 3: Alarm">${icons.mode3}</button>
+                    <button class="btn btn-small accent-reset chirper-mode-btn" data-mode="4" title="Mode 4: 2kHz short beep (hard to localize)">${icons.mode4}</button>
+                </div>
+                <div class="audio-controls chirper-controls">
+                    <button class="btn btn-small accent-add chirper-play" title="Play">${icons.play}</button>
+                    <button class="btn btn-small accent-reset chirper-stop" title="Stop">${icons.stop}</button>
+                </div>
+            `;
+
+            const statusEl = tile.querySelector('.chirper-display');
+            const playBtn = tile.querySelector('.chirper-play');
+            const stopBtn = tile.querySelector('.chirper-stop');
+            const removeBtn = tile.querySelector('.widget-header .btn');
+            const modeBtns = Array.from(tile.querySelectorAll('.chirper-mode-btn'));
+
+            // WebAudio state is kept per-widget (so multiple Chirpers can exist if desired).
+            // iOS/Safari requires audio context creation/resume inside a user gesture.
+            let audioCtx = null;
+            const buffersByMode = new Map();
+            let outputGain = null;
+            let eqIn = null;
+            let schedulerTimerId = null;
+            let nextChirpTime = 0;
+            let chirpIndex = 0;
+            let isRunning = false;
+            const liveSources = new Set();
+
+            let visibilityHandler = null;
+
+            const cfg = { ...CHIRPER_DEFAULTS };
+            let mode = Number(data.mode) || 1;
+
+            function setStatus(text, isMuted = false) {
+                statusEl.textContent = text;
+                statusEl.classList.toggle('empty', !!isMuted);
+            }
+
+            function ensureAudioContext() {
+                if (audioCtx) return audioCtx;
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                if (!Ctx) throw new Error('Web Audio API not supported');
+
+                // Safari versions vary in constructor support; fall back gracefully.
+                try {
+                    audioCtx = new Ctx({ latencyHint: 'interactive' });
+                } catch (e) {
+                    audioCtx = new Ctx();
+                }
+                outputGain = audioCtx.createGain();
+                outputGain.gain.value = 1;
+
+                // Simple EQ chain for audibility on phone/laptop speakers.
+                // (Keeps rumble out, avoids harsh ultrahighs, adds slight presence.)
+                const hp = audioCtx.createBiquadFilter();
+                hp.type = 'highpass';
+                hp.frequency.value = cfg.hpHz;
+                hp.Q.value = 0.707;
+
+                const presence = audioCtx.createBiquadFilter();
+                presence.type = 'peaking';
+                presence.frequency.value = cfg.presenceHz;
+                presence.gain.value = cfg.presenceGainDb;
+                presence.Q.value = cfg.presenceQ;
+
+                const lp = audioCtx.createBiquadFilter();
+                lp.type = 'lowpass';
+                lp.frequency.value = cfg.lpHz;
+                lp.Q.value = 0.707;
+
+                outputGain.connect(hp);
+                hp.connect(presence);
+                presence.connect(lp);
+                lp.connect(audioCtx.destination);
+                eqIn = hp;
+                return audioCtx;
+            }
+
+            // Procedurally generate each mode's sample once, then reuse.
+            function ensureModeBuffer(ctx, targetMode) {
+                if (buffersByMode.has(targetMode)) return buffersByMode.get(targetMode);
+                let buf;
+                if (targetMode === 1) {
+                    buf = generateChirpBuffer(ctx, cfg);
+                } else if (targetMode === 2) {
+                    buf = generateTriumphantMelodyBuffer(ctx, cfg);
+                } else if (targetMode === 3) {
+                    // Mode 3 is intentionally alarm-like; keep volume capped via masterGain.
+                    buf = generateAlarmBuffer(ctx, cfg);
+                } else {
+                    // Mode 4 is a deliberately “bad” locator test: short monotone beep.
+                    buf = generateMonotoneBeepBuffer(ctx, cfg);
+                }
+                buffersByMode.set(targetMode, buf);
+                return buf;
+            }
+
+            function randomSignedUnit() {
+                return (Math.random() * 2) - 1;
+            }
+
+            function computeNextGapSeconds() {
+                if (mode === 4) {
+                    return Math.max(0, (cfg.mode4GapBaseSeconds || 0) + (cfg.mode4GapJitterSeconds || 0) * randomSignedUnit());
+                }
+                // Long silence reduces habituation and avoids “alarm” character.
+                return Math.max(0, cfg.gapBaseSeconds + cfg.gapJitterSeconds * randomSignedUnit());
+            }
+
+            function scheduleOneChirp(atTime, index, buffer) {
+                const ctx = audioCtx;
+                const source = ctx.createBufferSource();
+                source.buffer = buffer;
+
+                liveSources.add(source);
+                source.onended = () => {
+                    liveSources.delete(source);
+                };
+
+                // Buffers are generated as true stereo for all modes.
+                source.connect(outputGain);
+
+                // Use a hard stop shortly after to prevent any tail from lingering.
+                source.start(atTime);
+                source.stop(atTime + buffer.duration + 0.05);
+            }
+
+            function schedulerTick() {
+                if (!isRunning || !audioCtx) return;
+                const ctx = audioCtx;
+                const horizon = ctx.currentTime + cfg.scheduleAheadSeconds;
+
+                const buffer = buffersByMode.get(mode);
+                if (!buffer) return;
+
+                while (nextChirpTime < horizon) {
+                    scheduleOneChirp(nextChirpTime, chirpIndex, buffer);
+                    const gap = computeNextGapSeconds();
+                    nextChirpTime += buffer.duration + gap;
+                    chirpIndex += 1;
+                }
+            }
+
+            async function start() {
+                if (isRunning) return;
+                setStatus('Starting…', true);
+
+                const ctx = ensureAudioContext();
+                // Resume is required on some platforms even after construction.
+                try { await ctx.resume(); } catch (e) {}
+
+                // Generate once (procedural audio data), then schedule repeated emissions.
+                setStatus('Generating…', true);
+                // Keep generation synchronous but allow the UI to paint first.
+                await new Promise(r => setTimeout(r, 0));
+
+                ensureModeBuffer(ctx, mode);
+
+                // Apply master level at runtime (so we can adjust without regenerating).
+                outputGain.gain.value = cfg.masterGain;
+
+                isRunning = true;
+                chirpIndex = 0;
+                nextChirpTime = ctx.currentTime + 0.05;
+
+                setStatus('Playing', false);
+                schedulerTimerId = setInterval(schedulerTick, cfg.schedulerTickMs);
+                schedulerTick();
+            }
+
+            function stop(immediateStatus = true) {
+                if (!audioCtx) {
+                    if (immediateStatus) setStatus('Ready', true);
+                    return;
+                }
+
+                isRunning = false;
+                if (schedulerTimerId) {
+                    clearInterval(schedulerTimerId);
+                    schedulerTimerId = null;
+                }
+
+                // Stop any already-scheduled-but-not-ended sources immediately.
+                for (const src of Array.from(liveSources)) {
+                    try { src.stop(); } catch (e) {}
+                }
+                liveSources.clear();
+
+                // Suspend saves battery on mobile without losing generated buffer.
+                try { audioCtx.suspend(); } catch (e) {}
+
+                if (immediateStatus) setStatus('Ready', true);
+            }
+
+            function updateModeButtons() {
+                for (const btn of modeBtns) {
+                    const m = Number(btn.dataset.mode);
+                    btn.classList.toggle('active', m === mode);
+                }
+            }
+
+            function setMode(newMode) {
+                const m = Number(newMode);
+                if (![1, 2, 3, 4].includes(m)) return;
+                if (m === mode) return;
+                mode = m;
+                updateModeButtons();
+                updateWidgetData(widget.id, { mode });
+
+                // Switching modes while running restarts immediately with the new buffer.
+                if (isRunning) {
+                    stop(false);
+                    start().catch(err => {
+                        console.error('Chirper start failed:', err);
+                        setStatus('Audio unavailable', true);
+                    });
+                }
+            }
+
+            function destroy() {
+                stop(false);
+                if (visibilityHandler) {
+                    document.removeEventListener('visibilitychange', visibilityHandler);
+                    visibilityHandler = null;
+                }
+                if (audioCtx) {
+                    try { audioCtx.close(); } catch (e) {}
+                }
+                audioCtx = null;
+                buffersByMode.clear();
+                outputGain = null;
+                eqIn = null;
+            }
+
+            // Controls
+            playBtn.addEventListener('click', () => {
+                start().catch(err => {
+                    console.error('Chirper start failed:', err);
+                    setStatus('Audio unavailable', true);
+                });
+            });
+            stopBtn.addEventListener('click', () => stop(true));
+
+            for (const btn of modeBtns) {
+                btn.addEventListener('click', () => setMode(btn.dataset.mode));
+            }
+
+            // Stop chirping when the tab is backgrounded (prevents accidental continuous play).
+            visibilityHandler = () => {
+                if (document.hidden) stop(true);
+            };
+            document.addEventListener('visibilitychange', visibilityHandler);
+
+            removeBtn.addEventListener('click', () => {
+                destroy();
+                removeWidget(widget.id);
+            });
+
+            updateModeButtons();
+
+            return tile;
+        }
+
+        // Mode 2: uplifting “completion chime”.
+        // Goal: the same *vibe* as appliance completion tunes (bright, major-key, bell-ish,
+        // short arpeggio + satisfying cadence), but kept fully original (not copied from
+        // any brand/video melody).
+        function generateTriumphantMelodyBuffer(ctx, cfg) {
+            const sr = ctx.sampleRate;
+            const dur = cfg.mode2Seconds;
+            const length = Math.max(1, Math.floor(dur * sr));
+            const buffer = ctx.createBuffer(2, length, sr);
+            const left = buffer.getChannelData(0);
+            const right = buffer.getChannelData(1);
+
+            const detuneRatio = Math.pow(2, (cfg.stereoDetuneCents || 0) / 1200);
+            const ratioL = 1 / Math.sqrt(detuneRatio);
+            const ratioR = Math.sqrt(detuneRatio);
+
+            // Mode 2 goal: bright bell-ish chime with a crisp “done!” cadence.
+            // Fit everything within cfg.mode2Seconds (default 1.25s).
+            const baseHz = 523.251; // C5 (bright, chime-like)
+
+            // Original completion contour: playful “plink-plink” pickup,
+            // quick arpeggio, then a satisfying held resolution.
+            const melody = [
+                { t0: 0.06, dur: 0.08, semi: 4 },    // E5
+                { t0: 0.15, dur: 0.08, semi: 4 },    // E5 (repeat: playful)
+                { t0: 0.24, dur: 0.09, semi: 7 },    // G5
+                { t0: 0.34, dur: 0.12, semi: 12 },   // C6
+                { t0: 0.48, dur: 0.09, semi: 9 },    // A5
+                { t0: 0.58, dur: 0.10, semi: 11 },   // B5
+                { t0: 0.70, dur: 0.12, semi: 14 },   // D6
+                { t0: 0.84, dur: 0.40, semi: 12, level: 1.10 },  // C6 (held resolve)
+                // quiet sparkle tag near the end (kept subtle)
+                { t0: 1.04, dur: 0.12, semi: 16, level: 0.20 }    // E6
+            ];
+
+            // Support bed: light, unobtrusive triads under the chime.
+            // I → IV → V7 → I(add6)
+            const chordBaseHz = 261.626; // C4
+            const chords = [
+                { t0: 0.06, dur: 0.26, notes: [0, 4, 7] },        // C
+                { t0: 0.34, dur: 0.22, notes: [5, 9, 12] },       // F
+                { t0: 0.58, dur: 0.26, notes: [7, 11, 14, 17] },  // G7
+                { t0: 0.84, dur: 0.40, notes: [0, 4, 7, 9] }      // C(add6)
+            ];
+
+            // Chime-ish: fewer harmonics, faster falloff, plus a couple inharmonic partials.
+            const melodyHarm = { harmonics: 4, falloff: 0.60 };
+            const chordHarm = { harmonics: 3, falloff: 0.50 };
+
+            // Crisp attack, ringing tail.
+            const atkMel = 0.006;
+            const relMel = 0.230;
+            const atkChord = 0.020;
+            const relChord = 0.220;
+
+            // Very subtle vibrato for warmth (avoid wobble).
+            const vibratoHz = 5.0;
+            const vibratoCents = 2.5;
+
+            // Tiny initial pitch-bend makes it feel more “plink” and playful.
+            const bendCents = 18;
+            const bendTauSeconds = 0.030;
+
+            // Distance assist: add a subtle low-mid carrier under the chime.
+            // This increases audibility at distance (and through obstacles) without needing to crank volume.
+            const carrierHz = cfg.mode2CarrierHz || cfg.carrierHz || 560;
+            const carrierLevel = cfg.mode2CarrierLevel || Math.min(0.14, (cfg.carrierLevel || 0.10) * 1.15);
+
+            function hzFromSemis(base, semi) {
+                return base * Math.pow(2, semi / 12);
+            }
+
+            function envAD(t, t0, durS, atkS, relS) {
+                const t1 = t0 + durS;
+                if (t < t0 || t > t1) return 0;
+                const local = t - t0;
+                const total = durS;
+                const a = Math.min(atkS, total * 0.5);
+                const r = Math.min(relS, total * 0.9);
+                if (local < a) return local / a;
+                if (local > total - r) return Math.max(0, (total - local) / r);
+                // More pronounced natural decay to feel like a chime.
+                return 1 - 0.42 * (local / total);
+            }
+
+            function addHarmonics(sum, f0, t, harmonics, falloff) {
+                let s = sum;
+                for (let h = 1; h <= harmonics; h++) {
+                    const amp = (1 / h) * Math.exp(-falloff * (h - 1));
+                    s += Math.sin(2 * Math.PI * (f0 * h) * t) * amp;
+                }
+                return s;
+            }
+
+            function synthAtTime(t, freqRatio) {
+                let melodySum = 0;
+                let chordSum = 0;
+                let melodyEnvMax = 0;
+                let chordEnvMax = 0;
+
+                // Melody layer
+                for (const n of melody) {
+                    const e = envAD(t, n.t0, n.dur, atkMel, relMel);
+                    if (e <= 0) continue;
+                    melodyEnvMax = Math.max(melodyEnvMax, e);
+
+                    const local = t - n.t0;
+                    const bend = Math.pow(2, ((bendCents * Math.exp(-Math.max(0, local) / bendTauSeconds))) / 1200);
+
+                    const vibRatio = Math.pow(2, (vibratoCents * Math.sin(2 * Math.PI * vibratoHz * t)) / 1200);
+                    const f0 = hzFromSemis(baseHz, n.semi) * freqRatio * vibRatio * bend;
+
+                    let note = 0;
+                    note = addHarmonics(note, f0, t, melodyHarm.harmonics, melodyHarm.falloff);
+                    // Bell-ish inharmonic partials (quiet), to avoid sounding like a plain organ.
+                    // Weighted by e^2 so they emphasize onset/shine.
+                    const e2 = e * e;
+                    note += Math.sin(2 * Math.PI * (f0 * 2.71) * t) * 0.12 * e2;
+                    note += Math.sin(2 * Math.PI * (f0 * 3.93) * t) * 0.08 * e2;
+
+                    const level = (n.level !== undefined ? n.level : 1.0);
+                    melodySum += note * e * level;
+                }
+
+                // Chord bed (lower level, supports warmth and “completion”).
+                for (const c of chords) {
+                    const e = envAD(t, c.t0, c.dur, atkChord, relChord);
+                    if (e <= 0) continue;
+                    chordEnvMax = Math.max(chordEnvMax, e);
+                    let chord = 0;
+                    for (const semi of c.notes) {
+                        const f0 = hzFromSemis(chordBaseHz, semi) * freqRatio;
+                        chord = addHarmonics(chord, f0, t, chordHarm.harmonics, chordHarm.falloff);
+                    }
+                    chordSum += chord * e;
+                }
+
+                // Balance: melody forward, chords subtle.
+                let s = melodySum * 0.92 + chordSum * 0.14;
+
+                // Low-mid carrier to help travel distance.
+                // Envelope follows the overall musical energy so it doesn’t feel like a separate tone.
+                const energy = Math.min(1, melodyEnvMax * 0.95 + chordEnvMax * 0.35);
+                if (energy > 0.0001) {
+                    const carF = carrierHz * freqRatio;
+                    const car =
+                        Math.sin(2 * Math.PI * carF * t) * 1.0 +
+                        Math.sin(2 * Math.PI * (carF * 2) * t) * 0.35 +
+                        Math.sin(2 * Math.PI * (carF * 3) * t) * 0.18;
+                    s += car * energy * carrierLevel;
+                }
+
+                // Gentle saturation to improve “presence” on small speakers.
+                return Math.tanh(s * 1.22) / Math.tanh(1.22);
+            }
+
+            for (let i = 0; i < length; i++) {
+                const t = i / sr;
+                // Both channels emit simultaneously; small detune can create a “bloom” on
+                // real stereo pairs via beating/interference in air.
+                left[i] = synthAtTime(t, ratioL);
+                right[i] = synthAtTime(t, ratioR);
+            }
+
+            // Normalize peak with headroom.
+            let peak = 0;
+            for (let i = 0; i < length; i++) {
+                peak = Math.max(peak, Math.abs(left[i]), Math.abs(right[i]));
+            }
+            if (peak > 0) {
+                const gain = 0.95 / peak;
+                for (let i = 0; i < length; i++) {
+                    left[i] *= gain;
+                    right[i] *= gain;
+                }
+            }
+            return buffer;
+        }
+
+        // Mode 3: alarm-like signal (more urgent/irritating by design).
+        // Still volume-capped by masterGain; user controls device volume.
+        function generateAlarmBuffer(ctx, cfg) {
+            const sr = ctx.sampleRate;
+            const dur = cfg.mode3Seconds;
+            const length = Math.max(1, Math.floor(dur * sr));
+            const buffer = ctx.createBuffer(2, length, sr);
+            const left = buffer.getChannelData(0);
+            const right = buffer.getChannelData(1);
+
+            const detuneRatio = Math.pow(2, (cfg.stereoDetuneCents || 0) / 1200);
+            const ratioL = 1 / Math.sqrt(detuneRatio);
+            const ratioR = Math.sqrt(detuneRatio);
+
+            // Two-tone alarm core (serious/urgent). Keep in the “cuts-through” band.
+            const baseA = 930;
+            const baseB = 1510;
+            const burstPattern = [
+                { t0: 0.00, t1: 0.14 },
+                { t0: 0.18, t1: 0.32 },
+                { t0: 0.36, t1: dur }
+            ];
+            // Sharp edges: no soft siney fades. (Clicks are acceptable for an alarm.)
+            const atk = 0.0012;
+            const rel = 0.012;
+
+            // Distance assist: low-mid carrier under the alarm (travels better than pure highs).
+            const carrierHz = Math.max(0, cfg.mode3CarrierHz || cfg.carrierHz || 520);
+            const carrierLevel = Math.max(0, cfg.mode3CarrierLevel || (cfg.carrierLevel || 0.10));
+
+            // “Hardness” controls: harmonics + saturation.
+            const toneHarmonics = 7;
+            const drive = 2.35;
+            const driveNorm = Math.tanh(drive);
+
+            // Broadband onset edge (short, per-burst) for salience at distance.
+            const edgeSeconds = 0.010;
+            const edgeSamples = Math.max(1, Math.floor(edgeSeconds * sr));
+            const edgeLevel = 0.055;
+
+            function inBurst(t) {
+                for (const b of burstPattern) {
+                    if (t >= b.t0 && t <= b.t1) return b;
+                }
+                return null;
+            }
+
+            function burstEnv(t, b) {
+                const local = t - b.t0;
+                const total = b.t1 - b.t0;
+                const a = Math.min(atk, total * 0.5);
+                const r = Math.min(rel, total * 0.8);
+                let e;
+                if (local < a) e = local / a;
+                else if (local > total - r) e = Math.max(0, (total - local) / r);
+                else e = 1;
+                // Slight intra-burst “pressure” decay (keeps it aggressive without being flat).
+                e *= (1 - 0.10 * (local / Math.max(1e-6, total)));
+                // Sharpen edges a touch.
+                return Math.pow(Math.max(0, Math.min(1, e)), 1.25);
+            }
+
+            function onsetEdge(localT) {
+                if (localT < 0) return 0;
+                const i = Math.floor(localT * sr);
+                if (i < 0 || i >= edgeSamples) return 0;
+                const x = i / edgeSamples;
+                // Quick rise + rapid decay so it reads as a crack/edge, not hiss.
+                const env = (x < 0.12 ? (x / 0.12) : 1) * (1 - x);
+                // White noise sample.
+                return (Math.random() * 2 - 1) * env;
+            }
+
+            function addSawish(sum, f0, t, harmonics) {
+                // Additive saw-ish tone: strong harmonic series, very “hard” and alarm-like.
+                let s = sum;
+                for (let h = 1; h <= harmonics; h++) {
+                    s += Math.sin(2 * Math.PI * (f0 * h) * t) * (1 / h);
+                }
+                return s;
+            }
+
+            function alarmSample(t, freqRatio) {
+                const b = inBurst(t);
+                if (!b) return 0;
+
+                const env = burstEnv(t, b);
+                const local = t - b.t0;
+                const a = baseA * freqRatio;
+                const c = baseB * freqRatio;
+
+                // Two-tone with close detunes to induce roughness (panic/urgency).
+                let s = 0;
+                s = addSawish(s, a - 21, t, toneHarmonics) * 0.55;
+                s = addSawish(s, a + 19, t, toneHarmonics) * 0.50;
+                s = addSawish(s, c - 29, t, toneHarmonics) * 0.45;
+                s = addSawish(s, c + 27, t, toneHarmonics) * 0.42;
+
+                // Add a high “bite” component.
+                s += Math.sin(2 * Math.PI * (c * 2.0) * t) * 0.18;
+
+                // Low-mid carrier (distance travel) under the whole burst.
+                if (carrierHz > 0 && carrierLevel > 0) {
+                    const carF = carrierHz * freqRatio;
+                    const car =
+                        Math.sin(2 * Math.PI * carF * t) * 1.0 +
+                        Math.sin(2 * Math.PI * (carF * 2) * t) * 0.35 +
+                        Math.sin(2 * Math.PI * (carF * 3) * t) * 0.18;
+                    s += car * carrierLevel;
+                }
+
+                // Short broadband edge at each burst onset.
+                s += onsetEdge(local) * edgeLevel;
+
+                // Aggressive saturation for urgency.
+                s = Math.tanh(s * drive) / driveNorm;
+                s *= env;
+                return s;
+            }
+
+            for (let i = 0; i < length; i++) {
+                const t = i / sr;
+                // Both channels emit simultaneously with tiny detune.
+                left[i] = alarmSample(t, ratioL);
+                right[i] = alarmSample(t, ratioR);
+            }
+
+            // Normalize peak with headroom.
+            let peak = 0;
+            for (let i = 0; i < length; i++) {
+                peak = Math.max(peak, Math.abs(left[i]), Math.abs(right[i]));
+            }
+            if (peak > 0) {
+                const gain = 0.95 / peak;
+                for (let i = 0; i < length; i++) {
+                    left[i] *= gain;
+                    right[i] *= gain;
+                }
+            }
+            return buffer;
+        }
+
+        // Mode 4: intentionally “bad” locator test.
+        // Very short monotone beep at 2000 Hz, identical L/R (no detune, no spatial cues).
+        // The point is to demonstrate that a very short blip can be hard to localize.
+        function generateMonotoneBeepBuffer(ctx, cfg) {
+            const sr = ctx.sampleRate;
+            const dur = Math.max(0.005, cfg.mode4Seconds || 0.03);
+            const f0 = Math.max(20, cfg.mode4Hz || 2000);
+
+            const length = Math.max(1, Math.floor(dur * sr));
+            const buffer = ctx.createBuffer(2, length, sr);
+            const left = buffer.getChannelData(0);
+            const right = buffer.getChannelData(1);
+
+            // Keep a minimal ramp to avoid harsh clicks, but still “beep-like”.
+            const atk = Math.min(0.0012, dur * 0.45);
+            const rel = Math.min(0.0045, dur * 0.70);
+            const twoPiF = 2 * Math.PI * f0;
+
+            function env(t) {
+                let e = 1;
+                if (t < atk) e = t / atk;
+                else if (t > dur - rel) e = Math.max(0, (dur - t) / rel);
+                return Math.max(0, Math.min(1, e));
+            }
+
+            for (let i = 0; i < length; i++) {
+                const t = i / sr;
+                const s = Math.sin(twoPiF * t) * env(t);
+                left[i] = s;
+                right[i] = s;
+            }
+
+            // Normalize peak with headroom.
+            let peak = 0;
+            for (let i = 0; i < length; i++) {
+                peak = Math.max(peak, Math.abs(left[i]));
+            }
+            if (peak > 0) {
+                const gain = 0.95 / peak;
+                for (let i = 0; i < length; i++) {
+                    left[i] *= gain;
+                    right[i] *= gain;
+                }
+            }
+            return buffer;
+        }
+
+        // Generate a single chirp (AudioBuffer) using additive synthesis with two sweeping voices.
+        // This is intentionally “chime-like”: sharp onset, rich midrange harmonics, no warble.
+        function generateChirpBuffer(ctx, cfg) {
+            const sr = ctx.sampleRate;
+            const length = Math.max(1, Math.floor(cfg.chirpSeconds * sr));
+            const buffer = ctx.createBuffer(2, length, sr);
+            const left = buffer.getChannelData(0);
+            const right = buffer.getChannelData(1);
+
+            // Track per-voice/per-harmonic phases for smooth sweeps.
+            // Keep separate L/R phases so stereo detune is a true frequency offset.
+            const phasesL = cfg.voices.map(() => Array.from({ length: cfg.harmonicsPerVoice }, () => 0));
+            const phasesR = cfg.voices.map(() => Array.from({ length: cfg.harmonicsPerVoice }, () => 0));
+
+            const twoPi = Math.PI * 2;
+            const dur = cfg.chirpSeconds;
+            const atk = Math.min(cfg.attackSeconds, dur * 0.45);
+            const rel = Math.min(cfg.releaseSeconds, dur * 0.7);
+            const capHz = cfg.highHzSoftCap;
+            const rollHz = Math.max(1, cfg.highHzRolloff);
+            const drive = Math.max(0.01, cfg.drive);
+            const driveNorm = Math.tanh(drive);
+
+            const detuneRatio = Math.pow(2, (cfg.stereoDetuneCents || 0) / 1200);
+            const ratioL = 1 / Math.sqrt(detuneRatio);
+            const ratioR = Math.sqrt(detuneRatio);
+
+            const noiseLevel = Math.max(0, cfg.onsetNoiseLevel || 0);
+            const noiseSamples = Math.max(0, Math.floor((cfg.onsetNoiseSeconds || 0) * sr));
+
+            function lerp(a, b, t) { return a + (b - a) * t; }
+
+            function envelope(t) {
+                // Fast attack for salience + gentle decay to avoid “beep” harshness.
+                let e = 1;
+                if (t < atk) e = t / atk;
+                else if (t > dur - rel) e = Math.max(0, (dur - t) / rel);
+                // Slight downward tilt for a more organic chime.
+                const tilt = 1 - 0.22 * (t / dur);
+                return e * tilt;
+            }
+
+            function highFreqRolloff(fHz) {
+                if (fHz <= capHz) return 1;
+                return Math.exp(-(fHz - capHz) / rollHz);
+            }
+
+            // Low-mid carrier: intentionally subtle. Contributes energy around ~400–1200 Hz
+            // (depending on harmonics) where distance propagation tends to be better.
+            const carrierHz = Math.max(0, cfg.carrierHz || 0);
+            const carrierHarmonics = Math.max(0, Math.min(8, cfg.carrierHarmonics || 0));
+            const carrierLevel = Math.max(0, cfg.carrierLevel || 0);
+            let carrierPhaseL = 0;
+            let carrierPhaseR = 0;
+
+            function onsetNoiseEnv(i) {
+                if (noiseSamples <= 0 || i >= noiseSamples) return 0;
+                // Quick rise + rapid decay (prevents hiss, reads as a micro “click”).
+                const x = i / noiseSamples;
+                return (x < 0.15 ? (x / 0.15) : 1) * (1 - x);
+            }
+
+            // Amplitude reference to avoid clipping (still waveshaped below).
+            // This is conservative because different devices may behave differently.
+            const harmonicBase = 0.9;
+
+            for (let i = 0; i < length; i++) {
+                const t = i / sr;
+                const x = t / dur;
+                const env = envelope(t);
+
+                let sL = 0;
+                let sR = 0;
+
+                for (let v = 0; v < cfg.voices.length; v++) {
+                    const voice = cfg.voices[v];
+                    const f0 = lerp(voice.fStart, voice.fEnd, x);
+
+                    for (let h = 1; h <= cfg.harmonicsPerVoice; h++) {
+                        const f = f0 * h;
+                        const fL = f * ratioL;
+                        const fR = f * ratioR;
+                        const rollL = highFreqRolloff(fL);
+                        const rollR = highFreqRolloff(fR);
+                        if (rollL < 0.001 && rollR < 0.001) continue;
+
+                        // Harmonic amplitude falls off with partial number.
+                        // (softens timbre, reduces harshness while staying “present”).
+                        const partialDecay = Math.exp(-cfg.harmonicFalloff * (h - 1));
+                        const ampBase = (harmonicBase / h) * partialDecay;
+
+                        const incL = twoPi * (fL / sr);
+                        const incR = twoPi * (fR / sr);
+                        phasesL[v][h - 1] += incL;
+                        phasesR[v][h - 1] += incR;
+                        if (phasesL[v][h - 1] > 1e9) phasesL[v][h - 1] %= twoPi;
+                        if (phasesR[v][h - 1] > 1e9) phasesR[v][h - 1] %= twoPi;
+
+                        sL += Math.sin(phasesL[v][h - 1]) * (ampBase * rollL);
+                        sR += Math.sin(phasesR[v][h - 1]) * (ampBase * rollR);
+                    }
+                }
+
+                // Add the low-mid carrier under the chirp (still shaped by chirp envelope).
+                if (carrierHz > 0 && carrierLevel > 0 && carrierHarmonics > 0) {
+                    // Slightly favor earlier part of the chirp so the onset is “findable”.
+                    const carrierEnv = env * (1 - 0.25 * x);
+                    const baseAmp = carrierLevel * carrierEnv;
+
+                    // Fundamental phase increments for L/R detuned carrier.
+                    const incCL = twoPi * ((carrierHz * ratioL) / sr);
+                    const incCR = twoPi * ((carrierHz * ratioR) / sr);
+                    carrierPhaseL += incCL;
+                    carrierPhaseR += incCR;
+                    if (carrierPhaseL > 1e9) carrierPhaseL %= twoPi;
+                    if (carrierPhaseR > 1e9) carrierPhaseR %= twoPi;
+
+                    for (let h = 1; h <= carrierHarmonics; h++) {
+                        const fall = Math.exp(-0.33 * (h - 1));
+                        const amp = baseAmp * (1 / h) * fall;
+                        const fHL = (carrierHz * ratioL) * h;
+                        const fHR = (carrierHz * ratioR) * h;
+                        const rollL = highFreqRolloff(fHL);
+                        const rollR = highFreqRolloff(fHR);
+                        if (rollL > 0.001) sL += Math.sin(carrierPhaseL * h) * (amp * rollL);
+                        if (rollR > 0.001) sR += Math.sin(carrierPhaseR * h) * (amp * rollR);
+                    }
+                }
+
+                // Tiny band-limited onset noise to add broadband localization edges.
+                if (noiseLevel > 0 && i < noiseSamples) {
+                    // A simple difference to bias toward higher frequencies (crude high-pass).
+                    const n0 = (Math.random() * 2 - 1);
+                    const n1 = (Math.random() * 2 - 1);
+                    const n = (n0 - 0.6 * n1);
+                    const ne = onsetNoiseEnv(i) * noiseLevel;
+                    sL += n * ne;
+                    sR += n * ne;
+                }
+
+                // Gentle saturation: improves perceived loudness/clarity on tiny speakers
+                // without needing high absolute amplitude.
+                sL = Math.tanh(sL * drive) / driveNorm;
+                sR = Math.tanh(sR * drive) / driveNorm;
+                left[i] = sL * env;
+                right[i] = sR * env;
+            }
+
+            // Normalize peak to prevent clipping, then leave headroom.
+            let peak = 0;
+            for (let i = 0; i < length; i++) {
+                peak = Math.max(peak, Math.abs(left[i]), Math.abs(right[i]));
+            }
+            if (peak > 0) {
+                const gain = 0.95 / peak;
+                for (let i = 0; i < length; i++) {
+                    left[i] *= gain;
+                    right[i] *= gain;
+                }
+            }
+            return buffer;
         }
 
         function unregisterAlarmContext(ctx) {
