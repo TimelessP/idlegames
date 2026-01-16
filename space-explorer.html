@@ -62,8 +62,8 @@
       background: rgba(26, 30, 63, 0.9);
       padding: calc(8px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) 8px calc(20px + env(safe-area-inset-left, 0px));
       display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
+      justify-content: flex-start;
+      align-items: center;
       flex-wrap: wrap;
       gap: 6px 16px;
       border-bottom: 2px solid var(--accent);
@@ -98,7 +98,13 @@
       row-gap: 6px;
     }
 
-    .hud-section:last-child {
+    .hud-controls {
+      flex: 0 0 auto;
+      gap: 10px;
+    }
+
+    .hud-stats {
+      flex: 1 1 520px;
       justify-content: flex-end;
     }
 
@@ -309,9 +315,11 @@
 </head>
 <body>
   <div id="hud">
-    <div class="hud-section">
+    <div class="hud-section hud-controls">
       <button class="hud-btn" id="menuBtn" aria-label="Game menu">☰ MENU</button>
       <button class="hud-btn" id="alertsBtn" aria-label="Alerts">⚠ ALERTS</button>
+    </div>
+    <div class="hud-section hud-stats">
       <div class="status-item">
         <span>POWER:</span>
         <span class="status-value" id="powerLevel">100%</span>
@@ -332,8 +340,10 @@
         <span>SPEED:</span>
         <span class="status-value" id="speedLevel">0 km/s</span>
       </div>
-    </div>
-    <div class="hud-section">
+      <div class="status-item">
+        <span>CREDITS:</span>
+        <span class="status-value" id="creditsLevel">0 cr</span>
+      </div>
       <div class="status-item">
         <span>LOCATION:</span>
         <span class="status-value" id="locationText">CARGO BAY</span>
@@ -386,7 +396,7 @@
 
     // Basic modules are always fabricatable so the player can never get stuck.
     // Sensors is included so anomaly/blueprint progression is always reachable.
-    const BASIC_MODULE_TYPES = new Set(['cargo', 'power', 'engine', 'cockpit', 'fabricator', 'life', 'hydro', 'quarters', 'sensors']);
+    const BASIC_MODULE_TYPES = new Set(['cargo', 'power', 'engine', 'cockpit', 'fabricator', 'life', 'hydro', 'quarters', 'sensors', 'computer']);
 
     const SYSTEM_GRAPH = {
       SOL: { EOS: 240, VEGA: 420, KITE: 180 },
@@ -1687,7 +1697,8 @@
         { uid: newUid(), type: 'power' },
         { uid: newUid(), type: 'fabricator' },
         { uid: newUid(), type: 'engine' },
-        { uid: newUid(), type: 'cockpit' }
+        { uid: newUid(), type: 'cockpit' },
+        { uid: newUid(), type: 'computer' }
       ];
     }
 
@@ -1695,6 +1706,9 @@
       rear: { uid: 'endcap-rear', type: 'rearcap' },
       front: { uid: 'endcap-front', type: 'nosecap' }
     };
+
+    // Interior layout scale: halve each module width while keeping station/equipment sizes unchanged.
+    const MODULE_WIDTH_SCALE = 0.5;
 
     function isEndcapType(type) {
       return type === 'rearcap' || type === 'nosecap';
@@ -2251,6 +2265,7 @@
           {
             key: 'airlock.eva',
             label: `EVA Patch Hull (Oxygen ${Math.round(state.oxygen)}% / 12%)`,
+            requiredRole: ['engineer', 'specialist'],
             action: () => {
               if (state.hull >= state.hullMax && !state.incidents.breach) {
                 showMessage('AIRLOCK', 'No hull work required.');
@@ -2320,7 +2335,7 @@
               }
 
               const fee = 30;
-              const candidates = ['TECH', 'MEDIC', 'PILOT', 'SPECIALIST'];
+              const candidates = ['CREW', 'TECH', 'MEDIC', 'PILOT', 'ENGINEER', 'SCIENTIST', 'QUARTERMASTER', 'SECURITY', 'SPECIALIST'];
               openPanel(
                 'TRANSFER CREW IN',
                 `Select a crew member to transfer in.\n\nTransport fee: ${fee} credits (you have ${Math.floor(state.credits)}).`,
@@ -2347,11 +2362,52 @@
           {
             key: 'quarters.transferOut',
             label: 'Transfer Crew OUT (Dismiss)',
-            playerOnly: true,
+            requiredRole: ['quartermaster'],
             action: () => {
+              const actor = state.ui && state.ui.actionActor ? state.ui.actionActor : 'player';
               const npcs = Array.isArray(state.npcs) ? state.npcs.filter(Boolean) : [];
               if (npcs.length === 0) {
-                showMessage('QUARTERS', 'No crew to transfer out.');
+                if (actor === 'player') showMessage('QUARTERS', 'No crew to transfer out.');
+                else queueNotification('QUARTERS', 'No crew to transfer out (AUTOMATION).');
+                return;
+              }
+
+              // Automation: pick a reasonable candidate and transfer them out without opening UI.
+              if (actor !== 'player') {
+                const qCount = npcs.filter((n) => npcRole(n) === 'quartermaster').length;
+                let candidates = npcs;
+                if (qCount <= 1) {
+                  candidates = npcs.filter((n) => npcRole(n) !== 'quartermaster');
+                }
+                if (!candidates.length) candidates = npcs;
+
+                const rolePriority = {
+                  crew: 0,
+                  security: 1,
+                  specialist: 2,
+                  scientist: 3,
+                  tech: 4,
+                  engineer: 5,
+                  medic: 6,
+                  pilot: 7,
+                  quartermaster: 8
+                };
+
+                const score = (n) => {
+                  const r = npcRole(n);
+                  const pri = rolePriority[r] !== undefined ? rolePriority[r] : 9;
+                  const duty = n.onDuty ? 1 : 0; // prefer dismissing standby first
+                  const following = n.following ? 1 : 0;
+                  return pri * 10 + duty * 3 + following;
+                };
+
+                candidates.sort((a, b) => score(a) - score(b));
+                const chosen = candidates[0];
+                if (!chosen) return;
+                removeCrewMemberById(chosen.id);
+                markDirty();
+                updateHUD();
+                queueNotification('QUARTERS', `${chosen.name} transferred out (AUTOMATION).`);
                 return;
               }
 
@@ -2465,6 +2521,14 @@
             ...craftActions
           ];
         }
+      },
+      computer: {
+        label: 'Ship Computer',
+        width: 520,
+        station: { width: 160, height: 120, y: 400 },
+        actions: (station) => [
+          { key: 'computer.open', label: 'Open Ship Computer', action: () => openShipComputerPanel(station) }
+        ]
       }
     };
 
@@ -2496,7 +2560,7 @@
       let x = 0;
       for (const m of state.modules) {
         const def = MODULE_DEFS[m.type] || { label: m.type, width: 520, station: { width: 120, height: 120, y: 400 }, walkable: true };
-        const w = def.width;
+        const w = def.width * MODULE_WIDTH_SCALE;
         layout.push({
           uid: m.uid,
           type: m.type,
@@ -2697,14 +2761,28 @@
 
         const wallY = 80;
         const wallH = 440;
-        const pad = Math.min(50, Math.max(28, wallW * 0.12));
-        const winW = Math.min(140, Math.max(80, (wallW - pad * 3) / 2));
+        const clampNum = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+
+        // Fit windows into the available wall width, evenly spaced and centered.
+        let winCount = wallW >= 240 ? 2 : 1;
+        let gap = winCount > 1 ? clampNum(wallW * 0.08, 16, 40) : 0;
+        let sidePad = clampNum(wallW * 0.10, 18, 46);
+        let winW = (wallW - sidePad * 2 - gap * (winCount - 1)) / winCount;
+
+        // If the module is too narrow for two windows, fall back to one.
+        if (winCount > 1 && winW < 70) {
+          winCount = 1;
+          gap = 0;
+          winW = wallW - sidePad * 2;
+        }
+
+        winW = clampNum(winW, 60, 140);
+        const usedW = (winCount * winW) + (gap * (winCount - 1));
+        const startOffset = (wallW - usedW) / 2;
+        const winXs = Array.from({ length: winCount }, (_, i) => wallStartX + startOffset + i * (winW + gap));
         const winH = 170;
         const winY = 160;
         const winRX = 14;
-
-        const win1X = wallStartX + pad;
-        const win2X = wallStartX + pad * 2 + winW;
 
         const maskId = `wallmask-${module.uid}`;
         const mask = document.createElementNS(svgNS, 'mask');
@@ -2723,7 +2801,7 @@
         maskBase.setAttribute('fill', 'white');
         mask.appendChild(maskBase);
 
-        for (const wx of [win1X, win2X]) {
+        for (const wx of winXs) {
           const hole = document.createElementNS(svgNS, 'rect');
           hole.setAttribute('x', wx);
           hole.setAttribute('y', winY);
@@ -2747,7 +2825,7 @@
         shipGroup.appendChild(wall);
 
         // Window frames (so the cutouts read clearly)
-        for (const wx of [win1X, win2X]) {
+        for (const wx of winXs) {
           const frame = document.createElementNS(svgNS, 'rect');
           frame.setAttribute('x', wx);
           frame.setAttribute('y', winY);
@@ -3264,6 +3342,32 @@
             art.appendChild(mk('rect', { x: xx + 6, y: yy + 6, width: 10, height: 8, rx: 3, ry: 3, fill: 'rgba(180,220,255,0.25)' }));
           }
         }
+      } else if (station.type === 'computer') {
+        // Terminal + knowledge panes
+        art.appendChild(mk('rect', { x: screenX + 12, y: screenY + 14, width: screenW - 24, height: screenH - 28, rx: 8, ry: 8, fill: 'rgba(0,0,0,0.22)', stroke: 'rgba(180,220,255,0.20)', 'stroke-width': 1 }));
+
+        const paneW = (screenW - 38) / 2;
+        const paneH = screenH - 44;
+        const leftX = screenX + 18;
+        const topY = screenY + 22;
+        const rightX = leftX + paneW + 10;
+
+        art.appendChild(mk('rect', { x: leftX, y: topY, width: paneW, height: paneH, rx: 6, ry: 6, fill: 'rgba(20, 30, 60, 0.55)', stroke: 'rgba(255,255,255,0.10)', 'stroke-width': 1 }));
+        art.appendChild(mk('rect', { x: rightX, y: topY, width: paneW, height: paneH, rx: 6, ry: 6, fill: 'rgba(20, 30, 60, 0.55)', stroke: 'rgba(255,255,255,0.10)', 'stroke-width': 1 }));
+
+        for (let i = 0; i < 6; i++) {
+          const yy = topY + 10 + i * 10;
+          art.appendChild(mk('path', { d: `M ${leftX + 10} ${yy} L ${leftX + paneW - 10} ${yy}`,
+            stroke: 'rgba(180,220,255,0.14)', 'stroke-width': 1 }));
+        }
+        for (let i = 0; i < 6; i++) {
+          const yy = topY + 10 + i * 10;
+          art.appendChild(mk('path', { d: `M ${rightX + 10} ${yy} L ${rightX + paneW - 10} ${yy}`,
+            stroke: 'rgba(180,220,255,0.12)', 'stroke-width': 1 }));
+        }
+
+        // Small cursor
+        art.appendChild(mk('rect', { x: rightX + 10, y: topY + paneH - 16, width: 10, height: 2, fill: C.accent, opacity: state.lightsOn ? 0.85 : 0.55 }));
       }
 
       // Station label
@@ -3458,6 +3562,7 @@
       setVal('moraleLevel', Math.round(state.morale) + '%', { warn: state.morale <= 25, good: state.morale >= 75 });
 
       document.getElementById('speedLevel').textContent = state.speed.toLocaleString() + ' km/s';
+      setVal('creditsLevel', `${Math.floor(state.credits).toLocaleString()} cr`);
     }
 
     function taskLabel(task) {
@@ -3468,14 +3573,8 @@
     function updateCrewHUD() {
       const crewText = document.getElementById('crewText');
       if (!crewText) return;
-      if (!Array.isArray(state.npcs) || state.npcs.length === 0) {
-        crewText.textContent = 'NONE';
-        return;
-      }
-      const npc = state.npcs[0];
-      const t = npc && npc.task ? taskLabel(npc.task) : 'IDLE';
-      const duty = npc && npc.following ? 'FOLLOW' : (npc && npc.onDuty ? 'DUTY' : 'STANDBY');
-      crewText.textContent = `${npc.name}: ${duty}${npc && npc.task && !npc.following ? ' · ' + t : ''}`;
+      const npcs = Array.isArray(state.npcs) ? state.npcs.filter(Boolean) : [];
+      crewText.textContent = String(npcs.length);
     }
 
     function npcDutyLabel(npc) {
@@ -3766,9 +3865,347 @@
       }
     }
 
+    function openShipComputerPanel(station, { tab = null } = {}) {
+      const openRoot = () => {
+        openPanel(
+          'SHIP COMPUTER',
+          'Select a section:',
+          [
+            { label: 'Knowledge Base', action: () => openComputerKnowledgeBaseRoot(station) },
+            { label: 'Statistics', action: () => openComputerStatsRoot(station) },
+            { label: 'Notifications', action: () => openComputerNotificationsRoot(station) },
+            { label: 'Back', action: closePanel }
+          ],
+          { includeCancel: false }
+        );
+      };
+
+      if (tab === 'kb') return openComputerKnowledgeBaseRoot(station);
+      if (tab === 'stats') return openComputerStatsRoot(station);
+      openRoot();
+    }
+
+    function openComputerNotificationsRoot(station) {
+      const notes = Array.isArray(state.notifications) ? [...state.notifications] : [];
+      const latest = notes.slice(-12).reverse();
+
+      const lines = [];
+      lines.push('Non-actionable log entries (NPC output, background info).');
+      lines.push('Actionable alerts remain under ⚠ ALERTS.');
+      lines.push('');
+      lines.push(`Stored: ${notes.length}/50`);
+      lines.push('');
+
+      if (!latest.length) {
+        lines.push('No notifications.');
+      } else {
+        for (const n of latest) {
+          const when = fmtDateTime(n.ts);
+          lines.push(`• ${when} — ${n.title}`);
+        }
+      }
+
+      const buttons = [];
+      for (const n of latest) {
+        buttons.push({
+          label: `${fmtDateTime(n.ts)} — ${n.title}`,
+          action: () => {
+            openPanel(
+              `NOTICE — ${n.title}`,
+              `${fmtDateTime(n.ts)}\n\n${String(n.description || '')}`,
+              [
+                { label: 'Back', action: () => openComputerNotificationsRoot(station) }
+              ],
+              { includeCancel: false }
+            );
+          }
+        });
+      }
+
+      if (notes.length) {
+        buttons.push({
+          label: 'Clear Notifications',
+          danger: true,
+          action: () => {
+            state.notifications = [];
+            markDirty();
+            openComputerNotificationsRoot(station);
+          }
+        });
+      }
+
+      buttons.push({ label: 'Back', action: () => openShipComputerPanel(station) });
+
+      openPanel('NOTIFICATIONS', lines.join('\n'), buttons, { includeCancel: false });
+    }
+
+    function openComputerKnowledgeBaseRoot(station) {
+      const intro = [
+        'Onboard reference (terse).',
+        'Notes:',
+        '• Crew roles gate some actions for NPCs and automation.',
+        '• The CAPTAIN can perform any action directly.',
+        ''
+      ].join('\n');
+
+      openPanel(
+        'KNOWLEDGE BASE',
+        intro + 'Choose a topic:',
+        [
+          { label: 'Crew Roles', action: () => openComputerKnowledgeBaseCrewRoot(station) },
+          { label: 'Role Gates (What needs who)', action: () => openComputerKnowledgeBaseRoleGates(station) },
+          { label: 'Back', action: () => openShipComputerPanel(station) }
+        ],
+        { includeCancel: false }
+      );
+    }
+
+    function openComputerKnowledgeBaseCrewRoot(station) {
+      const roles = [
+        { key: 'crew', label: 'Crew (Generalist)' },
+        { key: 'tech', label: 'Tech' },
+        { key: 'engineer', label: 'Engineer' },
+        { key: 'scientist', label: 'Scientist' },
+        { key: 'pilot', label: 'Pilot' },
+        { key: 'quartermaster', label: 'Quartermaster' },
+        { key: 'medic', label: 'Medic' },
+        { key: 'specialist', label: 'Specialist' },
+        { key: 'security', label: 'Security' }
+      ];
+
+      openPanel(
+        'KNOWLEDGE BASE — CREW ROLES',
+        'Select a role to view details:',
+        [
+          ...roles.map((r) => ({ label: r.label, action: () => openComputerKnowledgeBaseRole(station, r.key) })),
+          { label: 'Back', action: () => openComputerKnowledgeBaseRoot(station) }
+        ],
+        { includeCancel: false }
+      );
+    }
+
+    function openComputerKnowledgeBaseRole(station, role) {
+      const r = String(role || 'crew').toLowerCase();
+      const head = `${roleLabel(r)}\n`;
+
+      const lines = [];
+      if (r === 'crew') {
+        lines.push('Generalist. Can follow orders and handle ungated actions.');
+        lines.push('Good as extra hands when you already have specialists.');
+      } else if (r === 'tech') {
+        lines.push('Versatile systems operator.');
+        lines.push('Common gates: VENT HEAT, REFINING, SENSORS actions.');
+      } else if (r === 'engineer') {
+        lines.push('Ship maintenance and heavy systems.');
+        lines.push('Common gates: VENT HEAT, REFINING, REPAIR DRONES.');
+      } else if (r === 'scientist') {
+        lines.push('Exploration and anomaly work.');
+        lines.push('Common gates: SENSORS actions (scan / investigate / deep scan).');
+      } else if (r === 'pilot') {
+        lines.push('Navigation and contract handling.');
+        lines.push('Common gates: COMMUNICATIONS contracts, SALVAGE DRONES.');
+      } else if (r === 'quartermaster') {
+        lines.push('Logistics and trade/contracts support.');
+        lines.push('Common gates: COMMUNICATIONS contracts.');
+        lines.push('Also pairs well with automated supply buffers.');
+      } else if (r === 'medic') {
+        lines.push('Crew care and morale support.');
+        lines.push('Medbay treatment uses power or medkits.');
+      } else if (r === 'specialist') {
+        lines.push('Operational specialist for drones and field tasks.');
+        lines.push('Common gates: DRONE repairs, DRONE salvage (also needs PILOT for salvage).');
+      } else if (r === 'security') {
+        lines.push('Shipboard security.');
+        lines.push('Currently limited use, but a solid “future-proof” hire.');
+      }
+
+      lines.push('');
+      lines.push('Tip: automation can act as “any qualified on-duty crew”.');
+
+      openPanel(
+        `ROLE — ${roleLabel(r)}`,
+        head + lines.join('\n'),
+        [{ label: 'Back', action: () => openComputerKnowledgeBaseCrewRoot(station) }],
+        { includeCancel: false }
+      );
+    }
+
+    function openComputerKnowledgeBaseRoleGates(station) {
+      const items = [
+        { label: 'Engine: Vent Heat', req: 'ENGINEER/TECH', note: 'Reduces HEAT; helps resolve FIRE when cooled.' },
+        { label: 'Airlock: EVA Patch Hull', req: 'ENGINEER/SPECIALIST', note: 'Spends OXYGEN to patch hull and resolve HULL BREACH.' },
+        { label: 'Refinery: Refine Ore', req: 'ENGINEER/TECH', note: 'Turns ORE → INGOTS using POWER.' },
+        { label: 'Sensors: Scan / Investigate / Deep Scan', req: 'SCIENTIST/TECH', note: 'Loot + anomalies + blueprints.' },
+        { label: 'Comms: Contracts', req: 'PILOT/QUARTERMASTER', note: 'Pick/complete contracts and reputation.' },
+        { label: 'Drones: Repair Drone', req: 'ENGINEER/SPECIALIST', note: 'Repairs hull/incidents using parts + power.' },
+        { label: 'Drones: Salvage Drone', req: 'SPECIALIST/PILOT', note: 'Loots scrap/ore using power.' }
+      ];
+
+      const text = [
+        'These are the main role-gated actions (NPCs / automation).',
+        'The CAPTAIN can always do them manually.',
+        '',
+        ...items.map((i) => `• ${i.label}\n  Requires: ${i.req}\n  ${i.note}`)
+      ].join('\n');
+
+      openPanel(
+        'KNOWLEDGE BASE — ROLE GATES',
+        text,
+        [{ label: 'Back', action: () => openComputerKnowledgeBaseRoot(station) }],
+        { includeCancel: false }
+      );
+    }
+
+    function openComputerStatsRoot(station) {
+      const npcs = Array.isArray(state.npcs) ? state.npcs.filter(Boolean) : [];
+      const crewCount = npcs.length;
+      const sys = currentSystem();
+      const inc = [];
+      if (state.incidents.powerTrip) inc.push('POWER TRIP');
+      if (state.incidents.o2Leak) inc.push('O2 LEAK');
+      if (state.incidents.fire) inc.push('FIRE');
+      if (state.incidents.breach) inc.push('HULL BREACH');
+      const incLine = inc.length ? inc.join(', ') : 'None';
+
+      const summary = [
+        `Location: ${sys}`,
+        `Incidents: ${incLine}`,
+        `Crew: ${crewCount}/${MAX_CREW}`,
+        `Credits: ${Math.floor(state.credits)}  Reputation: ${Math.floor(state.reputation)}`,
+        ''
+      ].join('\n');
+
+      openPanel(
+        'STATISTICS',
+        summary + 'Choose a drill-down:',
+        [
+          { label: 'Ship Systems', action: () => openComputerStatsSystems(station) },
+          { label: 'Inventory', action: () => openComputerStatsInventory(station) },
+          { label: 'Crew', action: () => openComputerStatsCrew(station) },
+          { label: 'Modules', action: () => openComputerStatsModules(station) },
+          { label: 'Automation', action: () => openComputerStatsAutomation(station) },
+          { label: 'Back', action: () => openShipComputerPanel(station) }
+        ],
+        { includeCancel: false }
+      );
+    }
+
+    function openComputerStatsSystems(station) {
+      const thr = Math.round(clamp(safeNumber(state.throttle, 0), 0, 1) * 100);
+      const hullPct = state.hullMax > 0 ? (state.hull / state.hullMax) * 100 : 0;
+      const lines = [
+        `Power: ${Math.round(state.power)}%`,
+        `Oxygen: ${Math.round(state.oxygen)}%`,
+        `Hull: ${Math.round(hullPct)}% (${Math.round(state.hull)}/${Math.round(state.hullMax)})`,
+        `Heat: ${Math.round(state.heat)}%`,
+        `Food: ${Math.round(state.food)}%`,
+        `Morale: ${Math.round(state.morale)}%`,
+        `Engine: ${state.engineActive ? 'ACTIVE' : 'IDLE'}  Throttle: ${thr}%`,
+        `Speed: ${state.speed.toLocaleString()} km/s`,
+        '',
+        `Lights: ${state.lightsOn ? 'ON' : 'OFF'}`,
+        `Life Support: ${state.lifeSupportOn ? 'ON' : 'OFF'}`,
+        `Hydroponics: ${state.hydroponicsOn ? 'ON' : 'OFF'}`,
+        `Shields: ${state.shieldsOn ? 'ON' : 'OFF'}`
+      ];
+
+      openPanel('STATS — SHIP SYSTEMS', lines.join('\n'), [{ label: 'Back', action: () => openComputerStatsRoot(station) }], { includeCancel: false });
+    }
+
+    function openComputerStatsInventory(station) {
+      const keys = ['ore', 'scrap', 'ingot', 'filter', 'medkit', 'droneParts', 'rations'];
+      const lines = ['Totals (and Available after buffers/reserves):', ''];
+      for (const k of keys) {
+        const total = invGet(k);
+        const avail = typeof invAvailableAfterReserve === 'function' ? invAvailableAfterReserve(k) : total;
+        lines.push(`${String(k).toUpperCase()}: ${total}${avail !== total ? ` (avail ${avail})` : ''}`);
+      }
+      openPanel('STATS — INVENTORY', lines.join('\n'), [{ label: 'Back', action: () => openComputerStatsRoot(station) }], { includeCancel: false });
+    }
+
+    function openComputerStatsCrew(station) {
+      const npcs = Array.isArray(state.npcs) ? state.npcs.filter(Boolean) : [];
+      const counts = {};
+      let onDuty = 0;
+      let following = 0;
+      for (const n of npcs) {
+        const r = npcRole(n);
+        counts[r] = (counts[r] || 0) + 1;
+        if (n.onDuty && !n.paused) onDuty++;
+        if (n.following) following++;
+      }
+
+      const lines = [
+        `Crew total: ${npcs.length}/${MAX_CREW}`,
+        `On duty: ${onDuty}`,
+        `Following: ${following}`,
+        '',
+        'By role:'
+      ];
+
+      const roleKeys = [...new Set(Object.keys(counts))].sort();
+      for (const r of roleKeys) lines.push(`${roleLabel(r)}: ${counts[r]}`);
+
+      lines.push('', 'Roster:');
+      for (const n of npcs.slice(0, 14)) {
+        lines.push(`• ${n.name} — ${roleLabel(npcRole(n))} — ${npcDutyLabel(n)}`);
+      }
+      if (npcs.length > 14) lines.push(`• …and ${npcs.length - 14} more`);
+
+      openPanel('STATS — CREW', lines.join('\n'), [{ label: 'Back', action: () => openComputerStatsRoot(station) }], { includeCancel: false });
+    }
+
+    function openComputerStatsModules(station) {
+      const mods = Array.isArray(state.modulesLayout) ? state.modulesLayout : [];
+      const counts = {};
+      for (const m of mods) {
+        if (!m) continue;
+        const t = String(m.type || 'unknown');
+        if (isEndcapType(t)) continue;
+        counts[t] = (counts[t] || 0) + 1;
+      }
+
+      const lines = ['Installed modules (core):', ''];
+      const types = Object.keys(counts).sort((a, b) => {
+        const la = MODULE_DEFS[a] ? MODULE_DEFS[a].label : a;
+        const lb = MODULE_DEFS[b] ? MODULE_DEFS[b].label : b;
+        return la.localeCompare(lb);
+      });
+      for (const t of types) {
+        const label = MODULE_DEFS[t] ? MODULE_DEFS[t].label : t;
+        lines.push(`${label}: ${counts[t]}`);
+      }
+
+      lines.push('', 'Layout:');
+      for (const m of mods.slice(0, 12)) lines.push(`• ${m.name}`);
+      if (mods.length > 12) lines.push(`• …and ${mods.length - 12} more`);
+
+      openPanel('STATS — MODULES', lines.join('\n'), [{ label: 'Back', action: () => openComputerStatsRoot(station) }], { includeCancel: false });
+    }
+
+    function openComputerStatsAutomation(station) {
+      ensureCrewAI();
+      const b = state.crewAI && state.crewAI.buffers ? state.crewAI.buffers : {};
+      const lines = [
+        `Automation: ${state.crewAI.enabled ? 'ON' : 'OFF'}`,
+        `Auto Travel: ${state.crewAI.autoTravel ? 'ON' : 'OFF'}`,
+        `Auto Contracts: ${state.crewAI.autoContracts ? 'ON' : 'OFF'}`,
+        `Auto Research: ${state.crewAI.autoResearch ? 'ON' : 'OFF'}`,
+        `Auto Build: ${state.crewAI.autoBuild ? 'ON' : 'OFF'}`,
+        `Auto Vent Heat: ${state.crewAI.autoVentHeat ? 'ON' : 'OFF'}`,
+        `Auto Hire: ${state.crewAI.autoHire ? 'ON' : 'OFF'} (target ${state.crewAI.targetCrew})`,
+        '',
+        'Buffers (reserved):',
+        `ORE ${Math.floor(safeNumber(b.ore, 0))}, SCRAP ${Math.floor(safeNumber(b.scrap, 0))}, INGOT ${Math.floor(safeNumber(b.ingot, 0))}`,
+        `FILTER ${Math.floor(safeNumber(b.filter, 0))}, MEDKIT ${Math.floor(safeNumber(b.medkit, 0))}, PARTS ${Math.floor(safeNumber(b.droneParts, 0))}, RATIONS ${Math.floor(safeNumber(b.rations, 0))}`
+      ];
+
+      openPanel('STATS — AUTOMATION', lines.join('\n'), [{ label: 'Back', action: () => openComputerStatsRoot(station) }], { includeCancel: false });
+    }
+
     function showMessage(title, description) {
       // NPC/background actions must never steal the player's modal flow.
-      // Route their output to Alerts instead.
+      // Route their output to the Ship Computer's Notifications instead.
       const actor = state && state.ui ? state.ui.actionActor : 'player';
       if (actor && actor !== 'player') {
         queueNotification(title, description);
@@ -3795,9 +4232,8 @@
     }
 
     function pendingAlertsCount() {
-      const n1 = Array.isArray(state.notifications) ? state.notifications.length : 0;
       const n2 = state.events && Array.isArray(state.events.queue) ? state.events.queue.length : 0;
-      return n1 + n2;
+      return n2;
     }
 
     function updateAlertsButton() {
@@ -3809,20 +4245,18 @@
     }
 
     function openAlertsPanel() {
-      const notes = Array.isArray(state.notifications) ? [...state.notifications].slice(-8).reverse() : [];
       const evts = state.events && Array.isArray(state.events.queue) ? [...state.events.queue].slice(-5).reverse() : [];
 
       const lines = [];
+      lines.push('Actionable alerts only.');
+      lines.push('');
+
       if (evts.length) {
         lines.push('EVENTS:');
         for (const e of evts) lines.push(`• ${e.title}`);
-        lines.push('');
+      } else {
+        lines.push('No actionable alerts.');
       }
-      if (notes.length) {
-        lines.push('NOTIFICATIONS:');
-        for (const n of notes) lines.push(`• ${n.title}`);
-      }
-      if (!lines.length) lines.push('No alerts.');
 
       const buttons = [];
 
@@ -3834,18 +4268,6 @@
             updateAlertsButton();
             if (e) openEventPanel(e);
             else openAlertsPanel();
-          }
-        });
-      }
-
-      if (notes.length) {
-        buttons.push({
-          label: 'Clear Notifications',
-          danger: true,
-          action: () => {
-            state.notifications = [];
-            updateAlertsButton();
-            openAlertsPanel();
           }
         });
       }
@@ -4021,6 +4443,7 @@
         { uid: newUid(), type: 'life' },
         { uid: newUid(), type: 'hydro' },
         { uid: newUid(), type: 'quarters' },
+        { uid: newUid(), type: 'computer' },
         { uid: newUid(), type: 'fabricator' },
         { uid: newUid(), type: 'cockpit' }
       ];
@@ -4198,7 +4621,7 @@
 
     function moduleWidthForType(type) {
       const def = MODULE_DEFS[type];
-      return def ? def.width : 520;
+      return (def ? def.width : 520) * MODULE_WIDTH_SCALE;
     }
 
     function insertModuleAt(index, type) {
@@ -4353,6 +4776,12 @@
 
       if (!state.nearStation) return;
 
+      // The Ship Computer has its own dedicated menu (KB/Stats/Notifications).
+      if (state.nearStation.type === 'computer') {
+        openShipComputerPanel(state.nearStation);
+        return;
+      }
+
       openStationActionsPanel(state.nearStation);
     }
 
@@ -4372,7 +4801,7 @@
     window.closePanel = closePanel;
 
     // Game Loop
-    const FIXED_FPS = 30;
+    const FIXED_FPS = 20;
     const STEP = 1 / FIXED_FPS;
     const MAX_CATCHUP_STEPS = 5;
     let lastTs = null;
@@ -4498,12 +4927,23 @@
         }
       }
 
-      // Quartermaster: hire toward a target roster.
+      // Quartermaster: manage crew size toward a target roster.
       if (state.crewAI.autoHire) {
         const fee = 30;
         const npcs = Array.isArray(state.npcs) ? state.npcs.filter(Boolean) : [];
         const crewCount = npcs.length;
         const target = clamp(Math.floor(safeNumber(state.crewAI.targetCrew, 0)), 0, MAX_CREW);
+
+        // If we're above target, transfer crew out (requires QUARTERMASTER + quarters).
+        if (crewCount > target && hasModule('quarters')) {
+          const st = stationByType('quarters');
+          const a = st ? findActionByKey(st, 'quarters.transferOut') : null;
+          if (st && a) {
+            executeAction(a, st, 'npc-auto');
+            return;
+          }
+        }
+
         if (crewCount < target && crewCount < MAX_CREW && state.credits >= fee) {
           const counts = {};
           for (const n of npcs) {
@@ -4694,8 +5134,11 @@
             return { key: 'drones.repair', stationId: dronesStation.id, label: 'Repair Drone' };
           }
         }
-        if (airlockStation && findActionByKey(airlockStation, 'airlock.eva') && state.oxygen >= 12) {
-          return { key: 'airlock.eva', stationId: airlockStation.id, label: 'EVA Patch' };
+        if (airlockStation) {
+          const act = findActionByKey(airlockStation, 'airlock.eva');
+          if (act && actorMeetsRoleRequirement(npc.id, act.requiredRole) && state.oxygen >= 12) {
+            return { key: 'airlock.eva', stationId: airlockStation.id, label: 'EVA Patch' };
+          }
         }
       }
 
@@ -5311,7 +5754,7 @@
         state.sim.snap = false;
       }
 
-      // Fixed-step sim at 30 FPS.
+      // Fixed-step sim at 20 FPS.
       let drained = false;
       let steps = 0;
       while (acc >= STEP && steps < MAX_CATCHUP_STEPS) {
@@ -5589,14 +6032,30 @@
         visor.setAttribute('fill', C.accent);
         g.appendChild(visor);
 
-        // Name tag
+        // Overhead label: name / role / task (one per line)
+        const role = roleLabel(npcRole(npc));
+        const task = npc.following ? 'FOLLOWING' : (npc.task ? taskLabel(npc.task) : 'IDLE');
+        const lines = [String(npc.name || 'CREW'), role, String(task || 'IDLE')];
+
+        const fontSize = 11;
+        const lineH = 12;
         const tag = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         tag.setAttribute('x', x);
-        tag.setAttribute('y', npc.y - npc.height - 30);
+        tag.setAttribute('y', npc.y - npc.height - 30 - (lines.length - 1) * lineH);
         tag.setAttribute('text-anchor', 'middle');
-        tag.setAttribute('fill', 'rgba(255,255,255,0.55)');
-        tag.setAttribute('font-size', '12');
-        tag.textContent = npc.name;
+        tag.setAttribute('fill', 'rgba(255,255,255,0.62)');
+        tag.setAttribute('font-size', String(fontSize));
+        tag.setAttribute('font-weight', '600');
+
+        for (let i = 0; i < lines.length; i++) {
+          const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+          tspan.setAttribute('x', x);
+          tspan.setAttribute('dy', i === 0 ? '0' : String(lineH));
+          tspan.setAttribute('font-weight', i === 0 ? '700' : '600');
+          tspan.textContent = lines[i];
+          tag.appendChild(tspan);
+        }
+
         g.appendChild(tag);
 
         npcsGroup.appendChild(g);
