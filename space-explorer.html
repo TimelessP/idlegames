@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Space Explorer · Idle Games</title>
-  <link rel="icon" type="image/svg+xml" href="assets/appicons/icon.svg">
-  <link rel="apple-touch-icon" href="assets/appicons/icon-192.png">
+  <link rel="icon" href="favicon.ico" type="image/x-icon">
+  <link rel="apple-touch-icon" href="assets/appicons/idle-games-512x512px.png">
   <style>
     * {
       margin: 0;
@@ -210,6 +210,61 @@
       z-index: 300;
     }
 
+    #cabinAudioUI {
+      position: absolute;
+      top: 92px;
+      right: 14px;
+      width: 320px;
+      max-width: calc(100% - 28px);
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(26, 30, 63, 0.86);
+      border: 1px solid rgba(255,255,255,0.16);
+      box-shadow: 0 16px 32px rgba(0,0,0,0.30);
+      z-index: 260;
+    }
+
+    .cabin-audio-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .cabin-audio-title {
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      color: rgba(255,255,255,0.88);
+      font-size: 12px;
+    }
+
+    .cabin-audio-name {
+      font-size: 12px;
+      color: rgba(255,255,255,0.62);
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: right;
+    }
+
+    #cabinAudioUI input[type="file"] {
+      width: 100%;
+      margin: 6px 0 10px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.75);
+    }
+
+    .cabin-audio-controls {
+      display: flex;
+      gap: 8px;
+    }
+
+    .cabin-audio-controls .hud-btn {
+      flex: 1;
+    }
+
     #interactPanel h2 {
       color: var(--accent);
       margin-bottom: 15px;
@@ -384,6 +439,19 @@
     <div id="panelButtons"></div>
   </div>
 
+  <div id="cabinAudioUI" style="display:none" aria-label="Cabin audio player">
+    <div class="cabin-audio-row">
+      <div class="cabin-audio-title">CABIN AUDIO</div>
+      <div class="cabin-audio-name" id="cabinAudioName">No file loaded</div>
+    </div>
+    <input id="cabinAudioFile" type="file" accept="audio/mpeg,audio/ogg,audio/mp3,audio/*">
+    <div class="cabin-audio-controls">
+      <button class="hud-btn" id="cabinAudioPlay">Play</button>
+      <button class="hud-btn" id="cabinAudioPause">Pause</button>
+      <button class="hud-btn" id="cabinAudioStop">Stop</button>
+    </div>
+  </div>
+
   <script type="module">
     const STORAGE_KEY_V2 = 'idlegames-space-explorer-v2';
     const STORAGE_KEY_LEGACY = 'idlegames-space-explorer';
@@ -396,7 +464,7 @@
 
     // Basic modules are always fabricatable so the player can never get stuck.
     // Sensors is included so anomaly/blueprint progression is always reachable.
-    const BASIC_MODULE_TYPES = new Set(['cargo', 'power', 'engine', 'cockpit', 'fabricator', 'life', 'hydro', 'quarters', 'sensors', 'computer']);
+    const BASIC_MODULE_TYPES = new Set(['cargo', 'power', 'engine', 'cockpit', 'fabricator', 'life', 'hydro', 'quarters', 'sensors', 'computer', 'cabinDoor']);
 
     const SYSTEM_GRAPH = {
       SOL: { EOS: 240, VEGA: 420, KITE: 180 },
@@ -441,7 +509,8 @@
       contract: { available: [], active: null },
       events: { queue: [], active: null },
       notifications: [],
-      ui: { panelOpen: false, actionActor: 'player' },
+      ui: { panelOpen: false, actionActor: 'player', cabinOpen: false },
+      cabin: { open: false, shipX: 0, localX: 70, vx: 0, walkPhase: 0, near: null, audioVisible: false },
       meta: { inventoryAcc: 0, powerShedAt: 0, autoAt: 0 },
       crewAI: {
         enabled: true,
@@ -647,6 +716,7 @@
       const out = [];
       for (const t of Object.keys(MODULE_DEFS)) {
         if (isEndcapType(t)) continue;
+        if (MODULE_DEFS[t] && MODULE_DEFS[t].deprecated) continue;
         if (BASIC_MODULE_TYPES.has(t)) continue;
         out.push(t);
       }
@@ -1983,6 +2053,7 @@
           {
             key: 'engine.toggle',
             label: 'Toggle Engine',
+            requiredRole: ['pilot', 'tech', 'engineer'],
             action: () => {
               state.engineActive = !state.engineActive;
               if (!state.engineActive) state.speed = 0;
@@ -1995,7 +2066,20 @@
           {
             key: 'engine.throttle',
             label: 'Set Throttle',
-            action: () => openThrottlePanel('ENGINE')
+            requiredRole: ['pilot', 'tech', 'engineer'],
+            action: () => {
+              const actor = actionActor();
+              // NPC/background actions must not open interactive throttle UI.
+              if (actor && actor !== 'player') {
+                const next = clamp(Math.max(0.6, safeNumber(state.throttle, 0)), 0, 1);
+                state.throttle = next;
+                markDirty();
+                updateHUD();
+                showMessage('ENGINE', `Throttle set to ${Math.round(next * 100)}% (AUTOMATION).`);
+                return;
+              }
+              openThrottlePanel('ENGINE');
+            }
           },
           {
             key: 'engine.vent',
@@ -2011,6 +2095,40 @@
             }
           },
           { key: 'engine.diagnostics', label: 'Diagnostics', action: () => showMessage('DIAGNOSTICS', 'Running full system check...\n\n✓ Thruster array: OK\n✓ Fuel lines: OK\n✓ Coolant: OK') }
+        ]
+      },
+      cabinDoor: {
+        label: "Captain's Cabin",
+        width: 560,
+        station: { width: 140, height: 120, y: 400 },
+        actions: () => [
+          {
+            key: 'cabin.door',
+            label: state.ui && state.ui.cabinOpen ? 'Exit Cabin' : 'Enter Cabin',
+            playerOnly: true,
+            action: () => {
+              if (state.ui && state.ui.cabinOpen) exitCabin();
+              else enterCabin();
+            }
+          }
+        ]
+      },
+      // Deprecated alias retained for old saves (treated the same as cabinDoor).
+      cabin: {
+        deprecated: true,
+        label: "Captain's Cabin",
+        width: 560,
+        station: { width: 140, height: 120, y: 400 },
+        actions: () => [
+          {
+            key: 'cabin.door',
+            label: state.ui && state.ui.cabinOpen ? 'Exit Cabin' : 'Enter Cabin',
+            playerOnly: true,
+            action: () => {
+              if (state.ui && state.ui.cabinOpen) exitCabin();
+              else enterCabin();
+            }
+          }
         ]
       },
       cockpit: {
@@ -2767,6 +2885,12 @@
     npcsGroup.id = 'npcsGroup';
     svg.appendChild(npcsGroup);
 
+    // Cabin overlay (drawn above ship + NPCs, but below the captain).
+    const cabinOverlayGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    cabinOverlayGroup.id = 'cabinOverlayGroup';
+    cabinOverlayGroup.setAttribute('pointer-events', 'none');
+    svg.appendChild(cabinOverlayGroup);
+
     const playerRect = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     playerRect.id = 'player';
     svg.appendChild(playerRect);
@@ -2777,7 +2901,297 @@
     relayoutShip();
     renderPlayer();
     updateHUD();
+    updateCabinUI();
     saveGame();
+
+    // Cabin audio (ephemeral; not saved)
+    const cabinAudioEl = new Audio();
+    let cabinAudioUrl = null;
+
+    function setCabinAudioStatus(text) {
+      const el = document.getElementById('cabinAudioName');
+      if (el) el.textContent = String(text || '');
+    }
+
+    function cleanupCabinAudioUrl() {
+      if (cabinAudioUrl) {
+        try { URL.revokeObjectURL(cabinAudioUrl); } catch {}
+        cabinAudioUrl = null;
+      }
+    }
+
+    function updateCabinUI() {
+      const ui = document.getElementById('cabinAudioUI');
+      if (!ui) return;
+      const open = !!(state.ui && state.ui.cabinOpen);
+      const showAudio = open && !!(state.cabin && state.cabin.audioVisible);
+      ui.style.display = showAudio ? 'block' : 'none';
+    }
+
+    function stopAllFollowers(reason = 'Stopped following the captain.') {
+      if (!Array.isArray(state.npcs)) return;
+      for (const n of state.npcs) {
+        if (!n) continue;
+        if (n.following) {
+          n.following = false;
+          pushNpcLog(n.id, reason);
+        }
+      }
+      updateCrewHUD();
+      markDirty();
+    }
+
+    function enterCabin() {
+      // If the cabin was entered via a station/action panel, dismiss it.
+      closePanel();
+      stopAllFollowers('Stopped following (captain entered the cabin).');
+      if (state.ui) state.ui.cabinOpen = true;
+      if (state.cabin) {
+        state.cabin.open = true;
+        state.cabin.shipX = state.player.x;
+        state.cabin.vx = 0;
+        state.cabin.walkPhase = 0;
+        state.cabin.near = null;
+        // Spawn inside the cabin near the door.
+        const layout = getCabinLayout();
+        const eq = getCabinEquipment(layout);
+        const door = eq.find((e) => e && e.key === 'door') || null;
+        state.cabin.localX = door ? (door.x + door.w * 0.5) : (layout.w * 0.5);
+        state.cabin.audioVisible = false;
+      }
+      state.keys.left = false;
+      state.keys.right = false;
+      state.sim.snap = true;
+      updateCabinUI();
+      updateLocationHUD();
+      updateInteractPrompt();
+      renderCabinOverlay();
+      updateCabinNear();
+    }
+
+    function exitCabin() {
+      if (state.ui) state.ui.cabinOpen = false;
+      if (state.cabin) {
+        state.cabin.open = false;
+        state.cabin.near = null;
+        state.cabin.vx = 0;
+        state.cabin.audioVisible = false;
+      }
+      try {
+        cabinAudioEl.pause();
+        cabinAudioEl.currentTime = 0;
+      } catch {}
+      updateCabinUI();
+      updateLocationHUD();
+      updateInteractPrompt();
+      cabinOverlayGroup.innerHTML = '';
+      closePanel();
+    }
+
+    function openCabinBedPanel() {
+      openPanel(
+        'BED',
+        'A neatly made bed.',
+        [
+          {
+            label: 'Rest',
+            action: () => {
+              state.morale = clamp(state.morale + 8, 0, 100);
+              state.food = clamp(state.food + 3, 0, 100);
+              markDirty();
+              updateHUD();
+              showMessage('BED', 'You take a quiet moment.');
+            }
+          }
+        ],
+        { includeCancel: true, cancelLabel: 'Cancel' }
+      );
+    }
+
+    function openCabinComputerPanel() {
+      openPanel(
+        'CABIN COMPUTER',
+        'Select a section:',
+        [
+          { label: 'Knowledge Base', action: () => openComputerKnowledgeBaseRoot(null) },
+          { label: 'Statistics', action: () => openComputerStatsRoot(null) },
+          { label: 'Notifications', action: () => openComputerNotificationsRoot(null) }
+        ],
+        { includeCancel: true, cancelLabel: 'Cancel' }
+      );
+    }
+
+    function openCabinFishTankPanel() {
+      openPanel(
+        'FISH TANK',
+        'A small school drifts in slow circles. The ship feels far away.',
+        [],
+        { includeCancel: true, cancelLabel: 'Cancel' }
+      );
+    }
+
+    function openCabinAudioPanel() {
+      openPanel(
+        'AUDIO PLAYER',
+        'Load an audio file (mp3/ogg) and play it.\nThis is ephemeral (not saved).',
+        [
+          {
+            label: 'Show Audio Controls',
+            action: () => {
+              if (state.cabin) state.cabin.audioVisible = true;
+              updateCabinUI();
+              closePanel();
+            }
+          },
+          {
+            label: 'Choose File…',
+            action: () => {
+              if (state.cabin) state.cabin.audioVisible = true;
+              updateCabinUI();
+              const inp = document.getElementById('cabinAudioFile');
+              if (inp) {
+                try { inp.focus(); inp.click(); } catch {}
+              }
+            }
+          },
+          {
+            label: 'Hide Audio Controls',
+            action: () => {
+              if (state.cabin) state.cabin.audioVisible = false;
+              updateCabinUI();
+              closePanel();
+            }
+          }
+        ],
+        { includeCancel: true, cancelLabel: 'Cancel' }
+      );
+    }
+
+    function getCabinLayout() {
+      const camX = safeNumber(state.camera && state.camera.x, 0);
+      const { viewWidth, viewHeight, viewY } = getViewMetrics();
+
+      const cabinW = Math.max(560, Math.min(740, viewWidth - 40));
+      const cabinH = Math.max(360, Math.min(460, viewHeight - 60));
+      const cx = camX + viewWidth * 0.5;
+      const cy = viewY + viewHeight * 0.5;
+      const x = cx - cabinW * 0.5;
+      const y = cy - cabinH * 0.5;
+      const floorY = y + cabinH - 56;
+      return { camX, viewWidth, viewHeight, viewY, x, y, w: cabinW, h: cabinH, floorY };
+    }
+
+    function getCabinEquipment(layout) {
+      const w = layout.w;
+      const bedX = 80;
+      const fishX = 260;
+      const doorX = w * 0.5 - 45;
+      const computerX = w - 330;
+      const audioX = w - 200;
+      const teleportX = w - 110;
+      return [
+        { key: 'bed', label: 'Bed', x: bedX, w: 150 },
+        { key: 'fish', label: 'Fish Tank', x: fishX, w: 150 },
+        { key: 'door', label: 'Exit', x: doorX, w: 90 },
+        { key: 'computer', label: 'Cabin Computer', x: computerX, w: 160 },
+        { key: 'audio', label: 'Audio Player', x: audioX, w: 120 },
+        { key: 'teleport', label: 'Teleport Pad', x: teleportX, w: 120 }
+      ];
+    }
+
+    function updateCabinNear() {
+      if (!(state.ui && state.ui.cabinOpen)) {
+        if (state.cabin) state.cabin.near = null;
+        return;
+      }
+      const layout = getCabinLayout();
+      const eq = getCabinEquipment(layout);
+      const px = clamp(safeNumber(state.cabin && state.cabin.localX, 0), 30, layout.w - 30);
+      let best = null;
+      let bestD = Infinity;
+      for (const e of eq) {
+        const ex = e.x + e.w * 0.5;
+        const d = Math.abs(px - ex);
+        if (d < bestD) {
+          bestD = d;
+          best = e;
+        }
+      }
+      const near = best && bestD <= 60 ? best.key : null;
+      if (state.cabin && near !== state.cabin.near) {
+        state.cabin.near = near;
+        updateInteractPrompt();
+      }
+    }
+
+    function openCabinTeleportPanel() {
+      const walkable = Array.isArray(state.modulesLayout)
+        ? state.modulesLayout.filter((m) => m && m.walkable)
+        : [];
+
+      const buttons = walkable.map((m) => ({
+        label: `Teleport to ${m.name}`,
+        action: () => {
+          // Teleport to the center of the chosen module.
+          state.player.x = m.x + m.width * 0.5;
+          state.player.vx = 0;
+          state.sim.snap = true;
+          markDirty();
+          exitCabin();
+          updateCamera();
+          checkNearStation();
+          updateLocationHUD();
+        }
+      }));
+
+      openPanel(
+        'TELEPORT PAD',
+        'Select a destination module:',
+        buttons,
+        { includeCancel: true, cancelLabel: 'Cancel' }
+      );
+    }
+
+    // Wire cabin audio UI.
+    (function initCabinAudioUI() {
+      const fileEl = document.getElementById('cabinAudioFile');
+      const playEl = document.getElementById('cabinAudioPlay');
+      const pauseEl = document.getElementById('cabinAudioPause');
+      const stopEl = document.getElementById('cabinAudioStop');
+      if (!fileEl || !playEl || !pauseEl || !stopEl) return;
+
+      fileEl.addEventListener('change', () => {
+        const f = fileEl.files && fileEl.files[0] ? fileEl.files[0] : null;
+        cleanupCabinAudioUrl();
+        if (!f) {
+          setCabinAudioStatus('No file loaded');
+          cabinAudioEl.removeAttribute('src');
+          return;
+        }
+        cabinAudioUrl = URL.createObjectURL(f);
+        cabinAudioEl.src = cabinAudioUrl;
+        cabinAudioEl.preload = 'auto';
+        setCabinAudioStatus(f.name);
+      });
+
+      playEl.addEventListener('click', async () => {
+        if (!cabinAudioEl.src) return;
+        try { await cabinAudioEl.play(); } catch {}
+      });
+      pauseEl.addEventListener('click', () => {
+        try { cabinAudioEl.pause(); } catch {}
+      });
+      stopEl.addEventListener('click', () => {
+        try {
+          cabinAudioEl.pause();
+          cabinAudioEl.currentTime = 0;
+        } catch {}
+      });
+
+      window.addEventListener('beforeunload', () => {
+        cleanupCabinAudioUrl();
+      });
+    })();
 
     function initStarfield(force = false) {
       const STAR_COUNT = 70;
@@ -3513,7 +3927,7 @@
       shipGroup.appendChild(group);
     }
 
-    function renderPlayer({ x = state.player.x, vx = state.player.vx, walkPhase = state.anim.walkPhase } = {}) {
+    function renderPlayer({ x = state.player.x, y = state.player.y, vx = state.player.vx, walkPhase = state.anim.walkPhase } = {}) {
       playerRect.innerHTML = '';
 
       const moving = Math.abs(vx) > 1;
@@ -3521,7 +3935,7 @@
       const dir = state.facing || 1;
 
       // Legs (simple walk cycle)
-      const hipY = state.player.y - 4;
+      const hipY = y - 4;
       const hipBaseX = x;
       const legSpread = 7;
       const thighLen = 18;
@@ -3564,7 +3978,7 @@
       // Player body
       const body = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       body.setAttribute('x', x - state.player.width / 2);
-      body.setAttribute('y', state.player.y - state.player.height);
+      body.setAttribute('y', y - state.player.height);
       body.setAttribute('width', state.player.width);
       body.setAttribute('height', state.player.height);
       body.setAttribute('fill', C.success);
@@ -3575,7 +3989,7 @@
       // Player head
       const head = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       head.setAttribute('cx', x);
-      head.setAttribute('cy', state.player.y - state.player.height - 10);
+      head.setAttribute('cy', y - state.player.height - 10);
       head.setAttribute('r', 15);
       head.setAttribute('fill', C.text);
       head.setAttribute('stroke', C.success);
@@ -3585,7 +3999,7 @@
       // Visor
       const visor = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       visor.setAttribute('x', x - 8);
-      visor.setAttribute('y', state.player.y - state.player.height - 15);
+      visor.setAttribute('y', y - state.player.height - 15);
       visor.setAttribute('width', 16);
       visor.setAttribute('height', 6);
       visor.setAttribute('fill', C.accent);
@@ -3594,7 +4008,7 @@
       // Name tag
       const tag = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       tag.setAttribute('x', x);
-      tag.setAttribute('y', state.player.y - state.player.height - 30);
+      tag.setAttribute('y', y - state.player.height - 30);
       tag.setAttribute('text-anchor', 'middle');
       tag.setAttribute('fill', 'rgba(255,255,255,0.55)');
       tag.setAttribute('font-size', '12');
@@ -3612,6 +4026,14 @@
     }
 
     function checkNearStation() {
+      if (state.ui && state.ui.cabinOpen) {
+        if (state.nearStation) {
+          state.nearStation = null;
+        }
+        updateCabinNear();
+        updateLocationHUD();
+        return;
+      }
       let near = null;
       for (const station of state.stations) {
         if (Math.abs(state.player.x - station.interactX) < 50) {
@@ -3644,6 +4066,13 @@
     }
 
     function checkNearNpc() {
+      if (state.ui && state.ui.cabinOpen) {
+        if (state.nearNpc) {
+          state.nearNpc = null;
+          updateInteractPrompt();
+        }
+        return;
+      }
       const near = closestNpcToCaptain(60);
       if (near !== state.nearNpc) {
         state.nearNpc = near;
@@ -3653,6 +4082,24 @@
 
     function updateInteractPrompt() {
       const prompt = document.getElementById('interactPrompt');
+      if (state.ui && state.ui.cabinOpen) {
+        const nearKey = state.cabin ? state.cabin.near : null;
+        if (!nearKey) {
+          prompt.style.display = 'none';
+          return;
+        }
+
+        const layout = getCabinLayout();
+        const eq = getCabinEquipment(layout);
+        const entry = eq.find((e) => e && e.key === nearKey) || null;
+        const label = entry ? entry.label : 'equipment';
+
+        prompt.style.display = 'block';
+        prompt.textContent = nearKey === 'door'
+          ? 'Press ACTION to exit cabin'
+          : `Press ACTION to use ${label}`;
+        return;
+      }
       if (state.nearStation || state.nearNpc) {
         prompt.style.display = 'block';
         const npcDist = state.nearNpc ? Math.abs(state.player.x - state.nearNpc.x) : Infinity;
@@ -3665,6 +4112,10 @@
 
     function updateLocationHUD() {
       const locationText = document.getElementById('locationText');
+      if (state.ui && state.ui.cabinOpen) {
+        locationText.textContent = "CAPTAIN'S CABIN";
+        return;
+      }
       if (state.nearStation) {
         locationText.textContent = state.nearStation.name.toUpperCase();
       } else {
@@ -4759,6 +5210,10 @@
         showMessage('FABRICATOR', 'Rockets and Nose are always present and cannot be fabricated.');
         return;
       }
+      if ((type === 'cabinDoor' || type === 'cabin') && (countCoreModulesByType('cabinDoor') + countCoreModulesByType('cabin') >= 1)) {
+        showMessage('FABRICATOR', "Only one Captain's Cabin can be installed.");
+        return;
+      }
       const newModule = { uid: newUid(), type };
       const layoutBefore = state.modulesLayout;
       const combinedIndex = Math.max(0, Math.min(layoutBefore.length - 1, index + 1));
@@ -4810,7 +5265,7 @@
 
     function openFabricatorAddPanel(fabricatorUid) {
       const types = Object.keys(MODULE_DEFS)
-        .filter((t) => !isEndcapType(t))
+        .filter((t) => !isEndcapType(t) && !(MODULE_DEFS[t] && MODULE_DEFS[t].deprecated))
         .sort((a, b) => {
           const la = MODULE_DEFS[a] ? MODULE_DEFS[a].label : a;
           const lb = MODULE_DEFS[b] ? MODULE_DEFS[b].label : b;
@@ -4897,6 +5352,36 @@
     }
 
     function interact() {
+      if (state.ui && state.ui.cabinOpen) {
+        const near = state.cabin ? state.cabin.near : null;
+        if (!near) return;
+
+        if (near === 'door') {
+          exitCabin();
+          return;
+        }
+        if (near === 'bed') {
+          openCabinBedPanel();
+          return;
+        }
+        if (near === 'computer') {
+          openCabinComputerPanel();
+          return;
+        }
+        if (near === 'fish') {
+          openCabinFishTankPanel();
+          return;
+        }
+        if (near === 'teleport') {
+          openCabinTeleportPanel();
+          return;
+        }
+        if (near === 'audio') {
+          openCabinAudioPanel();
+          return;
+        }
+        return;
+      }
       const npcDist = state.nearNpc ? Math.abs(state.player.x - state.nearNpc.x) : Infinity;
       const stDist = state.nearStation ? Math.abs(state.player.x - state.nearStation.interactX) : Infinity;
       if (npcDist <= stDist && state.nearNpc) {
@@ -4941,6 +5426,9 @@
       x: state.player.x,
       vx: state.player.vx,
       walkPhase: state.anim.walkPhase,
+      cabinLocalX: state.cabin ? state.cabin.localX : 0,
+      cabinVx: state.cabin ? state.cabin.vx : 0,
+      cabinWalkPhase: state.cabin ? state.cabin.walkPhase : 0,
       npcs: Object.create(null)
     };
 
@@ -5445,7 +5933,8 @@
       }
 
       if (engineStation && state.engineActive && state.power <= 10) {
-        if (findActionByKey(engineStation, 'engine.toggle')) {
+        const act = findActionByKey(engineStation, 'engine.toggle');
+        if (act && actorMeetsRoleRequirement(npc.id, act.requiredRole)) {
           return { key: 'engine.toggle', stationId: engineStation.id, label: 'Disable Engine' };
         }
       }
@@ -5914,10 +6403,52 @@
       prev.x = state.player.x;
       prev.vx = state.player.vx;
       prev.walkPhase = state.anim.walkPhase;
+      prev.cabinLocalX = state.cabin ? state.cabin.localX : 0;
+      prev.cabinVx = state.cabin ? state.cabin.vx : 0;
+      prev.cabinWalkPhase = state.cabin ? state.cabin.walkPhase : 0;
 
       // Move player (dt-based)
       const beforeX = state.player.x;
       let vx = 0;
+
+      // When the cabin overlay is open, the captain is "inside" and not walking the main corridor.
+      if (state.ui && state.ui.cabinOpen) {
+        const layout = getCabinLayout();
+        const beforeLocalX = safeNumber(state.cabin && state.cabin.localX, 70);
+        let cabinVx = 0;
+        if (state.keys.left) {
+          cabinVx -= state.player.speed;
+          state.facing = -1;
+        }
+        if (state.keys.right) {
+          cabinVx += state.player.speed;
+          state.facing = 1;
+        }
+
+        const minLocalX = 40;
+        const maxLocalX = Math.max(minLocalX + 10, layout.w - 40);
+        const nextLocalX = clamp(beforeLocalX + cabinVx * dt, minLocalX, maxLocalX);
+        if (state.cabin) {
+          state.cabin.localX = nextLocalX;
+          state.cabin.vx = (nextLocalX - beforeLocalX) / Math.max(1e-6, dt);
+
+          const moved = Math.abs(nextLocalX - beforeLocalX) > 0.001;
+          if (moved) {
+            const speedNorm = Math.min(1, Math.abs(state.cabin.vx) / state.player.speed);
+            const walkRate = 10 + 6 * speedNorm; // rad/sec
+            state.cabin.walkPhase += walkRate * dt;
+            markDirty();
+          } else {
+            const damp = Math.max(0, 1 - dt * 6);
+            state.cabin.walkPhase *= damp;
+          }
+        }
+
+        // Keep the ship/camera anchor stable.
+        state.player.x = safeNumber(state.cabin && state.cabin.shipX, state.player.x);
+        state.player.vx = 0;
+        vx = 0;
+      } else {
       if (state.keys.left) {
         vx -= state.player.speed;
         state.facing = -1;
@@ -5926,21 +6457,30 @@
         vx += state.player.speed;
         state.facing = 1;
       }
-      state.player.x += vx * dt;
-      state.player.x = Math.max(state.walkBounds.minX, Math.min(state.walkBounds.maxX, state.player.x));
-      state.player.vx = (state.player.x - beforeX) / Math.max(1e-6, dt);
+      }
+      if (!(state.ui && state.ui.cabinOpen)) {
+        state.player.x += vx * dt;
+        state.player.x = Math.max(state.walkBounds.minX, Math.min(state.walkBounds.maxX, state.player.x));
+        state.player.vx = (state.player.x - beforeX) / Math.max(1e-6, dt);
+      }
 
-      const movedX = Math.abs(state.player.x - beforeX) > 0.001;
-      if (movedX) markDirty();
+      if (!(state.ui && state.ui.cabinOpen)) {
+        const movedX = Math.abs(state.player.x - beforeX) > 0.001;
+        if (movedX) markDirty();
 
-      const moved = Math.abs(state.player.x - beforeX) > 0.001;
-      if (moved) {
-        const speedNorm = Math.min(1, Math.abs(state.player.vx) / state.player.speed);
-        const walkRate = 10 + 6 * speedNorm; // rad/sec
-        state.anim.walkPhase += walkRate * dt;
-      } else {
-        const damp = Math.max(0, 1 - dt * 6);
-        state.anim.walkPhase *= damp;
+        const moved = Math.abs(state.player.x - beforeX) > 0.001;
+        if (moved) {
+          const speedNorm = Math.min(1, Math.abs(state.player.vx) / state.player.speed);
+          const walkRate = 10 + 6 * speedNorm; // rad/sec
+          state.anim.walkPhase += walkRate * dt;
+        } else {
+          const damp = Math.max(0, 1 - dt * 6);
+          state.anim.walkPhase *= damp;
+        }
+      }
+
+      if (state.ui && state.ui.cabinOpen) {
+        updateCabinNear();
       }
 
       // Time-based resource drain
@@ -5986,6 +6526,9 @@
         prev.x = state.player.x;
         prev.vx = state.player.vx;
         prev.walkPhase = state.anim.walkPhase;
+        prev.cabinLocalX = state.cabin ? state.cabin.localX : 0;
+        prev.cabinVx = state.cabin ? state.cabin.vx : 0;
+        prev.cabinWalkPhase = state.cabin ? state.cabin.walkPhase : 0;
         acc = 0;
         state.sim.snap = false;
       }
@@ -6006,11 +6549,20 @@
       const renderX = lerp(prev.x, state.player.x, alpha);
       const renderVx = lerp(prev.vx, state.player.vx, alpha);
       const renderWalk = lerp(prev.walkPhase, state.anim.walkPhase, alpha);
+      const renderCabinLocalX = lerp(prev.cabinLocalX, state.cabin ? state.cabin.localX : 0, alpha);
+      const renderCabinVx = lerp(prev.cabinVx, state.cabin ? state.cabin.vx : 0, alpha);
+      const renderCabinWalk = lerp(prev.cabinWalkPhase, state.cabin ? state.cabin.walkPhase : 0, alpha);
 
       updateCamera(renderX);
       updateStarfield();
-      renderPlayer({ x: renderX, vx: renderVx, walkPhase: renderWalk });
+      if (state.ui && state.ui.cabinOpen) {
+        const layout = getCabinLayout();
+        renderPlayer({ x: layout.x + renderCabinLocalX, y: layout.floorY, vx: renderCabinVx, walkPhase: renderCabinWalk });
+      } else {
+        renderPlayer({ x: renderX, vx: renderVx, walkPhase: renderWalk });
+      }
       renderNPCs(alpha);
+      renderCabinOverlay();
       checkNearStation();
       checkNearNpc();
       if (drained) updateHUD();
@@ -6296,6 +6848,249 @@
 
         npcsGroup.appendChild(g);
       }
+    }
+
+    function renderCabinOverlay() {
+      cabinOverlayGroup.innerHTML = '';
+      if (!(state.ui && state.ui.cabinOpen)) return;
+
+      const svgNS = 'http://www.w3.org/2000/svg';
+      const layout = getCabinLayout();
+      const { camX, viewWidth, viewHeight, viewY } = layout;
+      const { x, y, w: cabinW, h: cabinH, floorY } = layout;
+      const cx = x + cabinW * 0.5;
+      const eq = getCabinEquipment(layout);
+      const near = state.cabin ? state.cabin.near : null;
+
+      const highlightStroke = 'rgba(78, 205, 196, 0.75)';
+
+      const addGlowRect = (rx, ry, rw, rh, radius = 12) => {
+        const glow = document.createElementNS(svgNS, 'rect');
+        glow.setAttribute('x', rx);
+        glow.setAttribute('y', ry);
+        glow.setAttribute('width', rw);
+        glow.setAttribute('height', rh);
+        glow.setAttribute('rx', radius);
+        glow.setAttribute('ry', radius);
+        glow.setAttribute('fill', 'rgba(0,0,0,0)');
+        glow.setAttribute('stroke', highlightStroke);
+        glow.setAttribute('stroke-width', 4);
+        glow.setAttribute('opacity', 0.85);
+        cabinOverlayGroup.appendChild(glow);
+      };
+
+      const addLabel = (tx, ty, text) => {
+        const t = document.createElementNS(svgNS, 'text');
+        t.setAttribute('x', tx);
+        t.setAttribute('y', ty);
+        t.setAttribute('text-anchor', 'middle');
+        t.setAttribute('fill', 'rgba(255,255,255,0.68)');
+        t.setAttribute('font-size', '12');
+        t.textContent = text;
+        cabinOverlayGroup.appendChild(t);
+      };
+
+      // Dim the ship behind.
+      const dim = document.createElementNS(svgNS, 'rect');
+      dim.setAttribute('x', camX);
+      dim.setAttribute('y', viewY);
+      dim.setAttribute('width', viewWidth);
+      dim.setAttribute('height', viewHeight);
+      dim.setAttribute('fill', 'rgba(0,0,0,0.55)');
+      cabinOverlayGroup.appendChild(dim);
+
+      // Cabin shell.
+      const shell = document.createElementNS(svgNS, 'rect');
+      shell.setAttribute('x', x);
+      shell.setAttribute('y', y);
+      shell.setAttribute('width', cabinW);
+      shell.setAttribute('height', cabinH);
+      shell.setAttribute('rx', 18);
+      shell.setAttribute('ry', 18);
+      shell.setAttribute('fill', 'rgba(26, 30, 63, 0.98)');
+      shell.setAttribute('stroke', C.accent);
+      shell.setAttribute('stroke-width', 3);
+      cabinOverlayGroup.appendChild(shell);
+
+      const floor = document.createElementNS(svgNS, 'rect');
+      floor.setAttribute('x', x + 10);
+      floor.setAttribute('y', floorY);
+      floor.setAttribute('width', cabinW - 20);
+      floor.setAttribute('height', 46);
+      floor.setAttribute('fill', 'rgba(61, 68, 102, 0.85)');
+      floor.setAttribute('stroke', 'rgba(255,255,255,0.08)');
+      floor.setAttribute('stroke-width', 1);
+      cabinOverlayGroup.appendChild(floor);
+
+      const title = document.createElementNS(svgNS, 'text');
+      title.setAttribute('x', cx);
+      title.setAttribute('y', y + 34);
+      title.setAttribute('text-anchor', 'middle');
+      title.setAttribute('fill', C.accent);
+      title.setAttribute('font-size', '20');
+      title.textContent = "CAPTAIN'S CABIN";
+      cabinOverlayGroup.appendChild(title);
+
+      const byKey = Object.create(null);
+      for (const e of eq) byKey[e.key] = e;
+
+      // Bed (left)
+      const bed = byKey.bed;
+      const bedRectX = x + bed.x - 30;
+      const bedRectY = y + 88;
+      const bedRectW = bed.w + 60;
+      const bedRectH = 110;
+      if (near === 'bed') addGlowRect(bedRectX - 6, bedRectY - 6, bedRectW + 12, bedRectH + 12, 14);
+      const bedEl = document.createElementNS(svgNS, 'rect');
+      bedEl.setAttribute('x', bedRectX);
+      bedEl.setAttribute('y', bedRectY);
+      bedEl.setAttribute('width', bedRectW);
+      bedEl.setAttribute('height', bedRectH);
+      bedEl.setAttribute('rx', 12);
+      bedEl.setAttribute('ry', 12);
+      bedEl.setAttribute('fill', 'rgba(78, 205, 196, 0.16)');
+      bedEl.setAttribute('stroke', 'rgba(78, 205, 196, 0.45)');
+      bedEl.setAttribute('stroke-width', 2);
+      cabinOverlayGroup.appendChild(bedEl);
+      addLabel(bedRectX + bedRectW * 0.5, bedRectY - 6, 'BED');
+
+      // Fish tank (mid-left)
+      const fish = byKey.fish;
+      const tankX = x + fish.x - 22;
+      const tankY = y + 228;
+      const tankW = fish.w + 44;
+      const tankH = 112;
+      if (near === 'fish') addGlowRect(tankX - 6, tankY - 6, tankW + 12, tankH + 12, 14);
+      const tank = document.createElementNS(svgNS, 'rect');
+      tank.setAttribute('x', tankX);
+      tank.setAttribute('y', tankY);
+      tank.setAttribute('width', tankW);
+      tank.setAttribute('height', tankH);
+      tank.setAttribute('rx', 12);
+      tank.setAttribute('ry', 12);
+      tank.setAttribute('fill', 'rgba(0, 120, 255, 0.14)');
+      tank.setAttribute('stroke', 'rgba(0, 212, 255, 0.28)');
+      tank.setAttribute('stroke-width', 2);
+      cabinOverlayGroup.appendChild(tank);
+      for (let i = 0; i < 3; i++) {
+        const wave = document.createElementNS(svgNS, 'path');
+        const yy = tankY + 24 + i * 26;
+        wave.setAttribute('d', `M ${tankX + 18} ${yy} C ${tankX + 50} ${yy - 8}, ${tankX + 80} ${yy + 8}, ${tankX + 110} ${yy} S ${tankX + 160} ${yy + 8}, ${tankX + tankW - 18} ${yy}`);
+        wave.setAttribute('stroke', 'rgba(180,220,255,0.16)');
+        wave.setAttribute('stroke-width', 2);
+        wave.setAttribute('fill', 'none');
+        cabinOverlayGroup.appendChild(wave);
+      }
+      addLabel(tankX + tankW * 0.5, tankY - 6, 'FISH TANK');
+
+      // Door (center)
+      const door = byKey.door;
+      const doorX = x + door.x;
+      const doorY = y + cabinH - 150;
+      if (near === 'door') addGlowRect(doorX - 6, doorY - 6, door.w + 12, 110 + 12, 12);
+      const doorEl = document.createElementNS(svgNS, 'rect');
+      doorEl.setAttribute('x', doorX);
+      doorEl.setAttribute('y', doorY);
+      doorEl.setAttribute('width', door.w);
+      doorEl.setAttribute('height', 110);
+      doorEl.setAttribute('rx', 10);
+      doorEl.setAttribute('ry', 10);
+      doorEl.setAttribute('fill', 'rgba(61, 68, 102, 0.92)');
+      doorEl.setAttribute('stroke', C.accent);
+      doorEl.setAttribute('stroke-width', 2);
+      cabinOverlayGroup.appendChild(doorEl);
+      addLabel(doorX + door.w * 0.5, doorY - 10, 'DOOR');
+
+      // Cabin computer (mid-right)
+      const comp = byKey.computer;
+      const compX = x + comp.x - 18;
+      const compY = y + 96;
+      const compW = comp.w + 36;
+      const compH = 130;
+      if (near === 'computer') addGlowRect(compX - 6, compY - 6, compW + 12, compH + 12, 14);
+      const console = document.createElementNS(svgNS, 'rect');
+      console.setAttribute('x', compX);
+      console.setAttribute('y', compY);
+      console.setAttribute('width', compW);
+      console.setAttribute('height', compH);
+      console.setAttribute('rx', 12);
+      console.setAttribute('ry', 12);
+      console.setAttribute('fill', 'rgba(0,0,0,0.20)');
+      console.setAttribute('stroke', 'rgba(180,220,255,0.28)');
+      console.setAttribute('stroke-width', 2);
+      cabinOverlayGroup.appendChild(console);
+
+      const screen = document.createElementNS(svgNS, 'rect');
+      screen.setAttribute('x', compX + 12);
+      screen.setAttribute('y', compY + 14);
+      screen.setAttribute('width', compW - 24);
+      screen.setAttribute('height', 74);
+      screen.setAttribute('rx', 10);
+      screen.setAttribute('ry', 10);
+      screen.setAttribute('fill', 'rgba(0, 212, 255, 0.10)');
+      screen.setAttribute('stroke', 'rgba(0, 212, 255, 0.25)');
+      screen.setAttribute('stroke-width', 1);
+      cabinOverlayGroup.appendChild(screen);
+      addLabel(compX + compW * 0.5, compY - 6, 'CABIN COMPUTER');
+
+      // Audio player (near-right, on/near the floor)
+      const audio = byKey.audio;
+      const audioX = x + audio.x;
+      const audioY = floorY - 132;
+      if (near === 'audio') addGlowRect(audioX - 6, audioY - 6, audio.w + 12, 86 + 12, 14);
+      const audioBox = document.createElementNS(svgNS, 'rect');
+      audioBox.setAttribute('x', audioX);
+      audioBox.setAttribute('y', audioY);
+      audioBox.setAttribute('width', audio.w);
+      audioBox.setAttribute('height', 86);
+      audioBox.setAttribute('rx', 12);
+      audioBox.setAttribute('ry', 12);
+      audioBox.setAttribute('fill', 'rgba(255, 180, 80, 0.10)');
+      audioBox.setAttribute('stroke', 'rgba(255, 180, 80, 0.30)');
+      audioBox.setAttribute('stroke-width', 2);
+      cabinOverlayGroup.appendChild(audioBox);
+      const note = document.createElementNS(svgNS, 'path');
+      const nx = audioX + audio.w * 0.5;
+      const ny = audioY + 30;
+      note.setAttribute('d', `M ${nx - 6} ${ny - 10} L ${nx + 12} ${ny - 14} L ${nx + 12} ${ny + 18} C ${nx + 12} ${ny + 28}, ${nx + 2} ${ny + 32}, ${nx - 2} ${ny + 24} C ${nx - 6} ${ny + 16}, ${nx + 0} ${ny + 10}, ${nx + 6} ${ny + 14} L ${nx + 6} ${ny - 18}`);
+      note.setAttribute('fill', 'rgba(255, 180, 80, 0.55)');
+      note.setAttribute('stroke', 'rgba(255, 180, 80, 0.65)');
+      note.setAttribute('stroke-width', 1);
+      cabinOverlayGroup.appendChild(note);
+      addLabel(audioX + audio.w * 0.5, audioY - 6, 'AUDIO');
+
+      // Teleport pad (far-right)
+      const tp = byKey.teleport;
+      const padCx = x + tp.x + tp.w * 0.5;
+      const padCy = floorY - 84;
+      if (near === 'teleport') {
+        const glow = document.createElementNS(svgNS, 'circle');
+        glow.setAttribute('cx', padCx);
+        glow.setAttribute('cy', padCy);
+        glow.setAttribute('r', 60);
+        glow.setAttribute('fill', 'rgba(0,0,0,0)');
+        glow.setAttribute('stroke', highlightStroke);
+        glow.setAttribute('stroke-width', 4);
+        glow.setAttribute('opacity', 0.85);
+        cabinOverlayGroup.appendChild(glow);
+      }
+      const padOuter = document.createElementNS(svgNS, 'circle');
+      padOuter.setAttribute('cx', padCx);
+      padOuter.setAttribute('cy', padCy);
+      padOuter.setAttribute('r', 52);
+      padOuter.setAttribute('fill', 'rgba(0, 212, 255, 0.08)');
+      padOuter.setAttribute('stroke', 'rgba(0, 212, 255, 0.45)');
+      padOuter.setAttribute('stroke-width', 3);
+      cabinOverlayGroup.appendChild(padOuter);
+      const padInner = document.createElementNS(svgNS, 'circle');
+      padInner.setAttribute('cx', padCx);
+      padInner.setAttribute('cy', padCy);
+      padInner.setAttribute('r', 28);
+      padInner.setAttribute('fill', 'rgba(0, 212, 255, 0.10)');
+      padInner.setAttribute('stroke', 'rgba(255, 255, 255, 0.10)');
+      padInner.setAttribute('stroke-width', 2);
+      cabinOverlayGroup.appendChild(padInner);
+      addLabel(padCx, padCy + 72, 'TELEPORT');
     }
   </script>
 
