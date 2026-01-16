@@ -781,6 +781,10 @@
       return fmtNeed('CREDITS', need, Math.floor(state.credits));
     }
 
+    function actionActor() {
+      return state.ui && state.ui.actionActor ? state.ui.actionActor : 'player';
+    }
+
     function ensureNpcsArray() {
       if (!Array.isArray(state.npcs)) state.npcs = [];
     }
@@ -978,6 +982,12 @@
 
     function canSpendReserved(key, qty) {
       return invAvailableAfterReserve(key) >= Math.max(0, safeNumber(qty, 0));
+    }
+
+    function canSpendReservedWithMinKeep(key, qty, minKeep = 0) {
+      const need = Math.max(0, safeNumber(qty, 0));
+      const keep = Math.max(0, Math.floor(safeNumber(minKeep, 0)));
+      return invAvailableAfterReserve(key) >= (need + keep);
     }
 
     function describeInventory() {
@@ -1786,6 +1796,126 @@
                 ],
                 { includeCancel: false }
               );
+            }
+          },
+          // Role-gated, automation-friendly micro-actions (hidden from the player UI).
+          {
+            key: 'cargo.buy.filter',
+            hidden: true,
+            requiredRole: ['quartermaster'],
+            label: 'Buy Filter',
+            action: () => {
+              const actor = actionActor();
+              const cost = 10;
+              if (state.credits < cost) {
+                if (actor === 'player') showMessage('TRADE', fmtNeedCredits(cost));
+                return;
+              }
+              state.credits -= cost;
+              invAdd('filter', 1);
+              markDirty();
+              if (actor === 'player') showMessage('TRADE', 'Purchased 1 filter.');
+              else queueNotification('CARGO', 'Purchased 1 filter (AUTOMATION).');
+              updateHUD();
+            }
+          },
+          {
+            key: 'cargo.buy.medkit',
+            hidden: true,
+            requiredRole: ['quartermaster'],
+            label: 'Buy Medkit',
+            action: () => {
+              const actor = actionActor();
+              const cost = 25;
+              if (state.credits < cost) {
+                if (actor === 'player') showMessage('TRADE', fmtNeedCredits(cost));
+                return;
+              }
+              state.credits -= cost;
+              invAdd('medkit', 1);
+              markDirty();
+              if (actor === 'player') showMessage('TRADE', 'Purchased 1 medkit.');
+              else queueNotification('CARGO', 'Purchased 1 medkit (AUTOMATION).');
+              updateHUD();
+            }
+          },
+          {
+            key: 'cargo.buy.droneParts',
+            hidden: true,
+            requiredRole: ['quartermaster'],
+            label: 'Buy Drone Parts',
+            action: () => {
+              const actor = actionActor();
+              const cost = 20;
+              if (state.credits < cost) {
+                if (actor === 'player') showMessage('TRADE', fmtNeedCredits(cost));
+                return;
+              }
+              state.credits -= cost;
+              invAdd('droneParts', 1);
+              markDirty();
+              if (actor === 'player') showMessage('TRADE', 'Purchased 1 droneParts.');
+              else queueNotification('CARGO', 'Purchased 1 droneParts (AUTOMATION).');
+              updateHUD();
+            }
+          },
+          {
+            key: 'cargo.sell.ore',
+            hidden: true,
+            requiredRole: ['quartermaster'],
+            label: 'Sell Ore',
+            action: () => {
+              const actor = actionActor();
+              // Keep a small ore floor if a refinery exists so automation doesn't starve industry.
+              const oreMinKeep = hasModule('refinery') ? 2 : 0;
+              if (!canSpendReservedWithMinKeep('ore', 1, oreMinKeep)) {
+                if (actor === 'player') showMessage('TRADE', 'Nothing to sell.');
+                return;
+              }
+              invTake('ore', 1);
+              state.credits = Math.max(0, safeNumber(state.credits, 0) + 3);
+              markDirty();
+              if (actor === 'player') showMessage('TRADE', 'Sold 1 ore.');
+              else queueNotification('CARGO', 'Sold 1 ore (+3 cr) (AUTOMATION).');
+              updateHUD();
+            }
+          },
+          {
+            key: 'cargo.sell.scrap',
+            hidden: true,
+            requiredRole: ['quartermaster'],
+            label: 'Sell Scrap',
+            action: () => {
+              const actor = actionActor();
+              if (!canSpendReserved('scrap', 1)) {
+                if (actor === 'player') showMessage('TRADE', 'Nothing to sell.');
+                return;
+              }
+              invTake('scrap', 1);
+              state.credits = Math.max(0, safeNumber(state.credits, 0) + 5);
+              markDirty();
+              if (actor === 'player') showMessage('TRADE', 'Sold 1 scrap.');
+              else queueNotification('CARGO', 'Sold 1 scrap (+5 cr) (AUTOMATION).');
+              updateHUD();
+            }
+          },
+          {
+            key: 'cargo.sell.ingot',
+            hidden: true,
+            requiredRole: ['quartermaster'],
+            label: 'Sell Ingots',
+            action: () => {
+              const actor = actionActor();
+              if (!canSpendReserved('ingot', 1)) {
+                if (actor === 'player') showMessage('TRADE', 'Nothing to sell.');
+                return;
+              }
+              invTake('ingot', 1);
+              state.credits = Math.max(0, safeNumber(state.credits, 0) + 10);
+              markDirty();
+              if (actor === 'player') showMessage('TRADE', 'Sold 1 ingot.');
+              else queueNotification('CARGO', 'Sold 1 ingot (+10 cr) (AUTOMATION).');
+              updateHUD();
             }
           },
           { label: 'Check Cargo', action: () => showMessage('CARGO STATUS', 'Cargo holds are secure. Storage racks online.') },
@@ -4907,20 +5037,85 @@
 
       ensureContracts();
 
+      // Quartermaster: use Cargo to meet demand (buy essentials) and keep credits flowing.
+      // This is distinct from Fabricator crafting and provides a fallback when inputs/modules are missing.
+      if (hasCrewRole('quartermaster') && hasModule('cargo')) {
+        const cargo = stationByType('cargo');
+        const needs = activeContractNeeds();
+
+        const tryExec = (key) => {
+          const a = cargo ? findActionByKey(cargo, key) : null;
+          if (cargo && a) {
+            executeAction(a, cargo, 'npc-auto');
+            return true;
+          }
+          return false;
+        };
+
+        // Buy items needed for contracts (one action per tick).
+        if (needs && needs.filter > 0 && state.credits >= 10) {
+          if (tryExec('cargo.buy.filter')) return;
+        }
+        if (needs && needs.medkit > 0 && state.credits >= 25) {
+          if (tryExec('cargo.buy.medkit')) return;
+        }
+        if (needs && needs.droneParts > 0 && state.credits >= 20) {
+          if (tryExec('cargo.buy.droneParts')) return;
+        }
+
+        // Maintain minimum stocks for cross-system tasks (buffers) even without active contracts.
+        // Buffers act as a shared "do not drain below" floor; this makes the quartermaster keep essentials topped up.
+        if (invGet('filter') < invReserve('filter') && state.credits >= 10) {
+          if (tryExec('cargo.buy.filter')) return;
+        }
+        if (invGet('medkit') < invReserve('medkit') && state.credits >= 25) {
+          if (tryExec('cargo.buy.medkit')) return;
+        }
+        if (invGet('droneParts') < invReserve('droneParts') && state.credits >= 20) {
+          if (tryExec('cargo.buy.droneParts')) return;
+        }
+
+        // If we need credits for hiring or purchases, sell surplus (respecting reserves).
+        const hireFee = 30;
+        const wantsHireCredits = !!(state.crewAI && state.crewAI.autoHire) && state.credits < hireFee;
+        const wantsPurchaseCredits = !!(
+          ((needs && needs.filter > 0) || invGet('filter') < invReserve('filter'))
+            && state.credits < 10
+          || (((needs && needs.medkit > 0) || invGet('medkit') < invReserve('medkit'))
+            && state.credits < 25)
+          || (((needs && needs.droneParts > 0) || invGet('droneParts') < invReserve('droneParts'))
+            && state.credits < 20)
+        );
+        if (wantsHireCredits || wantsPurchaseCredits) {
+          // Sell highest value surplus first.
+          const canSellIngot = canSpendReserved('ingot', 1);
+          const canSellScrap = canSpendReserved('scrap', 1);
+          const oreMinKeep = hasModule('refinery') ? 2 : 0;
+          const canSellOre = canSpendReservedWithMinKeep('ore', 1, oreMinKeep);
+          if (canSellIngot) { if (tryExec('cargo.sell.ingot')) return; }
+          if (canSellScrap) { if (tryExec('cargo.sell.scrap')) return; }
+          if (canSellOre) { if (tryExec('cargo.sell.ore')) return; }
+        }
+      }
+
       // Basic supply-chain automation: keep a small ingot buffer so contracts/repairs don't stall.
       if (state.crewAI.autoBuild || state.crewAI.autoContracts || state.crewAI.autoResearch) {
         const ingots = invGet('ingot');
         const ore = invGet('ore');
+        const needs = activeContractNeeds();
+        const needsIngots = !!(needs && needs.ingot > 0);
+        const ingotTarget = invReserve('ingot') + 2;
 
         // If we're low on ore, do a quick loot scan (requires SCIENTIST/TECH).
-        if (ingots < 4 && ore < 2 && hasModule('sensors') && state.power >= 8) {
+        if (ingots < ingotTarget && ore < 2 && hasModule('sensors') && state.power >= 8) {
           const st = stationByType('sensors');
           const a = st ? findActionByKey(st, 'sensors.scan') : null;
           if (st && a) executeAction(a, st, 'npc-auto');
         }
 
         // If we have ore, refine it (requires ENGINEER/TECH).
-        if (ingots < 6 && ore >= 2 && hasModule('refinery') && state.power >= 10) {
+        // Trigger either when low on ingots OR when contracts actively demand ingots.
+        if ((needsIngots || ingots < ingotTarget) && ore >= 2 && hasModule('refinery') && state.power >= 10) {
           const st = stationByType('refinery');
           const a = st ? findActionByKey(st, 'refinery.refine') : null;
           if (st && a) executeAction(a, st, 'npc-auto');
@@ -5093,6 +5288,7 @@
       const hydroStation = stationByType('hydro');
       const medStation = stationByType('medbay');
       const dronesStation = stationByType('drones');
+      const cargoStation = stationByType('cargo');
       const airlockStation = stationByType('airlock');
       const shieldsStation = stationByType('shields');
       const sensorsStation = stationByType('sensors');
@@ -5103,12 +5299,52 @@
       const needs = activeContractNeeds();
       const wantsIngots = (needs && needs.ingot > 0)
         || (state.blueprints.recipes.plating && state.hullMax < 150 && invGet('ingot') < 2)
-        || invGet('ingot') < 4;
+        || invGet('ingot') < invReserve('ingot');
       const wantsMedkits = (needs && needs.medkit > 0) || (role === 'medic' && invGet('medkit') < 1 && invGet('scrap') >= 1);
-      const wantsFilters = (needs && needs.filter > 0) || (invGet('filter') < 1);
+      const wantsFilters = (needs && needs.filter > 0) || (invGet('filter') < invReserve('filter'));
       const wantsScrap = (needs && needs.scrap > 0) || invGet('scrap') < 6;
       const wantsOre = (needs && needs.ore > 0) || (wantsIngots && invGet('ore') < 4);
       const autoVentHeat = !!(state.crewAI && state.crewAI.autoVentHeat);
+
+      // Quartermaster: use Cargo to buy missing essentials for active contracts.
+      if (role === 'quartermaster' && cargoStation) {
+        if ((needs && needs.filter > 0) || invGet('filter') < invReserve('filter')) {
+          const act = findActionByKey(cargoStation, 'cargo.buy.filter');
+          if (act && actorMeetsRoleRequirement(npc.id, act.requiredRole) && state.credits >= 10) {
+            return { key: 'cargo.buy.filter', stationId: cargoStation.id, label: 'Buy Filter' };
+          }
+        }
+        if ((needs && needs.medkit > 0) || invGet('medkit') < invReserve('medkit')) {
+          const act = findActionByKey(cargoStation, 'cargo.buy.medkit');
+          if (act && actorMeetsRoleRequirement(npc.id, act.requiredRole) && state.credits >= 25) {
+            return { key: 'cargo.buy.medkit', stationId: cargoStation.id, label: 'Buy Medkit' };
+          }
+        }
+        if ((needs && needs.droneParts > 0) || invGet('droneParts') < invReserve('droneParts')) {
+          const act = findActionByKey(cargoStation, 'cargo.buy.droneParts');
+          if (act && actorMeetsRoleRequirement(npc.id, act.requiredRole) && state.credits >= 20) {
+            return { key: 'cargo.buy.droneParts', stationId: cargoStation.id, label: 'Buy Drone Parts' };
+          }
+        }
+
+        // If we can't afford hiring, sell surplus materials.
+        if (state.crewAI && state.crewAI.autoHire && state.credits < 30) {
+          const sell = (key, minCreditsDelta) => {
+            const act = findActionByKey(cargoStation, key);
+            if (!act || !actorMeetsRoleRequirement(npc.id, act.requiredRole)) return null;
+            // Use canSpendReserved checks inside the action, but prefer not to walk there if nothing to sell.
+            if (key === 'cargo.sell.ingot' && canSpendReserved('ingot', 1)) return { key, stationId: cargoStation.id, label: `Sell Ingots (+${minCreditsDelta} cr)` };
+            if (key === 'cargo.sell.scrap' && canSpendReserved('scrap', 1)) return { key, stationId: cargoStation.id, label: `Sell Scrap (+${minCreditsDelta} cr)` };
+            if (key === 'cargo.sell.ore') {
+              const oreMinKeep = hasModule('refinery') ? 2 : 0;
+              if (canSpendReservedWithMinKeep('ore', 1, oreMinKeep)) return { key, stationId: cargoStation.id, label: `Sell Ore (+${minCreditsDelta} cr)` };
+            }
+            return null;
+          };
+
+          return sell('cargo.sell.ingot', 10) || sell('cargo.sell.scrap', 5) || sell('cargo.sell.ore', 3);
+        }
+      }
 
       // Emergencies first.
       if (engineStation) {
