@@ -222,6 +222,8 @@
             align-items: center;
             justify-content: center;
             font-size: calc(var(--tile-size, 48px) * 0.65);
+            font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla", system-ui, sans-serif;
+            font-variant-emoji: emoji;
             cursor: pointer;
             transition: all 150ms ease;
             padding: 0;
@@ -844,7 +846,12 @@
             currentTheme: 'simple_light',
             gameCompleted: false,
             lastShareText: '',
-            timerRunning: false
+            timerRunning: false,
+            resolvingMismatch: false,
+            pendingFlip: null,
+            nextFlipped: [],
+            mismatchPair: [],
+            mismatchTimeoutId: null
         };
 
         // ========================================
@@ -1392,54 +1399,120 @@
             });
         }
 
+        function startTimerIfNeeded() {
+            if (gameState.timerRunning) return;
+            gameState.startTime = Date.now();
+            gameState.timerRunning = true;
+            if (gameState.timerInterval) {
+                clearInterval(gameState.timerInterval);
+            }
+            startTimer();
+        }
+
+        function handleResolvedPair() {
+            if (gameState.flipped.length !== 2) return;
+
+            gameState.gameActive = false;
+            gameState.moves++;
+            updateStats();
+
+            const [idx1, idx2] = gameState.flipped;
+            if (gameState.cards[idx1] === gameState.cards[idx2]) {
+                setTimeout(() => {
+                    gameState.matched.add(idx1);
+                    gameState.matched.add(idx2);
+                    gameState.matches++;
+                    gameState.flipped = [];
+                    gameState.gameActive = true;
+                    updateStats();
+                    renderBoard();
+
+                    if (gameState.matched.size === gameState.cards.length) {
+                        endGame();
+                        return;
+                    }
+
+                    if (gameState.nextFlipped.length > 0) {
+                        gameState.flipped = [...gameState.nextFlipped];
+                        gameState.nextFlipped = [];
+                        renderBoard();
+                        handleResolvedPair();
+                    }
+                }, 500);
+            } else {
+                gameState.resolvingMismatch = true;
+                gameState.mismatchPair = [idx1, idx2];
+                if (gameState.mismatchTimeoutId) {
+                    clearTimeout(gameState.mismatchTimeoutId);
+                }
+                gameState.mismatchTimeoutId = setTimeout(() => {
+                    gameState.resolvingMismatch = false;
+                    gameState.mismatchPair = [];
+                    gameState.mismatchTimeoutId = null;
+                    gameState.flipped = [];
+                    gameState.gameActive = true;
+                    renderBoard();
+
+                    if (gameState.nextFlipped.length > 0) {
+                        gameState.flipped = [...gameState.nextFlipped];
+                        gameState.nextFlipped = [];
+                        renderBoard();
+                        handleResolvedPair();
+                    }
+                }, 1000);
+            }
+        }
+
+        function restartMismatchTimeout() {
+            if (!gameState.resolvingMismatch || gameState.mismatchPair.length !== 2) {
+                return;
+            }
+            if (gameState.mismatchTimeoutId) {
+                clearTimeout(gameState.mismatchTimeoutId);
+            }
+            gameState.mismatchTimeoutId = setTimeout(() => {
+                gameState.resolvingMismatch = false;
+                gameState.mismatchPair = [];
+                gameState.mismatchTimeoutId = null;
+                gameState.flipped = [];
+                gameState.gameActive = true;
+                renderBoard();
+
+                if (gameState.nextFlipped.length > 0) {
+                    gameState.flipped = [...gameState.nextFlipped];
+                    gameState.nextFlipped = [];
+                    renderBoard();
+                    handleResolvedPair();
+                }
+            }, 1000);
+        }
+
         function flipCard(index, cardElement) {
-            if (!gameState.gameActive) return;
             if (gameState.matched.has(index)) return;
             if (gameState.flipped.includes(index)) return;
-            if (gameState.flipped.length >= 2) return;
-
-            if (!gameState.timerRunning) {
-                gameState.startTime = Date.now();
-                gameState.timerRunning = true;
-                if (gameState.timerInterval) {
-                    clearInterval(gameState.timerInterval);
-                }
-                startTimer();
+            if (gameState.resolvingMismatch && gameState.mismatchPair.includes(index)) {
+                restartMismatchTimeout();
+                return;
             }
+
+            startTimerIfNeeded();
+
+            if (gameState.resolvingMismatch) {
+                if (gameState.nextFlipped.includes(index) || gameState.nextFlipped.length >= 2) return;
+                gameState.nextFlipped.push(index);
+                cardElement.classList.add('flipped');
+                cardElement.textContent = gameState.cards[index];
+                return;
+            }
+
+            if (gameState.flipped.length >= 2) return;
 
             gameState.flipped.push(index);
             cardElement.classList.add('flipped');
             cardElement.textContent = gameState.cards[index];
 
             if (gameState.flipped.length === 2) {
-                gameState.gameActive = false;
-                gameState.moves++;
-                updateStats();
-
-                const [idx1, idx2] = gameState.flipped;
-                if (gameState.cards[idx1] === gameState.cards[idx2]) {
-                    // Match!
-                    setTimeout(() => {
-                        gameState.matched.add(idx1);
-                        gameState.matched.add(idx2);
-                        gameState.matches++;
-                        gameState.flipped = [];
-                        gameState.gameActive = true;
-                        updateStats();
-                        renderBoard();
-
-                        if (gameState.matched.size === gameState.cards.length) {
-                            endGame();
-                        }
-                    }, 500);
-                } else {
-                    // No match
-                    setTimeout(() => {
-                        gameState.flipped = [];
-                        gameState.gameActive = true;
-                        renderBoard();
-                    }, 1000);
-                }
+                handleResolvedPair();
             }
         }
 
@@ -1460,6 +1533,14 @@
             gameState.gameCompleted = false;
             gameState.lastShareText = '';
             gameState.timerRunning = false;
+            gameState.resolvingMismatch = false;
+            gameState.pendingFlip = null;
+            gameState.nextFlipped = [];
+            gameState.mismatchPair = [];
+            if (gameState.mismatchTimeoutId) {
+                clearTimeout(gameState.mismatchTimeoutId);
+            }
+            gameState.mismatchTimeoutId = null;
             showScoreBtn.disabled = true;
             copyStatus.textContent = '';
 
