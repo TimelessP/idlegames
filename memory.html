@@ -873,6 +873,13 @@
             <div class="modal-footer">
                 <span class="copy-status" id="copyStatus" aria-live="polite"></span>
                 <button class="primary-button" id="copyScoreBtn">Copy</button>
+                <button class="primary-button" id="shareScoreBtn" aria-label="Share score" title="Share">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                        <path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/>
+                        <path d="M16 6l-4-4-4 4"/>
+                        <path d="M12 2v14"/>
+                    </svg>
+                </button>
                 <button class="primary-button" id="closeGameOverBtn">Close</button>
                 <button class="primary-button" id="playAgainBtn">Play Again</button>
             </div>
@@ -965,7 +972,9 @@
             nextFlipped: [],
             mismatchPair: [],
             mismatchTimeoutId: null,
-            queuedFlips: []
+            queuedFlips: [],
+            resolvingMatch: false,
+            patternBaseTile: null
         };
         function drainQueuedFlips() {
             if (gameState.nextFlipped.length > 0) {
@@ -1142,6 +1151,7 @@
         const showScoreBtn = document.getElementById('showScoreBtn');
         const copyScoreBtn = document.getElementById('copyScoreBtn');
         const copyStatus = document.getElementById('copyStatus');
+        const shareScoreBtn = document.getElementById('shareScoreBtn');
         const toggleAllThemes = document.getElementById('toggleAllThemes');
         const toggleAllLabel = document.getElementById('toggleAllLabel');
 
@@ -1200,6 +1210,36 @@
                 copyStatus.textContent = 'Copied!';
             } catch (error) {
                 copyStatus.textContent = 'Copy failed. Select and copy manually.';
+            }
+            setTimeout(() => {
+                copyStatus.textContent = '';
+            }, 2000);
+        });
+
+        shareScoreBtn.addEventListener('click', async () => {
+            const text = `${gameState.lastShareText || buildShareText()}\n${window.location.href}`;
+            if (navigator.share) {
+                try {
+                    await navigator.share({
+                        title: 'Memory Match',
+                        text
+                    });
+                    copyStatus.textContent = 'Shared!';
+                } catch (error) {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        copyStatus.textContent = 'Copied!';
+                    } catch (err) {
+                        copyStatus.textContent = 'Share failed. Copy manually.';
+                    }
+                }
+            } else {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    copyStatus.textContent = 'Copied!';
+                } catch (error) {
+                    copyStatus.textContent = 'Share not supported. Copy manually.';
+                }
             }
             setTimeout(() => {
                 copyStatus.textContent = '';
@@ -1282,7 +1322,9 @@
 
             document.documentElement.style.setProperty('--card-back', colors.fill);
             document.documentElement.style.setProperty('--card-pattern', `url("${encodedSvg}")`);
-            document.documentElement.style.setProperty('--card-pattern-size', '80px');
+            if (!document.documentElement.style.getPropertyValue('--card-pattern-size')) {
+                document.documentElement.style.setProperty('--card-pattern-size', '80px');
+            }
             const pulseBase = colors.pulse || 'rgba(102, 126, 234, 0.35)';
             const pulseStrong = pulseBase.replace('0.35', '0.55');
             const pulseSoft = pulseBase.replace('0.35', '0.18');
@@ -1528,6 +1570,14 @@
             board.style.height = `${boardHeight}px`;
             board.style.setProperty('--tile-size', `${cellSize}px`);
             board.style.setProperty('--pulse-size', `${Math.max(4, Math.round(cellSize * 0.12))}px`);
+
+            if (gameState.boardSize === 2 && !gameState.patternBaseTile) {
+                gameState.patternBaseTile = cellSize;
+            }
+            const baseTile = gameState.patternBaseTile || cellSize;
+            const basePattern = 80;
+            const patternSize = Math.max(36, Math.round(cellSize * (basePattern / baseTile)));
+            document.documentElement.style.setProperty('--card-pattern-size', `${patternSize}px`);
         }
 
         function renderBoard() {
@@ -1596,6 +1646,15 @@
             startTimer();
         }
 
+        function animateFlipBack(indices) {
+            indices.forEach((index) => {
+                const card = document.querySelector(`.card[data-index="${index}"]`);
+                if (card) {
+                    card.classList.remove('flipped');
+                }
+            });
+        }
+
         function handleResolvedPair() {
             if (gameState.flipped.length !== 2) return;
 
@@ -1605,12 +1664,14 @@
 
             const [idx1, idx2] = gameState.flipped;
             if (gameState.cards[idx1] === gameState.cards[idx2]) {
+                gameState.resolvingMatch = true;
                 setTimeout(() => {
                     gameState.matched.add(idx1);
                     gameState.matched.add(idx2);
                     gameState.matches++;
                     gameState.flipped = [];
                     gameState.gameActive = true;
+                    gameState.resolvingMatch = false;
                     updateStats();
                     renderBoard();
 
@@ -1636,6 +1697,10 @@
                         return;
                     }
 
+                    if (gameState.nextFlipped.length === 0 && gameState.queuedFlips.length > 0) {
+                        drainQueuedFlips();
+                    }
+
                     if (gameState.nextFlipped.length > 0) {
                         gameState.flipped = [...gameState.nextFlipped];
                         gameState.nextFlipped = [];
@@ -1650,19 +1715,28 @@
                     clearTimeout(gameState.mismatchTimeoutId);
                 }
                 gameState.mismatchTimeoutId = setTimeout(() => {
-                    gameState.resolvingMismatch = false;
-                    gameState.mismatchPair = [];
-                    gameState.mismatchTimeoutId = null;
-                    gameState.flipped = [];
-                    gameState.gameActive = true;
-                    renderBoard();
+                    const mismatchIndices = [...gameState.mismatchPair];
+                    animateFlipBack(mismatchIndices);
 
-                    if (gameState.nextFlipped.length > 0) {
-                        gameState.flipped = [...gameState.nextFlipped];
-                        gameState.nextFlipped = [];
+                    setTimeout(() => {
+                        gameState.resolvingMismatch = false;
+                        gameState.mismatchPair = [];
+                        gameState.mismatchTimeoutId = null;
+                        gameState.flipped = [];
+                        gameState.gameActive = true;
                         renderBoard();
-                        handleResolvedPair();
-                    }
+
+                        if (gameState.nextFlipped.length === 0 && gameState.queuedFlips.length > 0) {
+                            drainQueuedFlips();
+                        }
+
+                        if (gameState.nextFlipped.length > 0) {
+                            gameState.flipped = [...gameState.nextFlipped];
+                            gameState.nextFlipped = [];
+                            renderBoard();
+                            handleResolvedPair();
+                        }
+                    }, 380);
                 }, 1000);
             }
         }
@@ -1675,19 +1749,28 @@
                 clearTimeout(gameState.mismatchTimeoutId);
             }
             gameState.mismatchTimeoutId = setTimeout(() => {
-                gameState.resolvingMismatch = false;
-                gameState.mismatchPair = [];
-                gameState.mismatchTimeoutId = null;
-                gameState.flipped = [];
-                gameState.gameActive = true;
-                renderBoard();
+                const mismatchIndices = [...gameState.mismatchPair];
+                animateFlipBack(mismatchIndices);
 
-                if (gameState.nextFlipped.length > 0) {
-                    gameState.flipped = [...gameState.nextFlipped];
-                    gameState.nextFlipped = [];
+                setTimeout(() => {
+                    gameState.resolvingMismatch = false;
+                    gameState.mismatchPair = [];
+                    gameState.mismatchTimeoutId = null;
+                    gameState.flipped = [];
+                    gameState.gameActive = true;
                     renderBoard();
-                    handleResolvedPair();
-                }
+
+                    if (gameState.nextFlipped.length === 0 && gameState.queuedFlips.length > 0) {
+                        drainQueuedFlips();
+                    }
+
+                    if (gameState.nextFlipped.length > 0) {
+                        gameState.flipped = [...gameState.nextFlipped];
+                        gameState.nextFlipped = [];
+                        renderBoard();
+                        handleResolvedPair();
+                    }
+                }, 380);
             }, 1000);
         }
 
@@ -1723,6 +1806,19 @@
             startTimerIfNeeded();
 
             if (gameState.resolvingMismatch) {
+                if (gameState.nextFlipped.includes(index)) return;
+                if (gameState.nextFlipped.length < 2) {
+                    gameState.nextFlipped.push(index);
+                    cardElement.classList.add('flipped');
+                    return;
+                }
+                if (!gameState.queuedFlips.includes(index)) {
+                    gameState.queuedFlips.push(index);
+                }
+                return;
+            }
+
+            if (gameState.resolvingMatch) {
                 if (gameState.nextFlipped.includes(index)) return;
                 if (gameState.nextFlipped.length < 2) {
                     gameState.nextFlipped.push(index);
@@ -1773,6 +1869,7 @@
             gameState.nextFlipped = [];
             gameState.mismatchPair = [];
             gameState.queuedFlips = [];
+            gameState.resolvingMatch = false;
             if (gameState.mismatchTimeoutId) {
                 clearTimeout(gameState.mismatchTimeoutId);
             }
