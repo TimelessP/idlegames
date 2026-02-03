@@ -781,7 +781,7 @@
       npcs: [],
       
       // UI state
-      ui: { panelOpen: false, actionActor: 'player', justOpenedPanel: false, panelScrollPositions: {}, focusedButtonLabel: null, menuStack: [], returnToStation: null },
+      ui: { panelOpen: false, actionActor: 'player', justOpenedPanel: false, panelScrollPositions: {}, focusedButtonLabel: null, menuStack: [], unifiedMenuStack: [], returnToStation: null, suppressMenuOpen: false },
       keys: { left: false, right: false },
       nearStation: null,
       pendingSpawn: null,
@@ -795,6 +795,863 @@
       // Movement bounds
       walkBounds: { minX: 50, maxX: 750 },
     };
+
+    // ============================================================================
+    // Unified Menu System (Data-Driven)
+    // ============================================================================
+    
+    /**
+     * Menu definitions - pure data structure
+     * All menus defined here with handlers as function references
+     * 
+     * Menu properties:
+     * - isRoot: boolean - whether this is a root menu (opened from world)
+     * - title: string - menu title
+     * - overview: string - menu description
+     * - items: array - static items (or use itemBuilder for dynamic)
+     * - itemBuilder: string - name of handler that builds items dynamically
+     * - actions: array - action bar buttons
+     */
+    const MENUS = {
+      // Computer Room (root)
+      computerRoom: {
+        isRoot: true,
+        stationType: 'computer',
+        title: 'COMPUTER',
+        overview: 'Computer Room systems access',
+        items: [
+          {
+            type: 'action',
+            label: 'System Status',
+            action: () => openMenu('computerSystemStatus')
+          },
+          {
+            type: 'action',
+            label: 'Crew Automation',
+            action: () => openMenu('crewCommand')
+          }
+        ],
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Computer System Status (submenu)
+      computerSystemStatus: {
+        isRoot: false,
+        title: 'COMPUTER — SYSTEM STATUS',
+        overview: 'Ship system overview:',
+        itemBuilder: 'buildSystemStatusItems',
+        actions: [
+          { label: 'Copy Debug JSON', action: copyDebugJson, behavior: 'keep-open' },
+          { label: 'Reset Blockers', action: resetBlockers, behavior: 'keep-open' },
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Crew Command (submenu)
+      crewCommand: {
+        isRoot: false,
+        title: 'CREW COMMAND',
+        overview: 'Configure crew automation:',
+        itemBuilder: 'buildCrewCommandItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Fabricator (root)
+      fabricator: {
+        isRoot: true,
+        stationType: 'fabricator',
+        title: 'FABRICATOR',
+        overview: 'Craft items from raw materials',
+        itemBuilder: 'buildFabricatorItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Navigation (root)
+      navigation: {
+        isRoot: true,
+        stationType: 'sensors',
+        title: 'NAVIGATION',
+        overview: 'Ship navigation and travel management:',
+        itemBuilder: 'buildNavigationItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Navigation Destinations (submenu)
+      navigationDestinations: {
+        isRoot: false,
+        title: 'NAVIGATION — DESTINATIONS',
+        overview: 'Plot course:',
+        itemBuilder: 'buildNavigationDestinations',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Power Routing (root)
+      powerRouting: {
+        isRoot: true,
+        stationType: 'power',
+        title: 'POWER ROUTING',
+        overview: 'Manage power distribution',
+        itemBuilder: 'buildPowerRoutingItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Contracts (root)
+      contracts: {
+        isRoot: true,
+        stationType: 'comms',
+        title: 'COMMS — CONTRACTS',
+        overview: 'Available contracts:',
+        itemBuilder: 'buildContractItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Game Menu (root - opened via ESC or Enter in game world)
+      gameMenu: {
+        isRoot: true,
+        title: 'GAME MENU',
+        overview: 'Manage your save data:',
+        itemBuilder: 'buildGameMenuItems',
+        actions: [
+          { label: 'Close', behavior: 'close' }
+        ]
+      },
+
+      // New Game Confirmation (submenu)
+      newGameConfirm: {
+        isRoot: false,
+        title: 'NEW GAME',
+        overview: 'Start a new game? This will clear the current save.',
+        items: [
+          {
+            type: 'action',
+            label: 'Start New Game',
+            danger: true,
+            action: newGame
+          }
+        ],
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      }
+    };
+
+    /**
+     * Menu handlers - all functions referenced by menus
+     * These are called by the unified menu system
+     */
+    const MENU_HANDLERS = {
+      // Item builders (generate dynamic content)
+      buildSystemStatusItems,
+      buildCrewCommandItems,
+      buildFabricatorItems,
+      buildNavigationItems,
+      buildNavigationDestinations,
+      buildPowerRoutingItems,
+      buildContractItems,
+      buildGameMenuItems,
+      
+      // Action handlers
+      copyDebugJson,
+      resetBlockers
+    };
+
+    /**
+     * Unified menu opener - handles root and submenu logic
+     * @param {string} menuName - name of menu in MENUS object
+     * @param {Object} options - optional context data
+     */
+    function openMenu(menuName, options = {}) {
+      const menuDef = MENUS[menuName];
+      if (!menuDef) {
+        console.error(`Menu not found: ${menuName}`);
+        return;
+      }
+
+      if (menuDef.isRoot && state.ui.suppressMenuOpen) {
+        return;
+      }
+
+      // Initialize stack for root menus
+      if (menuDef.isRoot) {
+        state.ui.unifiedMenuStack = [];
+        state.ui.returnToStation = state.nearStation;
+      }
+
+      // Build items (static or dynamic)
+      let items = menuDef.items || [];
+      if (menuDef.itemBuilder) {
+        const builder = MENU_HANDLERS[menuDef.itemBuilder];
+        if (typeof builder === 'function') {
+          items = builder(options);
+        }
+      }
+      
+      // Render menu (pass menuName for stack storage)
+      renderUnifiedMenu(menuDef, items, { menuName });
+    }
+
+    /**
+     * Pop from unified menu stack and return to previous menu or station
+     */
+    function popUnifiedMenu() {
+      if (state.ui.unifiedMenuStack.length > 0) {
+        state.ui.unifiedMenuStack.pop();
+        
+        if (state.ui.unifiedMenuStack.length > 0) {
+          // Return to previous menu in stack (don't push again)
+          const prev = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
+          renderUnifiedMenu(prev.definition, prev.items, { _skipPush: true });
+        } else {
+          // Stack is empty, close panel
+          state.ui.focusedButtonLabel = null;
+          state.ui.returnToStation = null;
+          closePanel();
+        }
+      } else {
+        // Stack is empty, just close
+        closePanel();
+      }
+    }
+
+    /**
+     * Unified menu renderer - handles all menu rendering consistently
+     * @param {Object} menuDef - menu definition from MENUS
+     * @param {Array} items - rendered items
+     * @param {Object} options - optional parameters (_skipPush, menuName, _dynamicOverview)
+     */
+    function renderUnifiedMenu(menuDef, items, options = {}) {
+      // Push to stack (unless explicitly skipped for re-renders)
+      if (!options._skipPush) {
+        const stackEntry = {
+          name: options.menuName || Object.keys(MENUS).find(k => MENUS[k] === menuDef),
+          definition: menuDef,
+          items: items
+        };
+        
+        // For root menus, replace the stack; for submenus, push
+        if (menuDef.isRoot) {
+          state.ui.unifiedMenuStack = [stackEntry];
+        } else {
+          state.ui.unifiedMenuStack.push(stackEntry);
+        }
+      }
+
+      // Get panel elements
+      const panel = document.getElementById('interactPanel');
+      const titleEl = document.getElementById('panelTitle');
+      const descEl = document.getElementById('panelDescription');
+      const menuItemsEl = document.getElementById('panelMenuItems');
+      const actionsBarEl = document.getElementById('panelActionsBar');
+
+      // Clear old UI
+      document.getElementById('panelTable').style.display = 'none';
+      document.getElementById('panelTextarea').style.display = 'none';
+      document.getElementById('panelInput').style.display = 'none';
+      document.getElementById('panelButtons').style.display = 'none';
+
+      // Set title and overview (use dynamic if provided)
+      titleEl.textContent = menuDef.title;
+      descEl.textContent = options._dynamicOverview || menuDef.overview;
+
+      // Render items
+      menuItemsEl.innerHTML = '';
+      menuItemsEl.style.display = 'block';
+
+      for (const item of items) {
+        if (item.type === 'action') {
+          renderUnifiedActionItem(menuItemsEl, item, menuDef);
+        } else if (item.type === 'setting') {
+          renderUnifiedSettingItem(menuItemsEl, item, menuDef);
+        } else if (item.type === 'divider') {
+          renderUnifiedDividerItem(menuItemsEl);
+        }
+      }
+
+      // Render action bar
+      renderUnifiedActionBar(actionsBarEl, menuDef.actions || [], menuDef);
+
+      // Show panel
+      panel.style.display = 'block';
+      state.ui.panelOpen = true;
+
+      // Clear focus for fresh auto-focus
+      if (document.activeElement && document.activeElement !== document.body) {
+        document.activeElement.blur();
+      }
+
+      // Set up keyboard navigation
+      setupMenuKeyboardNavigation(panel, menuItemsEl, actionsBarEl);
+    }
+
+    /**
+     * Execute a menu item action with behavior handling
+     */
+    function executeUnifiedMenuItem(item, menuDef) {
+      // Call handler if exists (string reference to MENU_HANDLERS)
+      if (item.handler) {
+        const handler = MENU_HANDLERS[item.handler];
+        if (typeof handler === 'function') {
+          handler();
+        }
+      }
+      
+      // Call action if exists (direct function reference)
+      if (item.action && typeof item.action === 'function') {
+        item.action();
+      }
+
+      // Apply behavior
+      handleMenuBehavior(item.behavior || 'keep-open', item.target, menuDef);
+    }
+
+    /**
+     * Execute a unified action bar button
+     */
+    function executeUnifiedAction(action, menuDef) {
+      // Call handler if exists (string reference to MENU_HANDLERS)
+      if (action.handler) {
+        const handler = MENU_HANDLERS[action.handler];
+        if (typeof handler === 'function') {
+          handler();
+        }
+      }
+      
+      // Call action if exists (direct function reference)
+      if (action.action && typeof action.action === 'function') {
+        action.action();
+      }
+
+      // Apply behavior
+      handleMenuBehavior(action.behavior, action.target, menuDef);
+    }
+
+    /**
+     * Handle menu behavior (navigation/lifecycle)
+     */
+    function handleMenuBehavior(behavior, target, menuDef) {
+      switch(behavior) {
+        case 'keep-open':
+          // Menu stays open, rebuild items and refresh values in place (no DOM rebuild)
+          if (state.ui.unifiedMenuStack.length > 0) {
+            const current = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
+            
+            // Rebuild items if menu has an itemBuilder
+            let items = current.definition.items || [];
+            if (current.definition.itemBuilder) {
+              const builder = MENU_HANDLERS[current.definition.itemBuilder];
+              if (typeof builder === 'function') {
+                items = builder();
+              }
+            }
+            
+            // Update cached items in stack
+            current.items = items;
+
+            // Refresh values in place without rebuilding DOM
+            refreshUnifiedMenuValues(current.definition, items);
+          }
+          break;
+        case 'close':
+          closePanel();
+          break;
+        case 'back':
+          popUnifiedMenu();
+          break;
+        case 'submenu':
+          if (target) {
+            openMenu(target);
+          }
+          break;
+        case 'close-all':
+          state.ui.menuStack = [];
+          state.ui.unifiedMenuStack = [];
+          closePanel();
+          break;
+      }
+    }
+
+    /**
+     * Render action item in unified menu
+     */
+    function renderUnifiedActionItem(container, item, menuDef) {
+      const div = document.createElement('div');
+      div.className = 'menu-action-item';
+
+      const btn = document.createElement('button');
+      btn.className = `menu-action-btn${item.danger ? ' danger' : ''}`;
+      btn.textContent = item.label;
+      btn.addEventListener('click', () => {
+        state.ui.focusedButtonLabel = item.label;
+        executeUnifiedMenuItem(item, menuDef);
+      });
+
+      div.appendChild(btn);
+      container.appendChild(div);
+    }
+
+    /**
+     * Render divider item in unified menu
+     */
+    function renderUnifiedDividerItem(container) {
+      const div = document.createElement('div');
+      div.className = 'menu-divider';
+      container.appendChild(div);
+    }
+
+    /**
+     * Render setting item in unified menu
+     */
+    function renderUnifiedSettingItem(container, item, menuDef) {
+      const div = document.createElement('div');
+      div.className = 'menu-setting-item';
+      div.dataset.menuLabel = item.label;
+
+      const label = document.createElement('div');
+      label.className = 'menu-setting-label';
+      label.textContent = item.label;
+
+      const value = document.createElement('div');
+      value.className = 'menu-setting-value';
+      value.textContent = item.value || '';
+      value.dataset.menuValueFor = item.label;
+
+      const controls = document.createElement('div');
+      controls.className = 'menu-setting-controls';
+
+      if (item.actions && Array.isArray(item.actions)) {
+        for (const action of item.actions) {
+          const btn = document.createElement('button');
+          btn.className = 'menu-setting-btn';
+          btn.textContent = action.label;
+          btn.addEventListener('click', () => {
+            if (typeof action.action === 'function') action.action();
+            // Handle behavior after action executes
+            handleMenuBehavior(action.behavior || 'keep-open', action.target, menuDef);
+          });
+          controls.appendChild(btn);
+        }
+      }
+
+      div.appendChild(label);
+      div.appendChild(value);
+      if (controls.children.length > 0) {
+        div.appendChild(controls);
+      }
+
+      container.appendChild(div);
+    }
+
+    /**
+     * Render unified action bar
+     */
+    function renderUnifiedActionBar(container, actions, menuDef) {
+      container.innerHTML = '';
+      if (!actions || actions.length === 0) {
+        container.style.display = 'none';
+        return;
+      }
+
+      container.style.display = 'flex';
+      for (const action of actions) {
+        const btn = document.createElement('button');
+        btn.className = action.danger ? 'danger' : '';
+        
+        // For root menus, convert "Back" to "Close" with close behavior
+        let label = action.label;
+        let behavior = action.behavior;
+        if (menuDef.isRoot && action.behavior === 'back') {
+          label = 'Close';
+          behavior = 'close';
+        }
+        
+        btn.textContent = label;
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          // Use the modified behavior for root menu Back buttons
+          executeUnifiedAction({ ...action, behavior }, menuDef);
+        });
+        container.appendChild(btn);
+      }
+    }
+
+    function refreshUnifiedMenuValues(menuDef, items) {
+      const menuItemsEl = document.getElementById('panelMenuItems');
+      if (!menuItemsEl) return;
+
+      for (const item of items) {
+        if (item.type === 'setting') {
+          const settingEls = Array.from(menuItemsEl.querySelectorAll('.menu-setting-item'));
+          const match = settingEls.find(el => el.dataset.menuLabel === item.label);
+          if (match) {
+            const valueEl = match.querySelector('.menu-setting-value');
+            if (valueEl) valueEl.textContent = item.value || '';
+          }
+        } else if (item.type === 'action') {
+          const actionEls = Array.from(menuItemsEl.querySelectorAll('.menu-action-item'));
+          const match = actionEls.find((el) => {
+            const btn = el.querySelector('button');
+            return btn && btn.textContent === item.label;
+          });
+          if (match) {
+            const btn = match.querySelector('button');
+            if (btn) btn.textContent = item.label;
+          }
+        }
+      }
+    }
+
+    // ============================================================================
+    // Unified Menu Handlers (Item Builders & Actions)
+    // ============================================================================
+
+    /**
+     * Build items for System Status menu
+     */
+    function buildSystemStatusItems(options = {}) {
+      const items = [
+        { type: 'setting', label: 'Power', value: `${Math.round(state.power)}%`, actions: [] },
+        { type: 'setting', label: 'Oxygen', value: `${Math.round(state.oxygen)}%`, actions: [] },
+        { type: 'setting', label: 'Hull', value: `${Math.round(state.hull)}/${Math.round(state.hullMax)}`, actions: [] },
+        { type: 'setting', label: 'Heat', value: `${Math.round(state.heat)}%`, actions: [] },
+        { type: 'setting', label: 'Rations', value: `${invGet('rations')}`, actions: [] },
+        { type: 'setting', label: 'Morale', value: `${Math.round(state.morale)}%`, actions: [] },
+        { type: 'setting', label: 'Credits', value: `${Math.floor(state.credits)}`, actions: [] },
+        { type: 'setting', label: 'Reputation', value: `${Math.floor(state.reputation)}`, actions: [] },
+        { type: 'setting', label: 'Engine', value: state.engineActive ? 'ONLINE' : 'OFFLINE', actions: [] }
+      ];
+      
+      if (state.travel && state.travel.active) {
+        items.push({ type: 'setting', label: 'Travel', value: `${state.travel.from} → ${state.travel.to} (${Math.ceil(state.travel.remaining)} AU)`, actions: [] });
+      }
+
+      // Build AI blockers description for overview
+      const blockers = state.aiBlockers || {};
+      const entries = Object.entries(blockers).filter(([, count]) => Number.isFinite(count) && count > 0);
+      entries.sort((a, b) => b[1] - a[1]);
+      
+      let overview = 'Ship system overview:';
+      if (entries.length > 0) {
+        const blocker_lines = entries.slice(0, 12).map(([key, count]) => `${key} (${count})`);
+        const extra = entries.length - blocker_lines.length;
+        overview += `\n\nAI Blockers:\n${blocker_lines.join('\n')}${extra > 0 ? `\n+${extra} more` : ''}`;
+      } else {
+        overview += '\n\nAI Blockers: None';
+      }
+
+      // Store overview for renderUnifiedMenu to use
+      options._dynamicOverview = overview;
+      
+      return items;
+    }
+
+    /**
+     * Build items for Crew Command menu
+     */
+    function buildCrewCommandItems(options = {}) {
+      const buffers = state.crewAI && state.crewAI.buffers ? state.crewAI.buffers : {};
+      const minCredits = Math.max(0, Math.floor(safeNumber(state.crewAI && state.crewAI.minCredits, 0)));
+
+      const toggle = (k) => () => {
+        state.crewAI[k] = !state.crewAI[k];
+        markDirty();
+        // Don't call openMenu - behavior:'keep-open' will handle re-render
+      };
+
+      const bump = (field, delta) => () => {
+        if (field === 'targetCrew') {
+          state.crewAI.targetCrew = Math.max(0, Math.min(MAX_CREW, state.crewAI.targetCrew + delta));
+        } else if (field === 'minCredits') {
+          state.crewAI.minCredits = Math.max(0, Math.floor(safeNumber(state.crewAI.minCredits, 0)) + delta);
+        } else {
+          const v = Math.max(0, Math.floor(safeNumber(buffers[field], 0)) + delta);
+          buffers[field] = v;
+          state.crewAI.buffers = buffers;
+        }
+        markDirty();
+        // Don't call openMenu - behavior:'keep-open' will handle re-render
+      };
+
+      return [
+        { type: 'setting', label: 'Automation', value: state.crewAI.enabled ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('enabled'), behavior: 'keep-open' }] },
+        { type: 'divider' },
+        { type: 'setting', label: 'Auto Repair', value: state.crewAI.autoRepair ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoRepair'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Life Support', value: state.crewAI.autoLife ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoLife'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Hydroponics', value: state.crewAI.autoHydro ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoHydro'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Fabricate', value: state.crewAI.autoFabricate ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoFabricate'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Refine', value: state.crewAI.autoRefine ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoRefine'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Contracts', value: state.crewAI.autoContracts ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoContracts'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Vent Heat', value: state.crewAI.autoVentHeat ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoVentHeat'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Travel', value: state.crewAI.autoTravel ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoTravel'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Research', value: state.crewAI.autoResearch ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoResearch'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Build', value: state.crewAI.autoBuild ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoBuild'), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Auto Hire', value: state.crewAI.autoHire ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: toggle('autoHire'), behavior: 'keep-open' }] },
+        { type: 'divider' },
+        { type: 'setting', label: 'Target Crew', value: `${state.crewAI.targetCrew}`, actions: [{ label: '-', action: () => bump('targetCrew', -1)(), behavior: 'keep-open' }, { label: '+', action: () => bump('targetCrew', 1)(), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Minimum Credits', value: `${minCredits}`, actions: [{ label: '-10', action: () => bump('minCredits', -10)(), behavior: 'keep-open' }, { label: '+10', action: () => bump('minCredits', 10)(), behavior: 'keep-open' }] },
+        { type: 'divider' },
+        { type: 'setting', label: 'Filters Buffer', value: `${buffers.filter || 0}`, actions: [{ label: '-', action: () => bump('filter', -1)(), behavior: 'keep-open' }, { label: '+', action: () => bump('filter', 1)(), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Medkits Buffer', value: `${buffers.medkit || 0}`, actions: [{ label: '-', action: () => bump('medkit', -1)(), behavior: 'keep-open' }, { label: '+', action: () => bump('medkit', 1)(), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Drone Parts Buffer', value: `${buffers.droneParts || 0}`, actions: [{ label: '-', action: () => bump('droneParts', -1)(), behavior: 'keep-open' }, { label: '+', action: () => bump('droneParts', 1)(), behavior: 'keep-open' }] },
+        { type: 'setting', label: 'Rations Buffer', value: `${buffers.rations || 0}`, actions: [{ label: '-', action: () => bump('rations', -1)(), behavior: 'keep-open' }, { label: '+', action: () => bump('rations', 1)(), behavior: 'keep-open' }] }
+      ];
+    }
+
+    /**
+     * Build items for Fabricator menu
+     */
+    function buildFabricatorItems(options = {}) {
+      const inventory = {
+        scrap: invGet('scrap'),
+        ingot: invGet('ingot'),
+        filter: invGet('filter'),
+        medkit: invGet('medkit'),
+        droneParts: invGet('droneParts'),
+        rations: invGet('rations')
+      };
+
+      return [
+        { type: 'action', label: `Build Filter (2 scrap) — Have: ${inventory.filter}`, action: () => craftItem('filter', 1, { showPanel: true }) },
+        { type: 'action', label: `Build Medkit (3 scrap) — Have: ${inventory.medkit}`, action: () => craftItem('medkit', 1, { showPanel: true }) },
+        { type: 'action', label: `Build Drone Parts (4 scrap + 1 ingot) — Have: ${inventory.droneParts}`, action: () => craftItem('droneParts', 1, { showPanel: true }) },
+        { type: 'action', label: `Build Rations (1 scrap) — Have: ${inventory.rations}`, action: () => craftItem('rations', 1, { showPanel: true }) }
+      ];
+    }
+
+    /**
+     * Build items for Navigation menu
+     */
+    function buildNavigationItems(options = {}) {
+      const sys = currentSystem();
+      const t = state.travel && typeof state.travel === 'object' ? state.travel : { active: false };
+      const thr = clamp(safeNumber(state.throttle, 0), 0, 1);
+      const thrPct = Math.round(thr * 100);
+      const localAnoms = Array.isArray(state.anomalies) ? state.anomalies.filter((a) => a && !a.resolved && a.system === sys).slice(-3) : [];
+
+      const items = [];
+
+      // System info
+      items.push({ type: 'setting', label: 'System', value: sys, actions: [] });
+      items.push({ type: 'setting', label: 'Engine', value: state.engineActive ? 'ACTIVE' : 'IDLE', actions: [{ label: 'Toggle', behavior: 'keep-open', action: () => {
+        state.engineActive = !state.engineActive;
+        if (!state.engineActive) state.speed = 0;
+        markDirty();
+        updateHUD();
+      }}] });
+      items.push({ type: 'setting', label: 'Throttle', value: `${thrPct}%`, actions: [{ label: 'Set', action: () => openThrottlePanel('NAVIGATION') }] });
+
+      // Travel info
+      if (t.active && t.to) {
+        const rate = Math.max(0, safeNumber(state.speed, 0) / 15000);
+        const eta = rate > 0.01 ? Math.ceil(t.remaining / rate) : null;
+        items.push({ type: 'divider' });
+        items.push({ type: 'setting', label: 'Course', value: `${t.from} → ${t.to}`, actions: [] });
+        items.push({ type: 'setting', label: 'Remaining', value: `${Math.max(0, Math.round(t.remaining))} AU`, actions: [] });
+        items.push({ type: 'setting', label: 'ETA', value: eta !== null ? `${eta}s` : '—', actions: [] });
+        items.push({ type: 'divider' });
+        items.push({ type: 'action', label: 'Cancel Course', danger: true, action: cancelTravel });
+      } else {
+        items.push({ type: 'divider' });
+        items.push({ type: 'action', label: 'Plot Course', action: () => openMenu('navigationDestinations') });
+      }
+
+      // Anomalies
+      if (localAnoms.length) {
+        items.push({ type: 'divider' });
+        for (const a of localAnoms) {
+          items.push({ type: 'action', label: `Investigate: ${a.name}`, action: () => openAnomalyPanel(a) });
+        }
+      }
+
+      return items;
+    }
+
+    /**
+     * Build destinations for Navigation submenu
+     */
+    function buildNavigationDestinations(options = {}) {
+      const sys = currentSystem();
+      const dests = listDestinations(sys);
+      if (dests.length === 0) {
+        showMessage('NAVIGATION', 'No known destinations.');
+        return [];
+      }
+      
+      return dests.map((d) => ({
+        type: 'action',
+        label: `${sys} → ${d} (${distanceBetween(sys, d)} AU)`,
+        action: () => startTravel(d)
+      }));
+    }
+
+    /**
+     * Build items for Power Routing menu
+     */
+    function buildPowerRoutingItems(options = {}) {
+      const context = options.context || 'POWER';
+      const desc = {
+        balanced: 'Default behavior. No automatic load shedding.',
+        survival: 'Prioritizes life support. Sheds nonessential loads at low power.',
+        combat: 'Prioritizes shields and engines. Sheds hydroponics first at low power.',
+        industry: 'Prioritizes hydroponics and fabrication support. Sheds shields first at low power.'
+      };
+
+      // Update menu title/description dynamically
+      const menuDef = MENUS['powerRouting'];
+      if (menuDef) {
+        menuDef.title = `${context} — POWER ROUTING`;
+        menuDef.overview = desc[state.powerProfile] || '';
+      }
+
+      const set = (profile) => {
+        state.powerProfile = profile;
+        markDirty();
+        showMessage(context, `Power routing set to ${profile.toUpperCase()}.`);
+        openMenu('powerRouting', options);
+      };
+
+      return [
+        { type: 'setting', label: 'Current Profile', value: state.powerProfile.toUpperCase(), actions: [] },
+        { type: 'divider' },
+        { type: 'action', label: state.powerProfile === 'balanced' ? '✓ BALANCED (current)' : 'BALANCED', action: () => set('balanced') },
+        { type: 'action', label: state.powerProfile === 'survival' ? '✓ SURVIVAL (current)' : 'SURVIVAL', action: () => set('survival') },
+        { type: 'action', label: state.powerProfile === 'combat' ? '✓ COMBAT (current)' : 'COMBAT', action: () => set('combat') },
+        { type: 'action', label: state.powerProfile === 'industry' ? '✓ INDUSTRY (current)' : 'INDUSTRY', action: () => set('industry') }
+      ];
+    }
+
+    /**
+     * Build items for Contracts menu
+     */
+    function buildContractItems(options = {}) {
+      ensureContracts();
+      const active = state.contract && state.contract.active;
+      const items = [];
+
+      if (active) {
+        // Active contract display
+        items.push({ type: 'setting', label: 'Contract', value: active.title, actions: [] });
+        const requires = Object.entries(active.requires || {}).map(([k, v]) => `${k}×${v}`).join(', ') || '—';
+        const reward = Object.entries(active.reward || {}).map(([k, v]) => `${k}+${v}`).join(', ') || '—';
+        items.push({ type: 'setting', label: 'Requires', value: requires, actions: [] });
+        items.push({ type: 'setting', label: 'Reward', value: reward, actions: [] });
+        items.push({ type: 'setting', label: 'Status', value: contractReady(active) ? '✓ READY' : 'In Progress', actions: [] });
+        items.push({ type: 'divider' });
+        items.push({ 
+          type: 'action', 
+          label: contractReady(active) ? 'Transmit Completion' : 'Transmit Status (Not Ready)', 
+          action: () => {
+            if (!contractReady(active)) {
+              showMessage('COMMS', 'Contract not ready yet.');
+              return;
+            }
+            applyContractCompletion(active);
+            state.contract.active = null;
+            ensureContracts();
+            markDirty();
+            showMessage('COMMS', 'Contract completed. Payment received.');
+            openMenu('contracts');
+          }
+        });
+        items.push({ type: 'action', label: 'Abandon Contract', danger: true, action: () => {
+          state.contract.active = null;
+          markDirty();
+          showMessage('COMMS', 'Contract abandoned.');
+          openMenu('contracts');
+        }});
+      } else {
+        // Available contracts
+        const available = state.contract.available || [];
+        if (available.length > 0) {
+          for (const c of available) {
+            if (!c) continue;
+            const requires = Object.entries(c.requires || {}).map(([k, v]) => `${k}×${v}`).join(', ') || '—';
+            const reward = Object.entries(c.reward || {}).map(([k, v]) => `${k}+${v}`).join(', ') || '—';
+            items.push({ 
+              type: 'action', 
+              label: `${c.title}\nRequires: ${requires} | Reward: ${reward}`, 
+              action: () => {
+                state.contract.active = c;
+                state.contract.available = (state.contract.available || []).filter((x) => x && x.id !== c.id);
+                markDirty();
+                showMessage('COMMS', `Accepted contract: ${c.title}`);
+                openMenu('contracts');
+              }
+            });
+          }
+        } else {
+          items.push({ type: 'action', label: 'No contracts available', action: () => {} });
+        }
+      }
+
+      return items;
+    }
+
+    /**
+     * Build items for Game Menu
+     */
+    function buildGameMenuItems(options = {}) {
+      return [
+        { 
+          type: 'action', 
+          label: 'New Game', 
+          danger: true,
+          action: () => openMenu('newGameConfirm')
+        },
+        { type: 'action', label: 'Export JSON', action: openExportPanel },
+        { type: 'action', label: 'Import JSON', action: openImportPanel },
+        { type: 'divider' },
+        { type: 'action', label: 'Exit Game', danger: true, action: () => { window.location.href = 'index.html'; } }
+      ];
+    }
+
+    /**
+     * Copy debug JSON
+     */
+    function copyDebugJson() {
+      const payload = JSON.stringify(buildAiDebugExport(), null, 2);
+      copyToClipboard(payload).then(ok => {
+        showMessage('COMPUTER', ok ? 'Debug data copied.' : 'Copy failed.');
+        // Refresh menu to keep it open
+        if (state.ui.unifiedMenuStack && state.ui.unifiedMenuStack.length > 0) {
+          const current = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
+          if (current.name === 'computerSystemStatus') {
+            openMenu('computerSystemStatus');
+          }
+        }
+      });
+    }
+
+    /**
+     * Reset AI blockers
+     */
+    function resetBlockers() {
+      state.aiBlockers = {};
+      if (state.meta) state.meta.aiBlockerAt = {};
+      markDirty();
+      showMessage('COMPUTER', 'AI blockers reset.');
+      // Refresh menu to show updated blockers
+      if (state.ui.unifiedMenuStack && state.ui.unifiedMenuStack.length > 0) {
+        const current = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
+        if (current.name === 'computerSystemStatus') {
+          openMenu('computerSystemStatus');
+        }
+      }
+    }
 
     const css = getComputedStyle(document.documentElement);
     const C = {
@@ -981,11 +1838,15 @@
         width: MODULE_WIDTH,
         station: { ...STATION_SIZE },
         actions: () => [
-          { key: 'fabricator.status', label: 'Check Status', action: () => showMessage('FABRICATOR', 'Fabricator warmed and ready.') },
           {
             key: 'fabricator.build',
             label: 'Fabricate Item/Part',
-            action: openFabricatorPanel,
+            action: () => {
+              state.ui.returnToStation = state.nearStation;
+              state.ui.unifiedMenuStack = [];
+              state.ui.menuStack = [];
+              openMenu('fabricator');
+            },
             perform: () => autoFabricateConsumables()
           }
         ]
@@ -1158,11 +2019,15 @@
         width: MODULE_WIDTH,
         station: { ...STATION_SIZE },
         actions: () => [
-          { key: 'power.status', label: 'Check Status', action: () => showMessage('POWER', '', [['Output', `${Math.round(state.power)}%`], ['Heat', `${Math.round(state.heat)}%`]]) },
           {
             key: 'power.route',
             label: 'Route Power',
-            action: () => openPowerRoutingPanel('POWER'),
+            action: () => {
+              state.ui.returnToStation = state.nearStation;
+              state.ui.unifiedMenuStack = [];
+              state.ui.menuStack = [];
+              openMenu('powerRouting', { context: 'POWER' });
+            },
             perform: () => autoRoutePower()
           },
           {
@@ -1316,31 +2181,46 @@
         station: { ...STATION_SIZE },
         actions: () => [
           {
-            key: 'cockpit.status',
-            label: 'Ship Status',
+            key: 'cockpit.nav',
+            label: 'Navigation',
             action: () => {
-              const inc = [];
-              if (state.incidents.powerTrip) inc.push('POWER TRIP');
-              if (state.incidents.o2Leak) inc.push('O2 LEAK');
-              if (state.incidents.fire) inc.push('FIRE');
-              if (state.incidents.breach) inc.push('HULL BREACH');
-              const incidents = inc.length ? inc.join(', ') : 'None';
-              const tableData = [
-                ['Incidents', incidents],
-                ['Power', `${Math.round(state.power)}%`],
-                ['Oxygen', `${Math.round(state.oxygen)}%`],
-                ['Hull', `${Math.round((state.hull / Math.max(1, state.hullMax)) * 100)}%`],
-                ['Heat', `${Math.round(state.heat)}%`],
-                ['Rations', `${invGet('rations')}`],
-                ['Morale', `${Math.round(state.morale)}%`]
-              ];
-              showMessage('SHIP STATUS', '', tableData);
+              state.ui.returnToStation = state.nearStation;
+              state.ui.unifiedMenuStack = [];
+              state.ui.menuStack = [];
+              openMenu('navigation');
             }
           },
-          { key: 'cockpit.nav', label: 'Navigation', action: openNavigationPanel },
-          { key: 'cockpit.power', label: 'Power Routing', action: () => openPowerRoutingPanel('COCKPIT') },
-          { key: 'cockpit.command', label: 'Crew Command', action: openCrewCommandPanel },
-          { key: 'cockpit.comms', label: 'Open Comms (Contracts)', requiredRole: ['pilot', 'quartermaster'], action: openContractsPanel }
+          {
+            key: 'cockpit.power',
+            label: 'Power Routing',
+            action: () => {
+              state.ui.returnToStation = state.nearStation;
+              state.ui.unifiedMenuStack = [];
+              state.ui.menuStack = [];
+              openMenu('powerRouting', { context: 'COCKPIT' });
+            }
+          },
+          {
+            key: 'cockpit.command',
+            label: 'Crew Command',
+            action: () => {
+              state.ui.returnToStation = state.nearStation;
+              state.ui.unifiedMenuStack = [];
+              state.ui.menuStack = [];
+              openMenu('crewCommand');
+            }
+          },
+          {
+            key: 'cockpit.comms',
+            label: 'Open Comms (Contracts)',
+            requiredRole: ['pilot', 'quartermaster'],
+            action: () => {
+              state.ui.returnToStation = state.nearStation;
+              state.ui.unifiedMenuStack = [];
+              state.ui.menuStack = [];
+              openMenu('contracts');
+            }
+          }
         ]
       },
       computer: {
@@ -1352,71 +2232,21 @@
             key: 'computer.status',
             label: 'System Status',
             action: () => {
-              // Store station reference so we can return to it
               state.ui.returnToStation = state.nearStation;
-              closePanel();
-              // Build system status items
-              const items = [
-                { type: 'setting', label: 'Power', value: `${Math.round(state.power)}%`, actions: [] },
-                { type: 'setting', label: 'Oxygen', value: `${Math.round(state.oxygen)}%`, actions: [] },
-                { type: 'setting', label: 'Hull', value: `${Math.round(state.hull)}/${Math.round(state.hullMax)}`, actions: [] },
-                { type: 'setting', label: 'Heat', value: `${Math.round(state.heat)}%`, actions: [] },
-                { type: 'setting', label: 'Rations', value: `${invGet('rations')}`, actions: [] },
-                { type: 'setting', label: 'Morale', value: `${Math.round(state.morale)}%`, actions: [] },
-                { type: 'setting', label: 'Credits', value: `${Math.floor(state.credits)}`, actions: [] },
-                { type: 'setting', label: 'Reputation', value: `${Math.floor(state.reputation)}`, actions: [] },
-                { type: 'setting', label: 'Engine', value: state.engineActive ? 'ONLINE' : 'OFFLINE', actions: [] }
-              ];
-              
-              if (state.travel && state.travel.active) {
-                items.push({ type: 'setting', label: 'Travel', value: `${state.travel.from} → ${state.travel.to} (${Math.ceil(state.travel.remaining)} AU)`, actions: [] });
-              }
-              
-              // Build AI blockers description
-              const blockers = state.aiBlockers || {};
-              const entries = Object.entries(blockers).filter(([, count]) => Number.isFinite(count) && count > 0);
-              entries.sort((a, b) => b[1] - a[1]);
-              
-              let overview = 'Ship system overview:';
-              if (entries.length > 0) {
-                const blocker_lines = entries.slice(0, 12).map(([key, count]) => `${key} (${count})`);
-                const extra = entries.length - blocker_lines.length;
-                overview += `\n\nAI Blockers:\n${blocker_lines.join('\n')}${extra > 0 ? `\n+${extra} more` : ''}`;
-              } else {
-                overview += '\n\nAI Blockers: None';
-              }
-              
-              openStructuredMenu({
-                title: 'COMPUTER — SYSTEM STATUS',
-                overview,
-                items,
-                actions: [
-                  {
-                    label: 'Copy Debug JSON',
-                    action: async () => {
-                      const payload = JSON.stringify(buildAiDebugExport(), null, 2);
-                      const ok = await copyToClipboard(payload);
-                      showMessage('COMPUTER', ok ? 'Debug data copied.' : 'Copy failed.');
-                    }
-                  },
-                  {
-                    label: 'Reset Blockers',
-                    action: () => {
-                      state.aiBlockers = {};
-                      if (state.meta) state.meta.aiBlockerAt = {};
-                      markDirty();
-                      showMessage('COMPUTER', 'AI blockers reset.');
-                    }
-                  },
-                  { label: 'Back', action: popMenu }
-                ]
-              });
+              state.ui.unifiedMenuStack = [];
+              state.ui.menuStack = [];
+              openMenu('computerRoom');
             }
           },
           {
             key: 'computer.crew',
             label: 'Crew Automation',
-            action: openCrewCommandPanel
+            action: () => {
+              state.ui.returnToStation = state.nearStation;
+              state.ui.unifiedMenuStack = [];
+              state.ui.menuStack = [];
+              openMenu('computerRoom');
+            }
           }
         ]
       },
@@ -1439,12 +2269,16 @@
         width: MODULE_WIDTH,
         station: { ...STATION_SIZE },
         actions: () => [
-          { key: 'comms.status', label: 'Check Status', action: () => showMessage('COMMS', 'Channels clear.') },
           {
             key: 'comms.contracts',
             label: 'Open Contracts',
             requiredRole: ['pilot', 'quartermaster'],
-            action: openContractsPanel,
+            action: () => {
+              state.ui.returnToStation = state.nearStation;
+              state.ui.unifiedMenuStack = [];
+              state.ui.menuStack = [];
+              openMenu('contracts');
+            },
             perform: () => autoManageContracts()
           }
         ]
@@ -1639,7 +2473,7 @@
                       showMessage('QUARTERS', `${name} transferred aboard.`);
                     }
                   })),
-                  { label: 'Back', action: popMenu }
+                  { label: 'Back', action: closePanel }
                 ],
                 { includeCancel: false }
               );
@@ -1688,7 +2522,7 @@
                       showMessage('QUARTERS', `${n.name} transferred out.`);
                     }
                   })),
-                  { label: 'Back', action: popMenu }
+                  { label: 'Back', action: closePanel }
                 ],
                 { includeCancel: false }
               );
@@ -2360,12 +3194,11 @@
         return isModuleUnlocked(k);
       });
       
-      const items = options.map((type) => {
+      const buttons = options.map((type) => {
         const def = MODULE_DEFS[type];
         const label = def && def.label ? def.label : type;
         const unlocked = isModuleUnlocked(type) || ['doorway', 'elevator', 'empty'].includes(type);
         return {
-          type: 'action',
           label: unlocked ? label : `${label} (Locked)`,
           action: () => {
             const ok = insertModuleAt(insertIndex, { type, label });
@@ -2384,14 +3217,7 @@
         };
       });
 
-      openStructuredMenu({
-        title: 'ADD MODULE',
-        overview: `Insert module at position ${insertIndex + 1}:`,
-        items,
-        actions: [
-          { label: 'Back', action: popMenu }
-        ]
-      });
+      openPanel('ADD MODULE', `Insert module at position ${insertIndex + 1}:`, buttons, { includeCancel: true });
     }
 
     // ============================================================================
@@ -3615,18 +4441,30 @@
     }
 
     function handleActionPress() {
-      // If a panel is open, pressing Action pops from the menu stack
+      // If a panel is open, pressing Action pops from the unified menu stack
       if (state.ui.panelOpen) {
-        popMenu();
-        return;
+        popUnifiedMenu();
+        state.ui.suppressMenuOpen = true;
+        requestAnimationFrame(() => {
+          state.ui.suppressMenuOpen = false;
+        });
+        return true;
       }
 
       // Check for nearby station
       for (const station of stations) {
         if (Math.abs(state.player.x - station.interactX) < 50) {
           state.nearStation = station;
-          openStationPanel(station);
-          return;
+          // Execute the station's first action (which opens the menu)
+          const actions = station.getActions ? station.getActions(station) : station.actions;
+          if (actions && actions.length > 0) {
+            executeAction(actions[0]);
+          }
+          state.ui.suppressMenuOpen = true;
+          requestAnimationFrame(() => {
+            state.ui.suppressMenuOpen = false;
+          });
+          return true;
         }
       }
 
@@ -3635,23 +4473,40 @@
       if (state.player.x < 80 && connections.left) {
         const conn = connections.left;
         moveToLocation(conn.level, conn.corridor);
-        return;
+        state.ui.suppressMenuOpen = true;
+        requestAnimationFrame(() => {
+          state.ui.suppressMenuOpen = false;
+        });
+        return true;
       }
       if (state.player.x > corridorEndX - 80 && connections.right) {
         const conn = connections.right;
         moveToLocation(conn.level, conn.corridor);
-        return;
+        state.ui.suppressMenuOpen = true;
+        requestAnimationFrame(() => {
+          state.ui.suppressMenuOpen = false;
+        });
+        return true;
       }
       if (connections.up) {
         const conn = connections.up;
         moveToLocation(conn.level, conn.corridor);
-        return;
+        state.ui.suppressMenuOpen = true;
+        requestAnimationFrame(() => {
+          state.ui.suppressMenuOpen = false;
+        });
+        return true;
       }
       if (connections.down) {
         const conn = connections.down;
         moveToLocation(conn.level, conn.corridor);
-        return;
+        state.ui.suppressMenuOpen = true;
+        requestAnimationFrame(() => {
+          state.ui.suppressMenuOpen = false;
+        });
+        return true;
       }
+      return false;
     }
 
     const svg = document.getElementById('gameCanvas');
@@ -3745,7 +4600,13 @@
       }
       if (e.key === 'ArrowLeft') handleLeftPress();
       if (e.key === 'ArrowRight') handleRightPress();
-      if (e.key === ' ' || e.key === 'Enter') handleActionPress();
+      if (e.key === ' ' || e.key === 'Enter') {
+        const handled = handleActionPress();
+        if (handled) {
+          e.preventDefault();
+          return;
+        }
+      }
     });
 
     document.addEventListener('keyup', (e) => {
@@ -3849,7 +4710,7 @@
 
     // Global keyboard handler for Enter to open menu from game
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !state.ui.panelOpen && document.activeElement !== document.getElementById('menuBtn')) {
+      if (e.key === 'Enter' && !state.ui.panelOpen && state.ui.unifiedMenuStack.length === 0 && !state.ui.suppressMenuOpen && document.activeElement !== document.getElementById('menuBtn')) {
         const gameCanvas = document.getElementById('gameCanvas');
         if (gameCanvas && gameCanvas.contains(document.activeElement) || document.activeElement === document.body) {
           e.preventDefault();
@@ -4229,8 +5090,8 @@
     }
 
     function openStationPanel(station) {
-      // Clear the menu stack when opening station from game world
-      // Station is the root of the menu hierarchy
+      // Clear both the unified menu stack and old menu stack when opening station
+      state.ui.unifiedMenuStack = [];
       state.ui.menuStack = [];
       
       const actions = station.getActions(station);
@@ -4842,17 +5703,12 @@
       }
 
       const status = anomaly.resolved ? 'RESOLVED' : 'UNRESOLVED';
-      const items = [
-        { type: 'setting', label: 'System', value: anomaly.system, actions: [] },
-        { type: 'setting', label: 'Signature', value: anomaly.name, actions: [] },
-        { type: 'setting', label: 'Type', value: String(anomaly.kind).toUpperCase(), actions: [] },
-        { type: 'setting', label: 'Status', value: status, actions: [] }
-      ];
+      let overview = `System: ${anomaly.system}\nSignature: ${anomaly.name}\nType: ${String(anomaly.kind).toUpperCase()}\nStatus: ${status}\n\n`;
+      overview += anomaly.resolved ? 'This anomaly has been resolved.' : 'Unidentified spatial anomaly detected.';
 
+      const buttons = [];
       if (!anomaly.resolved) {
-        items.push({ type: 'divider' });
-        items.push({
-          type: 'action',
+        buttons.push({
           label: 'Investigate (Cost: 10 power)',
           action: () => {
             investigateAnomaly(anomaly, true);
@@ -4860,14 +5716,7 @@
         });
       }
 
-      openStructuredMenu({
-        title: 'ANOMALY',
-        overview: anomaly.resolved ? 'This anomaly has been resolved.' : 'Unidentified spatial anomaly detected:',
-        items,
-        actions: [
-          { label: 'Back', action: openNavigationPanel }
-        ]
-      });
+      openPanel('ANOMALY', overview, buttons, { includeCancel: true });
     }
 
     function investigateAnomaly(anomaly, showPanel = true) {
@@ -5070,75 +5919,6 @@
       return null;
     }
 
-    function openContractsPanel(closeFirst = true) {
-      if (closeFirst) {
-        state.ui.returnToStation = state.nearStation;
-        closePanel();
-      }
-      ensureContracts();
-      const active = state.contract.active;
-      const items = [];
-
-      if (active) {
-        // Active contract display
-        items.push({ type: 'setting', label: 'Contract', value: active.title, actions: [] });
-        const requires = Object.entries(active.requires || {}).map(([k, v]) => `${k}×${v}`).join(', ') || '—';
-        const reward = Object.entries(active.reward || {}).map(([k, v]) => `${k}+${v}`).join(', ') || '—';
-        items.push({ type: 'setting', label: 'Requires', value: requires, actions: [] });
-        items.push({ type: 'setting', label: 'Reward', value: reward, actions: [] });
-        items.push({ type: 'setting', label: 'Status', value: contractReady(active) ? '✓ READY' : 'In Progress', actions: [] });
-        items.push({ type: 'divider' });
-        items.push({ 
-          type: 'action', 
-          label: contractReady(active) ? 'Transmit Completion' : 'Transmit Status (Not Ready)', 
-          action: () => {
-            if (!contractReady(active)) {
-              showMessage('COMMS', 'Contract not ready yet.');
-              return;
-            }
-            applyContractCompletion(active);
-            state.contract.active = null;
-            ensureContracts();
-            showMessage('COMMS', 'Contract completed. Payment received.');
-          }
-        });
-        items.push({ type: 'action', label: 'Abandon Contract', danger: true, action: () => {
-          state.contract.active = null;
-          markDirty();
-          showMessage('COMMS', 'Contract abandoned.');
-        }});
-      } else {
-        // Available contracts
-        const available = state.contract.available || [];
-        if (available.length > 0) {
-          for (const c of available) {
-            if (!c) continue;
-            const requires = Object.entries(c.requires || {}).map(([k, v]) => `${k}×${v}`).join(', ') || '—';
-            const reward = Object.entries(c.reward || {}).map(([k, v]) => `${k}+${v}`).join(', ') || '—';
-            items.push({ 
-              type: 'action', 
-              label: `${c.title}\nRequires: ${requires} | Reward: ${reward}`, 
-              action: () => {
-                state.contract.active = c;
-                state.contract.available = (state.contract.available || []).filter((x) => x && x.id !== c.id);
-                markDirty();
-                showMessage('COMMS', `Accepted contract: ${c.title}`);
-              }
-            });
-          }
-        } else {
-          items.push({ type: 'action', label: 'No contracts available', action: () => {} });
-        }
-      }
-
-      openStructuredMenu({
-        title: 'COMMS — CONTRACTS',
-        overview: active ? 'Active contract details:' : 'Available contracts:',
-        items,
-        actions: [{ label: 'Back', action: popMenu }]
-      });
-    }
-
     function autoManageContracts() {
       ensureContracts();
       if (state.contract.active) {
@@ -5269,35 +6049,6 @@
       return true;
     }
 
-    function openFabricatorPanel(closeFirst = true) {
-      if (closeFirst) {
-        state.ui.returnToStation = state.nearStation;
-        closePanel();
-      }
-      const inventory = {
-        scrap: invGet('scrap'),
-        ingot: invGet('ingot'),
-        filter: invGet('filter'),
-        medkit: invGet('medkit'),
-        droneParts: invGet('droneParts'),
-        rations: invGet('rations')
-      };
-
-      openStructuredMenu({
-        title: 'FABRICATOR',
-        overview: `Craft items from raw materials.\n\nInventory: Scrap ${inventory.scrap} | Ingots ${inventory.ingot}`,
-        items: [
-          { type: 'action', label: `Build Filter (2 scrap) — Have: ${inventory.filter}`, action: () => craftItem('filter', 1, { showPanel: true }) },
-          { type: 'action', label: `Build Medkit (3 scrap) — Have: ${inventory.medkit}`, action: () => craftItem('medkit', 1, { showPanel: true }) },
-          { type: 'action', label: `Build Drone Parts (4 scrap + 1 ingot) — Have: ${inventory.droneParts}`, action: () => craftItem('droneParts', 1, { showPanel: true }) },
-          { type: 'action', label: `Build Rations (1 scrap) — Have: ${inventory.rations}`, action: () => craftItem('rations', 1, { showPanel: true }) }
-        ],
-        actions: [
-          { label: 'Back', action: popMenu }
-        ]
-      });
-    }
-
     function autoFabricateConsumables() {
       const buffers = state.crewAI && state.crewAI.buffers ? state.crewAI.buffers : {};
       if (invGet('filter') < (buffers.filter || 0)) craftItem('filter', 1, { respectReserve: true });
@@ -5352,41 +6103,6 @@
         [mk(0), mk(25), mk(50), mk(75), mk(100), { label: 'Back', action: popMenu }],
         { includeCancel: false }
       );
-    }
-
-    function openPowerRoutingPanel(context = 'POWER', closeFirst = true) {
-      if (closeFirst) {
-        state.ui.returnToStation = state.nearStation;
-        closePanel();
-      }
-      const desc = {
-        balanced: 'Default behavior. No automatic load shedding.',
-        survival: 'Prioritizes life support. Sheds nonessential loads at low power.',
-        combat: 'Prioritizes shields and engines. Sheds hydroponics first at low power.',
-        industry: 'Prioritizes hydroponics and fabrication support. Sheds shields first at low power.'
-      };
-
-      const set = (profile) => {
-        state.powerProfile = profile;
-        markDirty();
-        showMessage(context, `Power routing set to ${profile.toUpperCase()}.`);
-      };
-
-      openStructuredMenu({
-        title: `${context} — POWER ROUTING`,
-        overview: desc[state.powerProfile] || '',
-        items: [
-          { type: 'setting', label: 'Current Profile', value: state.powerProfile.toUpperCase(), actions: [] },
-          { type: 'divider' },
-          { type: 'action', label: state.powerProfile === 'balanced' ? '✓ BALANCED (current)' : 'BALANCED', action: () => set('balanced') },
-          { type: 'action', label: state.powerProfile === 'survival' ? '✓ SURVIVAL (current)' : 'SURVIVAL', action: () => set('survival') },
-          { type: 'action', label: state.powerProfile === 'combat' ? '✓ COMBAT (current)' : 'COMBAT', action: () => set('combat') },
-          { type: 'action', label: state.powerProfile === 'industry' ? '✓ INDUSTRY (current)' : 'INDUSTRY', action: () => set('industry') }
-        ],
-        actions: [
-          { label: 'Back', action: popMenu }
-        ]
-      });
     }
 
     function autoRoutePower() {
@@ -5660,77 +6376,6 @@
       ]);
     }
 
-    function openNavigationPanel(closeFirst = true) {
-      if (closeFirst) {
-        state.ui.returnToStation = state.nearStation;
-        closePanel();
-      }
-      const sys = currentSystem();
-      const t = state.travel && typeof state.travel === 'object' ? state.travel : { active: false };
-      const thr = clamp(safeNumber(state.throttle, 0), 0, 1);
-      const thrPct = Math.round(thr * 100);
-
-      const localAnoms = Array.isArray(state.anomalies)
-        ? state.anomalies.filter((a) => a && !a.resolved && a.system === sys).slice(-3)
-        : [];
-
-      const items = [];
-
-      // System info
-      items.push({ type: 'setting', label: 'System', value: sys, actions: [] });
-      items.push({ type: 'setting', label: 'Engine', value: state.engineActive ? 'ACTIVE' : 'IDLE', actions: [{ label: 'Toggle', action: () => {
-        state.engineActive = !state.engineActive;
-        if (!state.engineActive) state.speed = 0;
-        markDirty();
-        updateHUD();
-        showMessage('NAVIGATION', state.engineActive ? 'Engine activated.' : 'Engine deactivated.');
-      }}] });
-      items.push({ type: 'setting', label: 'Throttle', value: `${thrPct}%`, actions: [{ label: 'Set', action: () => openThrottlePanel('NAVIGATION') }] });
-
-      // Travel info
-      if (t.active && t.to) {
-        const rate = Math.max(0, safeNumber(state.speed, 0) / 15000);
-        const eta = rate > 0.01 ? Math.ceil(t.remaining / rate) : null;
-        items.push({ type: 'divider' });
-        items.push({ type: 'setting', label: 'Course', value: `${t.from} → ${t.to}`, actions: [] });
-        items.push({ type: 'setting', label: 'Remaining', value: `${Math.max(0, Math.round(t.remaining))} AU`, actions: [] });
-        items.push({ type: 'setting', label: 'ETA', value: eta !== null ? `${eta}s` : '—', actions: [] });
-        items.push({ type: 'divider' });
-        items.push({ type: 'action', label: 'Cancel Course', danger: true, action: cancelTravel });
-      } else {
-        items.push({ type: 'divider' });
-        items.push({ type: 'action', label: 'Plot Course', action: () => {
-          const dests = listDestinations(sys);
-          if (dests.length === 0) return showMessage('NAVIGATION', 'No known destinations.');
-          openStructuredMenu({
-            title: 'NAVIGATION — DESTINATIONS',
-            overview: `Plot course from ${sys}:`,
-            items: dests.map((d) => ({ 
-              type: 'action', 
-              label: `${sys} → ${d} (${distanceBetween(sys, d)} AU)`, 
-              action: () => startTravel(d) 
-            })),
-            actions: [{ label: 'Back', action: openNavigationPanel }]
-          });
-        }});
-      }
-
-      // Anomalies
-      if (localAnoms.length) {
-        items.push({ type: 'divider' });
-        for (const a of localAnoms) {
-          items.push({ type: 'action', label: `Investigate: ${a.name}`, action: () => openAnomalyPanel(a) });
-        }
-      }
-
-      openStructuredMenu({
-        title: 'NAVIGATION',
-        overview: 'Ship navigation and travel management:',
-        items,
-        actions: [{ label: 'Back', action: popMenu }]
-      });
-    }
-
     function toggleShieldsPower() {
       if (!state.shieldsOn) return 0;
       return 0.3;
@@ -5748,140 +6393,7 @@
      * @param {Array} menuConfig.items - Menu items (settings, actions, dividers)
      * @param {Array} menuConfig.actions - Bottom action bar buttons
      */
-    function pushMenu(menuConfig) {
-      // Save current scroll position if a menu is already open
-      const panel = document.getElementById('interactPanel');
-      const titleEl = document.getElementById('panelTitle');
-      if (state.ui.panelOpen && titleEl && titleEl.textContent) {
-        state.ui.panelScrollPositions[titleEl.textContent] = panel.scrollTop;
-      }
-      
-      // Push new menu onto stack
-      state.ui.menuStack.push({ config: menuConfig, scrollPos: 0 });
-      renderMenuFromStack();
-    }
 
-    function popMenu() {
-      if (state.ui.menuStack.length > 0) {
-        // Save current scroll position
-        const panel = document.getElementById('interactPanel');
-        const titleEl = document.getElementById('panelTitle');
-        if (titleEl && titleEl.textContent) {
-          state.ui.panelScrollPositions[titleEl.textContent] = panel.scrollTop;
-        }
-        
-        state.ui.menuStack.pop();
-        
-        if (state.ui.menuStack.length > 0) {
-          renderMenuFromStack();
-        } else {
-          // No more menus, return to station if we came from one
-          state.ui.focusedButtonLabel = null;
-          if (state.ui.returnToStation) {
-            const station = state.ui.returnToStation;
-            state.ui.returnToStation = null;
-            openStationPanel(station);
-          } else {
-            closePanel();
-            // Don't focus the menu button - let focus return naturally
-          }
-        }
-      } else {
-        // Stack is empty (we're at station panel or similar), just close
-        closePanel();
-      }
-    }
-
-    function renderMenuFromStack() {
-      if (state.ui.menuStack.length === 0) {
-        state.ui.panelOpen = false;
-        return;
-      }
-      
-      const menuEntry = state.ui.menuStack[state.ui.menuStack.length - 1];
-      const menuConfig = menuEntry.config;
-      
-      const panel = document.getElementById('interactPanel');
-      
-      // Clear any focused element so auto-focus in setupMenuKeyboardNavigation works properly
-      if (document.activeElement && document.activeElement !== document.body) {
-        document.activeElement.blur();
-      }
-      
-      const titleEl = document.getElementById('panelTitle');
-      const descEl = document.getElementById('panelDescription');
-      const menuItemsEl = document.getElementById('panelMenuItems');
-      const actionsBarEl = document.getElementById('panelActionsBar');
-      const tableEl = document.getElementById('panelTable');
-      const textareaEl = document.getElementById('panelTextarea');
-      const inputEl = document.getElementById('panelInput');
-      const buttonsEl = document.getElementById('panelButtons');
-
-      // Set title and overview
-      titleEl.textContent = menuConfig.title || '';
-      descEl.textContent = menuConfig.overview || '';
-
-      // Hide old UI elements
-      if (tableEl) tableEl.style.display = 'none';
-      if (textareaEl) textareaEl.style.display = 'none';
-      if (inputEl) inputEl.style.display = 'none';
-      buttonsEl.style.display = 'none';
-
-      // Render menu items
-      menuItemsEl.innerHTML = '';
-      menuItemsEl.style.display = 'block';
-
-      for (const item of (menuConfig.items || [])) {
-        if (item.type === 'setting') {
-          renderSettingItem(menuItemsEl, item);
-        } else if (item.type === 'action') {
-          renderActionItem(menuItemsEl, item);
-        } else if (item.type === 'divider') {
-          renderDividerItem(menuItemsEl);
-        }
-      }
-
-      // Render actions bar
-      actionsBarEl.innerHTML = '';
-      if (menuConfig.actions && menuConfig.actions.length > 0) {
-        actionsBarEl.style.display = 'flex';
-        for (const action of menuConfig.actions) {
-          const btn = document.createElement('button');
-          btn.className = action.danger ? 'danger' : '';
-          btn.textContent = action.label;
-          btn.addEventListener('click', () => {
-            if (action.label !== 'Back' && action.label !== 'Cancel') {
-              state.ui.focusedButtonLabel = action.label;
-            } else {
-              state.ui.focusedButtonLabel = null;
-            }
-            if (typeof action.action === 'function') action.action();
-          });
-          actionsBarEl.appendChild(btn);
-        }
-      } else {
-        actionsBarEl.style.display = 'none';
-      }
-
-      // Show panel
-      panel.style.display = 'block';
-      state.ui.panelOpen = true;
-      state.ui.justOpenedPanel = false;
-
-      // Restore scroll position
-      if (state.ui.panelScrollPositions[menuConfig.title]) {
-        setTimeout(() => { panel.scrollTop = state.ui.panelScrollPositions[menuConfig.title]; }, 0);
-      } else {
-        panel.scrollTop = 0;
-      }
-
-      // Set up keyboard navigation
-      setupMenuKeyboardNavigation(panel, menuItemsEl, actionsBarEl);
-    }
-
-    function openStructuredMenu(menuConfig) {
-      pushMenu(menuConfig);
-    }
 
     function setupMenuKeyboardNavigation(panel, menuItemsEl, actionsBarEl) {
       // Remove any previous keyboard handler
@@ -5899,7 +6411,7 @@
 
         if (e.key === 'Escape') {
           e.preventDefault();
-          popMenu();
+          popUnifiedMenu();
         } else if (e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey)) {
           e.preventDefault();
           if (allButtons.length === 0) return;
@@ -5943,125 +6455,9 @@
       });
     }
 
-    function renderSettingItem(container, item) {
-      const div = document.createElement('div');
-      div.className = 'menu-setting-item';
-
-      const label = document.createElement('div');
-      label.className = 'menu-setting-label';
-      label.textContent = item.label;
-      div.appendChild(label);
-
-      const value = document.createElement('div');
-      value.className = 'menu-setting-value';
-      value.textContent = item.value;
-      div.appendChild(value);
-
-      if (item.actions && item.actions.length > 0) {
-        const controls = document.createElement('div');
-        controls.className = 'menu-setting-controls';
-        for (const action of item.actions) {
-          const btn = document.createElement('button');
-          btn.className = 'menu-setting-btn';
-          btn.textContent = action.label;
-          btn.addEventListener('click', () => {
-            state.ui.focusedButtonLabel = action.label; // Remember which button was clicked
-            if (typeof action.action === 'function') action.action();
-          });
-          controls.appendChild(btn);
-        }
-        div.appendChild(controls);
-      }
-
-      container.appendChild(div);
-    }
-
-    function renderActionItem(container, item) {
-      const div = document.createElement('div');
-      div.className = 'menu-action-item';
-
-      const btn = document.createElement('button');
-      btn.className = `menu-action-btn${item.danger ? ' danger' : ''}`;
-      btn.textContent = item.label;
-      btn.addEventListener('click', () => {
-        state.ui.focusedButtonLabel = item.label; // Remember which button was clicked
-        if (typeof item.action === 'function') item.action();
-      });
-
-      div.appendChild(btn);
-      container.appendChild(div);
-    }
-
-    function renderDividerItem(container) {
-      const div = document.createElement('div');
-      div.className = 'menu-divider';
-      container.appendChild(div);
-    }
-
     // ============================================================================
     // End Generalized Menu System
     // ============================================================================
-
-    function openCrewCommandPanel(closeFirst = true) {
-      if (closeFirst) {
-        state.ui.returnToStation = state.nearStation;
-        closePanel();
-      }
-      
-      const buffers = state.crewAI && state.crewAI.buffers ? state.crewAI.buffers : {};
-      const minCredits = Math.max(0, Math.floor(safeNumber(state.crewAI && state.crewAI.minCredits, 0)));
-
-      const toggle = (k) => {
-        state.crewAI[k] = !state.crewAI[k];
-        markDirty();
-        openCrewCommandPanel(false);
-      };
-
-      const bump = (field, delta) => {
-        if (field === 'targetCrew') {
-          state.crewAI.targetCrew = Math.max(0, Math.min(MAX_CREW, state.crewAI.targetCrew + delta));
-        } else if (field === 'minCredits') {
-          state.crewAI.minCredits = Math.max(0, Math.floor(safeNumber(state.crewAI.minCredits, 0)) + delta);
-        } else {
-          const v = Math.max(0, Math.floor(safeNumber(buffers[field], 0)) + delta);
-          buffers[field] = v;
-          state.crewAI.buffers = buffers;
-        }
-        markDirty();
-        openCrewCommandPanel(false);
-      };
-
-      openStructuredMenu({
-        title: 'CREW COMMAND',
-        overview: 'Configure crew automation:',
-        items: [
-          { type: 'setting', label: 'Automation', value: state.crewAI.enabled ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('enabled') }] },
-          { type: 'divider' },
-          { type: 'setting', label: 'Auto Repair', value: state.crewAI.autoRepair ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoRepair') }] },
-          { type: 'setting', label: 'Auto Life Support', value: state.crewAI.autoLife ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoLife') }] },
-          { type: 'setting', label: 'Auto Hydroponics', value: state.crewAI.autoHydro ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoHydro') }] },
-          { type: 'setting', label: 'Auto Fabricate', value: state.crewAI.autoFabricate ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoFabricate') }] },
-          { type: 'setting', label: 'Auto Refine', value: state.crewAI.autoRefine ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoRefine') }] },
-          { type: 'setting', label: 'Auto Contracts', value: state.crewAI.autoContracts ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoContracts') }] },
-          { type: 'setting', label: 'Auto Vent Heat', value: state.crewAI.autoVentHeat ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoVentHeat') }] },
-          { type: 'setting', label: 'Auto Travel', value: state.crewAI.autoTravel ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoTravel') }] },
-          { type: 'setting', label: 'Auto Research', value: state.crewAI.autoResearch ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoResearch') }] },
-          { type: 'setting', label: 'Auto Build', value: state.crewAI.autoBuild ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoBuild') }] },
-          { type: 'setting', label: 'Auto Hire', value: state.crewAI.autoHire ? 'ON' : 'OFF', actions: [{ label: 'Toggle', action: () => toggle('autoHire') }] },
-          { type: 'divider' },
-          { type: 'setting', label: 'Target Crew', value: `${state.crewAI.targetCrew}`, actions: [{ label: '-', action: () => bump('targetCrew', -1) }, { label: '+', action: () => bump('targetCrew', 1) }] },
-          { type: 'setting', label: 'Minimum Credits', value: `${minCredits}`, actions: [{ label: '-10', action: () => bump('minCredits', -10) }, { label: '+10', action: () => bump('minCredits', 10) }] },
-          { type: 'divider' },
-          { type: 'setting', label: 'Filters Buffer', value: `${buffers.filter || 0}`, actions: [{ label: '-', action: () => bump('filter', -1) }, { label: '+', action: () => bump('filter', 1) }] },
-          { type: 'setting', label: 'Medkits Buffer', value: `${buffers.medkit || 0}`, actions: [{ label: '-', action: () => bump('medkit', -1) }, { label: '+', action: () => bump('medkit', 1) }] },
-          { type: 'setting', label: 'Drone Parts Buffer', value: `${buffers.droneParts || 0}`, actions: [{ label: '-', action: () => bump('droneParts', -1) }, { label: '+', action: () => bump('droneParts', 1) }] },
-          { type: 'setting', label: 'Rations Buffer', value: `${buffers.rations || 0}`, actions: [{ label: '-', action: () => bump('rations', -1) }, { label: '+', action: () => bump('rations', 1) }] }
-        ],
-        actions: [
-          { label: 'Back', action: popMenu }
-        ]
-      });
-    }
 
     function incidentLabel(kind) {
       if (kind === 'powerTrip') return 'POWER TRIP';
@@ -6343,10 +6739,24 @@
         panel.menuKeyHandler = null;
       }
       state.ui.focusedButtonLabel = null;
-      state.ui.menuStack = []; // Clear the menu stack when closing
+      state.ui.menuStack = []; // Clear old menu stack
+      state.ui.unifiedMenuStack = []; // Clear unified menu stack
+      state.ui.returnToStation = null;
       panel.style.display = 'none';
       state.ui.panelOpen = false;
       state.ui.justOpenedPanel = false;
+      // Clear focus so Enter doesn't trigger the main menu button
+      if (document.activeElement && document.activeElement !== document.body) {
+        document.activeElement.blur();
+      }
+      const gameCanvas = document.getElementById('gameCanvas');
+      if (gameCanvas && typeof gameCanvas.focus === 'function') {
+        gameCanvas.focus();
+      }
+      state.ui.suppressMenuOpen = true;
+      requestAnimationFrame(() => {
+        state.ui.suppressMenuOpen = false;
+      });
     }
 
     function showMessage(title, text, tableData = null) {
@@ -6358,152 +6768,14 @@
     }
 
     function openGameMenu() {
-      const panel = document.getElementById('gameMenuPanel');
-      const titleEl = document.getElementById('gameMenuTitle');
-      const descEl = document.getElementById('gameMenuDescription');
-      const menuItemsEl = document.getElementById('gameMenuItems');
-      const actionsBarEl = document.getElementById('gameMenuActionsBar');
-
-      titleEl.textContent = 'GAME MENU';
-      descEl.textContent = 'Manage your save data:';
-
-      menuItemsEl.innerHTML = '';
-      menuItemsEl.style.display = 'block';
-
-      const items = [
-        { 
-          type: 'action', 
-          label: 'New Game', 
-          danger: true,
-          action: () => {
-            openGameSubMenu('NEW GAME', 'Start a new game? This will clear the current save.', [
-              { type: 'action', label: 'Start New Game', danger: true, action: newGame },
-              { type: 'action', label: 'Back', action: openGameMenu }
-            ]);
-          }
-        },
-        { type: 'action', label: 'Export JSON', action: openExportPanel },
-        { type: 'action', label: 'Import JSON', action: openImportPanel },
-        { type: 'divider' },
-        { type: 'action', label: 'Exit Game', danger: true, action: () => { window.location.href = 'index.html'; } }
-      ];
-
-      for (const item of items) {
-        if (item.type === 'action') {
-          renderGameMenuItem(menuItemsEl, item);
-        } else if (item.type === 'divider') {
-          renderGameMenuDivider(menuItemsEl);
-        }
-      }
-
-      actionsBarEl.innerHTML = '';
-      actionsBarEl.style.display = 'flex';
-      const closeBtn = document.createElement('button');
-      closeBtn.textContent = 'Close';
-      closeBtn.addEventListener('click', () => closeGameMenu());
-      actionsBarEl.appendChild(closeBtn);
-
-      panel.style.display = 'block';
-
-      // Set up keyboard navigation for game menu
-      setupGameMenuKeyboardNavigation(panel, menuItemsEl, actionsBarEl);
-    }
-
-    function openGameSubMenu(title, description, items) {
-      const panel = document.getElementById('gameMenuPanel');
-      const titleEl = document.getElementById('gameMenuTitle');
-      const descEl = document.getElementById('gameMenuDescription');
-      const menuItemsEl = document.getElementById('gameMenuItems');
-      const actionsBarEl = document.getElementById('gameMenuActionsBar');
-
-      titleEl.textContent = title;
-      descEl.textContent = description;
-
-      menuItemsEl.innerHTML = '';
-      menuItemsEl.style.display = 'block';
-
-      for (const item of items) {
-        if (item.type === 'action') {
-          renderGameMenuItem(menuItemsEl, item);
-        }
-      }
-
-      actionsBarEl.innerHTML = '';
-      actionsBarEl.style.display = 'none';
-
-      // Set up keyboard navigation for game menu
-      setupGameMenuKeyboardNavigation(panel, menuItemsEl, actionsBarEl);
-    }
-
-    function renderGameMenuItem(container, item) {
-      const div = document.createElement('div');
-      div.className = 'menu-action-item';
-
-      const btn = document.createElement('button');
-      btn.className = `menu-action-btn${item.danger ? ' danger' : ''}`;
-      btn.textContent = item.label;
-      btn.addEventListener('click', () => {
-        if (typeof item.action === 'function') item.action();
-      });
-
-      div.appendChild(btn);
-      container.appendChild(div);
-    }
-
-    function renderGameMenuDivider(container) {
-      const div = document.createElement('div');
-      div.className = 'menu-divider';
-      container.appendChild(div);
+      // Clear old menu stacks and open new unified game menu
+      state.ui.menuStack = [];
+      state.ui.unifiedMenuStack = [];
+      openMenu('gameMenu');
     }
 
     function closeGameMenu() {
-      const panel = document.getElementById('gameMenuPanel');
-      panel.style.display = 'none';
-      if (panel.menuKeyHandler) {
-        panel.removeEventListener('keydown', panel.menuKeyHandler);
-        panel.menuKeyHandler = null;
-      }
-    }
-
-    function setupGameMenuKeyboardNavigation(panel, menuItemsEl, actionsBarEl) {
-      if (panel.menuKeyHandler) {
-        panel.removeEventListener('keydown', panel.menuKeyHandler);
-      }
-
-      panel.menuKeyHandler = (e) => {
-        // Get all visible buttons (only those in visible containers)
-        const allButtons = Array.from(panel.querySelectorAll('button')).filter(btn => {
-          return btn.offsetParent !== null;
-        });
-        const activeEl = document.activeElement;
-        const activeIndex = allButtons.indexOf(activeEl);
-
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          closeGameMenu();
-          document.getElementById('menuBtn').focus();
-        } else if (e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey)) {
-          e.preventDefault();
-          if (allButtons.length === 0) return;
-          const prevIndex = activeIndex <= 0 ? allButtons.length - 1 : activeIndex - 1;
-          allButtons[prevIndex].focus();
-        } else if (e.key === 'ArrowDown' || e.key === 'Tab') {
-          e.preventDefault();
-          if (allButtons.length === 0) return;
-          const nextIndex = activeIndex < 0 || activeIndex >= allButtons.length - 1 ? 0 : activeIndex + 1;
-          allButtons[nextIndex].focus();
-        }
-      };
-
-      panel.addEventListener('keydown', panel.menuKeyHandler);
-
-      // Auto-focus first button using requestAnimationFrame for reliable focus
-      requestAnimationFrame(() => {
-        const firstButton = panel.querySelector('button');
-        if (firstButton && firstButton.offsetParent !== null) {
-          firstButton.focus();
-        }
-      });
+      closePanel();
     }
 
     function newGame() {
