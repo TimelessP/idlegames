@@ -69,8 +69,17 @@ if (menuDef.isRoot) {
 
 ## Rendering and Updates
 
-### 1) Render Once, Update Values In-Place
-For `keep-open` actions, **do not rebuild DOM**. Rebuild the **data** and update values in-place.
+### 1) Two Update Strategies
+
+**refreshUnifiedMenuValues()** - Update values in-place without DOM rebuild:
+- Use for toggles, counters, status displays
+- Updates text content only
+- Preserves focus and scroll position
+
+**rebuildUnifiedMenuInPlace()** - Full DOM rebuild:
+- Use when items are added/removed from the menu
+- Use when the list structure changes (crew hired/dismissed, contracts completed)
+- Rebuilds entire menu but keeps the same menu open
 
 ```js
 function handleMenuBehavior(behavior, target, menuDef) {
@@ -83,6 +92,7 @@ function handleMenuBehavior(behavior, target, menuDef) {
         if (typeof builder === 'function') items = builder();
       }
       current.items = items;
+      // Only updates values - fast, preserves focus
       refreshUnifiedMenuValues(current.definition, items);
       break;
     }
@@ -124,25 +134,190 @@ function refreshUnifiedMenuValues(menuDef, items) {
 }
 ```
 
+### 3) Full Menu Rebuild for List Changes
+When items are added/removed (crew hired, inventory exhausted), rebuild the DOM:
+
+```js
+function rebuildUnifiedMenuInPlace() {
+  if (state.ui.unifiedMenuStack.length === 0) return;
+  const current = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
+
+  let items = current.definition.items || [];
+  if (current.definition.itemBuilder) {
+    const builder = MENU_HANDLERS[current.definition.itemBuilder];
+    if (typeof builder === 'function') {
+      items = builder();
+    }
+  }
+
+  current.items = items;
+  renderUnifiedMenu(current.definition, items, { _skipPush: true });
+}
+
+// Use in actions that change list structure
+function buildTransferCrewOutItems(options = {}) {
+  const npcs = state.npcs.filter(Boolean);
+  const items = [/* ... */];
+
+  for (const n of npcs) {
+    items.push({
+      type: 'action',
+      label: `Dismiss ${n.name}`,
+      action: () => {
+        removeCrewMemberById(n.id);
+        updateHUD();
+        markDirty();
+        rebuildUnifiedMenuInPlace(); // Rebuild to remove button
+      },
+      danger: true,
+      behavior: 'keep-open'
+    });
+  }
+
+  return items;
+}
+```
+
 ## Custom Action Patterns
 
 ### 1) Toggle / +/- without DOM Rebuild
+**CRITICAL:** Never call `openMenu()` within an action to refresh. Let `behavior: 'keep-open'` handle it.
+
 ```js
 const toggle = (k) => () => {
   state.crewAI[k] = !state.crewAI[k];
   markDirty();
+  // NO openMenu() call - keep-open handles refresh
 };
 
 { type: 'setting', label: 'Auto Repair', value: state.crewAI.autoRepair ? 'ON' : 'OFF',
   actions: [{ label: 'Toggle', action: toggle('autoRepair'), behavior: 'keep-open' }] }
 ```
 
-### 2) Submenu Navigation
+### 2) List Management (Add/Remove Items)
+Use `rebuildUnifiedMenuInPlace()` when the action changes the list structure:
+
 ```js
-{ type: 'action', label: 'System Status', action: () => openMenu('computerSystemStatus') }
+function buildTransferCrewInItems(options = {}) {
+  const fee = 30;
+  const candidates = ['CREW', 'TECH', 'MEDIC', /* ... */];
+  
+  const items = [
+    { type: 'setting', label: 'Transport Fee', value: `${fee} credits`, actions: [] },
+    { type: 'setting', label: 'Available Credits', value: `${Math.floor(state.credits)}`, actions: [] },
+    { type: 'divider' }
+  ];
+
+  for (const name of candidates) {
+    items.push({
+      type: 'action',
+      label: `Hire ${name} (have ${have})`,
+      action: () => {
+        if (state.credits < fee) {
+          openMenu('transferCrewInInsufficientCredits'); // Navigate to error submenu
+          return;
+        }
+        state.credits -= fee;
+        addCrewMember(name);
+        updateHUD();
+      **NEVER call `openMenu()` within an action to refresh** - let `behavior: 'keep-open'` handle it.
+- [ ] Use `rebuildUnifiedMenuInPlace()` when items are added/removed from lists.
+- [ ] Use `refreshUnifiedMenuValues()` (automatic via keep-open) for value-only updates.
+- [ ] Error/status messages use dedicated submenus, not dialog popups.
+- [ ] Root menus show **Close**, submenus show **Back**.
+- [ ] Focus returns to game canvas on close.
+
+## Common Mistakes to Avoid
+
+1. **Calling `openMenu()` to refresh the current menu**
+   ```js
+   // ❌ WRONG - creates duplicate menu stack entries
+   action: () => {
+     state.credits -= 10;
+     openMenu('transferCrewIn'); // Don't do this!
+   }
+
+   // ✅ CORRECT - let keep-open handle refresh
+   action: () => {
+     state.credits -= 10;
+     markDirty();
+   },
+   behavior: 'keep-open'
+   ```
+
+2. **Using dialog popups instead of submenus**
+   ```js
+   // ❌ WRONG - breaks unified menu flow
+   if (state.credits < fee) {
+     showMessage('QUARTERS', 'Need more credits');
+     return;
+   }
+
+   // ✅ CORRECT - navigate to error submenu
+   if (state.credits < fee) {
+     openMenu('transferCrewInInsufficientCredits');
+     return;
+   }
+   ```
+
+3. **Not rebuilding when list structure changes**
+   ```js
+   // ❌ WRONG - button stays even after dismissing
+   action: () => {
+     removeCrewMemberById(n.id);
+     // Missing rebuildUnifiedMenuInPlace()
+   }
+
+   // ✅ CORRECT - rebuild to remove button
+   action: () => {
+     removeCrewMemberById(n.id);
+     updateHUD();
+     markDirty();
+     rebuildUnifiedMenuInPlace();
+   }
+   ```
+      danger: !affordable,
+      behavior: 'keep-open'
+    });
+  }
+
+  return items;
+}
 ```
 
-### 3) Root Menu Close vs Back
+### 3) Error/Status Submenus
+Create dedicated submenus for errors instead of dialog popups:
+
+```js
+// Menu definition
+transferCrewInInsufficientCredits: {
+  isRoot: false,
+  stationType: 'quarters',
+  title: 'INSUFFICIENT CREDITS',
+  overview: 'Cannot afford this hire:',
+  itemBuilder: 'buildTransferCrewInInsufficientCreditsItems',
+  actions: [
+    { label: 'Back', behavior: 'back' }
+  ]
+},
+
+// Item builder
+function buildTransferCrewInInsufficientCreditsItems(options = {}) {
+  const fee = 30;
+  return [
+    { type: 'setting', label: 'Required Credits', value: `${fee}`, actions: [] },
+    { type: 'setting', label: 'Available Credits', value: `${Math.floor(state.credits)}`, actions: [] },
+    { type: 'setting', label: 'Shortage', value: `${fee - Math.floor(state.credits)}`, actions: [] }
+  ];
+}
+```
+
+### 4) Submenu Navigation
+```js
+{ type: 'action', label: 'System Status', action: () => openMenu('computerSystemStatus'), behavior: 'submenu' }
+```
+
+### 5) Root Menu Close vs Back
 If `isRoot` and the action is `Back`, render it as `Close` and set behavior to `close`.
 
 ## Concurrency (Game Continues)
