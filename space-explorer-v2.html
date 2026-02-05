@@ -2698,14 +2698,17 @@
     function buildLmStudioGuidance() {
       const buffers = (state.crewAI && state.crewAI.buffers) ? state.crewAI.buffers : {};
       return [
-        'Help (use 1 tool call):',
+        'Help (use 0+ tool calls):',
         '- Use the action tool: {"action":"walk_to","args":{...}} or {"action":"use_station_action","args":{...}}.',
-        '- Output JSON uses tool "action": {"tool":"action","args":{"action":"use_station_action","args":{"action_key":"cargo.sell.rations"}}}.',
+        '- Output JSON can be a single tool: {"tool":"action","args":{"action":"use_station_action","args":{"action_key":"cargo.sell.rations"}}}.',
+        '- Or multiple tools: {"tool_calls":[{"tool":"action","args":{"action":"route_power","args":{}}},{"tool":"action","args":{"action":"toggle_system","args":{"system":"lights"}}}]}.',
+        '- Or no action: {"tool_calls":[]}.',
         '- come_to_captain: report to the captain (args.message required for report/status/questions).',
         '- task_npc: assign a station action to a specific npc_id (args.npc_id + args.action_key).',
         '- Use task_npc to assign work to idle NPCs so ship duties keep moving.',
         '- rename_module: set module label (args.new_label + module_uid or module_type; optional corridor_key).',
         '- walk_to requires args.corridor_key (example: L1B) or args.target_type (example: cargo).',
+        '- Station actions auto-walk: use_station_action or task_npc will move the NPC to the right station; do NOT use walk_to first unless you are repositioning or exploring.',
         '- rename_self requires args.name (not new_name).',
         '- use_station_action requires args.action_key (example: cargo.sell.rations).',
         '- Elevators: action use_elevator with direction up/down to move between decks.',
@@ -3668,7 +3671,13 @@
             try {
               const normalized = lmStudioNormalizeJsonText(msg.content);
               const parsed = JSON.parse(normalized);
-              if (parsed && parsed.tool && parsed.args) {
+              if (parsed && Array.isArray(parsed.tool_calls)) {
+                for (const call of parsed.tool_calls) {
+                  if (call && call.tool && call.args) {
+                    calls.push({ name: call.tool, args: call.args });
+                  }
+                }
+              } else if (parsed && parsed.tool && parsed.args) {
                 calls.push({ name: parsed.tool, args: parsed.args });
               }
             } catch {}
@@ -3859,7 +3868,7 @@
         const recentTools = buildLmStudioRecentToolCalls();
         const memoryBlocks = [pinnedMemory, searchMemory].filter(Boolean).join('\n\n');
         const contextBlocks = [chatHistory, recentTools, corridorKeys, moduleTypes, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
-        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool. If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix). Respond only with JSON that matches the provided schema. Use exact argument names from the guidance. No prose.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${shipGraph}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
+        const input = `You are the ship AI. Choose any number of actions to execute via tools (zero, one, or many). If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix). Respond only with JSON that matches the provided schema. Use exact argument names from the guidance. No prose.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${shipGraph}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
 
         const withTimeout = async (path, body) => {
           const controller = new AbortController();
@@ -3893,22 +3902,24 @@
               name: 'tool_call',
               strict: true,
               schema: {
-                type: 'object',
-                properties: {
-                  tool: { const: 'action' },
-                  args: {
+                $defs: {
+                  actionCall: {
                     type: 'object',
                     properties: {
-                      action: { type: 'string' },
-                      args: { type: 'object' }
+                      tool: { const: 'action' },
+                      args: {
+                        type: 'object',
+                        properties: {
+                          action: { type: 'string' },
+                          args: { type: 'object' }
+                        },
+                        required: ['action'],
+                        additionalProperties: true
+                      }
                     },
-                    required: ['action'],
-                    additionalProperties: true
-                  }
-                },
-                required: ['tool', 'args'],
-                additionalProperties: false,
-                allOf: [
+                    required: ['tool', 'args'],
+                    additionalProperties: false,
+                    allOf: [
                   {
                     if: {
                       properties: {
@@ -4248,6 +4259,23 @@
                     }
                   }
                 ]
+                  }
+                },
+                oneOf: [
+                  { $ref: '#/$defs/actionCall' },
+                  {
+                    type: 'object',
+                    properties: {
+                      tool_calls: {
+                        type: 'array',
+                        items: { $ref: '#/$defs/actionCall' },
+                        minItems: 0
+                      }
+                    },
+                    required: ['tool_calls'],
+                    additionalProperties: false
+                  }
+                ]
               }
             }
           },
@@ -4286,9 +4314,15 @@
         });
         const calls = extractLmStudioToolCalls(payload);
         if (calls.length) {
-          const result = executeLmStudioToolCall(calls[0]);
-          cfg.lastError = result && result.ok === false ? (result.error || 'Tool failed') : '';
-          lmStudioLogEvent('tool_selected', { name: calls[0].name, ok: !!result.ok });
+          let firstError = '';
+          for (const call of calls) {
+            const result = executeLmStudioToolCall(call);
+            if (!firstError && result && result.ok === false) {
+              firstError = result.error || 'Tool failed';
+            }
+            lmStudioLogEvent('tool_selected', { name: call.name, ok: !!result.ok });
+          }
+          cfg.lastError = firstError;
         } else {
           lmStudioLogEvent('tool_call', { name: '', args: {}, error: 'No tool calls returned' });
         }
