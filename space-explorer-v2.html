@@ -2677,16 +2677,20 @@
         'Help (use 1 tool call):',
         '- Use the action tool: {"action":"walk_to","args":{...}} or {"action":"use_station_action","args":{...}}.',
         '- Output JSON uses tool "action": {"tool":"action","args":{"action":"use_station_action","args":{"action_key":"cargo.sell.rations"}}}.',
-        '- come_to_captain: report to the captain (optional args.message for report/status/questions).',
+        '- come_to_captain: report to the captain (args.message required for report/status/questions).',
+        '- task_npc: assign a station action to a specific npc_id (args.npc_id + args.action_key).',
+        '- Use task_npc to assign work to idle NPCs so ship duties keep moving.',
+        '- rename_module: set module label (args.new_label + module_uid or module_type; optional corridor_key).',
         '- walk_to requires args.corridor_key (example: L1B) or args.target_type (example: cargo).',
         '- rename_self requires args.name (not new_name).',
         '- use_station_action requires args.action_key (example: cargo.sell.rations).',
         '- Elevators: action use_elevator with direction up/down to move between decks.',
-        '- Layout: action build_module supports corridor_key; action create_elevator_link connects elevator up/down.',
+        '- Layout: build_module requires module_type + corridor_key; create_elevator_link connects elevator up/down.',
         '- Navigation: action set_course to travel; action cancel_course to stop travel.',
         '- O2 low: toggle life_support or use_station_action life.emergency; seal o2 leak.',
         '- Rations low: toggle hydroponics then hydro.harvest; or cargo.buy.rations; feed via canteen.eat.',
-        '- Credits low: cargo.sell.ore/ingot/rations; farm scrap/ore via sensors.scan or drones.salvage; refine ore -> ingot.',
+        '- Credits low: cargo.sell.ore/ingot/rations; farm scrap/ore via sensors_scan or drones.salvage; refine ore -> ingot.',
+        '- Sensors: use sensors_scan or sensors_deep_scan to find anomalies/blueprints.',
         '- Filters low: cargo.buy.filter; life support uses filters.',
         '- Medkits low: cargo.buy.medkit; treat via med.treat.',
         '- Drone parts low: cargo.buy.droneParts; drones.salvage or drones.repair use parts.',
@@ -2697,11 +2701,13 @@
         '- Contracts: open comms/contracts in cockpit when available; gather required items then transmit completion.',
         '- Travel: use navigation to pick destination once ready; ensure engine online and power stable.',
         '- Blueprints: sensors.deepScan to unlock; then build_module when fabricator + unlocks are ready.',
-        '- Layout: build_module to add; remove_module to remove non-structural modules (avoid doorways/elevators).',
+        '- Layout: build_module to add; remove_module to remove non-structural modules (requires module_uid or module_type + corridor_key).',
         '- Auto-build: ensure fabricator, then build missing crew/engineering/ops/science modules.',
         '- Power profiles: survival (life), combat (shields/engine), industry (hydro/fabricator), balanced (default).',
         '- Memory: use memory_add, memory_delete, memory_pin, memory_unpin, memory_search to manage notes.',
         '- Crew comms: speak_to_captain or speak_to_ai to coordinate; chat history shows speakers.',
+        '- Talk to other AIs regularly using speak_to_ai with a clear message (and target_ai_id or target_ai_name if known).',
+        '- NPC IDs are listed in State.npcs for task_npc.',
         `- Targets: ore ${buffers.ore ?? 0}, scrap ${buffers.scrap ?? 0}, ingot ${buffers.ingot ?? 0}, filter ${buffers.filter ?? 0}, medkit ${buffers.medkit ?? 0}, droneParts ${buffers.droneParts ?? 0}, rations ${buffers.rations ?? 0}.`
       ].join('\n');
     }
@@ -3011,6 +3017,9 @@
         'walk_to',
         'use_elevator',
         'come_to_captain',
+        'task_npc',
+        'sensors_scan',
+        'sensors_deep_scan',
         'set_course',
         'cancel_course',
         'set_power_profile',
@@ -3020,6 +3029,7 @@
         'build_module',
         'create_elevator_link',
         'remove_module',
+        'rename_module',
         'use_station_action',
         'toggle_system',
         'manage_crew',
@@ -3139,6 +3149,46 @@
           result = { ok: true };
           break;
         }
+        case 'task_npc': {
+          const npcId = String(args.npc_id || '').trim();
+          const actionKey = String(args.action_key || '').trim();
+          if (!npcId) {
+            result = { ok: false, error: 'npc_id required' };
+            break;
+          }
+          if (!actionKey) {
+            result = { ok: false, error: 'action_key required' };
+            break;
+          }
+          const def = resolveLmsStationAction(actionKey);
+          if (def.error) {
+            result = { ok: false, error: def.error };
+            break;
+          }
+          const npc = selectNpcForLmStudio(npcId, null);
+          if (!npc) {
+            result = { ok: false, error: 'Unknown npc_id' };
+            break;
+          }
+          assignNpcTask(npc, {
+            key: actionKey,
+            label: def.label || actionKey,
+            targetType: def.targetType,
+            onComplete: (n) => def.perform(n)
+          });
+          result = { ok: true };
+          break;
+        }
+        case 'sensors_scan': {
+          scanForAnomalies(false);
+          result = { ok: true };
+          break;
+        }
+        case 'sensors_deep_scan': {
+          const ok = deepScanBlueprint(false);
+          result = { ok };
+          break;
+        }
         case 'set_course': {
           const destination = String(args.destination || '').trim();
           if (!destination) {
@@ -3219,6 +3269,44 @@
           }
           const ok = removeModuleByUid(target.uid);
           result = { ok, error: ok ? '' : 'Remove failed' };
+          break;
+        }
+        case 'rename_module': {
+          const newLabel = String(args.new_label || '').trim();
+          if (!newLabel) {
+            result = { ok: false, error: 'new_label required' };
+            break;
+          }
+          const moduleUid = String(args.module_uid || '').trim();
+          const moduleType = String(args.module_type || '').trim();
+          let moduleRef = null;
+          if (moduleUid) {
+            moduleRef = findModuleByUid(moduleUid);
+            if (!moduleRef) {
+              result = { ok: false, error: 'Unknown module_uid' };
+              break;
+            }
+          } else if (moduleType) {
+            const target = resolveCorridorKeyArg(args.corridor_key);
+            if (target.error) {
+              result = { ok: false, error: target.error };
+              break;
+            }
+            const modules = getModulesForCorridor(target.level, target.corridor).filter(Boolean);
+            moduleRef = modules.find((m) => m.type === moduleType) || null;
+            if (!moduleRef) {
+              result = { ok: false, error: `No ${moduleType} module found` };
+              break;
+            }
+          } else {
+            result = { ok: false, error: 'module_uid or module_type required' };
+            break;
+          }
+          moduleRef.customLabel = newLabel;
+          moduleRef.autoLabel = false;
+          markDirty();
+          relayoutCorridor();
+          result = { ok: true };
           break;
         }
         case 'use_station_action': {
@@ -3461,7 +3549,7 @@
           type: 'function',
           function: {
             name: 'action',
-            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. come_to_captain accepts optional args.message. walk_to uses args.corridor_key or args.target_type. rename_self uses args.name. use_station_action uses args.action_key. Actions: walk_to, use_elevator, come_to_captain, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, use_station_action, toggle_system, manage_crew, speak_to_captain, speak_to_ai, memory_add, memory_delete, memory_pin, memory_unpin, memory_search, rename_self.',
+            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. come_to_captain accepts optional args.message. task_npc requires args.npc_id + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to uses args.corridor_key or args.target_type. rename_self uses args.name. use_station_action uses args.action_key. Actions: walk_to, use_elevator, come_to_captain, task_npc, sensors_scan, sensors_deep_scan, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, speak_to_captain, speak_to_ai, memory_add, memory_delete, memory_pin, memory_unpin, memory_search, rename_self.',
             parameters: {
               type: 'object',
               properties: {
@@ -3796,6 +3884,211 @@
                               anyOf: [
                                 { required: ['corridor_key'] },
                                 { required: ['target_type'] }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'task_npc' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                npc_id: { type: 'string' },
+                                action_key: { type: 'string' }
+                              },
+                              required: ['npc_id', 'action_key']
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'come_to_captain' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                message: { type: 'string' }
+                              },
+                              required: ['message']
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'speak_to_ai' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                message: { type: 'string' },
+                                target_ai_id: { type: 'string' },
+                                target_ai_name: { type: 'string' }
+                              },
+                              required: ['message'],
+                              anyOf: [
+                                { required: ['target_ai_id'] },
+                                { required: ['target_ai_name'] }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'speak_to_captain' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                message: { type: 'string' }
+                              },
+                              required: ['message']
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'rename_module' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                new_label: { type: 'string' },
+                                module_uid: { type: 'string' },
+                                module_type: { type: 'string' },
+                                corridor_key: { type: 'string' }
+                              },
+                              required: ['new_label'],
+                              anyOf: [
+                                { required: ['module_uid'] },
+                                { required: ['module_type'] }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'build_module' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                module_type: { type: 'string' },
+                                corridor_key: { type: 'string' },
+                                allow_structure: { type: 'boolean' },
+                                allow_duplicate: { type: 'boolean' }
+                              },
+                              required: ['module_type', 'corridor_key']
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'remove_module' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                module_uid: { type: 'string' },
+                                module_type: { type: 'string' },
+                                corridor_key: { type: 'string' },
+                                allow_structure: { type: 'boolean' }
+                              },
+                              anyOf: [
+                                { required: ['module_uid'] },
+                                { required: ['module_type', 'corridor_key'] }
                               ]
                             }
                           }
