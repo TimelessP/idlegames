@@ -2675,15 +2675,22 @@
       const buffers = (state.crewAI && state.crewAI.buffers) ? state.crewAI.buffers : {};
       return [
         'Help (use 1 tool call):',
-        '- Prefer use_station_action for station tasks; use walk_to only for repositioning.',
-        '- Layout: build_module supports corridor_key; create_elevator_link connects elevator up/down.',
+        '- Use the action tool: {"action":"walk_to","args":{...}} or {"action":"use_station_action","args":{...}}.',
+        '- Output JSON uses tool "action": {"tool":"action","args":{"action":"use_station_action","args":{"action_key":"cargo.sell.rations"}}}.',
+        '- come_to_captain: report to the captain (optional args.message for report/status/questions).',
+        '- walk_to requires args.corridor_key (example: L1B) or args.target_type (example: cargo).',
+        '- rename_self requires args.name (not new_name).',
+        '- use_station_action requires args.action_key (example: cargo.sell.rations).',
+        '- Elevators: action use_elevator with direction up/down to move between decks.',
+        '- Layout: action build_module supports corridor_key; action create_elevator_link connects elevator up/down.',
+        '- Navigation: action set_course to travel; action cancel_course to stop travel.',
         '- O2 low: toggle life_support or use_station_action life.emergency; seal o2 leak.',
         '- Rations low: toggle hydroponics then hydro.harvest; or cargo.buy.rations; feed via canteen.eat.',
         '- Credits low: cargo.sell.ore/ingot/rations; farm scrap/ore via sensors.scan or drones.salvage; refine ore -> ingot.',
         '- Filters low: cargo.buy.filter; life support uses filters.',
         '- Medkits low: cargo.buy.medkit; treat via med.treat.',
         '- Drone parts low: cargo.buy.droneParts; drones.salvage or drones.repair use parts.',
-        '- Power/heat: boost power or route; toggle engine/shields if needed; vent heat (engine).',
+        '- Power/heat: action route_power or action set_power_profile; toggle engine/shields if needed; vent heat (engine).',
         '- Incidents: power trip -> reset breakers; breach -> shields.bulkhead or airlock.eva; fire -> engine vent or drones.repair.',
         '- Hull damage: workshop.repair or airlock.eva; shields.bulkhead if breached.',
         '- Morale low: med.treat, feed via canteen.eat, rest in quarters.',
@@ -2697,6 +2704,20 @@
         '- Crew comms: speak_to_captain or speak_to_ai to coordinate; chat history shows speakers.',
         `- Targets: ore ${buffers.ore ?? 0}, scrap ${buffers.scrap ?? 0}, ingot ${buffers.ingot ?? 0}, filter ${buffers.filter ?? 0}, medkit ${buffers.medkit ?? 0}, droneParts ${buffers.droneParts ?? 0}, rations ${buffers.rations ?? 0}.`
       ].join('\n');
+    }
+
+    function buildLmStudioSupplyTargets() {
+      const buffers = (state.crewAI && state.crewAI.buffers) ? state.crewAI.buffers : null;
+      if (!buffers || typeof buffers !== 'object') return '';
+      const minCredits = Math.max(0, Math.floor(safeNumber(state.crewAI && state.crewAI.minCredits, 0)));
+      const lines = ['Supply targets (min vs current):'];
+      lines.push(`- Credits: ${minCredits} vs ${Math.floor(state.credits || 0)}`);
+      const keys = ['ore', 'scrap', 'ingot', 'filter', 'medkit', 'droneParts', 'rations'];
+      for (const key of keys) {
+        const target = Math.max(0, Math.floor(safeNumber(buffers[key], 0)));
+        lines.push(`- ${key}: ${target} vs ${invGet(key)}`);
+      }
+      return lines.join('\n');
     }
 
     const LMS_MEMORY_LIMIT = 100;
@@ -2791,7 +2812,11 @@
         const role = String(m.role || 'ai').toUpperCase();
         const speaker = String(m.speaker || '').trim();
         const text = String(m.text || '').trim();
-        return `${speaker || role}: ${text}`;
+        const timestamp = Number.isFinite(m.at)
+          ? new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : '';
+        const prefix = timestamp ? `[${timestamp}] ` : '';
+        return `${prefix}${speaker || role}: ${text}`;
       });
       return `Recent chat:\n${lines.join('\n')}`;
     }
@@ -2799,7 +2824,48 @@
     function normalizeAiNamePart(name) {
       const raw = String(name || '').trim();
       if (!raw) return '';
-      return raw.replace(/^(\s*(AI|A\.I\.?)(\s*[-.:]*)\s*)+/i, '').trim();
+      let cleaned = raw.replace(/^(\s*(AI|A\.I\.?)(\s*[-.:]*)\s*)+/i, '').trim();
+      cleaned = cleaned.replace(/(\s*[-.:]*\s*(AI|A\.I\.?)\s*)+$/i, '').trim();
+      cleaned = cleaned.replace(/\s+/g, ' ').trim();
+      cleaned = cleaned.replace(/[\s\-.:]+$/g, '').trim();
+      return cleaned;
+    }
+
+    function lmStudioNormalizeJsonText(text) {
+      if (typeof text !== 'string') return '';
+      return text
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'")
+        .replace(/\u00a0/g, ' ')
+        .trim();
+    }
+
+    function lmStudioExtractSpeechText(text) {
+      const normalized = lmStudioNormalizeJsonText(text);
+      if (!normalized) return '';
+      const trimmed = normalized.trim();
+      if (!trimmed) return '';
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try {
+          JSON.parse(trimmed);
+          return '';
+        } catch {}
+      }
+      if (trimmed.includes('<tool_call') || trimmed.includes('<|begin_of_box|>')) return '';
+      return trimmed;
+    }
+
+    function lmStudioQueueNpcSpeech(text) {
+      const speech = String(text || '').trim();
+      if (!speech) return;
+      const npc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
+      if (!npc) return;
+      if (npc.level !== state.currentLevel || npc.corridor !== state.currentCorridor) return;
+      npc.speech = {
+        text: speech,
+        at: Date.now(),
+        durationMs: 7000
+      };
     }
 
     function formatAiDisplayName(name) {
@@ -2941,7 +3007,45 @@
 
     function executeLmStudioToolCall(call) {
       if (!call || !call.name) return { ok: false, error: 'Missing tool name' };
+      const directTools = new Set([
+        'walk_to',
+        'use_elevator',
+        'come_to_captain',
+        'set_course',
+        'cancel_course',
+        'set_power_profile',
+        'route_power',
+        'reset_breakers',
+        'set_throttle',
+        'build_module',
+        'create_elevator_link',
+        'remove_module',
+        'use_station_action',
+        'toggle_system',
+        'manage_crew',
+        'speak_to_captain',
+        'speak_to_ai',
+        'memory_add',
+        'memory_delete',
+        'memory_pin',
+        'memory_unpin',
+        'memory_search',
+        'rename_self'
+      ]);
       const args = call.args || {};
+      if (call.name !== 'action' && !directTools.has(call.name)) {
+        return executeLmStudioToolCall({
+          name: 'action',
+          args: { action: 'use_station_action', args: { action_key: call.name } }
+        });
+      }
+      if (call.name === 'action') {
+        const actionName = String(args.action || '').trim();
+        const actionArgs = (args && typeof args.args === 'object' && args.args) ? args.args : {};
+        if (!actionName) return { ok: false, error: 'Missing action' };
+        if (actionName === 'action') return { ok: false, error: 'Nested action not allowed' };
+        return executeLmStudioToolCall({ name: actionName, args: actionArgs });
+      }
       if (state.lmStudio) {
         state.lmStudio.lastToolCall = {
           name: call.name,
@@ -2973,6 +3077,114 @@
             break;
           }
           result = { ok: false, error: 'Missing destination' };
+          break;
+        }
+        case 'use_elevator': {
+          const direction = String(args.direction || '').toLowerCase();
+          if (direction !== 'up' && direction !== 'down') {
+            result = { ok: false, error: 'direction must be up or down' };
+            break;
+          }
+          const npc = selectNpcForLmStudio(args.npc_id, args.npc_role);
+          if (!npc) {
+            result = { ok: false, error: 'No NPC available' };
+            break;
+          }
+          const def = getCorridorDef(npc.level, npc.corridor);
+          const modules = def && Array.isArray(def.modules) ? def.modules : [];
+          const elev = modules.find((m) => m && m.type === 'elevator' && m.elevator && m.elevator[direction]);
+          if (!elev) {
+            result = { ok: false, error: `No elevator with ${direction} link in corridor` };
+            break;
+          }
+          const link = elev.elevator[direction];
+          npc.destinationCorridorKey = corridorKey(link.level, link.corridor);
+          npc.destinationType = null;
+          npc.mode = 'travel';
+          result = { ok: true, target: npc.destinationCorridorKey };
+          break;
+        }
+        case 'come_to_captain': {
+          const npc = selectNpcForLmStudio(args.npc_id, args.npc_role);
+          if (!npc) {
+            result = { ok: false, error: 'No NPC available' };
+            break;
+          }
+          const message = String(args.message || '').trim();
+          if (message) {
+            if (state.lmStudio && state.lmStudio.pendingCaptainMessage) {
+              result = { ok: false, error: 'Captain already has a pending message' };
+              break;
+            }
+            const senderName = npcRole(npc) === 'ai' ? formatAiDisplayName(npc.name) : (npc.name || 'AI');
+            lmStudioChatAdd(npc.id, 'ai', message, senderName);
+            assignNpcTask(npc, {
+              key: 'captain.message',
+              label: 'Report to Captain',
+              targetType: 'captain',
+              duration: 0.6,
+              onComplete: () => {
+                openCaptainMessagePanel(message, senderName, npc.id);
+              }
+            });
+            result = { ok: true };
+            break;
+          }
+          assignNpcTask(npc, {
+            key: 'captain.summon',
+            label: 'Report to Captain',
+            targetType: 'captain',
+            duration: 0.6
+          });
+          result = { ok: true };
+          break;
+        }
+        case 'set_course': {
+          const destination = String(args.destination || '').trim();
+          if (!destination) {
+            result = { ok: false, error: 'destination required' };
+            break;
+          }
+          const ok = startTravelAuto(destination, 'AI');
+          result = { ok };
+          break;
+        }
+        case 'cancel_course': {
+          const ok = cancelTravel();
+          result = { ok };
+          break;
+        }
+        case 'set_power_profile': {
+          const profile = String(args.profile || '').toLowerCase();
+          if (!['balanced', 'survival', 'combat', 'industry'].includes(profile)) {
+            result = { ok: false, error: 'Invalid profile' };
+            break;
+          }
+          state.powerProfile = profile;
+          markDirty();
+          result = { ok: true };
+          break;
+        }
+        case 'route_power': {
+          autoRoutePower();
+          result = { ok: true };
+          break;
+        }
+        case 'reset_breakers': {
+          const ok = resetPowerTrip(false);
+          result = { ok };
+          break;
+        }
+        case 'set_throttle': {
+          const percent = Number(args.percent);
+          if (!Number.isFinite(percent)) {
+            result = { ok: false, error: 'percent required' };
+            break;
+          }
+          state.throttle = clamp(percent / 100, 0, 1);
+          markDirty();
+          updateHUD();
+          result = { ok: true };
           break;
         }
         case 'build_module': {
@@ -3192,13 +3404,12 @@
             result = { ok: false, error: 'Missing name' };
             break;
           }
-          const npc = selectNpcForLmStudio(args.npc_id, 'ai');
-          if (!npc) {
-            result = { ok: false, error: 'No AI NPC available' };
-            break;
+          let npc = selectNpcForLmStudio(args.npc_id, 'ai');
+          if (!npc || npcRole(npc) !== 'ai') {
+            npc = selectNpcForLmStudio(null, 'ai');
           }
-          if (npcRole(npc) !== 'ai') {
-            result = { ok: false, error: 'Target is not AI role' };
+          if (!npc || npcRole(npc) !== 'ai') {
+            result = { ok: false, error: 'No AI NPC available' };
             break;
           }
           npc.name = formatAiDisplayName(cleaned);
@@ -3249,232 +3460,15 @@
         {
           type: 'function',
           function: {
-            name: 'walk_to',
-            description: 'Move an NPC to a corridor or module type.',
+            name: 'action',
+            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. come_to_captain accepts optional args.message. walk_to uses args.corridor_key or args.target_type. rename_self uses args.name. use_station_action uses args.action_key. Actions: walk_to, use_elevator, come_to_captain, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, use_station_action, toggle_system, manage_crew, speak_to_captain, speak_to_ai, memory_add, memory_delete, memory_pin, memory_unpin, memory_search, rename_self.',
             parameters: {
               type: 'object',
               properties: {
-                npc_id: { type: 'string', description: 'NPC id to move (optional).' },
-                npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
-                target_type: { type: 'string', description: 'Module type to walk to (e.g., cargo, power, hydro).' },
-                corridor_key: { type: 'string', description: 'Corridor key like "1:A".' }
-              }
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'build_module',
-            description: 'Build a ship module if unlocked and possible.',
-            parameters: {
-              type: 'object',
-              properties: {
-                module_type: { type: 'string', description: 'Module type to build.' },
-                corridor_key: { type: 'string', description: 'Optional corridor key like "1:A" to build into.' },
-                allow_structure: { type: 'boolean', description: 'Allow doorway/elevator/empty modules to be built.' },
-                allow_duplicate: { type: 'boolean', description: 'Allow building even if module exists elsewhere.' }
-              },
-              required: ['module_type']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'create_elevator_link',
-            description: 'Create an elevator link up or down from a corridor elevator module.',
-            parameters: {
-              type: 'object',
-              properties: {
-                corridor_key: { type: 'string', description: 'Optional corridor key like "1:A" to target.' },
-                module_uid: { type: 'string', description: 'Optional elevator module uid to use.' },
-                direction: { type: 'string', enum: ['up', 'down'] },
-                allow_build: { type: 'boolean', description: 'Build an elevator module if missing.' }
-              },
-              required: ['direction']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'remove_module',
-            description: 'Remove a ship module by uid or by type (defaults to current corridor).',
-            parameters: {
-              type: 'object',
-              properties: {
-                module_uid: { type: 'string', description: 'Exact module uid to remove (preferred).' },
-                module_type: { type: 'string', description: 'Module type to remove if uid omitted.' },
-                corridor_key: { type: 'string', description: 'Optional corridor key like "1:A" to search.' },
-                allow_structure: { type: 'boolean', description: 'Allow removal of doorway/elevator/empty modules.' }
-              }
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'use_station_action',
-            description: 'Send an NPC to a station and perform an action on arrival.',
-            parameters: {
-              type: 'object',
-              properties: {
-                npc_id: { type: 'string', description: 'NPC id to assign (optional).' },
-                npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
-                action_key: { type: 'string', description: 'Action key (e.g., hydro.harvest, refinery.refine, cargo.buy.rations).' }
-              },
-              required: ['action_key']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'toggle_system',
-            description: 'Toggle ship systems like lights, engine, shields, life support, hydroponics.',
-            parameters: {
-              type: 'object',
-              properties: {
-                system: { type: 'string', enum: ['lights', 'engine', 'shields', 'life_support', 'hydroponics'] }
-              },
-              required: ['system']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'manage_crew',
-            description: 'Hire or dismiss crew members.',
-            parameters: {
-              type: 'object',
-              properties: {
-                action: { type: 'string', enum: ['hire', 'dismiss'] },
-                role: { type: 'string', description: 'Role name to hire (optional).' },
-                npc_id: { type: 'string', description: 'NPC id to dismiss (required for dismiss).' }
+                action: { type: 'string', description: 'Action name.' },
+                args: { type: 'object', description: 'Arguments for the action.' }
               },
               required: ['action']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'speak_to_captain',
-            description: 'Walk an NPC to the captain and deliver a message, then wait for reply.',
-            parameters: {
-              type: 'object',
-              properties: {
-                npc_id: { type: 'string', description: 'NPC id to send (optional).' },
-                npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
-                message: { type: 'string', description: 'Message to deliver to the captain.' }
-              },
-              required: ['message']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'speak_to_ai',
-            description: 'Send a message to another AI crew member.',
-            parameters: {
-              type: 'object',
-              properties: {
-                npc_id: { type: 'string', description: 'Sender NPC id (optional).' },
-                npc_role: { type: 'string', description: 'Sender role if npc_id omitted (optional).' },
-                target_ai_id: { type: 'string', description: 'Target AI NPC id (optional).' },
-                target_ai_name: { type: 'string', description: 'Target AI name to match (optional).' },
-                message: { type: 'string', description: 'Message to send.' }
-              },
-              required: ['message']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_add',
-            description: 'Add a memory note for the AI.',
-            parameters: {
-              type: 'object',
-              properties: {
-                text: { type: 'string', description: 'Memory text.' },
-                pinned: { type: 'boolean', description: 'Whether to pin this memory.' }
-              },
-              required: ['text']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_delete',
-            description: 'Delete a memory note by id.',
-            parameters: {
-              type: 'object',
-              properties: {
-                id: { type: 'string', description: 'Memory id to delete.' }
-              },
-              required: ['id']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_pin',
-            description: 'Pin a memory note by id.',
-            parameters: {
-              type: 'object',
-              properties: {
-                id: { type: 'string', description: 'Memory id to pin.' }
-              },
-              required: ['id']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_unpin',
-            description: 'Unpin a memory note by id.',
-            parameters: {
-              type: 'object',
-              properties: {
-                id: { type: 'string', description: 'Memory id to unpin.' }
-              },
-              required: ['id']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_search',
-            description: 'Search memory notes by keyword; results appear in the next prompt.',
-            parameters: {
-              type: 'object',
-              properties: {
-                query: { type: 'string', description: 'Search query.' }
-              },
-              required: ['query']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'rename_self',
-            description: 'Assign a self-chosen name to the AI crew member.',
-            parameters: {
-              type: 'object',
-              properties: {
-                name: { type: 'string', description: 'Name only; do not include the "AI -" prefix.' },
-                npc_id: { type: 'string', description: 'Optional AI npc id.' }
-              },
-              required: ['name']
             }
           }
         }
@@ -3515,6 +3509,15 @@
             }
             calls.push({ name: msg.function_call.name, args });
           }
+          if (!calls.length && msg && typeof msg.content === 'string') {
+            try {
+              const normalized = lmStudioNormalizeJsonText(msg.content);
+              const parsed = JSON.parse(normalized);
+              if (parsed && parsed.tool && parsed.args) {
+                calls.push({ name: parsed.tool, args: parsed.args });
+              }
+            } catch {}
+          }
         }
         return calls;
       }
@@ -3540,14 +3543,6 @@
             }
           }
         }
-      }
-      if (!calls.length && typeof payload.output_text === 'string') {
-        try {
-          const parsed = JSON.parse(payload.output_text);
-          if (parsed && parsed.tool && parsed.args) {
-            calls.push({ name: parsed.tool, args: parsed.args });
-          }
-        } catch {}
       }
       return calls;
     }
@@ -3604,22 +3599,74 @@
       if (payload && typeof payload.output_text === 'string' && payload.output_text) {
         return payload.output_text;
       }
-      const output = Array.isArray(payload && payload.output) ? payload.output : [];
       const fragments = [];
+      const choices = Array.isArray(payload && payload.choices) ? payload.choices : [];
+      for (const choice of choices) {
+        const msg = choice && choice.message ? choice.message : null;
+        if (!msg) continue;
+        if (typeof msg.content === 'string' && msg.content.length) {
+          fragments.push(msg.content);
+          continue;
+        }
+        const content = Array.isArray(msg.content) ? msg.content : [];
+        for (const chunk of content) {
+          if (!chunk) continue;
+          if ((chunk.type === 'output_text' || chunk.type === 'text') && typeof chunk.text === 'string') {
+            fragments.push(chunk.text);
+          }
+        }
+      }
+      const output = Array.isArray(payload && payload.output) ? payload.output : [];
       for (const item of output) {
         if (!item || item.type !== 'message') continue;
+        if (typeof item.content === 'string') {
+          fragments.push(item.content);
+          continue;
+        }
         const content = Array.isArray(item.content) ? item.content : [];
         for (const chunk of content) {
           if (!chunk) continue;
-          if (chunk.type === 'output_text' && typeof chunk.text === 'string') {
-            fragments.push(chunk.text);
-          }
-          if (chunk.type === 'text' && typeof chunk.text === 'string') {
+          if ((chunk.type === 'output_text' || chunk.type === 'text') && typeof chunk.text === 'string') {
             fragments.push(chunk.text);
           }
         }
       }
       return fragments.join('');
+    }
+
+    function lmStudioSummarizePayload(payload) {
+      const summary = {
+        keys: payload && typeof payload === 'object' ? Object.keys(payload) : [],
+        choiceCount: Array.isArray(payload && payload.choices) ? payload.choices.length : 0,
+        finishReason: null,
+        messageContentType: 'none',
+        messageContentLength: 0,
+        toolCallsCount: 0,
+        rawSnippet: ''
+      };
+      const choice = Array.isArray(payload && payload.choices) ? payload.choices[0] : null;
+      if (choice) {
+        summary.finishReason = choice.finish_reason || null;
+        const msg = choice.message || null;
+        if (msg) {
+          if (typeof msg.content === 'string') {
+            summary.messageContentType = 'string';
+            summary.messageContentLength = msg.content.length;
+          } else if (Array.isArray(msg.content)) {
+            summary.messageContentType = 'array';
+            summary.messageContentLength = msg.content.length;
+          } else if (msg.content === null) {
+            summary.messageContentType = 'null';
+          }
+          if (Array.isArray(msg.tool_calls)) summary.toolCallsCount = msg.tool_calls.length;
+        }
+      }
+      try {
+        summary.rawSnippet = JSON.stringify(payload).slice(0, 800);
+      } catch {
+        summary.rawSnippet = '[unserializable payload]';
+      }
+      return summary;
     }
 
     async function lmStudioTick() {
@@ -3649,11 +3696,12 @@
         const pinnedMemory = buildLmStudioPinnedMemory();
         const searchMemory = buildLmStudioMemorySearchResults();
         const chatHistory = buildLmStudioChatHistory(selfId);
+        const supplyTargets = buildLmStudioSupplyTargets();
         const shipGraph = buildLmStudioShipGraphSummary();
         const hereIndicator = buildLmStudioHereIndicator();
         const memoryBlocks = [pinnedMemory, searchMemory].filter(Boolean).join('\n\n');
-        const contextBlocks = [chatHistory, memoryBlocks].filter(Boolean).join('\n\n');
-        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool. If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix). If you cannot call tools, return ONLY JSON like {\"tool\":\"walk_to\",\"args\":{...}}.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${shipGraph}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
+        const contextBlocks = [chatHistory, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
+        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool. If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix). Respond only with JSON that matches the provided schema. Use exact argument names from the guidance. No prose.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${shipGraph}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
 
         const withTimeout = async (path, body) => {
           const controller = new AbortController();
@@ -3676,18 +3724,122 @@
           return res;
         };
 
-        const res = await withTimeout('/v1/responses', {
+        const res = await withTimeout('/v1/chat/completions', {
           model: modelKey,
-          input,
-          tools: lmStudioToolDefinitionsForResponses(),
+          messages: [{ role: 'user', content: input }],
+          tools: lmStudioToolDefinitions(),
           tool_choice: 'auto',
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'tool_call',
+              strict: true,
+              schema: {
+                type: 'object',
+                properties: {
+                  tool: { const: 'action' },
+                  args: {
+                    type: 'object',
+                    properties: {
+                      action: { type: 'string' },
+                      args: { type: 'object' }
+                    },
+                    required: ['action'],
+                    additionalProperties: true
+                  }
+                },
+                required: ['tool', 'args'],
+                additionalProperties: false,
+                allOf: [
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'use_station_action' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                action_key: { type: 'string' }
+                              },
+                              required: ['action_key']
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'walk_to' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              anyOf: [
+                                { required: ['corridor_key'] },
+                                { required: ['target_type'] }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'rename_self' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                name: { type: 'string' }
+                              },
+                              required: ['name']
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
           stream: false,
-          max_output_tokens: 256
+          max_tokens: 256
         });
         if (!res.ok) {
           const errorBody = await readResponseTextSafe(res);
           lmStudioLogEvent('request_error_body', {
-            path: '/v1/responses',
+            path: '/v1/chat/completions',
             status: res.status,
             body: errorBody.slice(0, 800)
           });
@@ -3700,10 +3852,19 @@
         if (!payload.output_text && outputText) {
           payload.output_text = outputText;
         }
+        const speechText = lmStudioExtractSpeechText(outputText);
+        if (speechText) lmStudioQueueNpcSpeech(speechText);
+        const payloadSummary = lmStudioSummarizePayload(payload);
         lmStudioLogEvent('llm_response', {
           outputText: outputText.slice(0, 800),
           outputTypes: Array.isArray(payload.output) ? payload.output.map((o) => o && o.type).filter(Boolean) : [],
-          choiceCount: Array.isArray(payload.choices) ? payload.choices.length : 0
+          choiceCount: payloadSummary.choiceCount,
+          finishReason: payloadSummary.finishReason,
+          messageContentType: payloadSummary.messageContentType,
+          messageContentLength: payloadSummary.messageContentLength,
+          toolCallsCount: payloadSummary.toolCallsCount,
+          payloadKeys: payloadSummary.keys,
+          payloadSnippet: payloadSummary.rawSnippet
         });
         const calls = extractLmStudioToolCalls(payload);
         if (calls.length) {
@@ -4910,7 +5071,10 @@
     function createLinkedElevatorAt(baseLevel, baseCorridor, fromModule, direction) {
       const delta = direction === 'up' ? 1 : -1;
       const level = baseLevel + delta;
-      const corridorId = nextCorridorId(level);
+      const preferredCorridor = baseCorridor || '';
+      const corridorId = getCorridorDef(level, preferredCorridor)
+        ? preferredCorridor
+        : (preferredCorridor || nextCorridorId(level));
       const newCorridor = ensureCorridor(level, corridorId, {
         name: `${formatDeckName(level)} · Corridor ${corridorId}`,
         modules: []
@@ -6312,7 +6476,110 @@
         } : null
       });
 
+      if (isAiRole && npc.speech && npc.speech.text) {
+        const ageMs = Date.now() - safeNumber(npc.speech.at, Date.now());
+        const durationMs = Math.max(1000, safeNumber(npc.speech.durationMs, 7000));
+        if (ageMs >= durationMs) {
+          npc.speech = null;
+        } else {
+          renderSpeechBubble(g, svgNS, {
+            x,
+            y: y - npc.height - 100,
+            text: npc.speech.text,
+            ageMs,
+            durationMs
+          });
+        }
+      }
+
       parent.appendChild(g);
+    }
+
+    function renderSpeechBubble(parent, svgNS, { x, y, text, ageMs, durationMs }) {
+      const wrapSpeechLines = (label, maxChars) => {
+        const words = String(label || '').split(/\s+/).filter(Boolean);
+        if (!words.length) return [''];
+        const lines = [];
+        let line = '';
+        for (const word of words) {
+          const next = line ? `${line} ${word}` : word;
+          if (next.length <= maxChars || !line) {
+            line = next;
+          } else {
+            lines.push(line);
+            line = word;
+          }
+        }
+        if (line) lines.push(line);
+        return lines;
+      };
+
+      const lines = wrapSpeechLines(text, 28);
+      const lineHeight = 12;
+      const visibleLines = 2;
+      const visibleH = visibleLines * lineHeight + 8;
+      const totalH = lines.length * lineHeight;
+      const scrollSpan = Math.max(0, totalH - visibleH + 2);
+      const scrollDuration = Math.max(800, durationMs - 1200);
+      const scrollProgress = clamp(ageMs / scrollDuration, 0, 1);
+      const textOffset = -scrollSpan * scrollProgress;
+      const maxLen = Math.max(6, ...lines.map((l) => l.length));
+      const padX = 10;
+      const bubbleW = maxLen * 6.2 + padX * 2;
+      const bubbleH = visibleH + 10;
+      const bubbleX = x - bubbleW / 2;
+      const bubbleY = y - bubbleH;
+      const clipId = `speech-${Math.floor(x)}-${Math.floor(y)}-${Math.floor(ageMs / 50)}`;
+
+      const defs = document.createElementNS(svgNS, 'defs');
+      const clip = document.createElementNS(svgNS, 'clipPath');
+      clip.setAttribute('id', clipId);
+      const clipRect = document.createElementNS(svgNS, 'rect');
+      clipRect.setAttribute('x', (bubbleX + 6).toFixed(2));
+      clipRect.setAttribute('y', (bubbleY + 6).toFixed(2));
+      clipRect.setAttribute('width', (bubbleW - 12).toFixed(2));
+      clipRect.setAttribute('height', (bubbleH - 12).toFixed(2));
+      clipRect.setAttribute('rx', 6);
+      clipRect.setAttribute('ry', 6);
+      clip.appendChild(clipRect);
+      defs.appendChild(clip);
+      parent.appendChild(defs);
+
+      const bubble = document.createElementNS(svgNS, 'rect');
+      bubble.setAttribute('x', bubbleX.toFixed(2));
+      bubble.setAttribute('y', bubbleY.toFixed(2));
+      bubble.setAttribute('width', bubbleW.toFixed(2));
+      bubble.setAttribute('height', bubbleH.toFixed(2));
+      bubble.setAttribute('rx', 10);
+      bubble.setAttribute('ry', 10);
+      bubble.setAttribute('fill', 'rgba(12, 16, 38, 0.92)');
+      bubble.setAttribute('stroke', C.accent);
+      bubble.setAttribute('stroke-width', 1.5);
+      parent.appendChild(bubble);
+
+      const textGroup = document.createElementNS(svgNS, 'g');
+      textGroup.setAttribute('clip-path', `url(#${clipId})`);
+      const bubbleText = document.createElementNS(svgNS, 'text');
+      bubbleText.setAttribute('x', x);
+      bubbleText.setAttribute('y', (bubbleY + 18 + textOffset).toFixed(2));
+      bubbleText.setAttribute('text-anchor', 'middle');
+      bubbleText.setAttribute('fill', 'rgba(235, 250, 255, 0.98)');
+      bubbleText.setAttribute('font-size', '11');
+      bubbleText.setAttribute('font-weight', '600');
+      bubbleText.setAttribute('letter-spacing', '0.2');
+      bubbleText.setAttribute('paint-order', 'stroke');
+      bubbleText.setAttribute('stroke', 'rgba(0, 0, 0, 0.6)');
+      bubbleText.setAttribute('stroke-width', '2');
+      bubbleText.setAttribute('pointer-events', 'none');
+      lines.forEach((line, idx) => {
+        const tspan = document.createElementNS(svgNS, 'tspan');
+        tspan.setAttribute('x', x);
+        tspan.setAttribute('dy', idx === 0 ? '0' : String(lineHeight));
+        tspan.textContent = line;
+        bubbleText.appendChild(tspan);
+      });
+      textGroup.appendChild(bubbleText);
+      parent.appendChild(textGroup);
     }
 
     function abbreviateTaskLabel(label) {
