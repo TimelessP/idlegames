@@ -783,7 +783,13 @@
         activeModelKey: '',
         lastCallAt: 0,
         inflight: false,
-        lastError: ''
+        lastError: '',
+        lastCaptainMessage: '',
+        lastCaptainReply: '',
+        pendingCaptainMessage: null,
+        memory: [],
+        lastMemorySearch: [],
+        chatHistory: {}
       },
       meta: { inventoryAcc: 0, powerShedAt: 0, autoAt: 0 },
       
@@ -2595,6 +2601,11 @@
         inventory: { ...state.inventory },
         credits: Math.floor(state.credits),
         incidents: { ...state.incidents },
+        lmStudio: {
+          lastCaptainMessage: state.lmStudio.lastCaptainMessage,
+          lastCaptainReply: state.lmStudio.lastCaptainReply,
+          pendingCaptainMessage: state.lmStudio.pendingCaptainMessage
+        },
         npcs: (state.npcs || []).map((n) => ({
           id: n.id,
           name: n.name,
@@ -2608,11 +2619,167 @@
       };
     }
 
+    function buildLmStudioGuidance() {
+      const buffers = (state.crewAI && state.crewAI.buffers) ? state.crewAI.buffers : {};
+      return [
+        'Help (use 1 tool call):',
+        '- O2 low: toggle life_support or use_station_action life.emergency; seal o2 leak.',
+        '- Rations low: toggle hydroponics then hydro.harvest; or cargo.buy.rations; feed via canteen.eat.',
+        '- Credits low: cargo.sell.ore/ingot/rations; farm scrap/ore via sensors.scan or drones.salvage; refine ore -> ingot.',
+        '- Filters low: cargo.buy.filter; life support uses filters.',
+        '- Medkits low: cargo.buy.medkit; treat via med.treat.',
+        '- Drone parts low: cargo.buy.droneParts; drones.salvage or drones.repair use parts.',
+        '- Power/heat: boost power or route; toggle engine/shields if needed; vent heat (engine).',
+        '- Incidents: power trip -> reset breakers; breach -> shields.bulkhead or airlock.eva; fire -> engine vent or drones.repair.',
+        '- Hull damage: workshop.repair or airlock.eva; shields.bulkhead if breached.',
+        '- Morale low: med.treat, feed via canteen.eat, rest in quarters.',
+        '- Contracts: open comms/contracts in cockpit when available; gather required items then transmit completion.',
+        '- Travel: use navigation to pick destination once ready; ensure engine online and power stable.',
+        '- Blueprints: sensors.deepScan to unlock; then build_module when fabricator + unlocks are ready.',
+        '- Layout: build_module to add; remove_module to remove non-structural modules (avoid doorways/elevators).',
+        '- Auto-build: ensure fabricator, then build missing crew/engineering/ops/science modules.',
+        '- Power profiles: survival (life), combat (shields/engine), industry (hydro/fabricator), balanced (default).',
+        '- Memory: use memory_add, memory_delete, memory_pin, memory_unpin, memory_search to manage notes.',
+        '- Crew comms: speak_to_captain or speak_to_ai to coordinate; chat history shows speakers.',
+        `- Targets: ore ${buffers.ore ?? 0}, scrap ${buffers.scrap ?? 0}, ingot ${buffers.ingot ?? 0}, filter ${buffers.filter ?? 0}, medkit ${buffers.medkit ?? 0}, droneParts ${buffers.droneParts ?? 0}, rations ${buffers.rations ?? 0}.`
+      ].join('\n');
+    }
+
+    const LMS_MEMORY_LIMIT = 100;
+    const LMS_CHAT_LIMIT = 30;
+
+    function lmStudioNormalizeMemoryItem(item) {
+      return {
+        id: String(item.id || `mem-${Math.random().toString(36).slice(2)}`),
+        text: String(item.text || '').trim(),
+        pinned: !!item.pinned,
+        createdAt: Number.isFinite(item.createdAt) ? item.createdAt : Date.now()
+      };
+    }
+
+    function lmStudioTrimMemory() {
+      const list = state.lmStudio.memory;
+      if (!Array.isArray(list)) return;
+      if (list.length <= LMS_MEMORY_LIMIT) return;
+      const unpinned = list.filter((m) => !m.pinned);
+      unpinned.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      while (state.lmStudio.memory.length > LMS_MEMORY_LIMIT && unpinned.length) {
+        const victim = unpinned.shift();
+        state.lmStudio.memory = state.lmStudio.memory.filter((m) => m.id !== victim.id);
+      }
+      if (state.lmStudio.memory.length > LMS_MEMORY_LIMIT) {
+        state.lmStudio.memory.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        state.lmStudio.memory = state.lmStudio.memory.slice(-LMS_MEMORY_LIMIT);
+      }
+    }
+
+    function lmStudioMemoryAdd(text, pinned = false) {
+      const item = lmStudioNormalizeMemoryItem({ text, pinned });
+      if (!item.text) return null;
+      state.lmStudio.memory.push(item);
+      lmStudioTrimMemory();
+      markDirty();
+      return item;
+    }
+
+    function lmStudioMemoryDelete(id) {
+      const before = state.lmStudio.memory.length;
+      state.lmStudio.memory = state.lmStudio.memory.filter((m) => m.id !== id);
+      return state.lmStudio.memory.length !== before;
+    }
+
+    function lmStudioMemoryPin(id, pinned = true) {
+      const item = state.lmStudio.memory.find((m) => m.id === id);
+      if (!item) return false;
+      item.pinned = pinned;
+      markDirty();
+      return true;
+    }
+
+    function lmStudioMemorySearch(query) {
+      const q = String(query || '').toLowerCase();
+      if (!q) return [];
+      return state.lmStudio.memory.filter((m) => m.text.toLowerCase().includes(q));
+    }
+
+    function buildLmStudioPinnedMemory() {
+      const pinned = state.lmStudio.memory.filter((m) => m.pinned).slice(0, 20);
+      if (!pinned.length) return '';
+      const lines = pinned.map((m) => `- ${m.text}`);
+      return `Pinned memory:\n${lines.join('\n')}`;
+    }
+
+    function buildLmStudioMemorySearchResults() {
+      const results = Array.isArray(state.lmStudio.lastMemorySearch) ? state.lmStudio.lastMemorySearch : [];
+      if (!results.length) return '';
+      const lines = results.slice(0, 10).map((m) => `- ${m.text}`);
+      return `Last memory search:\n${lines.join('\n')}`;
+    }
+    function lmStudioChatAdd(aiId, role, text, speaker = '') {
+      const msg = String(text || '').trim();
+      if (!msg) return;
+      const entry = { role: String(role || 'ai'), speaker: String(speaker || '').trim(), text: msg, at: Date.now() };
+      const key = String(aiId || 'ai');
+      if (!state.lmStudio.chatHistory[key]) state.lmStudio.chatHistory[key] = [];
+      state.lmStudio.chatHistory[key].push(entry);
+      if (state.lmStudio.chatHistory[key].length > LMS_CHAT_LIMIT) {
+        state.lmStudio.chatHistory[key] = state.lmStudio.chatHistory[key].slice(-LMS_CHAT_LIMIT);
+      }
+      markDirty();
+    }
+    function buildLmStudioChatHistory(aiId) {
+      const key = String(aiId || 'ai');
+      const list = state.lmStudio.chatHistory && Array.isArray(state.lmStudio.chatHistory[key])
+        ? state.lmStudio.chatHistory[key]
+        : [];
+      if (!list.length) return '';
+      const lines = list.map((m) => {
+        const role = String(m.role || 'ai').toUpperCase();
+        const speaker = String(m.speaker || '').trim();
+        const text = String(m.text || '').trim();
+        return `${speaker || role}: ${text}`;
+      });
+      return `Recent chat:\n${lines.join('\n')}`;
+    }
+
+    function lmStudioSelfName() {
+      const aiNpc = (state.npcs || []).find((n) => npcRole(n) === 'ai');
+      if (!aiNpc) return 'AI - Unnamed';
+      const raw = String(aiNpc.name || '').trim();
+      return raw.length ? raw : 'AI - Unnamed';
+    }
+
+    function lmStudioSelfId() {
+      const aiNpc = (state.npcs || []).find((n) => npcRole(n) === 'ai');
+      return aiNpc ? aiNpc.id : 'ai';
+    }
+
     function selectNpcForLmStudio(npcId, role) {
       const list = Array.isArray(state.npcs) ? state.npcs.filter(Boolean) : [];
       if (npcId) return list.find((n) => n.id === npcId) || null;
       if (role) return list.find((n) => npcRole(n) === role && n.onDuty) || null;
       return list.find((n) => n.onDuty) || list[0] || null;
+    }
+
+    function lmStudioListAiNpcs() {
+      return Array.isArray(state.npcs) ? state.npcs.filter((n) => n && npcRole(n) === 'ai') : [];
+    }
+
+    function lmStudioResolveTargetAi(args, senderId) {
+      const targetId = String(args.target_ai_id || '').trim();
+      const targetName = String(args.target_ai_name || '').trim();
+      const aiNpcs = lmStudioListAiNpcs().filter((n) => n.id !== senderId);
+      if (!aiNpcs.length) return null;
+      if (targetId) {
+        return aiNpcs.find((n) => n.id === targetId) || null;
+      }
+      if (targetName) {
+        const normalized = targetName.toLowerCase();
+        return aiNpcs.find((n) => String(n.name || '').toLowerCase() === normalized)
+          || aiNpcs.find((n) => String(n.name || '').toLowerCase().includes(normalized))
+          || null;
+      }
+      return aiNpcs[0] || null;
     }
 
     const LMS_STATION_ACTIONS = {
@@ -2627,6 +2794,37 @@
       'cargo.buy.medkit': { targetType: 'cargo', label: 'Buy Medkit', perform: () => buyCargoItem('medkit', 25) },
       'cargo.sell.ore': { targetType: 'cargo', label: 'Sell Ore', perform: () => sellCargoItem('ore', 5, { respectReserve: true }) }
     };
+
+    function lmStudioResolveModuleRemoval(args) {
+      const moduleUid = String(args.module_uid || '').trim();
+      const moduleType = String(args.module_type || '').trim();
+      const allowStructure = !!args.allow_structure;
+
+      if (moduleUid) {
+        const module = findModuleByUid(moduleUid);
+        if (!module) return { error: 'Unknown module_uid' };
+        if (!allowStructure && STRUCTURE_TYPES.has(module.type)) {
+          return { error: 'Refusing to remove structural module' };
+        }
+        return { uid: module.uid, module };
+      }
+
+      if (!moduleType) return { error: 'Missing module_uid or module_type' };
+
+      let targetLevel = state.currentLevel;
+      let targetCorridor = state.currentCorridor;
+      if (args.corridor_key) {
+        const parsed = parseCorridorKey(args.corridor_key);
+        if (!getCorridorDef(parsed.level, parsed.corridor)) return { error: 'Unknown corridor_key' };
+        targetLevel = parsed.level;
+        targetCorridor = parsed.corridor;
+      }
+
+      const modules = getModulesForCorridor(targetLevel, targetCorridor).filter(Boolean);
+      const candidate = modules.find((m) => m.type === moduleType && (allowStructure || !STRUCTURE_TYPES.has(m.type)));
+      if (!candidate) return { error: `No removable ${moduleType} module found` };
+      return { uid: candidate.uid, module: candidate };
+    }
 
     function executeLmStudioToolCall(call) {
       if (!call || !call.name) return { ok: false, error: 'Missing tool name' };
@@ -2654,6 +2852,12 @@
           if (!type) return { ok: false, error: 'Missing module_type' };
           const ok = ensureModuleBuiltIfUnlocked(type, 'LMS');
           return { ok };
+        }
+        case 'remove_module': {
+          const target = lmStudioResolveModuleRemoval(args);
+          if (target.error) return { ok: false, error: target.error };
+          const ok = removeModuleByUid(target.uid);
+          return { ok, error: ok ? '' : 'Remove failed' };
         }
         case 'use_station_action': {
           const actionKey = String(args.action_key || '').trim();
@@ -2700,6 +2904,87 @@
           }
           return { ok: false, error: 'Unknown crew action' };
         }
+        case 'speak_to_captain': {
+          const message = String(args.message || '').trim();
+          if (!message) return { ok: false, error: 'Message required' };
+          const npc = selectNpcForLmStudio(args.npc_id, args.npc_role);
+          if (!npc) return { ok: false, error: 'No NPC available' };
+          if (state.lmStudio.pendingCaptainMessage) {
+            return { ok: false, error: 'Captain already has a pending message' };
+          }
+          lmStudioChatAdd(npc.id, 'ai', message, npc.name || 'AI');
+          npc.task = {
+            key: 'captain.message',
+            label: 'Message Captain',
+            targetType: 'captain',
+            duration: 0.5,
+            progress: 0,
+            onComplete: () => {
+              openCaptainMessagePanel(message, npc.name || 'AI', npc.id);
+            },
+            message
+          };
+          npc.destinationCorridorKey = corridorKey(state.currentLevel, state.currentCorridor);
+          npc.destinationType = null;
+          npc.mode = 'travel';
+          return { ok: true };
+        }
+        case 'speak_to_ai': {
+          const message = String(args.message || '').trim();
+          if (!message) return { ok: false, error: 'Message required' };
+          const sender = selectNpcForLmStudio(args.npc_id, args.npc_role);
+          if (!sender) return { ok: false, error: 'No NPC available' };
+          if (npcRole(sender) !== 'ai') return { ok: false, error: 'Sender must be AI role' };
+          const target = lmStudioResolveTargetAi(args, sender.id);
+          if (!target) return { ok: false, error: 'No other AI available' };
+          const senderName = sender.name || 'AI';
+          lmStudioChatAdd(sender.id, 'ai', message, senderName);
+          lmStudioChatAdd(target.id, 'ai', message, senderName);
+          markDirty();
+          return { ok: true };
+        }
+        case 'memory_add': {
+          const text = String(args.text || '').trim();
+          const pinned = !!args.pinned;
+          const item = lmStudioMemoryAdd(text, pinned);
+          if (!item) return { ok: false, error: 'Empty memory text' };
+          return { ok: true, id: item.id };
+        }
+        case 'memory_delete': {
+          const id = String(args.id || '').trim();
+          if (!id) return { ok: false, error: 'Missing id' };
+          const ok = lmStudioMemoryDelete(id);
+          return { ok };
+        }
+        case 'memory_pin': {
+          const id = String(args.id || '').trim();
+          if (!id) return { ok: false, error: 'Missing id' };
+          const ok = lmStudioMemoryPin(id, true);
+          return { ok };
+        }
+        case 'memory_unpin': {
+          const id = String(args.id || '').trim();
+          if (!id) return { ok: false, error: 'Missing id' };
+          const ok = lmStudioMemoryPin(id, false);
+          return { ok };
+        }
+        case 'memory_search': {
+          const query = String(args.query || '').trim();
+          if (!query) return { ok: false, error: 'Missing query' };
+          const results = lmStudioMemorySearch(query);
+          state.lmStudio.lastMemorySearch = results.slice(0, 20);
+          return { ok: true, count: results.length };
+        }
+        case 'rename_self': {
+          const rawName = String(args.name || '').trim();
+          if (!rawName) return { ok: false, error: 'Missing name' };
+          const npc = selectNpcForLmStudio(args.npc_id, 'ai');
+          if (!npc) return { ok: false, error: 'No AI NPC available' };
+          if (npcRole(npc) !== 'ai') return { ok: false, error: 'Target is not AI role' };
+          npc.name = `AI - ${rawName}`;
+          markDirty();
+          return { ok: true };
+        }
         default:
           return { ok: false, error: 'Unknown tool' };
       }
@@ -2731,6 +3016,20 @@
               module_type: { type: 'string', description: 'Module type to build.' }
             },
             required: ['module_type']
+          }
+        },
+        {
+          type: 'function',
+          name: 'remove_module',
+          description: 'Remove a ship module by uid or by type (defaults to current corridor).',
+          parameters: {
+            type: 'object',
+            properties: {
+              module_uid: { type: 'string', description: 'Exact module uid to remove (preferred).' },
+              module_type: { type: 'string', description: 'Module type to remove if uid omitted.' },
+              corridor_key: { type: 'string', description: 'Optional corridor key like "1:A" to search.' },
+              allow_structure: { type: 'boolean', description: 'Allow removal of doorway/elevator/empty modules.' }
+            }
           }
         },
         {
@@ -2771,6 +3070,110 @@
               npc_id: { type: 'string', description: 'NPC id to dismiss (required for dismiss).' }
             },
             required: ['action']
+          }
+        },
+        {
+          type: 'function',
+          name: 'speak_to_captain',
+          description: 'Walk an NPC to the captain and deliver a message, then wait for reply.',
+          parameters: {
+            type: 'object',
+            properties: {
+              npc_id: { type: 'string', description: 'NPC id to send (optional).' },
+              npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
+              message: { type: 'string', description: 'Message to deliver to the captain.' }
+            },
+            required: ['message']
+          }
+        },
+        {
+          type: 'function',
+          name: 'speak_to_ai',
+          description: 'Send a message to another AI crew member.',
+          parameters: {
+            type: 'object',
+            properties: {
+              npc_id: { type: 'string', description: 'Sender NPC id (optional).' },
+              npc_role: { type: 'string', description: 'Sender role if npc_id omitted (optional).' },
+              target_ai_id: { type: 'string', description: 'Target AI NPC id (optional).' },
+              target_ai_name: { type: 'string', description: 'Target AI name to match (optional).' },
+              message: { type: 'string', description: 'Message to send.' }
+            },
+            required: ['message']
+          }
+        },
+        {
+          type: 'function',
+          name: 'memory_add',
+          description: 'Add a memory note for the AI.',
+          parameters: {
+            type: 'object',
+            properties: {
+              text: { type: 'string', description: 'Memory text.' },
+              pinned: { type: 'boolean', description: 'Whether to pin this memory.' }
+            },
+            required: ['text']
+          }
+        },
+        {
+          type: 'function',
+          name: 'memory_delete',
+          description: 'Delete a memory note by id.',
+          parameters: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Memory id to delete.' }
+            },
+            required: ['id']
+          }
+        },
+        {
+          type: 'function',
+          name: 'memory_pin',
+          description: 'Pin a memory note by id.',
+          parameters: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Memory id to pin.' }
+            },
+            required: ['id']
+          }
+        },
+        {
+          type: 'function',
+          name: 'memory_unpin',
+          description: 'Unpin a memory note by id.',
+          parameters: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Memory id to unpin.' }
+            },
+            required: ['id']
+          }
+        },
+        {
+          type: 'function',
+          name: 'memory_search',
+          description: 'Search memory notes by keyword; results appear in the next prompt.',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'Search query.' }
+            },
+            required: ['query']
+          }
+        },
+        {
+          type: 'function',
+          name: 'rename_self',
+          description: 'Assign a self-chosen name to the AI crew member.',
+          parameters: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Name to use after "AI - ".' },
+              npc_id: { type: 'string', description: 'Optional AI npc id.' }
+            },
+            required: ['name']
           }
         }
       ];
@@ -2830,7 +3233,16 @@
         }
 
         const snapshot = buildLmStudioStateSnapshot();
-        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool.\nState:\n${JSON.stringify(snapshot)}`;
+        const guidance = buildLmStudioGuidance();
+        const nowIso = new Date().toISOString();
+        const selfName = lmStudioSelfName();
+        const selfId = lmStudioSelfId();
+        const pinnedMemory = buildLmStudioPinnedMemory();
+        const searchMemory = buildLmStudioMemorySearchResults();
+        const chatHistory = buildLmStudioChatHistory(selfId);
+        const memoryBlocks = [pinnedMemory, searchMemory].filter(Boolean).join('\n\n');
+        const contextBlocks = [chatHistory, memoryBlocks].filter(Boolean).join('\n\n');
+        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool. If you have not named yourself yet, call rename_self now.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
 
         const res = await lmStudioFetch('/v1/responses', {
           method: 'POST',
@@ -5389,11 +5801,17 @@
       const briefTask = abbreviateTaskLabel(taskLabel);
       const line2 = npc.onDuty ? (briefTask || 'IDLE') : 'STANDBY';
 
+      const isAiRole = npcRole(npc) === 'ai';
       renderCharacterLabel(g, svgNS, {
         x,
         y: y - npc.height - 70,
         line1,
-        line2
+        line2,
+        style: isAiRole ? {
+          bgFill: 'rgba(20, 24, 54, 0.85)',
+          stroke: C.accent,
+          textFill: 'rgba(210, 245, 255, 0.98)'
+        } : null
       });
 
       parent.appendChild(g);
@@ -5435,7 +5853,7 @@
       return words.length ? words[0].toUpperCase() : compact.toUpperCase();
     }
 
-    function renderCharacterLabel(parent, svgNS, { x, y, line1, line2 }) {
+    function renderCharacterLabel(parent, svgNS, { x, y, line1, line2, style = null }) {
       const clipText = (text, maxLen = 22) => (text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text);
       const l1 = clipText(String(line1 || '').toUpperCase());
       const l2 = clipText(String(line2 || '').toUpperCase());
@@ -5454,8 +5872,11 @@
       labelBg.setAttribute('height', labelH);
       labelBg.setAttribute('rx', 7);
       labelBg.setAttribute('ry', 7);
-      labelBg.setAttribute('fill', 'rgba(10, 14, 39, 0.78)');
-      labelBg.setAttribute('stroke', 'rgba(0, 212, 255, 0.45)');
+      const bgFill = style && style.bgFill ? style.bgFill : 'rgba(10, 14, 39, 0.78)';
+      const stroke = style && style.stroke ? style.stroke : 'rgba(0, 212, 255, 0.45)';
+      const textFill = style && style.textFill ? style.textFill : 'rgba(240, 250, 255, 0.95)';
+      labelBg.setAttribute('fill', bgFill);
+      labelBg.setAttribute('stroke', stroke);
       labelBg.setAttribute('stroke-width', 1);
       parent.appendChild(labelBg);
 
@@ -5463,7 +5884,7 @@
       labelText.setAttribute('x', x);
       labelText.setAttribute('y', labelY + 12 + padY * 0.2);
       labelText.setAttribute('text-anchor', 'middle');
-      labelText.setAttribute('fill', 'rgba(240, 250, 255, 0.95)');
+      labelText.setAttribute('fill', textFill);
       labelText.setAttribute('font-size', '11');
       labelText.setAttribute('font-weight', '600');
       labelText.setAttribute('letter-spacing', '0.4');
@@ -6716,7 +7137,13 @@
         activeModelKey: '',
         lastCallAt: 0,
         inflight: false,
-        lastError: ''
+        lastError: '',
+        lastCaptainMessage: '',
+        lastCaptainReply: '',
+        pendingCaptainMessage: null,
+        memory: [],
+        lastMemorySearch: [],
+        chatHistory: {}
       };
       if (!state.lmStudio || typeof state.lmStudio !== 'object') state.lmStudio = { ...defaults };
       for (const k of Object.keys(defaults)) {
@@ -6729,6 +7156,16 @@
       if (!Number.isFinite(state.lmStudio.lastCallAt)) state.lmStudio.lastCallAt = 0;
       state.lmStudio.inflight = false;
       if (typeof state.lmStudio.lastError !== 'string') state.lmStudio.lastError = '';
+      if (typeof state.lmStudio.lastCaptainMessage !== 'string') state.lmStudio.lastCaptainMessage = '';
+      if (typeof state.lmStudio.lastCaptainReply !== 'string') state.lmStudio.lastCaptainReply = '';
+      if (state.lmStudio.pendingCaptainMessage && typeof state.lmStudio.pendingCaptainMessage !== 'object') {
+        state.lmStudio.pendingCaptainMessage = null;
+      }
+      if (!Array.isArray(state.lmStudio.memory)) state.lmStudio.memory = [];
+      if (!Array.isArray(state.lmStudio.lastMemorySearch)) state.lmStudio.lastMemorySearch = [];
+      if (!state.lmStudio.chatHistory || typeof state.lmStudio.chatHistory !== 'object') {
+        state.lmStudio.chatHistory = {};
+      }
     }
 
     function currentSystem() {
@@ -7994,6 +8431,39 @@
       );
     }
 
+    function openCaptainMessagePanel(message, npcName = 'AI', aiId = null) {
+      const prompt = String(message || '').trim();
+      state.lmStudio.lastCaptainMessage = prompt;
+      state.lmStudio.pendingCaptainMessage = { message: prompt, from: npcName, at: Date.now(), aiId };
+      const description = `${npcName.toUpperCase()}:\n${prompt}\n\nType your reply and press Say:`;
+      openTextPanel(
+        'AI MESSAGE',
+        description,
+        '',
+        {
+          placeholder: 'Captain reply...',
+          singleLine: false,
+          includeCancel: true,
+          cancelLabel: 'Close',
+          buttons: [
+            {
+              label: 'Say',
+              action: () => {
+                const textarea = document.getElementById('panelTextarea');
+                const raw = textarea ? textarea.value : '';
+                const reply = String(raw || '').trim();
+                state.lmStudio.lastCaptainReply = reply;
+                state.lmStudio.pendingCaptainMessage = null;
+                lmStudioChatAdd(aiId, 'captain', reply, 'CAPTAIN');
+                markDirty();
+                closePanel();
+              }
+            }
+          ]
+        }
+      );
+    }
+
     async function copyToClipboard(text) {
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -8331,7 +8801,11 @@
           enabled: !!state.lmStudio.enabled,
           baseUrl: state.lmStudio.baseUrl,
           apiKey: state.lmStudio.apiKey,
-          autoLoadModel: state.lmStudio.autoLoadModel
+          autoLoadModel: state.lmStudio.autoLoadModel,
+          memory: Array.isArray(state.lmStudio.memory) ? state.lmStudio.memory : [],
+          chatHistory: state.lmStudio.chatHistory && typeof state.lmStudio.chatHistory === 'object'
+            ? state.lmStudio.chatHistory
+            : {}
         } : undefined,
         npcs: state.npcs.map(n => ({
           id: n.id,
@@ -8576,6 +9050,33 @@
       if (!targetType) {
         npc.task = null;
         return false;
+      }
+
+      if (targetType === 'captain') {
+        const captainKey = corridorKey(state.currentLevel, state.currentCorridor);
+        if (npc.level !== state.currentLevel || npc.corridor !== state.currentCorridor) {
+          npc.destinationCorridorKey = captainKey;
+          npc.mode = 'travel';
+          return true;
+        }
+        const dist = state.player.x - npc.x;
+        if (Math.abs(dist) > 10) {
+          npc.vx = Math.sign(dist) * npc.speed * 0.5;
+          npc.mode = 'travel';
+          return true;
+        }
+        npc.vx = 0;
+        npc.task.progress += dt;
+        if (npc.task.progress >= task.duration) {
+          if (typeof task.onComplete === 'function') task.onComplete(npc);
+          npc.task = null;
+          npc.mode = 'idle';
+          npc.destinationType = null;
+          npc.destinationCorridorKey = null;
+          npc.wanderTarget = null;
+          return true;
+        }
+        return true;
       }
 
       if (!corridorsWithModuleType(targetType).length) {
