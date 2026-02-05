@@ -2619,6 +2619,34 @@
       };
     }
 
+    function buildLmStudioShipGraphSummary() {
+      const levels = SHIP_LAYOUT && SHIP_LAYOUT.levels ? SHIP_LAYOUT.levels : {};
+      const levelKeys = Object.keys(levels).map((n) => Number(n)).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+      const lines = [];
+      for (const level of levelKeys) {
+        const levelDef = levels[level];
+        if (!levelDef || !levelDef.corridors) continue;
+        const corridorKeys = Object.keys(levelDef.corridors).sort();
+        for (const corridor of corridorKeys) {
+          const here = level === state.currentLevel && corridor === state.currentCorridor;
+          const label = `${formatLevelLabel(level)}${corridor}${here ? '*' : ''}`;
+          const summary = corridorEquipmentSummary(level, corridor, { maxItems: 2 });
+          const links = listLinkedCorridors(level, corridor)
+            .map((key) => {
+              const parsed = parseCorridorKey(key);
+              return `${formatLevelLabel(parsed.level)}${parsed.corridor}`;
+            })
+            .sort();
+          lines.push(`${label} ${summary}${links.length ? ` -> ${links.join(',')}` : ''}`);
+        }
+      }
+      return lines.length ? `Ship graph (terse):\n${lines.join('\n')}` : 'Ship graph (terse): (empty)';
+    }
+
+    function buildLmStudioHereIndicator() {
+      return `You are here: ${formatLevelLabel(state.currentLevel)}${state.currentCorridor}`;
+    }
+
     function buildLmStudioGuidance() {
       const buffers = (state.crewAI && state.crewAI.buffers) ? state.crewAI.buffers : {};
       return [
@@ -2742,11 +2770,21 @@
       return `Recent chat:\n${lines.join('\n')}`;
     }
 
+    function normalizeAiNamePart(name) {
+      const raw = String(name || '').trim();
+      if (!raw) return '';
+      return raw.replace(/^(\s*(AI|A\.I\.?)(\s*[-.:]*)\s*)+/i, '').trim();
+    }
+
+    function formatAiDisplayName(name) {
+      const base = normalizeAiNamePart(name);
+      return base ? `AI - ${base}` : 'AI - Unnamed';
+    }
+
     function lmStudioSelfName() {
       const aiNpc = (state.npcs || []).find((n) => npcRole(n) === 'ai');
       if (!aiNpc) return 'AI - Unnamed';
-      const raw = String(aiNpc.name || '').trim();
-      return raw.length ? raw : 'AI - Unnamed';
+      return formatAiDisplayName(aiNpc.name);
     }
 
     function lmStudioSelfId() {
@@ -2912,7 +2950,8 @@
           if (state.lmStudio.pendingCaptainMessage) {
             return { ok: false, error: 'Captain already has a pending message' };
           }
-          lmStudioChatAdd(npc.id, 'ai', message, npc.name || 'AI');
+          const senderName = npcRole(npc) === 'ai' ? formatAiDisplayName(npc.name) : (npc.name || 'AI');
+          lmStudioChatAdd(npc.id, 'ai', message, senderName);
           npc.task = {
             key: 'captain.message',
             label: 'Message Captain',
@@ -2920,7 +2959,7 @@
             duration: 0.5,
             progress: 0,
             onComplete: () => {
-              openCaptainMessagePanel(message, npc.name || 'AI', npc.id);
+              openCaptainMessagePanel(message, senderName, npc.id);
             },
             message
           };
@@ -2937,7 +2976,7 @@
           if (npcRole(sender) !== 'ai') return { ok: false, error: 'Sender must be AI role' };
           const target = lmStudioResolveTargetAi(args, sender.id);
           if (!target) return { ok: false, error: 'No other AI available' };
-          const senderName = sender.name || 'AI';
+          const senderName = npcRole(sender) === 'ai' ? formatAiDisplayName(sender.name) : (sender.name || 'AI');
           lmStudioChatAdd(sender.id, 'ai', message, senderName);
           lmStudioChatAdd(target.id, 'ai', message, senderName);
           markDirty();
@@ -2977,11 +3016,12 @@
         }
         case 'rename_self': {
           const rawName = String(args.name || '').trim();
-          if (!rawName) return { ok: false, error: 'Missing name' };
+          const cleaned = normalizeAiNamePart(rawName);
+          if (!cleaned) return { ok: false, error: 'Missing name' };
           const npc = selectNpcForLmStudio(args.npc_id, 'ai');
           if (!npc) return { ok: false, error: 'No AI NPC available' };
           if (npcRole(npc) !== 'ai') return { ok: false, error: 'Target is not AI role' };
-          npc.name = `AI - ${rawName}`;
+          npc.name = formatAiDisplayName(cleaned);
           markDirty();
           return { ok: true };
         }
@@ -3170,7 +3210,7 @@
           parameters: {
             type: 'object',
             properties: {
-              name: { type: 'string', description: 'Name to use after "AI - ".' },
+              name: { type: 'string', description: 'Name only; do not include the "AI -" prefix.' },
               npc_id: { type: 'string', description: 'Optional AI npc id.' }
             },
             required: ['name']
@@ -3240,9 +3280,11 @@
         const pinnedMemory = buildLmStudioPinnedMemory();
         const searchMemory = buildLmStudioMemorySearchResults();
         const chatHistory = buildLmStudioChatHistory(selfId);
+        const shipGraph = buildLmStudioShipGraphSummary();
+        const hereIndicator = buildLmStudioHereIndicator();
         const memoryBlocks = [pinnedMemory, searchMemory].filter(Boolean).join('\n\n');
         const contextBlocks = [chatHistory, memoryBlocks].filter(Boolean).join('\n\n');
-        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool. If you have not named yourself yet, call rename_self now.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
+        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool. If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix).\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${shipGraph}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
 
         const res = await lmStudioFetch('/v1/responses', {
           method: 'POST',
@@ -5795,7 +5837,8 @@
       g.appendChild(visor);
 
       const role = String(npcRole(npc) || 'crew').toUpperCase();
-      const name = String(npc.name || 'CREW').toUpperCase();
+      const displayName = npcRole(npc) === 'ai' ? formatAiDisplayName(npc.name) : String(npc.name || 'CREW');
+      const name = displayName.toUpperCase();
       const line1 = name === role ? name : `${name} • ${role}`;
       const taskLabel = npc.task ? String(npc.task.label || npc.task.key || 'TASK') : '';
       const briefTask = abbreviateTaskLabel(taskLabel);
