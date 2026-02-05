@@ -792,7 +792,8 @@
         pendingCaptainMessage: null,
         memory: [],
         lastMemorySearch: [],
-        chatHistory: {}
+        chatHistory: {},
+        toolLog: []
       },
       meta: { inventoryAcc: 0, powerShedAt: 0, autoAt: 0 },
       
@@ -2421,6 +2422,10 @@
       ensureLmStudioConfig();
       const cfg = state.lmStudio;
       const status = cfg.activeModelKey ? `Model: ${cfg.activeModelKey}` : 'Model: (not loaded)';
+      const lastTool = cfg.lastToolCall ? `${cfg.lastToolCall.name} (${new Date(cfg.lastToolCall.at).toLocaleTimeString()})` : 'None';
+      const lastResult = cfg.lastToolResult
+        ? (cfg.lastToolResult.ok ? 'OK' : `ERR: ${cfg.lastToolResult.error || 'Unknown'}`)
+        : 'None';
       const items = [
         { type: 'setting', label: 'LM Studio NPC AI', value: cfg.enabled ? 'ON' : 'OFF', actions: [
           { label: 'Toggle', action: () => { cfg.enabled = !cfg.enabled; markDirty(); }, behavior: 'keep-open' }
@@ -2475,6 +2480,8 @@
           } }
         ] },
         { type: 'setting', label: 'Status', value: status, actions: [] },
+        { type: 'setting', label: 'Last Tool', value: lastTool, actions: [] },
+        { type: 'setting', label: 'Last Result', value: lastResult, actions: [] },
         { type: 'divider' },
         { type: 'action', label: 'Refresh Models', action: () => lmStudioRefreshModels(true), behavior: 'keep-open' },
         { type: 'action', label: 'Test Connection', action: () => lmStudioTestConnection(), behavior: 'keep-open' }
@@ -2577,6 +2584,26 @@
     }
 
     function buildLmStudioStateSnapshot() {
+      const inventory = Object.fromEntries(
+        Object.entries(state.inventory || {}).filter(([, v]) => Number.isFinite(v) && v > 0)
+      );
+      const incidents = Object.fromEntries(
+        Object.entries(state.incidents || {}).filter(([, v]) => !!v)
+      );
+      const npcs = (state.npcs || [])
+        .filter((n) => n && (n.task || npcRole(n) === 'ai' || n.onDuty))
+        .slice(0, 8)
+        .map((n) => ({
+          id: n.id,
+          name: n.name,
+          role: npcRole(n),
+          level: n.level,
+          corridor: n.corridor,
+          x: n.x,
+          onDuty: !!n.onDuty,
+          task: n.task ? { key: n.task.key, label: n.task.label, targetType: n.task.targetType } : null
+        }));
+
       return {
         timestamp: new Date().toISOString(),
         captain: {
@@ -2586,7 +2613,6 @@
           facing: state.player.facing
         },
         ship: {
-          layout: SHIP_LAYOUT,
           currentLevel: state.currentLevel,
           currentCorridor: state.currentCorridor,
           powerProfile: state.powerProfile
@@ -2601,28 +2627,19 @@
           hydroponicsOn: state.hydroponicsOn,
           shieldsOn: state.shieldsOn
         },
-        inventory: { ...state.inventory },
+        inventory,
         credits: Math.floor(state.credits),
-        incidents: { ...state.incidents },
+        incidents,
         lmStudio: {
           lastCaptainMessage: state.lmStudio.lastCaptainMessage,
           lastCaptainReply: state.lmStudio.lastCaptainReply,
           pendingCaptainMessage: state.lmStudio.pendingCaptainMessage
         },
-        npcs: (state.npcs || []).map((n) => ({
-          id: n.id,
-          name: n.name,
-          role: npcRole(n),
-          level: n.level,
-          corridor: n.corridor,
-          x: n.x,
-          onDuty: !!n.onDuty,
-          task: n.task ? { key: n.task.key, label: n.task.label, targetType: n.task.targetType } : null
-        }))
+        npcs
       };
     }
 
-    function buildLmStudioShipGraphSummary() {
+    function buildLmStudioShipGraphSummary({ maxLines = 30 } = {}) {
       const levels = SHIP_LAYOUT && SHIP_LAYOUT.levels ? SHIP_LAYOUT.levels : {};
       const levelKeys = Object.keys(levels).map((n) => Number(n)).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
       const lines = [];
@@ -2643,7 +2660,11 @@
           lines.push(`${label} ${summary}${links.length ? ` -> ${links.join(',')}` : ''}`);
         }
       }
-      return lines.length ? `Ship graph (terse):\n${lines.join('\n')}` : 'Ship graph (terse): (empty)';
+      if (!lines.length) return 'Ship graph (terse): (empty)';
+      const trimmed = lines.slice(0, Math.max(1, maxLines));
+      const extra = lines.length - trimmed.length;
+      const suffix = extra > 0 ? `\n... +${extra} more` : '';
+      return `Ship graph (terse):\n${trimmed.join('\n')}${suffix}`;
     }
 
     function buildLmStudioHereIndicator() {
@@ -2654,6 +2675,8 @@
       const buffers = (state.crewAI && state.crewAI.buffers) ? state.crewAI.buffers : {};
       return [
         'Help (use 1 tool call):',
+        '- Prefer use_station_action for station tasks; use walk_to only for repositioning.',
+        '- Layout: build_module supports corridor_key; create_elevator_link connects elevator up/down.',
         '- O2 low: toggle life_support or use_station_action life.emergency; seal o2 leak.',
         '- Rations low: toggle hydroponics then hydro.harvest; or cargo.buy.rations; feed via canteen.eat.',
         '- Credits low: cargo.sell.ore/ingot/rations; farm scrap/ore via sensors.scan or drones.salvage; refine ore -> ingot.',
@@ -2677,7 +2700,7 @@
     }
 
     const LMS_MEMORY_LIMIT = 100;
-    const LMS_CHAT_LIMIT = 30;
+    const LMS_CHAT_LIMIT = 8;
 
     function lmStudioNormalizeMemoryItem(item) {
       return {
@@ -2784,21 +2807,37 @@
       return base ? `AI - ${base}` : 'AI - Unnamed';
     }
 
+    function lmStudioActiveAiNpc() {
+      const activeId = state.lmStudio && state.lmStudio.activeAiId ? String(state.lmStudio.activeAiId) : '';
+      if (!activeId) return null;
+      const npc = (state.npcs || []).find((n) => n && n.id === activeId && npcRole(n) === 'ai');
+      return npc || null;
+    }
+
     function lmStudioSelfName() {
-      const aiNpc = (state.npcs || []).find((n) => npcRole(n) === 'ai');
+      const aiNpc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
       if (!aiNpc) return 'AI - Unnamed';
       return formatAiDisplayName(aiNpc.name);
     }
 
     function lmStudioSelfId() {
-      const aiNpc = (state.npcs || []).find((n) => npcRole(n) === 'ai');
+      const aiNpc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
       return aiNpc ? aiNpc.id : 'ai';
     }
 
     function selectNpcForLmStudio(npcId, role) {
       const list = Array.isArray(state.npcs) ? state.npcs.filter(Boolean) : [];
+      const activeAi = lmStudioActiveAiNpc();
       if (npcId) return list.find((n) => n.id === npcId) || null;
-      if (role) return list.find((n) => npcRole(n) === role && n.onDuty) || null;
+      if (role) {
+        if (role === 'ai' && activeAi) return activeAi;
+        return list.find((n) => npcRole(n) === role && n.onDuty)
+          || (role === 'ai' ? list.find((n) => npcRole(n) === 'ai') : null);
+      }
+      if (activeAi) return activeAi;
+      const anyAi = list.find((n) => npcRole(n) === 'ai' && n.onDuty)
+        || list.find((n) => npcRole(n) === 'ai');
+      if (anyAi) return anyAi;
       return list.find((n) => n.onDuty) || list[0] || null;
     }
 
@@ -2836,6 +2875,39 @@
       'cargo.sell.ore': { targetType: 'cargo', label: 'Sell Ore', perform: () => sellCargoItem('ore', 5, { respectReserve: true }) }
     };
 
+    function resolveLmsStationAction(actionKey) {
+      if (!actionKey) return { error: 'Missing action_key' };
+      const direct = LMS_STATION_ACTIONS[actionKey];
+      if (direct) return { ...direct };
+
+      const entries = Object.entries(MODULE_DEFS || {});
+      for (const [moduleType, def] of entries) {
+        const aiActions = Array.isArray(def.aiActions) ? def.aiActions : [];
+        const aiMatch = aiActions.find((entry) => entry && entry.key === actionKey);
+        if (aiMatch && typeof aiMatch.perform === 'function') {
+          return { targetType: moduleType, label: aiMatch.label || actionKey, perform: aiMatch.perform };
+        }
+
+        let actions = [];
+        if (typeof def.actions === 'function') {
+          try {
+            actions = def.actions({ moduleRef: null }) || [];
+          } catch {
+            actions = [];
+          }
+        } else if (Array.isArray(def.actions)) {
+          actions = def.actions;
+        }
+
+        const match = actions.find((entry) => entry && entry.key === actionKey);
+        if (match && typeof match.perform === 'function') {
+          return { targetType: moduleType, label: match.label || actionKey, perform: match.perform };
+        }
+      }
+
+      return { error: 'Unknown action_key' };
+    }
+
     function lmStudioResolveModuleRemoval(args) {
       const moduleUid = String(args.module_uid || '').trim();
       const moduleType = String(args.module_type || '').trim();
@@ -2870,49 +2942,93 @@
     function executeLmStudioToolCall(call) {
       if (!call || !call.name) return { ok: false, error: 'Missing tool name' };
       const args = call.args || {};
+      if (state.lmStudio) {
+        state.lmStudio.lastToolCall = {
+          name: call.name,
+          args,
+          at: Date.now()
+        };
+        lmStudioLogEvent('tool_call', { name: call.name, args });
+      }
+      let result = { ok: false, error: 'Unknown tool' };
       switch (call.name) {
         case 'walk_to': {
           const npc = selectNpcForLmStudio(args.npc_id, args.npc_role);
-          if (!npc) return { ok: false, error: 'No NPC available' };
+          if (!npc) {
+            result = { ok: false, error: 'No NPC available' };
+            break;
+          }
           if (args.corridor_key) {
             npc.destinationCorridorKey = String(args.corridor_key);
             npc.destinationType = null;
             npc.mode = 'travel';
-            return { ok: true };
+            result = { ok: true };
+            break;
           }
           if (args.target_type) {
             npc.destinationType = String(args.target_type);
             npc.destinationCorridorKey = null;
             npc.mode = 'travel';
-            return { ok: true };
+            result = { ok: true };
+            break;
           }
-          return { ok: false, error: 'Missing destination' };
+          result = { ok: false, error: 'Missing destination' };
+          break;
         }
         case 'build_module': {
           const type = String(args.module_type || '').trim();
-          if (!type) return { ok: false, error: 'Missing module_type' };
-          const ok = ensureModuleBuiltIfUnlocked(type, 'LMS');
-          return { ok };
+          const allowStructure = !!args.allow_structure;
+          const allowDuplicate = !!args.allow_duplicate || !!args.corridor_key;
+          const target = resolveCorridorKeyArg(args.corridor_key);
+          if (target.error) {
+            result = { ok: false, error: target.error };
+            break;
+          }
+          if (!type) {
+            result = { ok: false, error: 'Missing module_type' };
+            break;
+          }
+          if (allowStructure && STRUCTURE_TYPES.has(type)) {
+            const built = buildStructureModuleAt(target.level, target.corridor, type);
+            result = built;
+            break;
+          }
+          const built = target
+            ? ensureModuleBuiltAt(type, target.level, target.corridor, 'LMS', { allowDuplicate })
+            : { ok: ensureModuleBuiltIfUnlocked(type, 'LMS') };
+          result = built;
+          break;
         }
         case 'remove_module': {
           const target = lmStudioResolveModuleRemoval(args);
-          if (target.error) return { ok: false, error: target.error };
+          if (target.error) {
+            result = { ok: false, error: target.error };
+            break;
+          }
           const ok = removeModuleByUid(target.uid);
-          return { ok, error: ok ? '' : 'Remove failed' };
+          result = { ok, error: ok ? '' : 'Remove failed' };
+          break;
         }
         case 'use_station_action': {
           const actionKey = String(args.action_key || '').trim();
-          const def = LMS_STATION_ACTIONS[actionKey];
-          if (!def) return { ok: false, error: 'Unknown action_key' };
+          const def = resolveLmsStationAction(actionKey);
+          if (def.error) {
+            result = { ok: false, error: def.error };
+            break;
+          }
           const npc = selectNpcForLmStudio(args.npc_id, args.npc_role);
-          if (!npc) return { ok: false, error: 'No NPC available' };
+          if (!npc) {
+            result = { ok: false, error: 'No NPC available' };
+            break;
+          }
           assignNpcTask(npc, {
             key: actionKey,
             label: def.label || actionKey,
             targetType: def.targetType,
             onComplete: (n) => def.perform(n)
           });
-          return { ok: true };
+          result = { ok: true };
+          break;
         }
         case 'toggle_system': {
           const system = String(args.system || '').toLowerCase();
@@ -2921,37 +3037,55 @@
           else if (system === 'shields') toggleShields();
           else if (system === 'life_support') toggleLifeSupport();
           else if (system === 'hydroponics') toggleHydroponics();
-          else return { ok: false, error: 'Unknown system' };
+          else {
+            result = { ok: false, error: 'Unknown system' };
+            break;
+          }
           markDirty();
           updateHUD();
-          return { ok: true };
+          result = { ok: true };
+          break;
         }
         case 'manage_crew': {
           const action = String(args.action || '').toLowerCase();
           if (action === 'hire') {
             const role = String(args.role || 'crew').toUpperCase();
             if (role === 'AI' || role === 'A.I') {
-              return { ok: false, error: 'AI role can only be hired by a human.' };
+              result = { ok: false, error: 'AI role can only be hired by a human.' };
+              break;
             }
             addCrewMember(role);
             updateHUD();
-            return { ok: true };
+            result = { ok: true };
+            break;
           }
           if (action === 'dismiss') {
-            if (!args.npc_id) return { ok: false, error: 'npc_id required for dismiss' };
+            if (!args.npc_id) {
+              result = { ok: false, error: 'npc_id required for dismiss' };
+              break;
+            }
             const ok = removeCrewMemberById(args.npc_id);
             if (ok) updateHUD();
-            return { ok };
+            result = { ok };
+            break;
           }
-          return { ok: false, error: 'Unknown crew action' };
+          result = { ok: false, error: 'Unknown crew action' };
+          break;
         }
         case 'speak_to_captain': {
           const message = String(args.message || '').trim();
-          if (!message) return { ok: false, error: 'Message required' };
+          if (!message) {
+            result = { ok: false, error: 'Message required' };
+            break;
+          }
           const npc = selectNpcForLmStudio(args.npc_id, args.npc_role);
-          if (!npc) return { ok: false, error: 'No NPC available' };
+          if (!npc) {
+            result = { ok: false, error: 'No NPC available' };
+            break;
+          }
           if (state.lmStudio.pendingCaptainMessage) {
-            return { ok: false, error: 'Captain already has a pending message' };
+            result = { ok: false, error: 'Captain already has a pending message' };
+            break;
           }
           const senderName = npcRole(npc) === 'ai' ? formatAiDisplayName(npc.name) : (npc.name || 'AI');
           lmStudioChatAdd(npc.id, 'ai', message, senderName);
@@ -2969,261 +3103,421 @@
           npc.destinationCorridorKey = corridorKey(state.currentLevel, state.currentCorridor);
           npc.destinationType = null;
           npc.mode = 'travel';
-          return { ok: true };
+          result = { ok: true };
+          break;
         }
         case 'speak_to_ai': {
           const message = String(args.message || '').trim();
-          if (!message) return { ok: false, error: 'Message required' };
+          if (!message) {
+            result = { ok: false, error: 'Message required' };
+            break;
+          }
           const sender = selectNpcForLmStudio(args.npc_id, args.npc_role);
-          if (!sender) return { ok: false, error: 'No NPC available' };
-          if (npcRole(sender) !== 'ai') return { ok: false, error: 'Sender must be AI role' };
+          if (!sender) {
+            result = { ok: false, error: 'No NPC available' };
+            break;
+          }
+          if (npcRole(sender) !== 'ai') {
+            result = { ok: false, error: 'Sender must be AI role' };
+            break;
+          }
           const target = lmStudioResolveTargetAi(args, sender.id);
-          if (!target) return { ok: false, error: 'No other AI available' };
+          if (!target) {
+            result = { ok: false, error: 'No other AI available' };
+            break;
+          }
           const senderName = npcRole(sender) === 'ai' ? formatAiDisplayName(sender.name) : (sender.name || 'AI');
           lmStudioChatAdd(sender.id, 'ai', message, senderName);
           lmStudioChatAdd(target.id, 'ai', message, senderName);
           markDirty();
-          return { ok: true };
+          result = { ok: true };
+          break;
         }
         case 'memory_add': {
           const text = String(args.text || '').trim();
           const pinned = !!args.pinned;
           const item = lmStudioMemoryAdd(text, pinned);
-          if (!item) return { ok: false, error: 'Empty memory text' };
-          return { ok: true, id: item.id };
+          if (!item) {
+            result = { ok: false, error: 'Empty memory text' };
+            break;
+          }
+          result = { ok: true, id: item.id };
+          break;
         }
         case 'memory_delete': {
           const id = String(args.id || '').trim();
-          if (!id) return { ok: false, error: 'Missing id' };
+          if (!id) {
+            result = { ok: false, error: 'Missing id' };
+            break;
+          }
           const ok = lmStudioMemoryDelete(id);
-          return { ok };
+          result = { ok };
+          break;
         }
         case 'memory_pin': {
           const id = String(args.id || '').trim();
-          if (!id) return { ok: false, error: 'Missing id' };
+          if (!id) {
+            result = { ok: false, error: 'Missing id' };
+            break;
+          }
           const ok = lmStudioMemoryPin(id, true);
-          return { ok };
+          result = { ok };
+          break;
         }
         case 'memory_unpin': {
           const id = String(args.id || '').trim();
-          if (!id) return { ok: false, error: 'Missing id' };
+          if (!id) {
+            result = { ok: false, error: 'Missing id' };
+            break;
+          }
           const ok = lmStudioMemoryPin(id, false);
-          return { ok };
+          result = { ok };
+          break;
         }
         case 'memory_search': {
           const query = String(args.query || '').trim();
-          if (!query) return { ok: false, error: 'Missing query' };
+          if (!query) {
+            result = { ok: false, error: 'Missing query' };
+            break;
+          }
           const results = lmStudioMemorySearch(query);
           state.lmStudio.lastMemorySearch = results.slice(0, 20);
-          return { ok: true, count: results.length };
+          result = { ok: true, count: results.length };
+          break;
         }
         case 'rename_self': {
           const rawName = String(args.name || '').trim();
           const cleaned = normalizeAiNamePart(rawName);
-          if (!cleaned) return { ok: false, error: 'Missing name' };
+          if (!cleaned) {
+            result = { ok: false, error: 'Missing name' };
+            break;
+          }
           const npc = selectNpcForLmStudio(args.npc_id, 'ai');
-          if (!npc) return { ok: false, error: 'No AI NPC available' };
-          if (npcRole(npc) !== 'ai') return { ok: false, error: 'Target is not AI role' };
+          if (!npc) {
+            result = { ok: false, error: 'No AI NPC available' };
+            break;
+          }
+          if (npcRole(npc) !== 'ai') {
+            result = { ok: false, error: 'Target is not AI role' };
+            break;
+          }
           npc.name = formatAiDisplayName(cleaned);
           markDirty();
-          return { ok: true };
+          result = { ok: true };
+          break;
         }
-        default:
-          return { ok: false, error: 'Unknown tool' };
+        case 'create_elevator_link': {
+          const direction = String(args.direction || '').toLowerCase();
+          if (direction !== 'up' && direction !== 'down') {
+            result = { ok: false, error: 'direction must be up or down' };
+            break;
+          }
+          const target = resolveCorridorKeyArg(args.corridor_key);
+          if (target.error) {
+            result = { ok: false, error: target.error };
+            break;
+          }
+          let elevatorModule = null;
+          if (args.module_uid) elevatorModule = findModuleByUid(String(args.module_uid));
+          if (!elevatorModule) elevatorModule = findModuleByType(target.level, target.corridor, 'elevator');
+          if (!elevatorModule && args.allow_build) {
+            const built = buildStructureModuleAt(target.level, target.corridor, 'elevator');
+            if (built.ok && built.module) elevatorModule = built.module;
+          }
+          if (!elevatorModule) {
+            result = { ok: false, error: 'No elevator module in corridor' };
+            break;
+          }
+          const link = createLinkedElevatorAt(target.level, target.corridor, elevatorModule, direction);
+          result = link ? { ok: true } : { ok: false, error: 'Link failed' };
+          break;
+        }
       }
+      if (state.lmStudio) {
+        state.lmStudio.lastToolResult = {
+          ok: !!result.ok,
+          error: result.error || '',
+          at: Date.now()
+        };
+        lmStudioLogEvent('tool_result', { name: call.name, ok: !!result.ok, error: result.error || '' });
+      }
+      return result;
     }
 
     function lmStudioToolDefinitions() {
       return [
         {
           type: 'function',
-          name: 'walk_to',
-          description: 'Move an NPC to a corridor or module type.',
-          parameters: {
-            type: 'object',
-            properties: {
-              npc_id: { type: 'string', description: 'NPC id to move (optional).' },
-              npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
-              target_type: { type: 'string', description: 'Module type to walk to (e.g., cargo, power, hydro).' },
-              corridor_key: { type: 'string', description: 'Corridor key like "1:A".' }
+          function: {
+            name: 'walk_to',
+            description: 'Move an NPC to a corridor or module type.',
+            parameters: {
+              type: 'object',
+              properties: {
+                npc_id: { type: 'string', description: 'NPC id to move (optional).' },
+                npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
+                target_type: { type: 'string', description: 'Module type to walk to (e.g., cargo, power, hydro).' },
+                corridor_key: { type: 'string', description: 'Corridor key like "1:A".' }
+              }
             }
           }
         },
         {
           type: 'function',
-          name: 'build_module',
-          description: 'Build a ship module if unlocked and possible.',
-          parameters: {
-            type: 'object',
-            properties: {
-              module_type: { type: 'string', description: 'Module type to build.' }
-            },
-            required: ['module_type']
-          }
-        },
-        {
-          type: 'function',
-          name: 'remove_module',
-          description: 'Remove a ship module by uid or by type (defaults to current corridor).',
-          parameters: {
-            type: 'object',
-            properties: {
-              module_uid: { type: 'string', description: 'Exact module uid to remove (preferred).' },
-              module_type: { type: 'string', description: 'Module type to remove if uid omitted.' },
-              corridor_key: { type: 'string', description: 'Optional corridor key like "1:A" to search.' },
-              allow_structure: { type: 'boolean', description: 'Allow removal of doorway/elevator/empty modules.' }
+          function: {
+            name: 'build_module',
+            description: 'Build a ship module if unlocked and possible.',
+            parameters: {
+              type: 'object',
+              properties: {
+                module_type: { type: 'string', description: 'Module type to build.' },
+                corridor_key: { type: 'string', description: 'Optional corridor key like "1:A" to build into.' },
+                allow_structure: { type: 'boolean', description: 'Allow doorway/elevator/empty modules to be built.' },
+                allow_duplicate: { type: 'boolean', description: 'Allow building even if module exists elsewhere.' }
+              },
+              required: ['module_type']
             }
           }
         },
         {
           type: 'function',
-          name: 'use_station_action',
-          description: 'Send an NPC to a station and perform an action on arrival.',
-          parameters: {
-            type: 'object',
-            properties: {
-              npc_id: { type: 'string', description: 'NPC id to assign (optional).' },
-              npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
-              action_key: { type: 'string', description: 'Action key (e.g., hydro.harvest, refinery.refine, cargo.buy.rations).' }
-            },
-            required: ['action_key']
+          function: {
+            name: 'create_elevator_link',
+            description: 'Create an elevator link up or down from a corridor elevator module.',
+            parameters: {
+              type: 'object',
+              properties: {
+                corridor_key: { type: 'string', description: 'Optional corridor key like "1:A" to target.' },
+                module_uid: { type: 'string', description: 'Optional elevator module uid to use.' },
+                direction: { type: 'string', enum: ['up', 'down'] },
+                allow_build: { type: 'boolean', description: 'Build an elevator module if missing.' }
+              },
+              required: ['direction']
+            }
           }
         },
         {
           type: 'function',
-          name: 'toggle_system',
-          description: 'Toggle ship systems like lights, engine, shields, life support, hydroponics.',
-          parameters: {
-            type: 'object',
-            properties: {
-              system: { type: 'string', enum: ['lights', 'engine', 'shields', 'life_support', 'hydroponics'] }
-            },
-            required: ['system']
+          function: {
+            name: 'remove_module',
+            description: 'Remove a ship module by uid or by type (defaults to current corridor).',
+            parameters: {
+              type: 'object',
+              properties: {
+                module_uid: { type: 'string', description: 'Exact module uid to remove (preferred).' },
+                module_type: { type: 'string', description: 'Module type to remove if uid omitted.' },
+                corridor_key: { type: 'string', description: 'Optional corridor key like "1:A" to search.' },
+                allow_structure: { type: 'boolean', description: 'Allow removal of doorway/elevator/empty modules.' }
+              }
+            }
           }
         },
         {
           type: 'function',
-          name: 'manage_crew',
-          description: 'Hire or dismiss crew members.',
-          parameters: {
-            type: 'object',
-            properties: {
-              action: { type: 'string', enum: ['hire', 'dismiss'] },
-              role: { type: 'string', description: 'Role name to hire (optional).' },
-              npc_id: { type: 'string', description: 'NPC id to dismiss (required for dismiss).' }
-            },
-            required: ['action']
+          function: {
+            name: 'use_station_action',
+            description: 'Send an NPC to a station and perform an action on arrival.',
+            parameters: {
+              type: 'object',
+              properties: {
+                npc_id: { type: 'string', description: 'NPC id to assign (optional).' },
+                npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
+                action_key: { type: 'string', description: 'Action key (e.g., hydro.harvest, refinery.refine, cargo.buy.rations).' }
+              },
+              required: ['action_key']
+            }
           }
         },
         {
           type: 'function',
-          name: 'speak_to_captain',
-          description: 'Walk an NPC to the captain and deliver a message, then wait for reply.',
-          parameters: {
-            type: 'object',
-            properties: {
-              npc_id: { type: 'string', description: 'NPC id to send (optional).' },
-              npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
-              message: { type: 'string', description: 'Message to deliver to the captain.' }
-            },
-            required: ['message']
+          function: {
+            name: 'toggle_system',
+            description: 'Toggle ship systems like lights, engine, shields, life support, hydroponics.',
+            parameters: {
+              type: 'object',
+              properties: {
+                system: { type: 'string', enum: ['lights', 'engine', 'shields', 'life_support', 'hydroponics'] }
+              },
+              required: ['system']
+            }
           }
         },
         {
           type: 'function',
-          name: 'speak_to_ai',
-          description: 'Send a message to another AI crew member.',
-          parameters: {
-            type: 'object',
-            properties: {
-              npc_id: { type: 'string', description: 'Sender NPC id (optional).' },
-              npc_role: { type: 'string', description: 'Sender role if npc_id omitted (optional).' },
-              target_ai_id: { type: 'string', description: 'Target AI NPC id (optional).' },
-              target_ai_name: { type: 'string', description: 'Target AI name to match (optional).' },
-              message: { type: 'string', description: 'Message to send.' }
-            },
-            required: ['message']
+          function: {
+            name: 'manage_crew',
+            description: 'Hire or dismiss crew members.',
+            parameters: {
+              type: 'object',
+              properties: {
+                action: { type: 'string', enum: ['hire', 'dismiss'] },
+                role: { type: 'string', description: 'Role name to hire (optional).' },
+                npc_id: { type: 'string', description: 'NPC id to dismiss (required for dismiss).' }
+              },
+              required: ['action']
+            }
           }
         },
         {
           type: 'function',
-          name: 'memory_add',
-          description: 'Add a memory note for the AI.',
-          parameters: {
-            type: 'object',
-            properties: {
-              text: { type: 'string', description: 'Memory text.' },
-              pinned: { type: 'boolean', description: 'Whether to pin this memory.' }
-            },
-            required: ['text']
+          function: {
+            name: 'speak_to_captain',
+            description: 'Walk an NPC to the captain and deliver a message, then wait for reply.',
+            parameters: {
+              type: 'object',
+              properties: {
+                npc_id: { type: 'string', description: 'NPC id to send (optional).' },
+                npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
+                message: { type: 'string', description: 'Message to deliver to the captain.' }
+              },
+              required: ['message']
+            }
           }
         },
         {
           type: 'function',
-          name: 'memory_delete',
-          description: 'Delete a memory note by id.',
-          parameters: {
-            type: 'object',
-            properties: {
-              id: { type: 'string', description: 'Memory id to delete.' }
-            },
-            required: ['id']
+          function: {
+            name: 'speak_to_ai',
+            description: 'Send a message to another AI crew member.',
+            parameters: {
+              type: 'object',
+              properties: {
+                npc_id: { type: 'string', description: 'Sender NPC id (optional).' },
+                npc_role: { type: 'string', description: 'Sender role if npc_id omitted (optional).' },
+                target_ai_id: { type: 'string', description: 'Target AI NPC id (optional).' },
+                target_ai_name: { type: 'string', description: 'Target AI name to match (optional).' },
+                message: { type: 'string', description: 'Message to send.' }
+              },
+              required: ['message']
+            }
           }
         },
         {
           type: 'function',
-          name: 'memory_pin',
-          description: 'Pin a memory note by id.',
-          parameters: {
-            type: 'object',
-            properties: {
-              id: { type: 'string', description: 'Memory id to pin.' }
-            },
-            required: ['id']
+          function: {
+            name: 'memory_add',
+            description: 'Add a memory note for the AI.',
+            parameters: {
+              type: 'object',
+              properties: {
+                text: { type: 'string', description: 'Memory text.' },
+                pinned: { type: 'boolean', description: 'Whether to pin this memory.' }
+              },
+              required: ['text']
+            }
           }
         },
         {
           type: 'function',
-          name: 'memory_unpin',
-          description: 'Unpin a memory note by id.',
-          parameters: {
-            type: 'object',
-            properties: {
-              id: { type: 'string', description: 'Memory id to unpin.' }
-            },
-            required: ['id']
+          function: {
+            name: 'memory_delete',
+            description: 'Delete a memory note by id.',
+            parameters: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: 'Memory id to delete.' }
+              },
+              required: ['id']
+            }
           }
         },
         {
           type: 'function',
-          name: 'memory_search',
-          description: 'Search memory notes by keyword; results appear in the next prompt.',
-          parameters: {
-            type: 'object',
-            properties: {
-              query: { type: 'string', description: 'Search query.' }
-            },
-            required: ['query']
+          function: {
+            name: 'memory_pin',
+            description: 'Pin a memory note by id.',
+            parameters: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: 'Memory id to pin.' }
+              },
+              required: ['id']
+            }
           }
         },
         {
           type: 'function',
-          name: 'rename_self',
-          description: 'Assign a self-chosen name to the AI crew member.',
-          parameters: {
-            type: 'object',
-            properties: {
-              name: { type: 'string', description: 'Name only; do not include the "AI -" prefix.' },
-              npc_id: { type: 'string', description: 'Optional AI npc id.' }
-            },
-            required: ['name']
+          function: {
+            name: 'memory_unpin',
+            description: 'Unpin a memory note by id.',
+            parameters: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: 'Memory id to unpin.' }
+              },
+              required: ['id']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'memory_search',
+            description: 'Search memory notes by keyword; results appear in the next prompt.',
+            parameters: {
+              type: 'object',
+              properties: {
+                query: { type: 'string', description: 'Search query.' }
+              },
+              required: ['query']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'rename_self',
+            description: 'Assign a self-chosen name to the AI crew member.',
+            parameters: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Name only; do not include the "AI -" prefix.' },
+                npc_id: { type: 'string', description: 'Optional AI npc id.' }
+              },
+              required: ['name']
+            }
           }
         }
       ];
     }
 
+    function lmStudioToolDefinitionsForResponses() {
+      return lmStudioToolDefinitions().map((tool) => {
+        if (!tool || tool.type !== 'function' || !tool.function) return tool;
+        return {
+          type: tool.type,
+          name: tool.function.name,
+          description: tool.function.description,
+          parameters: tool.function.parameters
+        };
+      });
+    }
+
     function extractLmStudioToolCalls(payload) {
       const calls = [];
+      if (payload && Array.isArray(payload.choices)) {
+        for (const choice of payload.choices) {
+          const msg = choice && choice.message ? choice.message : null;
+          if (msg && Array.isArray(msg.tool_calls)) {
+            for (const tool of msg.tool_calls) {
+              const name = tool.function && tool.function.name;
+              let args = tool.function && tool.function.arguments;
+              if (typeof args === 'string') {
+                try { args = JSON.parse(args); } catch { args = {}; }
+              }
+              if (name) calls.push({ name, args });
+            }
+          }
+          if (msg && msg.function_call && msg.function_call.name) {
+            let args = msg.function_call.arguments;
+            if (typeof args === 'string') {
+              try { args = JSON.parse(args); } catch { args = {}; }
+            }
+            calls.push({ name: msg.function_call.name, args });
+          }
+        }
+        return calls;
+      }
       const output = Array.isArray(payload.output) ? payload.output : [];
       for (const item of output) {
         if (item.type === 'tool_call' || item.type === 'function_call') {
@@ -3258,6 +3552,76 @@
       return calls;
     }
 
+    async function readResponseTextSafe(res) {
+      try {
+        return await res.text();
+      } catch {
+        return '';
+      }
+    }
+
+    async function lmStudioReadResponsePayload(res) {
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('text/event-stream')) {
+        const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+        if (!reader) return { output: [], output_text: '' };
+        const decoder = new TextDecoder();
+        let buffer = '';
+        const payload = { output: [], output_text: '' };
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (let line of lines) {
+            line = line.trim();
+            if (!line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === '[DONE]') {
+              if (data === '[DONE]') return payload;
+              continue;
+            }
+            try {
+              const json = JSON.parse(data);
+              if (typeof json.output_text === 'string') payload.output_text += json.output_text;
+              if (Array.isArray(json.output)) payload.output.push(...json.output);
+              else if (json.output && typeof json.output === 'object') payload.output.push(json.output);
+              if (payload.output.some((item) => item && (item.type === 'tool_call' || item.type === 'function_call'))) {
+                return payload;
+              }
+            } catch {
+              continue;
+            }
+          }
+        }
+        return payload;
+      }
+      return res.json();
+    }
+
+    function lmStudioExtractOutputText(payload) {
+      if (payload && typeof payload.output_text === 'string' && payload.output_text) {
+        return payload.output_text;
+      }
+      const output = Array.isArray(payload && payload.output) ? payload.output : [];
+      const fragments = [];
+      for (const item of output) {
+        if (!item || item.type !== 'message') continue;
+        const content = Array.isArray(item.content) ? item.content : [];
+        for (const chunk of content) {
+          if (!chunk) continue;
+          if (chunk.type === 'output_text' && typeof chunk.text === 'string') {
+            fragments.push(chunk.text);
+          }
+          if (chunk.type === 'text' && typeof chunk.text === 'string') {
+            fragments.push(chunk.text);
+          }
+        }
+      }
+      return fragments.join('');
+    }
+
     async function lmStudioTick() {
       ensureLmStudioConfig();
       const cfg = state.lmStudio;
@@ -3269,9 +3633,11 @@
       cfg.lastCallAt = now;
       cfg.inflight = true;
       try {
+        lmStudioLogEvent('tick_start', { at: now, activeModelKey: cfg.activeModelKey || '' });
         const modelKey = await lmStudioEnsureLoadedModel();
         if (!modelKey) {
           cfg.lastError = 'No model loaded.';
+          lmStudioLogEvent('tick_error', { error: cfg.lastError });
           return;
         }
 
@@ -3287,29 +3653,73 @@
         const hereIndicator = buildLmStudioHereIndicator();
         const memoryBlocks = [pinnedMemory, searchMemory].filter(Boolean).join('\n\n');
         const contextBlocks = [chatHistory, memoryBlocks].filter(Boolean).join('\n\n');
-        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool. If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix).\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${shipGraph}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
+        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool. If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix). If you cannot call tools, return ONLY JSON like {\"tool\":\"walk_to\",\"args\":{...}}.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${shipGraph}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
 
-        const res = await lmStudioFetch('/v1/responses', {
-          method: 'POST',
-          body: JSON.stringify({
-            model: modelKey,
-            input,
-            tools: lmStudioToolDefinitions(),
-            tool_choice: 'auto'
-          })
+        const withTimeout = async (path, body) => {
+          const controller = new AbortController();
+          const requestStart = Date.now();
+          const timeoutId = setTimeout(() => {
+            lmStudioLogEvent('request_abort', { afterMs: Date.now() - requestStart, path });
+            controller.abort();
+          }, 120000);
+          controller.signal.addEventListener('abort', () => {
+            lmStudioLogEvent('request_aborted', { afterMs: Date.now() - requestStart, path });
+          }, { once: true });
+          lmStudioLogEvent('request_start', { model: modelKey, inputChars: input.length, path });
+          const res = await lmStudioFetch(path, {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+          lmStudioLogEvent('request_status', { status: res.status, ok: res.ok, contentType: res.headers.get('content-type') || '', path });
+          return res;
+        };
+
+        const res = await withTimeout('/v1/responses', {
+          model: modelKey,
+          input,
+          tools: lmStudioToolDefinitionsForResponses(),
+          tool_choice: 'auto',
+          stream: false,
+          max_output_tokens: 256
         });
         if (!res.ok) {
+          const errorBody = await readResponseTextSafe(res);
+          lmStudioLogEvent('request_error_body', {
+            path: '/v1/responses',
+            status: res.status,
+            body: errorBody.slice(0, 800)
+          });
           cfg.lastError = `LLM request failed (${res.status})`;
+          lmStudioLogEvent('tick_error', { error: cfg.lastError });
           return;
         }
-        const payload = await res.json();
+        const payload = await lmStudioReadResponsePayload(res);
+        const outputText = lmStudioExtractOutputText(payload);
+        if (!payload.output_text && outputText) {
+          payload.output_text = outputText;
+        }
+        lmStudioLogEvent('llm_response', {
+          outputText: outputText.slice(0, 800),
+          outputTypes: Array.isArray(payload.output) ? payload.output.map((o) => o && o.type).filter(Boolean) : [],
+          choiceCount: Array.isArray(payload.choices) ? payload.choices.length : 0
+        });
         const calls = extractLmStudioToolCalls(payload);
         if (calls.length) {
           const result = executeLmStudioToolCall(calls[0]);
           cfg.lastError = result && result.ok === false ? (result.error || 'Tool failed') : '';
+          lmStudioLogEvent('tool_selected', { name: calls[0].name, ok: !!result.ok });
+        } else {
+          lmStudioLogEvent('tool_call', { name: '', args: {}, error: 'No tool calls returned' });
         }
       } catch (err) {
         cfg.lastError = err ? String(err.message || err) : 'Unknown error';
+        lmStudioLogEvent('request_error', {
+          name: err && err.name ? String(err.name) : 'Error',
+          message: cfg.lastError
+        });
+        lmStudioLogEvent('tick_error', { error: cfg.lastError });
       } finally {
         cfg.inflight = false;
       }
@@ -3491,6 +3901,44 @@
 
     function listLockedAdvancedModuleTypes() {
       return Object.keys(MODULE_DEFS).filter((t) => !isModuleUnlocked(t) && !['rear', 'front', 'doorway', 'elevator', 'empty'].includes(t));
+    }
+
+    function resolveCorridorKeyArg(corridorKeyArg) {
+      if (!corridorKeyArg) return { level: state.currentLevel, corridor: state.currentCorridor };
+      const parsed = parseCorridorKey(corridorKeyArg);
+      if (!getCorridorDef(parsed.level, parsed.corridor)) return { error: 'Unknown corridor_key' };
+      return { level: parsed.level, corridor: parsed.corridor };
+    }
+
+    function buildStructureModuleAt(level, corridor, type) {
+      const def = getCorridorDef(level, corridor);
+      if (!def) return { ok: false, error: 'Unknown corridor' };
+      const modules = getModulesForCorridor(level, corridor);
+      const index = modules.length;
+      const ok = insertModuleAtInCorridor(level, corridor, index, { type, label: MODULE_DEFS[type] ? MODULE_DEFS[type].label : type });
+      if (!ok) return { ok: false, error: 'Insert failed' };
+      const refreshed = getModulesForCorridor(level, corridor);
+      const inserted = refreshed[index];
+      if (type === 'elevator' && inserted && !inserted.elevator) inserted.elevator = {};
+      queueNotification('FABRICATOR', `${MODULE_DEFS[type] ? MODULE_DEFS[type].label : type} fabricated (LMS).`);
+      updateDoorwayLabelsForAll();
+      if (level === state.currentLevel && corridor === state.currentCorridor) relayoutCorridor();
+      updateHUD();
+      return { ok: true, module: inserted };
+    }
+
+    function ensureModuleBuiltAt(type, level, corridor, source = 'CREW', { allowDuplicate = false } = {}) {
+      if (!getCorridorDef(level, corridor)) return { ok: false, error: 'Unknown corridor' };
+      if (!allowDuplicate && corridorsWithModuleType(type).length) return { ok: true, already: true };
+      if (!isModuleUnlocked(type)) return { ok: false, error: 'Module locked' };
+      if (type !== 'fabricator' && !corridorsWithModuleType('fabricator').length) return { ok: false, error: 'Fabricator required' };
+      const modules = getModulesForCorridor(level, corridor);
+      insertModuleAtInCorridor(level, corridor, modules.length, { type, label: MODULE_DEFS[type] ? MODULE_DEFS[type].label : type });
+      queueNotification('FABRICATOR', `${MODULE_DEFS[type] ? MODULE_DEFS[type].label : type} fabricated (${String(source)}).`);
+      updateDoorwayLabelsForAll();
+      if (level === state.currentLevel && corridor === state.currentCorridor) relayoutCorridor();
+      updateHUD();
+      return { ok: true };
     }
 
     // ============================================================================
@@ -4456,8 +4904,12 @@
     }
 
     function createLinkedElevator(fromModule, direction) {
+      return createLinkedElevatorAt(state.currentLevel, state.currentCorridor, fromModule, direction);
+    }
+
+    function createLinkedElevatorAt(baseLevel, baseCorridor, fromModule, direction) {
       const delta = direction === 'up' ? 1 : -1;
-      const level = state.currentLevel + delta;
+      const level = baseLevel + delta;
       const corridorId = nextCorridorId(level);
       const newCorridor = ensureCorridor(level, corridorId, {
         name: `${formatDeckName(level)} · Corridor ${corridorId}`,
@@ -4465,7 +4917,7 @@
       });
 
       const elevatorBack = { type: 'elevator', label: 'Elevator', uid: newUid(), elevator: {} };
-      elevatorBack.elevator[direction === 'up' ? 'down' : 'up'] = { level: state.currentLevel, corridor: state.currentCorridor };
+      elevatorBack.elevator[direction === 'up' ? 'down' : 'up'] = { level: baseLevel, corridor: baseCorridor };
       newCorridor.modules.push(elevatorBack);
 
       if (!fromModule.elevator) fromModule.elevator = {};
@@ -6511,7 +6963,9 @@
       for (const npc of state.npcs) {
         if (npc.onDuty === undefined) npc.onDuty = true;
         if (!Number.isFinite(npc.hunger)) npc.hunger = 0;
-        if (!npc.onDuty || npc.paused) continue;
+        const isAi = npcRole(npc) === 'ai';
+        if (npc.paused) continue;
+        if (!npc.onDuty && !isAi) continue;
         if (!npc.mode) npc.mode = 'idle';
         if (!Number.isFinite(npc.thinkTimer)) npc.thinkTimer = 0;
 
@@ -7191,7 +7645,8 @@
         pendingCaptainMessage: null,
         memory: [],
         lastMemorySearch: [],
-        chatHistory: {}
+        chatHistory: {},
+        toolLog: []
       };
       if (!state.lmStudio || typeof state.lmStudio !== 'object') state.lmStudio = { ...defaults };
       for (const k of Object.keys(defaults)) {
@@ -7202,7 +7657,7 @@
       state.lmStudio.apiKey = String(state.lmStudio.apiKey || '').trim();
       state.lmStudio.autoLoadModel = String(state.lmStudio.autoLoadModel || defaults.autoLoadModel).trim() || defaults.autoLoadModel;
       if (!Number.isFinite(state.lmStudio.lastCallAt)) state.lmStudio.lastCallAt = 0;
-      state.lmStudio.inflight = false;
+      if (typeof state.lmStudio.inflight !== 'boolean') state.lmStudio.inflight = false;
       if (typeof state.lmStudio.lastError !== 'string') state.lmStudio.lastError = '';
       if (typeof state.lmStudio.lastCaptainMessage !== 'string') state.lmStudio.lastCaptainMessage = '';
       if (typeof state.lmStudio.lastCaptainReply !== 'string') state.lmStudio.lastCaptainReply = '';
@@ -7213,6 +7668,25 @@
       if (!Array.isArray(state.lmStudio.lastMemorySearch)) state.lmStudio.lastMemorySearch = [];
       if (!state.lmStudio.chatHistory || typeof state.lmStudio.chatHistory !== 'object') {
         state.lmStudio.chatHistory = {};
+      }
+      if (!Array.isArray(state.lmStudio.toolLog)) state.lmStudio.toolLog = [];
+    }
+
+    function lmStudioLogEvent(kind, payload) {
+      if (!state.lmStudio) return;
+      const entry = {
+        kind: String(kind || 'event'),
+        at: Date.now(),
+        payload
+      };
+      state.lmStudio.toolLog.push(entry);
+      if (state.lmStudio.toolLog.length > 60) {
+        state.lmStudio.toolLog = state.lmStudio.toolLog.slice(-60);
+      }
+      if (typeof console !== 'undefined') {
+        if (typeof console.log === 'function') {
+          console.log('[LMStudio]', entry.kind, entry.payload);
+        }
       }
     }
 
@@ -8481,6 +8955,7 @@
 
     function openCaptainMessagePanel(message, npcName = 'AI', aiId = null) {
       const prompt = String(message || '').trim();
+      if (aiId && state.lmStudio) state.lmStudio.activeAiId = aiId;
       state.lmStudio.lastCaptainMessage = prompt;
       state.lmStudio.pendingCaptainMessage = { message: prompt, from: npcName, at: Date.now(), aiId };
       const description = `${npcName.toUpperCase()}:\n${prompt}\n\nType your reply and press Say:`;
@@ -8557,6 +9032,7 @@
                   showMessage('MESSAGE AI', 'Message cannot be empty.');
                   return;
                 }
+                if (state.lmStudio) state.lmStudio.activeAiId = npc.id;
                 lmStudioChatAdd(npc.id, 'captain', message, 'CAPTAIN');
                 markDirty();
                 closePanel();
@@ -8914,6 +9390,9 @@
           baseUrl: state.lmStudio.baseUrl,
           apiKey: state.lmStudio.apiKey,
           autoLoadModel: state.lmStudio.autoLoadModel,
+          activeAiId: state.lmStudio.activeAiId || null,
+          lastToolCall: state.lmStudio.lastToolCall || null,
+          lastToolResult: state.lmStudio.lastToolResult || null,
           memory: Array.isArray(state.lmStudio.memory) ? state.lmStudio.memory : [],
           chatHistory: state.lmStudio.chatHistory && typeof state.lmStudio.chatHistory === 'object'
             ? state.lmStudio.chatHistory
@@ -9006,6 +9485,10 @@
             destinationCorridorKey: n.destinationCorridorKey || null,
             log: []
           }));
+        }
+        if (state.lmStudio && state.lmStudio.activeAiId) {
+          const active = (state.npcs || []).find((n) => n && n.id === state.lmStudio.activeAiId && npcRole(n) === 'ai');
+          if (!active) state.lmStudio.activeAiId = null;
         }
         if (!state.inventory || typeof state.inventory !== 'object') state.inventory = { ore: 0, scrap: 0, ingot: 0, filter: 1, medkit: 0, droneParts: 0, rations: 0 };
         if (!state.travel || typeof state.travel !== 'object') state.travel = { active: false, from: currentSystem(), to: null, remaining: 0, total: 0 };
