@@ -775,6 +775,16 @@
           targetCrew: 3,
           buffers: { ore: 0, scrap: 4, ingot: 4, filter: 1, medkit: 1, droneParts: 1, rations: 2 }
         },
+      lmStudio: {
+        enabled: false,
+        baseUrl: 'http://localhost:1234',
+        apiKey: '',
+        autoLoadModel: 'zai-org/glm-4.6v-flash',
+        activeModelKey: '',
+        lastCallAt: 0,
+        inflight: false,
+        lastError: ''
+      },
       meta: { inventoryAcc: 0, powerShedAt: 0, autoAt: 0 },
       
       // NPCs
@@ -1158,6 +1168,17 @@
         ]
       },
 
+      // LM Studio Settings (submenu)
+      lmStudioSettings: {
+        isRoot: false,
+        title: 'LM STUDIO',
+        overview: 'Configure local LM Studio connection and NPC AI:',
+        itemBuilder: 'buildLmStudioSettingsItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
       // New Game Confirmation (submenu)
       newGameConfirm: {
         isRoot: false,
@@ -1221,6 +1242,7 @@
       buildInsertModuleItems,
       buildPowerItems,
       buildGameMenuItems,
+      buildLmStudioSettingsItems,
       
       // Action handlers
       copyDebugJson,
@@ -2183,7 +2205,7 @@
       const maxCrew = MAX_CREW;
       const crewCount = Array.isArray(state.npcs) ? state.npcs.length : 0;
       const fee = 30;
-      const candidates = ['CREW', 'TECH', 'MEDIC', 'PILOT', 'ENGINEER', 'SCIENTIST', 'QUARTERMASTER', 'SECURITY', 'SPECIALIST'];
+      const candidates = ['CREW', 'TECH', 'MEDIC', 'PILOT', 'ENGINEER', 'SCIENTIST', 'QUARTERMASTER', 'SECURITY', 'SPECIALIST', 'AI'];
       const counts = {};
       for (const n of (state.npcs || [])) {
         const role = npcRole(n);
@@ -2325,7 +2347,7 @@
         let candidates = npcs;
         if (qmCount <= 1) candidates = npcs.filter((n) => npcRole(n) !== 'quartermaster');
         if (!candidates.length) candidates = npcs;
-        const rolePriority = { crew: 0, security: 1, specialist: 2, scientist: 3, tech: 4, engineer: 5, medic: 6, pilot: 7, quartermaster: 8 };
+        const rolePriority = { crew: 0, security: 1, specialist: 2, scientist: 3, tech: 4, engineer: 5, medic: 6, pilot: 7, quartermaster: 8, ai: 9 };
         candidates.sort((a, b) => {
           const pa = rolePriority[npcRole(a)] ?? 9;
           const pb = rolePriority[npcRole(b)] ?? 9;
@@ -2378,11 +2400,462 @@
           danger: true,
           action: () => openMenu('newGameConfirm')
         },
+        { type: 'action', label: 'LM Studio Settings', action: () => openMenu('lmStudioSettings') },
         { type: 'action', label: 'Export JSON', action: openExportPanel },
         { type: 'action', label: 'Import JSON', action: openImportPanel },
         { type: 'divider' },
         { type: 'action', label: 'Exit Game', danger: true, action: () => { window.location.href = 'index.html'; } }
       ];
+    }
+
+    function buildLmStudioSettingsItems(options = {}) {
+      ensureLmStudioConfig();
+      const cfg = state.lmStudio;
+      const status = cfg.activeModelKey ? `Model: ${cfg.activeModelKey}` : 'Model: (not loaded)';
+      const items = [
+        { type: 'setting', label: 'LM Studio NPC AI', value: cfg.enabled ? 'ON' : 'OFF', actions: [
+          { label: 'Toggle', action: () => { cfg.enabled = !cfg.enabled; markDirty(); }, behavior: 'keep-open' }
+        ] },
+        { type: 'setting', label: 'Host', value: cfg.baseUrl, actions: [
+          { label: 'Edit', action: () => {
+            openTextPanel('LM STUDIO HOST', 'Base URL for LM Studio server:', cfg.baseUrl, {
+              singleLine: true,
+              includeCancel: true,
+              buttons: [
+                { label: 'Save', action: () => {
+                  const input = document.getElementById('panelInput');
+                  cfg.baseUrl = String(input ? input.value : '').trim() || 'http://localhost:1234';
+                  ensureLmStudioConfig();
+                  closePanel();
+                } }
+              ]
+            });
+          } }
+        ] },
+        { type: 'setting', label: 'API Token', value: cfg.apiKey ? 'SET' : 'EMPTY', actions: [
+          { label: 'Edit', action: () => {
+            openTextPanel('LM STUDIO API TOKEN', 'Optional Authorization Bearer token:', cfg.apiKey || '', {
+              singleLine: true,
+              includeCancel: true,
+              buttons: [
+                { label: 'Save', action: () => {
+                  const input = document.getElementById('panelInput');
+                  cfg.apiKey = String(input ? input.value : '').trim();
+                  ensureLmStudioConfig();
+                  closePanel();
+                } },
+                { label: 'Clear', action: () => { cfg.apiKey = ''; closePanel(); } }
+              ]
+            });
+          } }
+        ] },
+        { type: 'setting', label: 'Auto-Load Model', value: cfg.autoLoadModel, actions: [
+          { label: 'Edit', action: () => {
+            openTextPanel('LM STUDIO MODEL', 'Model to load if none is currently loaded:', cfg.autoLoadModel, {
+              singleLine: true,
+              includeCancel: true,
+              buttons: [
+                { label: 'Save', action: () => {
+                  const input = document.getElementById('panelInput');
+                  cfg.autoLoadModel = String(input ? input.value : '').trim() || 'zai-org/glm-4.6v-flash';
+                  ensureLmStudioConfig();
+                  closePanel();
+                } }
+              ]
+            });
+          } }
+        ] },
+        { type: 'setting', label: 'Status', value: status, actions: [] },
+        { type: 'divider' },
+        { type: 'action', label: 'Refresh Models', action: () => lmStudioRefreshModels(true), behavior: 'keep-open' },
+        { type: 'action', label: 'Test Connection', action: () => lmStudioTestConnection(), behavior: 'keep-open' }
+      ];
+      if (cfg.lastError) {
+        items.push({ type: 'divider' });
+        items.push({ type: 'setting', label: 'Last Error', value: cfg.lastError, actions: [] });
+      }
+      return items;
+    }
+
+    const LMS_ACTION_INTERVAL_MS = 30000;
+
+    function lmStudioBaseUrl() {
+      ensureLmStudioConfig();
+      return String(state.lmStudio.baseUrl || '').replace(/\/$/, '');
+    }
+
+    function lmStudioHeaders() {
+      const headers = { 'Content-Type': 'application/json' };
+      const token = state.lmStudio.apiKey;
+      if (token) headers.Authorization = `Bearer ${token}`;
+      return headers;
+    }
+
+    async function lmStudioFetch(path, options = {}) {
+      const baseUrl = lmStudioBaseUrl();
+      const url = `${baseUrl}${path}`;
+      return fetch(url, {
+        ...options,
+        headers: { ...lmStudioHeaders(), ...(options.headers || {}) }
+      });
+    }
+
+    async function lmStudioListModels() {
+      const res = await lmStudioFetch('/api/v1/models');
+      if (!res.ok) {
+        throw new Error(`List models failed (${res.status})`);
+      }
+      return res.json();
+    }
+
+    function lmStudioPickLoadedModel(models) {
+      const list = Array.isArray(models) ? models : [];
+      for (const model of list) {
+        if (model.type !== 'llm') continue;
+        if (Array.isArray(model.loaded_instances) && model.loaded_instances.length > 0) {
+          return model.key || model.id || model.display_name || '';
+        }
+      }
+      return '';
+    }
+
+    async function lmStudioLoadModel(modelKey) {
+      const res = await lmStudioFetch('/api/v1/models/load', {
+        method: 'POST',
+        body: JSON.stringify({ model: modelKey })
+      });
+      if (!res.ok) {
+        throw new Error(`Load model failed (${res.status})`);
+      }
+      return res.json();
+    }
+
+    async function lmStudioEnsureLoadedModel() {
+      ensureLmStudioConfig();
+      const cfg = state.lmStudio;
+      const result = await lmStudioListModels();
+      const loadedKey = lmStudioPickLoadedModel(result.models || []);
+      if (loadedKey) {
+        cfg.activeModelKey = loadedKey;
+        cfg.lastError = '';
+        return loadedKey;
+      }
+      if (!cfg.autoLoadModel) return '';
+      await lmStudioLoadModel(cfg.autoLoadModel);
+      cfg.activeModelKey = cfg.autoLoadModel;
+      cfg.lastError = '';
+      return cfg.activeModelKey;
+    }
+
+    async function lmStudioRefreshModels(showToast = false) {
+      ensureLmStudioConfig();
+      try {
+        const result = await lmStudioListModels();
+        const loadedKey = lmStudioPickLoadedModel(result.models || []);
+        state.lmStudio.activeModelKey = loadedKey;
+        state.lmStudio.lastError = '';
+        if (showToast) {
+          showMessage('LM STUDIO', loadedKey ? `Loaded model: ${loadedKey}` : 'No model loaded.');
+        }
+      } catch (err) {
+        state.lmStudio.lastError = err ? String(err.message || err) : 'Unknown error';
+        if (showToast) showMessage('LM STUDIO', `Connection failed: ${state.lmStudio.lastError}`);
+      }
+    }
+
+    function lmStudioTestConnection() {
+      return lmStudioRefreshModels(true);
+    }
+
+    function buildLmStudioStateSnapshot() {
+      return {
+        timestamp: new Date().toISOString(),
+        captain: {
+          level: state.currentLevel,
+          corridor: state.currentCorridor,
+          x: state.player.x,
+          facing: state.player.facing
+        },
+        ship: {
+          layout: SHIP_LAYOUT,
+          currentLevel: state.currentLevel,
+          currentCorridor: state.currentCorridor,
+          powerProfile: state.powerProfile
+        },
+        systems: {
+          power: Math.round(state.power),
+          oxygen: Math.round(state.oxygen),
+          hull: Math.round(state.hull),
+          heat: Math.round(state.heat),
+          lightsOn: state.lightsOn,
+          lifeSupportOn: state.lifeSupportOn,
+          hydroponicsOn: state.hydroponicsOn,
+          shieldsOn: state.shieldsOn
+        },
+        inventory: { ...state.inventory },
+        credits: Math.floor(state.credits),
+        incidents: { ...state.incidents },
+        npcs: (state.npcs || []).map((n) => ({
+          id: n.id,
+          name: n.name,
+          role: npcRole(n),
+          level: n.level,
+          corridor: n.corridor,
+          x: n.x,
+          onDuty: !!n.onDuty,
+          task: n.task ? { key: n.task.key, label: n.task.label, targetType: n.task.targetType } : null
+        }))
+      };
+    }
+
+    function selectNpcForLmStudio(npcId, role) {
+      const list = Array.isArray(state.npcs) ? state.npcs.filter(Boolean) : [];
+      if (npcId) return list.find((n) => n.id === npcId) || null;
+      if (role) return list.find((n) => npcRole(n) === role && n.onDuty) || null;
+      return list.find((n) => n.onDuty) || list[0] || null;
+    }
+
+    const LMS_STATION_ACTIONS = {
+      'hydro.toggle': { targetType: 'hydro', label: 'Enable Grow Lights', perform: () => toggleHydroponics() },
+      'hydro.harvest': { targetType: 'hydro', label: 'Harvest Crops', perform: () => harvestHydroponics(false) },
+      'refinery.refine': { targetType: 'refinery', label: 'Refine Ore', perform: () => refineOre(false) },
+      'sensors.scan': { targetType: 'sensors', label: 'Sensor Sweep', perform: () => scanForAnomalies(false) },
+      'drones.salvage': { targetType: 'drones', label: 'Launch Salvage Drone', perform: () => launchSalvageDrone(false) },
+      'med.treat': { targetType: 'medbay', label: 'Treat Crew', perform: () => treatInjury(false) },
+      'canteen.eat': { targetType: 'canteen', label: 'Serve Rations', perform: (npc) => feedNpc(npc) },
+      'cargo.buy.rations': { targetType: 'cargo', label: 'Buy Rations', perform: () => buyCargoItem('rations', 8) },
+      'cargo.buy.medkit': { targetType: 'cargo', label: 'Buy Medkit', perform: () => buyCargoItem('medkit', 25) },
+      'cargo.sell.ore': { targetType: 'cargo', label: 'Sell Ore', perform: () => sellCargoItem('ore', 5, { respectReserve: true }) }
+    };
+
+    function executeLmStudioToolCall(call) {
+      if (!call || !call.name) return { ok: false, error: 'Missing tool name' };
+      const args = call.args || {};
+      switch (call.name) {
+        case 'walk_to': {
+          const npc = selectNpcForLmStudio(args.npc_id, args.npc_role);
+          if (!npc) return { ok: false, error: 'No NPC available' };
+          if (args.corridor_key) {
+            npc.destinationCorridorKey = String(args.corridor_key);
+            npc.destinationType = null;
+            npc.mode = 'travel';
+            return { ok: true };
+          }
+          if (args.target_type) {
+            npc.destinationType = String(args.target_type);
+            npc.destinationCorridorKey = null;
+            npc.mode = 'travel';
+            return { ok: true };
+          }
+          return { ok: false, error: 'Missing destination' };
+        }
+        case 'build_module': {
+          const type = String(args.module_type || '').trim();
+          if (!type) return { ok: false, error: 'Missing module_type' };
+          const ok = ensureModuleBuiltIfUnlocked(type, 'LMS');
+          return { ok };
+        }
+        case 'use_station_action': {
+          const actionKey = String(args.action_key || '').trim();
+          const def = LMS_STATION_ACTIONS[actionKey];
+          if (!def) return { ok: false, error: 'Unknown action_key' };
+          const npc = selectNpcForLmStudio(args.npc_id, args.npc_role);
+          if (!npc) return { ok: false, error: 'No NPC available' };
+          assignNpcTask(npc, {
+            key: actionKey,
+            label: def.label || actionKey,
+            targetType: def.targetType,
+            onComplete: (n) => def.perform(n)
+          });
+          return { ok: true };
+        }
+        case 'toggle_system': {
+          const system = String(args.system || '').toLowerCase();
+          if (system === 'lights') toggleLights();
+          else if (system === 'engine') toggleEngine();
+          else if (system === 'shields') toggleShields();
+          else if (system === 'life_support') toggleLifeSupport();
+          else if (system === 'hydroponics') toggleHydroponics();
+          else return { ok: false, error: 'Unknown system' };
+          markDirty();
+          updateHUD();
+          return { ok: true };
+        }
+        case 'manage_crew': {
+          const action = String(args.action || '').toLowerCase();
+          if (action === 'hire') {
+            const role = String(args.role || 'crew').toUpperCase();
+            if (role === 'AI' || role === 'A.I') {
+              return { ok: false, error: 'AI role can only be hired by a human.' };
+            }
+            addCrewMember(role);
+            updateHUD();
+            return { ok: true };
+          }
+          if (action === 'dismiss') {
+            if (!args.npc_id) return { ok: false, error: 'npc_id required for dismiss' };
+            const ok = removeCrewMemberById(args.npc_id);
+            if (ok) updateHUD();
+            return { ok };
+          }
+          return { ok: false, error: 'Unknown crew action' };
+        }
+        default:
+          return { ok: false, error: 'Unknown tool' };
+      }
+    }
+
+    function lmStudioToolDefinitions() {
+      return [
+        {
+          type: 'function',
+          name: 'walk_to',
+          description: 'Move an NPC to a corridor or module type.',
+          parameters: {
+            type: 'object',
+            properties: {
+              npc_id: { type: 'string', description: 'NPC id to move (optional).' },
+              npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
+              target_type: { type: 'string', description: 'Module type to walk to (e.g., cargo, power, hydro).' },
+              corridor_key: { type: 'string', description: 'Corridor key like "1:A".' }
+            }
+          }
+        },
+        {
+          type: 'function',
+          name: 'build_module',
+          description: 'Build a ship module if unlocked and possible.',
+          parameters: {
+            type: 'object',
+            properties: {
+              module_type: { type: 'string', description: 'Module type to build.' }
+            },
+            required: ['module_type']
+          }
+        },
+        {
+          type: 'function',
+          name: 'use_station_action',
+          description: 'Send an NPC to a station and perform an action on arrival.',
+          parameters: {
+            type: 'object',
+            properties: {
+              npc_id: { type: 'string', description: 'NPC id to assign (optional).' },
+              npc_role: { type: 'string', description: 'Role to select if npc_id omitted (optional).' },
+              action_key: { type: 'string', description: 'Action key (e.g., hydro.harvest, refinery.refine, cargo.buy.rations).' }
+            },
+            required: ['action_key']
+          }
+        },
+        {
+          type: 'function',
+          name: 'toggle_system',
+          description: 'Toggle ship systems like lights, engine, shields, life support, hydroponics.',
+          parameters: {
+            type: 'object',
+            properties: {
+              system: { type: 'string', enum: ['lights', 'engine', 'shields', 'life_support', 'hydroponics'] }
+            },
+            required: ['system']
+          }
+        },
+        {
+          type: 'function',
+          name: 'manage_crew',
+          description: 'Hire or dismiss crew members.',
+          parameters: {
+            type: 'object',
+            properties: {
+              action: { type: 'string', enum: ['hire', 'dismiss'] },
+              role: { type: 'string', description: 'Role name to hire (optional).' },
+              npc_id: { type: 'string', description: 'NPC id to dismiss (required for dismiss).' }
+            },
+            required: ['action']
+          }
+        }
+      ];
+    }
+
+    function extractLmStudioToolCalls(payload) {
+      const calls = [];
+      const output = Array.isArray(payload.output) ? payload.output : [];
+      for (const item of output) {
+        if (item.type === 'tool_call' || item.type === 'function_call') {
+          const name = item.name || (item.function && item.function.name);
+          const rawArgs = item.arguments || (item.function && item.function.arguments);
+          let args = rawArgs;
+          if (typeof rawArgs === 'string') {
+            try { args = JSON.parse(rawArgs); } catch { args = {}; }
+          }
+          if (name) calls.push({ name, args });
+        }
+        if (item.type === 'message' && Array.isArray(item.content)) {
+          for (const content of item.content) {
+            if (content.type === 'tool_call') {
+              let args = content.arguments;
+              if (typeof args === 'string') {
+                try { args = JSON.parse(args); } catch { args = {}; }
+              }
+              calls.push({ name: content.name, args });
+            }
+          }
+        }
+      }
+      if (!calls.length && typeof payload.output_text === 'string') {
+        try {
+          const parsed = JSON.parse(payload.output_text);
+          if (parsed && parsed.tool && parsed.args) {
+            calls.push({ name: parsed.tool, args: parsed.args });
+          }
+        } catch {}
+      }
+      return calls;
+    }
+
+    async function lmStudioTick() {
+      ensureLmStudioConfig();
+      const cfg = state.lmStudio;
+      if (!cfg.enabled || cfg.inflight) return;
+      if (document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - cfg.lastCallAt < LMS_ACTION_INTERVAL_MS) return;
+
+      cfg.lastCallAt = now;
+      cfg.inflight = true;
+      try {
+        const modelKey = await lmStudioEnsureLoadedModel();
+        if (!modelKey) {
+          cfg.lastError = 'No model loaded.';
+          return;
+        }
+
+        const snapshot = buildLmStudioStateSnapshot();
+        const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool.\nState:\n${JSON.stringify(snapshot)}`;
+
+        const res = await lmStudioFetch('/v1/responses', {
+          method: 'POST',
+          body: JSON.stringify({
+            model: modelKey,
+            input,
+            tools: lmStudioToolDefinitions(),
+            tool_choice: 'auto'
+          })
+        });
+        if (!res.ok) {
+          cfg.lastError = `LLM request failed (${res.status})`;
+          return;
+        }
+        const payload = await res.json();
+        const calls = extractLmStudioToolCalls(payload);
+        if (calls.length) {
+          const result = executeLmStudioToolCall(calls[0]);
+          cfg.lastError = result && result.ok === false ? (result.error || 'Tool failed') : '';
+        }
+      } catch (err) {
+        cfg.lastError = err ? String(err.message || err) : 'Unknown error';
+      } finally {
+        cfg.inflight = false;
+      }
     }
 
     /**
@@ -5795,6 +6268,7 @@
       applyTravelTick(dt);
       applyIncidentTriggers(dt);
       crewAutomationTick(dt);
+      lmStudioTick();
       markDirty();
     }
 
@@ -6231,6 +6705,30 @@
       for (const k of Object.keys(defaults.buffers)) {
         if (state.crewAI.buffers[k] === undefined) state.crewAI.buffers[k] = defaults.buffers[k];
       }
+    }
+
+    function ensureLmStudioConfig() {
+      const defaults = {
+        enabled: false,
+        baseUrl: 'http://localhost:1234',
+        apiKey: '',
+        autoLoadModel: 'zai-org/glm-4.6v-flash',
+        activeModelKey: '',
+        lastCallAt: 0,
+        inflight: false,
+        lastError: ''
+      };
+      if (!state.lmStudio || typeof state.lmStudio !== 'object') state.lmStudio = { ...defaults };
+      for (const k of Object.keys(defaults)) {
+        if (state.lmStudio[k] === undefined) state.lmStudio[k] = defaults[k];
+      }
+      state.lmStudio.enabled = !!state.lmStudio.enabled;
+      state.lmStudio.baseUrl = String(state.lmStudio.baseUrl || defaults.baseUrl).trim() || defaults.baseUrl;
+      state.lmStudio.apiKey = String(state.lmStudio.apiKey || '').trim();
+      state.lmStudio.autoLoadModel = String(state.lmStudio.autoLoadModel || defaults.autoLoadModel).trim() || defaults.autoLoadModel;
+      if (!Number.isFinite(state.lmStudio.lastCallAt)) state.lmStudio.lastCallAt = 0;
+      state.lmStudio.inflight = false;
+      if (typeof state.lmStudio.lastError !== 'string') state.lmStudio.lastError = '';
     }
 
     function currentSystem() {
@@ -7567,6 +8065,7 @@
     }
 
     function newGame() {
+      const lmStudioConfig = state.lmStudio ? { ...state.lmStudio } : null;
       try {
         localStorage.removeItem(STORAGE_KEY);
       } catch {}
@@ -7621,6 +8120,8 @@
       state.hydroponicsOn = false;
       state.shieldsOn = false;
       state.crewAI = { enabled: true, autoRepair: true, autoLife: true, autoHydro: true, autoRefine: true, autoFabricate: true, autoContracts: true, autoVentHeat: true, autoTravel: true, autoResearch: true, autoBuild: true, autoHire: false, minCredits: 0, targetCrew: 3, buffers: { ore: 0, scrap: 4, ingot: 4, filter: 1, medkit: 1, droneParts: 1, rations: 2 } };
+      state.lmStudio = lmStudioConfig ? { ...lmStudioConfig } : state.lmStudio;
+      ensureLmStudioConfig();
       state.meta = { inventoryAcc: 0, powerShedAt: 0, autoAt: 0 };
       state.anim.walkPhase = 0;
       state.pendingSpawn = null;
@@ -7826,6 +8327,12 @@
         hydroponicsOn: state.hydroponicsOn,
         shieldsOn: state.shieldsOn,
         crewAI: state.crewAI,
+        lmStudio: state.lmStudio ? {
+          enabled: !!state.lmStudio.enabled,
+          baseUrl: state.lmStudio.baseUrl,
+          apiKey: state.lmStudio.apiKey,
+          autoLoadModel: state.lmStudio.autoLoadModel
+        } : undefined,
         npcs: state.npcs.map(n => ({
           id: n.id,
           name: n.name,
@@ -7887,6 +8394,7 @@
         if (data.hydroponicsOn !== undefined) state.hydroponicsOn = data.hydroponicsOn;
         if (data.shieldsOn !== undefined) state.shieldsOn = data.shieldsOn;
         if (data.crewAI) state.crewAI = data.crewAI;
+        if (data.lmStudio) state.lmStudio = data.lmStudio;
         if (Array.isArray(data.npcs)) {
           state.npcs = data.npcs.map(n => ({
             id: n.id || 'npc-' + Math.random().toString(36).slice(2),
@@ -7921,6 +8429,7 @@
         if (!state.aiBlockers || typeof state.aiBlockers !== 'object') state.aiBlockers = {};
         if (!state.meta || typeof state.meta !== 'object') state.meta = { inventoryAcc: 0, powerShedAt: 0, autoAt: 0 };
         ensureCrewAI();
+        ensureLmStudioConfig();
         ensureBlueprints();
       } catch {}
     }
@@ -7934,7 +8443,7 @@
     // ============================================================================
 
     const MAX_CREW = 50;
-    const ROLES = ['pilot', 'engineer', 'tech', 'medic', 'quartermaster', 'specialist', 'scientist', 'security', 'crew'];
+    const ROLES = ['pilot', 'engineer', 'tech', 'medic', 'quartermaster', 'specialist', 'scientist', 'security', 'ai', 'crew'];
 
     function npcRole(npc) {
       if (!npc) return 'crew';
@@ -7944,6 +8453,7 @@
 
     function inferRoleFromName(name) {
       const s = String(name || '').toUpperCase();
+      if (s === 'AI' || s.includes(' A.I') || s.includes(' AI')) return 'ai';
       if (s.includes('PILOT')) return 'pilot';
       if (s.includes('MEDIC')) return 'medic';
       if (s.includes('TECH')) return 'tech';
