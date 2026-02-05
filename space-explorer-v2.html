@@ -2829,6 +2829,56 @@
       const lines = results.slice(0, 10).map((m) => `- ${m.text}`);
       return `Last memory search:\n${lines.join('\n')}`;
     }
+
+    function lmStudioExtractRecentChatWords(aiId, { maxMessages = 4, maxWords = 20 } = {}) {
+      const key = String(aiId || 'ai');
+      const list = state.lmStudio.chatHistory && Array.isArray(state.lmStudio.chatHistory[key])
+        ? state.lmStudio.chatHistory[key]
+        : [];
+      if (!list.length) return [];
+      const stopwords = new Set([
+        'about', 'after', 'again', 'before', 'below', 'could', 'every', 'first', 'found', 'from', 'going',
+        'hello', 'there', 'their', 'these', 'thing', 'think', 'today', 'under', 'until', 'where', 'which',
+        'would', 'your', 'youre', 'with', 'just', 'have', 'this', 'that', 'what', 'when', 'then', 'will',
+        'than', 'into', 'over', 'only', 'some', 'more', 'need', 'been', 'were', 'them', 'they', 'here'
+      ]);
+      const words = [];
+      const seen = new Set();
+      const recent = list.slice(-maxMessages).reverse();
+      for (const msg of recent) {
+        const text = String(msg && msg.text ? msg.text : '').toLowerCase();
+        const matches = text.match(/[a-z0-9]{4,}/g) || [];
+        for (const word of matches) {
+          if (stopwords.has(word)) continue;
+          if (seen.has(word)) continue;
+          seen.add(word);
+          words.push(word);
+          if (words.length >= maxWords) return words;
+        }
+      }
+      return words;
+    }
+
+    function buildLmStudioRelatedMemories(aiId, { limit = 2 } = {}) {
+      const words = lmStudioExtractRecentChatWords(aiId);
+      if (!words.length) return '';
+      const memories = Array.isArray(state.lmStudio.memory) ? state.lmStudio.memory : [];
+      if (!memories.length) return '';
+      const scored = [];
+      for (const mem of memories) {
+        const text = String(mem && mem.text ? mem.text : '').toLowerCase();
+        if (!text) continue;
+        let score = 0;
+        for (const word of words) {
+          if (text.includes(word)) score += 1;
+        }
+        if (score > 0) scored.push({ mem, score });
+      }
+      if (!scored.length) return '';
+      scored.sort((a, b) => (b.score - a.score) || ((b.mem.createdAt || 0) - (a.mem.createdAt || 0)));
+      const lines = scored.slice(0, limit).map((item) => `- ${item.mem.text}`);
+      return `Related memories (from recent chat):\n${lines.join('\n')}`;
+    }
     function lmStudioChatAdd(aiId, role, text, speaker = '') {
       const msg = String(text || '').trim();
       if (!msg) return;
@@ -3860,6 +3910,7 @@
         const selfName = lmStudioSelfName();
         const selfId = lmStudioSelfId();
         const pinnedMemory = buildLmStudioPinnedMemory();
+        const relatedMemory = buildLmStudioRelatedMemories(selfId);
         const searchMemory = buildLmStudioMemorySearchResults();
         const chatHistory = buildLmStudioChatHistory(selfId);
         const supplyTargets = buildLmStudioSupplyTargets();
@@ -3868,7 +3919,7 @@
         const corridorKeys = buildLmStudioCorridorKeys();
         const moduleTypes = buildLmStudioModuleTypeHints();
         const recentTools = buildLmStudioRecentToolCalls();
-        const memoryBlocks = [pinnedMemory, searchMemory].filter(Boolean).join('\n\n');
+        const memoryBlocks = [pinnedMemory, relatedMemory, searchMemory].filter(Boolean).join('\n\n');
         const contextBlocks = [chatHistory, recentTools, corridorKeys, moduleTypes, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
         const input = `You are the ship AI. Choose any number of actions to execute via tools (zero, one, or many). If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix). Respond only with JSON that matches the provided schema. Use exact argument names from the guidance. No prose.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${shipGraph}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
 
