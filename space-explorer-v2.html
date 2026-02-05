@@ -2710,12 +2710,15 @@
         '- use_station_action requires args.action_key (example: cargo.sell.rations).',
         '- Elevators: action use_elevator with direction up/down to move between decks.',
         '- Layout: build_module requires module_type + corridor_key; create_elevator_link connects elevator up/down.',
-        '- Navigation: action set_course to travel; action cancel_course to stop travel.',
+        '- Navigation: action set_course to travel; action cancel_course to stop travel; cockpit_set_course uses cockpit nav.',
+        '- Cockpit: use_station_action cockpit.power or cockpit.comms; cockpit_set_course with args.destination.',
         '- O2 low: toggle life_support or use_station_action life.emergency; seal o2 leak.',
         '- Rations low: toggle hydroponics then hydro.harvest; or cargo.buy.rations; feed via canteen.eat.',
         '- Credits low: cargo.sell.ore/ingot/rations; farm scrap/ore via sensors_scan or drones.salvage; refine ore -> ingot.',
         '- Sensors: use sensors_scan or sensors_deep_scan to find anomalies/blueprints.',
         '- Filters low: cargo.buy.filter; life support uses filters.',
+        '- Lights are NOT a station action; use toggle_system with system "lights" to turn lights on/off.',
+        '- Example (lights off): {"tool":"action","args":{"action":"toggle_system","args":{"system":"lights"}}}.',
         '- Medkits low: cargo.buy.medkit; treat via med.treat.',
         '- Drone parts low: cargo.buy.droneParts; drones.salvage or drones.repair use parts.',
         '- Power/heat: action route_power or action set_power_profile; toggle engine/shields if needed; vent heat (engine).',
@@ -2731,6 +2734,7 @@
         '- Memory: use memory_add, memory_delete, memory_pin, memory_unpin, memory_search to manage notes.',
         '- Crew comms: speak_to_captain or speak_to_ai to coordinate; chat history shows speakers.',
         '- Talk to other AIs regularly using speak_to_ai with a clear message (and target_ai_id or target_ai_name if known).',
+        '- When replying to an AI message, use target_ai_id shown in Recent chat (speaker name includes the id in parentheses).',
         '- NPC IDs are listed in State.npcs for task_npc.',
         `- Targets: ore ${buffers.ore ?? 0}, scrap ${buffers.scrap ?? 0}, ingot ${buffers.ingot ?? 0}, filter ${buffers.filter ?? 0}, medkit ${buffers.medkit ?? 0}, droneParts ${buffers.droneParts ?? 0}, rations ${buffers.rations ?? 0}.`
       ].join('\n');
@@ -2849,6 +2853,32 @@
         return `${prefix}${speaker || role}: ${text}`;
       });
       return `Recent chat:\n${lines.join('\n')}`;
+    }
+
+    function buildLmStudioRecentToolCalls({ limit = 3 } = {}) {
+      const log = state.lmStudio && Array.isArray(state.lmStudio.toolLog)
+        ? state.lmStudio.toolLog
+        : [];
+      const recent = log.filter((entry) => entry && entry.kind === 'tool_call').slice(-limit).reverse();
+      if (!recent.length) return '';
+      const lines = recent.map((entry) => {
+        const stamp = Number.isFinite(entry.at) ? new Date(entry.at).toISOString() : 'unknown';
+        const payload = entry && entry.payload ? entry.payload : {};
+        const name = String(payload.name || 'unknown');
+        let argsText = '{}';
+        if (payload.args && typeof payload.args === 'object') {
+          try {
+            argsText = JSON.stringify(payload.args);
+          } catch {
+            argsText = '[unserializable args]';
+          }
+        } else if (payload.args != null) {
+          argsText = String(payload.args);
+        }
+        if (argsText.length > 260) argsText = `${argsText.slice(0, 260)}...`;
+        return `- ${stamp} ${name} args: ${argsText}`;
+      });
+      return `Recent tools (newest first):\n${lines.join('\n')}`;
     }
 
     function normalizeAiNamePart(name) {
@@ -3044,6 +3074,7 @@
         'task_npc',
         'sensors_scan',
         'sensors_deep_scan',
+        'cockpit_set_course',
         'set_course',
         'cancel_course',
         'set_power_profile',
@@ -3210,6 +3241,16 @@
         }
         case 'sensors_deep_scan': {
           const ok = deepScanBlueprint(false);
+          result = { ok };
+          break;
+        }
+        case 'cockpit_set_course': {
+          const destination = String(args.destination || '').trim();
+          if (!destination) {
+            result = { ok: false, error: 'destination required' };
+            break;
+          }
+          const ok = startTravelAuto(destination, 'AI');
           result = { ok };
           break;
         }
@@ -3451,8 +3492,10 @@
             break;
           }
           const senderName = npcRole(sender) === 'ai' ? formatAiDisplayName(sender.name) : (sender.name || 'AI');
-          lmStudioChatAdd(sender.id, 'ai', message, senderName);
-          lmStudioChatAdd(target.id, 'ai', message, senderName);
+          const senderTag = `${senderName} (${sender.id})`;
+          lmStudioChatAdd(sender.id, 'ai', message, senderTag);
+          lmStudioChatAdd(target.id, 'ai', message, senderTag);
+          if (state.lmStudio) state.lmStudio.activeAiId = target.id;
           markDirty();
           result = { ok: true };
           break;
@@ -3573,7 +3616,7 @@
           type: 'function',
           function: {
             name: 'action',
-            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. come_to_captain accepts optional args.message. task_npc requires args.npc_id + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to uses args.corridor_key or args.target_type. rename_self uses args.name. use_station_action uses args.action_key. Actions: walk_to, use_elevator, come_to_captain, task_npc, sensors_scan, sensors_deep_scan, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, speak_to_captain, speak_to_ai, memory_add, memory_delete, memory_pin, memory_unpin, memory_search, rename_self.',
+            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. come_to_captain accepts optional args.message. task_npc requires args.npc_id + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to uses args.corridor_key or args.target_type. rename_self uses args.name. use_station_action uses args.action_key. Actions: walk_to, use_elevator, come_to_captain, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, speak_to_captain, speak_to_ai, memory_add, memory_delete, memory_pin, memory_unpin, memory_search, rename_self.',
             parameters: {
               type: 'object',
               properties: {
@@ -3813,8 +3856,9 @@
         const hereIndicator = buildLmStudioHereIndicator();
         const corridorKeys = buildLmStudioCorridorKeys();
         const moduleTypes = buildLmStudioModuleTypeHints();
+        const recentTools = buildLmStudioRecentToolCalls();
         const memoryBlocks = [pinnedMemory, searchMemory].filter(Boolean).join('\n\n');
-        const contextBlocks = [chatHistory, corridorKeys, moduleTypes, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
+        const contextBlocks = [chatHistory, recentTools, corridorKeys, moduleTypes, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
         const input = `You are the ship AI. Choose one action to execute via tools. Only call one tool. If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix). Respond only with JSON that matches the provided schema. Use exact argument names from the guidance. No prose.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${shipGraph}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
 
         const withTimeout = async (path, body) => {
@@ -4066,6 +4110,35 @@
                       properties: {
                         args: {
                           properties: {
+                            action: { const: 'toggle_system' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                system: {
+                                  type: 'string',
+                                  enum: ['lights', 'engine', 'shields', 'life_support', 'hydroponics']
+                                }
+                              },
+                              required: ['system']
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
                             action: { const: 'build_module' }
                           }
                         }
@@ -4116,6 +4189,32 @@
                                 { required: ['module_uid'] },
                                 { required: ['module_type', 'corridor_key'] }
                               ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
+                            action: { const: 'cockpit_set_course' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                destination: { type: 'string' }
+                              },
+                              required: ['destination']
                             }
                           }
                         }
@@ -4817,7 +4916,8 @@
           {
             key: 'cockpit.power',
             label: 'Power Routing',
-            action: () => openMenu('powerRouting', { context: 'COCKPIT' })
+            action: () => openMenu('powerRouting', { context: 'COCKPIT' }),
+            perform: () => autoRoutePower()
           },
           {
             key: 'cockpit.command',
@@ -4828,7 +4928,8 @@
             key: 'cockpit.comms',
             label: 'Open Comms (Contracts)',
             requiredRole: ['pilot', 'quartermaster'],
-            action: () => openMenu('contracts')
+            action: () => openMenu('contracts'),
+            perform: () => autoManageContracts()
           }
         ]
       },
