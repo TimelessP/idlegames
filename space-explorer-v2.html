@@ -2934,9 +2934,11 @@
         '- rename_module: set module label (args.new_label + module_uid or module_type; optional corridor_key).',
         '- rename_module: if using corridor_key, pick one from “Valid corridor_key values” in the context; otherwise prefer module_uid when known.',
         '- Aliases: see “Module aliases (custom labels)” for renamed rooms like “Captain\'s Cabin”; use those to target walk_to or rename_module by corridor/uid.',
-        '- walk_to requires args.corridor_key (example: L1B) or args.target_type (example: cargo).',
+        '- walk_to supports args.corridor_key (example: L1B), args.module_type (example: cargo), args.module_uid, or args.target_type (example: cargo).',
         '- Station actions auto-walk: use_station_action or task_npc will move the NPC to the right station; do NOT use walk_to first unless you are repositioning or exploring.',
-        '- rename_self requires args.name (not new_name).',
+        '- Example: if you want hydro harvest, use use_station_action hydro.harvest directly (no walk_to).',
+        '- Avoid walk_to loops: if State.npcs already shows a destinationType, destinationCorridorKey, or destinationModuleUid for your NPC, do not issue another walk_to.',
+        '- rename_self requires args.name (not new_name) and should be a human-friendly name.',
         '- use_station_action requires args.action_key (example: cargo.sell.rations).',
         '- Elevators: action use_elevator with direction up/down to move between decks.',
         '- Layout: build_module requires module_type + corridor_key; create_elevator_link connects elevator up/down.',
@@ -3187,6 +3189,21 @@
       return `Recent chat:\n${lines.join('\n')}`;
     }
 
+    function buildLmStudioNpcActionHistory(aiId, { limit = 3 } = {}) {
+      const npc = (state.npcs || []).find((n) => n && n.id === aiId);
+      if (!npc || !Array.isArray(npc.log) || !npc.log.length) return '';
+      const recent = npc.log.slice(-limit).reverse();
+      const lines = recent.map((entry) => {
+        const stamp = Number.isFinite(entry.at)
+          ? new Date(entry.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : '';
+        const prefix = stamp ? `[${stamp}] ` : '';
+        const detail = entry.detail ? ` — ${entry.detail}` : '';
+        return `${prefix}${entry.action || 'action'}${detail}`;
+      });
+      return `Recent actions (this NPC):\n${lines.join('\n')}`;
+    }
+
     function buildLmStudioRecentToolCalls({ limit = 3 } = {}) {
       const log = state.lmStudio && Array.isArray(state.lmStudio.toolLog)
         ? state.lmStudio.toolLog
@@ -3262,7 +3279,7 @@
 
     function formatAiDisplayName(name) {
       const base = normalizeAiNamePart(name);
-      return base ? `AI - ${base}` : 'AI - Unnamed';
+      return base || 'Unnamed';
     }
 
     function lmStudioActiveAiNpc() {
@@ -3274,7 +3291,7 @@
 
     function lmStudioSelfName() {
       const aiNpc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
-      if (!aiNpc) return 'AI - Unnamed';
+      if (!aiNpc) return 'Unnamed';
       return formatAiDisplayName(aiNpc.name);
     }
 
@@ -3474,17 +3491,76 @@
             result = { ok: false, error: 'No NPC available' };
             break;
           }
-          if (args.corridor_key) {
-            npc.destinationCorridorKey = String(args.corridor_key);
+          const targetCorridor = args.corridor_key ? String(args.corridor_key) : '';
+          const targetUid = args.module_uid ? String(args.module_uid).trim() : '';
+          const targetType = args.module_type ? String(args.module_type)
+            : (args.target_type ? String(args.target_type) : '');
+          if (targetCorridor && npc.destinationCorridorKey === targetCorridor) {
+            result = { ok: false, error: 'Already heading to corridor' };
+            break;
+          }
+          if (targetUid && npc.destinationModuleUid === targetUid) {
+            result = { ok: false, error: 'Already heading to module_uid' };
+            break;
+          }
+          if (targetType && npc.destinationType === targetType) {
+            result = { ok: false, error: 'Already heading to module_type' };
+            break;
+          }
+          if (targetCorridor) {
+            npc.lmStudioHoldPending = true;
+            npc.lmStudioHoldUntil = 0;
+            npc.lmStudioHoldTargetType = 'corridor';
+            npc.lmStudioHoldTargetValue = targetCorridor;
+            npc.destinationCorridorKey = targetCorridor;
             npc.destinationType = null;
+            npc.destinationModuleUid = null;
             npc.mode = 'travel';
+            logNpcAction(npc, 'walk_to', `corridor ${targetCorridor}`);
+            result = { ok: true };
+            break;
+          }
+          if (targetUid) {
+            const target = findModuleLocationByUid(targetUid);
+            if (!target) {
+              result = { ok: false, error: 'Unknown module_uid' };
+              break;
+            }
+            npc.lmStudioHoldPending = true;
+            npc.lmStudioHoldUntil = 0;
+            npc.lmStudioHoldTargetType = 'module_uid';
+            npc.lmStudioHoldTargetValue = targetUid;
+            npc.destinationModuleUid = targetUid;
+            npc.destinationType = null;
+            npc.destinationCorridorKey = null;
+            npc.mode = 'travel';
+            logNpcAction(npc, 'walk_to', `module_uid ${targetUid}`);
+            result = { ok: true };
+            break;
+          }
+          if (args.module_type) {
+            npc.lmStudioHoldPending = true;
+            npc.lmStudioHoldUntil = 0;
+            npc.lmStudioHoldTargetType = 'module_type';
+            npc.lmStudioHoldTargetValue = targetType;
+            npc.destinationType = targetType;
+            npc.destinationCorridorKey = null;
+            npc.destinationModuleUid = null;
+            npc.mode = 'travel';
+            logNpcAction(npc, 'walk_to', `module_type ${targetType}`);
             result = { ok: true };
             break;
           }
           if (args.target_type) {
-            npc.destinationType = String(args.target_type);
+            npc.lmStudioHoldPending = true;
+            npc.lmStudioHoldUntil = 0;
+            npc.lmStudioHoldTargetType = 'module_type';
+            npc.lmStudioHoldTargetValue = targetType;
+            npc.destinationType = targetType;
             npc.destinationCorridorKey = null;
+            npc.destinationModuleUid = null;
             npc.mode = 'travel';
+            logNpcAction(npc, 'walk_to', `target_type ${targetType}`);
             result = { ok: true };
             break;
           }
@@ -3512,7 +3588,9 @@
           const link = elev.elevator[direction];
           npc.destinationCorridorKey = corridorKey(link.level, link.corridor);
           npc.destinationType = null;
+          npc.destinationModuleUid = null;
           npc.mode = 'travel';
+          logNpcAction(npc, 'use_elevator', direction);
           result = { ok: true, target: npc.destinationCorridorKey };
           break;
         }
@@ -3530,6 +3608,7 @@
             }
             const senderName = npcRole(npc) === 'ai' ? formatAiDisplayName(npc.name) : (npc.name || 'AI');
             lmStudioChatAdd(npc.id, 'ai', message, senderName);
+            logNpcAction(npc, 'come_to_captain', 'message');
             assignNpcTask(npc, {
               key: 'captain.message',
               label: 'Report to Captain',
@@ -3548,6 +3627,7 @@
             targetType: 'captain',
             duration: 0.6
           });
+          logNpcAction(npc, 'come_to_captain', 'summon');
           result = { ok: true };
           break;
         }
@@ -3578,6 +3658,7 @@
             targetType: def.targetType,
             onComplete: (n) => def.perform(n)
           });
+          logNpcAction(npc, 'task_npc', actionKey);
           result = { ok: true };
           break;
         }
@@ -3739,6 +3820,7 @@
             targetType: def.targetType,
             onComplete: (n) => def.perform(n)
           });
+          logNpcAction(npc, 'use_station_action', actionKey);
           result = { ok: true };
           break;
         }
@@ -3801,6 +3883,7 @@
           }
           const senderName = npcRole(npc) === 'ai' ? formatAiDisplayName(npc.name) : (npc.name || 'AI');
           lmStudioChatAdd(npc.id, 'ai', message, senderName);
+          logNpcAction(npc, 'speak_to_captain', message.slice(0, 80));
           npc.task = {
             key: 'captain.message',
             label: 'Message Captain',
@@ -3814,6 +3897,7 @@
           };
           npc.destinationCorridorKey = corridorKey(state.currentLevel, state.currentCorridor);
           npc.destinationType = null;
+          npc.destinationModuleUid = null;
           npc.mode = 'travel';
           result = { ok: true };
           break;
@@ -3842,6 +3926,7 @@
           const senderTag = `${senderName} (${sender.id})`;
           lmStudioChatAdd(sender.id, 'ai', message, senderTag);
           lmStudioChatAdd(target.id, 'ai', message, senderTag);
+          logNpcAction(sender, 'speak_to_ai', message.slice(0, 80));
           if (state.lmStudio) state.lmStudio.activeAiId = target.id;
           markDirty();
           result = { ok: true };
@@ -3982,7 +4067,7 @@
           type: 'function',
           function: {
             name: 'action',
-            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. come_to_captain accepts optional args.message. task_npc requires args.npc_id + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to uses args.corridor_key or args.target_type. rename_self uses args.name. use_station_action uses args.action_key. Actions: walk_to, use_elevator, come_to_captain, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, speak_to_captain, speak_to_ai, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self.',
+            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. come_to_captain accepts optional args.message. task_npc requires args.npc_id + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self uses args.name. use_station_action uses args.action_key. Actions: walk_to, use_elevator, come_to_captain, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, speak_to_captain, speak_to_ai, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self.',
             parameters: {
               type: 'object',
               properties: {
@@ -4224,6 +4309,7 @@
         const relatedMemory = buildLmStudioRelatedMemories(selfId);
         const searchMemory = buildLmStudioMemorySearchResults(selfId);
         const chatHistory = buildLmStudioChatHistory(selfId);
+        const npcActions = buildLmStudioNpcActionHistory(selfId);
         const supplyTargets = buildLmStudioSupplyTargets();
         const moduleTable = buildLmStudioModuleTableSummary();
         const hereIndicator = buildLmStudioHereIndicator();
@@ -4231,8 +4317,8 @@
         const moduleTypes = buildLmStudioModuleTypeHints();
         const recentTools = buildLmStudioRecentToolCalls();
         const memoryBlocks = [pinnedMemory, relatedMemory, searchMemory].filter(Boolean).join('\n\n');
-        const contextBlocks = [chatHistory, recentTools, corridorKeys, moduleTypes, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
-        const input = `You are the ship AI. Choose any number of actions to execute via tools (zero, one, or many). If you have not named yourself yet, call rename_self now with a human-friendly name (provide only the name, no \"AI -\" prefix). Respond only with JSON that matches the provided schema. Use exact argument names from the guidance. No prose.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${moduleTable}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
+        const contextBlocks = [chatHistory, npcActions, recentTools, corridorKeys, moduleTypes, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
+        const input = `You are the ship AI. Choose any number of actions to execute via tools (zero, one, or many). If you have not named yourself yet, call rename_self now with a human-friendly name. Respond only with JSON that matches the provided schema. Use exact argument names from the guidance. No prose.\n\nSelf-name: ${selfName} (chosen by you).\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${moduleTable}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
 
         const withTimeout = async (path, body) => {
           const controller = new AbortController();
@@ -4330,6 +4416,8 @@
                               type: 'object',
                               anyOf: [
                                 { required: ['corridor_key'] },
+                                { required: ['module_uid'] },
+                                { required: ['module_type'] },
                                 { required: ['target_type'] }
                               ]
                             }
@@ -5827,6 +5915,18 @@
       return null;
     }
 
+    function findModuleLocationByUid(uid) {
+      for (const [levelKey, lvl] of Object.entries(SHIP_LAYOUT.levels || {})) {
+        const level = Number(levelKey);
+        if (!Number.isFinite(level)) continue;
+        for (const [corridorKey, corridor] of Object.entries(lvl.corridors || {})) {
+          const found = (corridor.modules || []).find((m) => m && m.uid === uid);
+          if (found) return { module: found, level, corridor: corridorKey };
+        }
+      }
+      return null;
+    }
+
     function createLinkedDoorway(fromModule) {
       if (!fromModule) return null;
       const level = state.currentLevel;
@@ -6010,6 +6110,7 @@
           npc.walkPhase = 0;
           npc.destinationType = null;
           npc.destinationCorridorKey = null;
+          npc.destinationModuleUid = null;
           offset += 20;
         }
       }
@@ -7578,48 +7679,107 @@
       return getCorridorLayout(npc.level, npc.corridor).bounds;
     }
 
+    function applyLmStudioArrivalHold(npc, targetType, targetValue) {
+      if (!npc || !npc.lmStudioHoldPending) return;
+      if (npc.lmStudioHoldTargetType && targetType && npc.lmStudioHoldTargetType !== targetType) return;
+      if (npc.lmStudioHoldTargetValue && targetValue && npc.lmStudioHoldTargetValue !== targetValue) return;
+      npc.lmStudioHoldPending = false;
+      npc.lmStudioHoldTargetType = null;
+      npc.lmStudioHoldTargetValue = null;
+      npc.lmStudioHoldUntil = Date.now() + LMS_ACTION_INTERVAL_MS;
+    }
+
     function updateNpcNavigation(npc) {
       const startKey = corridorKey(npc.level, npc.corridor);
+      if (npc.destinationModuleUid) {
+        const target = findModuleLocationByUid(npc.destinationModuleUid);
+        if (!target) {
+          npc.destinationModuleUid = null;
+          npc.destinationCorridorKey = null;
+          npc.mode = 'idle';
+          npc.vx = 0;
+          return false;
+        }
+        const targetKey = corridorKey(target.level, target.corridor);
+        npc.destinationCorridorKey = targetKey === startKey ? null : targetKey;
+      }
+
       if (npc.destinationCorridorKey) {
         if (npc.destinationCorridorKey === startKey) {
           npc.destinationCorridorKey = null;
+          if (!npc.destinationModuleUid) {
+            npc.mode = 'idle';
+            npc.vx = 0;
+            applyLmStudioArrivalHold(npc, 'corridor', startKey);
+            return false;
+          }
+        } else {
+          const route = findRoute(startKey, [npc.destinationCorridorKey]);
+          if (!route || route.length < 2) {
+            npc.destinationCorridorKey = null;
+            npc.destinationModuleUid = null;
+            npc.mode = 'idle';
+            npc.vx = 0;
+            return false;
+          }
+          const nextKey = route[1];
+          const link = findLinkModule(npc.level, npc.corridor, nextKey);
+          if (!link) {
+            npc.destinationCorridorKey = null;
+            npc.destinationModuleUid = null;
+            npc.mode = 'idle';
+            npc.vx = 0;
+            return false;
+          }
+          const targetX = moduleCenterInCorridor(npc.level, npc.corridor, link.module);
+          if (targetX === null || targetX === undefined) {
+            npc.destinationCorridorKey = null;
+            npc.destinationModuleUid = null;
+            npc.mode = 'idle';
+            npc.vx = 0;
+            return false;
+          }
+          const dist = targetX - npc.x;
+          if (Math.abs(dist) <= 6) {
+            const { level: nextLevel, corridor: nextCorridor } = parseCorridorKey(nextKey);
+            const backLink = findLinkModule(nextLevel, nextCorridor, startKey);
+            const destX = backLink ? moduleCenterInCorridor(nextLevel, nextCorridor, backLink.module) : null;
+            const bounds = getCorridorLayout(nextLevel, nextCorridor).bounds;
+            npc.level = nextLevel;
+            npc.corridor = nextCorridor;
+            npc.x = destX != null ? clamp(destX, bounds.minX, bounds.maxX) : bounds.minX + (bounds.maxX - bounds.minX) * 0.5;
+            npc.vx = 0;
+            npc.mode = 'travel';
+            return true;
+          }
+          npc.vx = Math.sign(dist) * npc.speed * 0.6;
+          npc.mode = 'travel';
+          return true;
+        }
+      }
+
+      if (npc.destinationModuleUid) {
+        const target = findModuleLocationByUid(npc.destinationModuleUid);
+        if (!target) {
+          npc.destinationModuleUid = null;
           npc.mode = 'idle';
           npc.vx = 0;
           return false;
         }
-        const route = findRoute(startKey, [npc.destinationCorridorKey]);
-        if (!route || route.length < 2) {
-          npc.destinationCorridorKey = null;
-          npc.mode = 'idle';
-          npc.vx = 0;
-          return false;
-        }
-        const nextKey = route[1];
-        const link = findLinkModule(npc.level, npc.corridor, nextKey);
-        if (!link) {
-          npc.destinationCorridorKey = null;
-          npc.mode = 'idle';
-          npc.vx = 0;
-          return false;
-        }
-        const targetX = moduleCenterInCorridor(npc.level, npc.corridor, link.module);
+        const targetX = moduleCenterInCorridor(target.level, target.corridor, target.module);
         if (targetX === null || targetX === undefined) {
-          npc.destinationCorridorKey = null;
+          npc.destinationModuleUid = null;
           npc.mode = 'idle';
           npc.vx = 0;
           return false;
         }
         const dist = targetX - npc.x;
         if (Math.abs(dist) <= 6) {
-          const { level: nextLevel, corridor: nextCorridor } = parseCorridorKey(nextKey);
-          const backLink = findLinkModule(nextLevel, nextCorridor, startKey);
-          const destX = backLink ? moduleCenterInCorridor(nextLevel, nextCorridor, backLink.module) : null;
-          const bounds = getCorridorLayout(nextLevel, nextCorridor).bounds;
-          npc.level = nextLevel;
-          npc.corridor = nextCorridor;
-          npc.x = destX != null ? clamp(destX, bounds.minX, bounds.maxX) : bounds.minX + (bounds.maxX - bounds.minX) * 0.5;
+          const targetUid = npc.destinationModuleUid;
           npc.vx = 0;
-          npc.mode = 'travel';
+          npc.destinationModuleUid = null;
+          npc.mode = 'idle';
+          applyLmStudioArrivalHold(npc, 'module_uid', targetUid);
           return true;
         }
         npc.vx = Math.sign(dist) * npc.speed * 0.6;
@@ -7651,6 +7811,7 @@
           npc.vx = 0;
           npc.destinationType = null;
           npc.mode = 'idle';
+          applyLmStudioArrivalHold(npc, 'module_type', targetType);
           return true;
         }
         npc.vx = Math.sign(dist) * npc.speed * 0.6;
@@ -8091,49 +8252,55 @@
         if (!navActive && !taskActive) {
           npc.mode = 'idle';
           npc.thinkTimer -= dt;
-          
-          if (npc.thinkTimer <= 0) {
-            // Pick a random wander target occasionally
-            if (Math.random() < 0.6 || npc.wanderTarget === null) {
-              const bounds = npcBoundsFor(npc);
-              const minX = bounds.minX;
-              const maxX = bounds.maxX;
-              if (maxX > minX) {
-                npc.wanderTarget = minX + Math.random() * (maxX - minX);
-              } else {
-                npc.wanderTarget = minX;
-              }
-            }
-            if (npc.destinationType == null && Math.random() < 0.08) {
-              const types = listRoutableModuleTypes();
-              if (types.length) {
-                npc.destinationType = types[(Math.random() * types.length) | 0];
-                npc.wanderTarget = null;
-                npc.mode = 'travel';
-              }
-            }
-            if (npc.destinationType == null && npc.destinationCorridorKey == null && Math.random() < 0.12) {
-              const corridors = listAllCorridors().filter((k) => k !== corridorKey(npc.level, npc.corridor));
-              if (corridors.length) {
-                npc.destinationCorridorKey = corridors[(Math.random() * corridors.length) | 0];
-                npc.wanderTarget = null;
-                npc.mode = 'travel';
-              }
-            }
-            npc.thinkTimer = 2 + Math.random() * 3;
-          }
+          const holdUntil = Number.isFinite(npc.lmStudioHoldUntil) ? npc.lmStudioHoldUntil : 0;
 
-          // Move toward wander target
-          if (npc.wanderTarget !== null) {
-            const dist = npc.wanderTarget - npc.x;
-            if (Math.abs(dist) > 10) {
-              npc.vx = (dist > 0 ? 1 : -1) * npc.speed * 0.5;
+          if (holdUntil && Date.now() < holdUntil) {
+            npc.vx = 0;
+            npc.wanderTarget = null;
+          } else {
+            if (npc.thinkTimer <= 0) {
+              // Pick a random wander target occasionally
+              if (Math.random() < 0.6 || npc.wanderTarget === null) {
+                const bounds = npcBoundsFor(npc);
+                const minX = bounds.minX;
+                const maxX = bounds.maxX;
+                if (maxX > minX) {
+                  npc.wanderTarget = minX + Math.random() * (maxX - minX);
+                } else {
+                  npc.wanderTarget = minX;
+                }
+              }
+              if (npc.destinationType == null && Math.random() < 0.08) {
+                const types = listRoutableModuleTypes();
+                if (types.length) {
+                  npc.destinationType = types[(Math.random() * types.length) | 0];
+                  npc.wanderTarget = null;
+                  npc.mode = 'travel';
+                }
+              }
+              if (npc.destinationType == null && npc.destinationCorridorKey == null && Math.random() < 0.12) {
+                const corridors = listAllCorridors().filter((k) => k !== corridorKey(npc.level, npc.corridor));
+                if (corridors.length) {
+                  npc.destinationCorridorKey = corridors[(Math.random() * corridors.length) | 0];
+                  npc.wanderTarget = null;
+                  npc.mode = 'travel';
+                }
+              }
+              npc.thinkTimer = 2 + Math.random() * 3;
+            }
+
+            // Move toward wander target
+            if (npc.wanderTarget !== null) {
+              const dist = npc.wanderTarget - npc.x;
+              if (Math.abs(dist) > 10) {
+                npc.vx = (dist > 0 ? 1 : -1) * npc.speed * 0.5;
+              } else {
+                npc.vx = 0;
+                npc.wanderTarget = null;
+              }
             } else {
               npc.vx = 0;
-              npc.wanderTarget = null;
             }
-          } else {
-            npc.vx = 0;
           }
         }
 
@@ -10514,12 +10681,22 @@
           apiKey: state.lmStudio.apiKey,
           autoLoadModel: state.lmStudio.autoLoadModel,
           activeAiId: state.lmStudio.activeAiId || null,
+          pendingCaptainMessage: state.lmStudio.pendingCaptainMessage || null,
+          lastCaptainMessage: state.lmStudio.lastCaptainMessage || '',
+          lastCaptainReply: state.lmStudio.lastCaptainReply || '',
           lastToolCall: state.lmStudio.lastToolCall || null,
           lastToolResult: state.lmStudio.lastToolResult || null,
           memory: Array.isArray(state.lmStudio.memory) ? state.lmStudio.memory : [],
+          memoryByAi: state.lmStudio.memoryByAi && typeof state.lmStudio.memoryByAi === 'object'
+            ? state.lmStudio.memoryByAi
+            : {},
           chatHistory: state.lmStudio.chatHistory && typeof state.lmStudio.chatHistory === 'object'
             ? state.lmStudio.chatHistory
-            : {}
+            : {},
+          lastMemorySearchByAi: state.lmStudio.lastMemorySearchByAi && typeof state.lmStudio.lastMemorySearchByAi === 'object'
+            ? state.lmStudio.lastMemorySearchByAi
+            : {},
+          toolLog: Array.isArray(state.lmStudio.toolLog) ? state.lmStudio.toolLog : []
         } : undefined,
         npcs: state.npcs.map(n => ({
           id: n.id,
@@ -10532,7 +10709,9 @@
           hunger: n.hunger,
           walkPhase: n.walkPhase || 0,
           destinationType: n.destinationType || null,
-          destinationCorridorKey: n.destinationCorridorKey || null
+          destinationCorridorKey: n.destinationCorridorKey || null,
+          destinationModuleUid: n.destinationModuleUid || null,
+          log: Array.isArray(n.log) ? n.log : []
         }))
       };
     }
@@ -10606,7 +10785,8 @@
             hunger: Number.isFinite(n.hunger) ? n.hunger : 0,
             destinationType: n.destinationType || null,
             destinationCorridorKey: n.destinationCorridorKey || null,
-            log: []
+            destinationModuleUid: n.destinationModuleUid || null,
+            log: Array.isArray(n.log) ? n.log : []
           }));
         }
         if (state.lmStudio && state.lmStudio.activeAiId) {
@@ -10698,8 +10878,21 @@
         hunger: 0,
         destinationType: null,
         destinationCorridorKey: null,
+        destinationModuleUid: null,
         log: []
       };
+    }
+
+    function logNpcAction(npc, action, detail = '') {
+      if (!npc) return;
+      if (!Array.isArray(npc.log)) npc.log = [];
+      const entry = {
+        at: Date.now(),
+        action: String(action || '').trim(),
+        detail: String(detail || '').trim()
+      };
+      npc.log.push(entry);
+      if (npc.log.length > 20) npc.log = npc.log.slice(-20);
     }
 
     function npcHasRole(npc, required) {
@@ -10757,6 +10950,7 @@
       npc.task = { key, label, targetType, duration, progress: 0, onComplete };
       npc.destinationType = targetType;
       npc.destinationCorridorKey = null;
+      npc.destinationModuleUid = null;
       npc.mode = 'travel';
       return true;
     }
@@ -10791,6 +10985,7 @@
           npc.mode = 'idle';
           npc.destinationType = null;
           npc.destinationCorridorKey = null;
+          npc.destinationModuleUid = null;
           npc.wanderTarget = null;
           return true;
         }
@@ -10801,6 +10996,7 @@
         npc.task = null;
         npc.destinationType = null;
         npc.destinationCorridorKey = null;
+        npc.destinationModuleUid = null;
         npc.mode = 'idle';
         return false;
       }
@@ -10824,6 +11020,7 @@
             npc.mode = 'idle';
             npc.destinationType = null;
             npc.destinationCorridorKey = null;
+            npc.destinationModuleUid = null;
             npc.wanderTarget = null;
             return true;
           }
