@@ -3592,7 +3592,15 @@
         }
       }
 
-      return { error: 'Unknown action_key' };
+      return { error: 'Unknown action_key. Use an action_key from the station menus in context.' };
+    }
+
+    function ensureModuleForActionTarget(targetType) {
+      if (!targetType) return { ok: true };
+      if (corridorsWithModuleType(targetType).length) return { ok: true };
+      const locked = !isModuleUnlocked(targetType) && !STRUCTURE_TYPES.has(targetType);
+      const unlockHint = locked ? ' Run sensors_deep_scan to unlock the blueprint.' : '';
+      return { ok: false, error: `No ${targetType} module available. Build it with build_module (module_type: "${targetType}").${unlockHint}` };
     }
 
     function lmStudioResolveModuleRemoval(args) {
@@ -3683,7 +3691,7 @@
         case 'walk_to': {
           const npc = selectNpcForLmStudio(args.npc_uid, args.npc_role);
           if (!npc) {
-            result = { ok: false, error: 'No NPC available' };
+            result = { ok: false, error: 'No NPC available. Hire crew or specify args.npc_uid.' };
             break;
           }
           const targetCorridor = args.corridor_key ? String(args.corridor_key) : '';
@@ -3797,7 +3805,7 @@
           }
           const npc = selectNpcForLmStudio(args.npc_uid, args.npc_role);
           if (!npc) {
-            result = { ok: false, error: 'No NPC available' };
+            result = { ok: false, error: 'No NPC available. Hire crew or specify args.npc_uid.' };
             break;
           }
           const recipientUid = String(args.uid || '').trim();
@@ -3812,7 +3820,7 @@
               : null)
             : null;
           if (!recipient && !recipientAi) {
-            result = { ok: false, error: 'Unknown uid' };
+            result = { ok: false, error: 'Unknown uid. Use Character lookup to find a valid player/AI uid.' };
             break;
           }
           const walkto = args.walkto === undefined ? true : !!args.walkto;
@@ -3820,7 +3828,7 @@
           lmStudioChatAdd(npc.uid, 'ai', message, senderName);
           if (recipientAi) {
             if (npcRole(npc) !== 'ai') {
-              result = { ok: false, error: 'Sender must be AI role' };
+              result = { ok: false, error: 'Sender must be AI role to message another AI. Use an AI npc_uid.' };
               break;
             }
             const senderTag = `${senderName} (${npc.uid})`;
@@ -3865,9 +3873,14 @@
             result = { ok: false, error: def.error };
             break;
           }
+          const moduleCheck = ensureModuleForActionTarget(def.targetType);
+          if (!moduleCheck.ok) {
+            result = { ok: false, error: moduleCheck.error };
+            break;
+          }
           const npc = selectNpcForLmStudio(npcId, null);
           if (!npc) {
-            result = { ok: false, error: 'Unknown npc_uid' };
+            result = { ok: false, error: 'Unknown npc_uid. Use State.npcs to pick a valid crew uid.' };
             break;
           }
           assignNpcTask(npc, {
@@ -3886,8 +3899,16 @@
           break;
         }
         case 'sensors_deep_scan': {
+          if (state.power < 12) {
+            result = { ok: false, error: 'Need at least 12 power. Route power or disable other systems.' };
+            break;
+          }
+          if (!invHas('scrap', 2)) {
+            result = { ok: false, error: 'Need 2 scrap. Run sensors_scan or drones.salvage to collect scrap.' };
+            break;
+          }
           const ok = deepScanBlueprint(false);
-          result = { ok };
+          result = ok ? { ok: true } : { ok: false, error: 'No new signatures found. Try another deep scan later.' };
           break;
         }
         case 'cockpit_set_course': {
@@ -3950,7 +3971,7 @@
         }
         case 'build_module': {
           if (state.crewAI && !state.crewAI.autoBuild) {
-            result = { ok: false, error: 'Auto Build is disabled' };
+            result = { ok: false, error: 'Auto Build is disabled. Enable Auto Build in Crew AI before building.' };
             break;
           }
           const type = String(args.module_type || '').trim();
@@ -3958,11 +3979,15 @@
           const allowDuplicate = !!args.allow_duplicate || !!args.corridor_key;
           const target = resolveCorridorKeyArg(args.corridor_key);
           if (target.error) {
-            result = { ok: false, error: target.error };
+            result = { ok: false, error: `${target.error}. Use “Valid corridor_key values” from context.` };
             break;
           }
           if (!type) {
             result = { ok: false, error: 'Missing module_type' };
+            break;
+          }
+          if (STRUCTURE_TYPES.has(type) && !allowStructure) {
+            result = { ok: false, error: 'Structural module requires args.allow_structure=true.' };
             break;
           }
           if (allowStructure && STRUCTURE_TYPES.has(type)) {
@@ -3973,6 +3998,13 @@
           const built = target
             ? ensureModuleBuiltAt(type, target.level, target.corridor, 'LMS', { allowDuplicate })
             : { ok: ensureModuleBuiltIfUnlocked(type, 'LMS') };
+          if (built && built.ok === false && built.error) {
+            if (built.error === 'Module locked') {
+              built.error = 'Module locked. Run sensors_deep_scan to unlock the blueprint.';
+            } else if (built.error === 'Fabricator required') {
+              built.error = 'Fabricator required. Build a fabricator first.';
+            }
+          }
           result = built;
           break;
         }
@@ -4031,6 +4063,11 @@
             result = { ok: false, error: def.error };
             break;
           }
+          const moduleCheck = ensureModuleForActionTarget(def.targetType);
+          if (!moduleCheck.ok) {
+            result = { ok: false, error: moduleCheck.error };
+            break;
+          }
           const npc = selectNpcForLmStudio(args.npc_uid, args.npc_role);
           if (!npc) {
             result = { ok: false, error: 'No NPC available' };
@@ -4048,6 +4085,20 @@
         }
         case 'toggle_system': {
           const system = String(args.system || '').toLowerCase();
+          const systemModuleMap = {
+            engine: 'engine',
+            shields: 'shields',
+            life_support: 'life',
+            hydroponics: 'hydro'
+          };
+          const targetType = systemModuleMap[system] || '';
+          if (targetType) {
+            const moduleCheck = ensureModuleForActionTarget(targetType);
+            if (!moduleCheck.ok) {
+              result = { ok: false, error: moduleCheck.error };
+              break;
+            }
+          }
           if (system === 'lights') toggleLights();
           else if (system === 'engine') toggleEngine();
           else if (system === 'shields') toggleShields();
@@ -4181,7 +4232,7 @@
         }
         case 'create_elevator_link': {
           if (state.crewAI && !state.crewAI.autoBuild) {
-            result = { ok: false, error: 'Auto Build is disabled' };
+            result = { ok: false, error: 'Auto Build is disabled. Enable Auto Build in Crew AI before building.' };
             break;
           }
           const direction = String(args.direction || '').toLowerCase();
@@ -4202,7 +4253,7 @@
             if (built.ok && built.module) elevatorModule = built.module;
           }
           if (!elevatorModule) {
-            result = { ok: false, error: 'No elevator module in corridor' };
+            result = { ok: false, error: 'No elevator in corridor. Build an elevator with build_module (allow_structure=true), then retry.' };
             break;
           }
           const link = createLinkedElevatorAt(target.level, target.corridor, elevatorModule, direction);
