@@ -391,6 +391,10 @@
       gap: 12px;
     }
 
+    .menu-setting-item.multiline {
+      align-items: flex-start;
+    }
+
     .menu-setting-item:last-child {
       border-bottom: none;
     }
@@ -409,6 +413,13 @@
       text-align: right;
       flex-shrink: 0;
       word-break: break-word;
+    }
+
+    .menu-setting-value.multiline {
+      white-space: pre-wrap;
+      text-align: left;
+      flex: 2 1 240px;
+      min-width: 140px;
     }
 
     .menu-setting-controls {
@@ -917,7 +928,7 @@
       npcs: [],
       
       // UI state
-      ui: { panelOpen: false, actionActor: 'player', justOpenedPanel: false, panelScrollPositions: {}, focusedButtonLabel: null, menuStack: [], unifiedMenuStack: [], returnToStation: null, suppressMenuOpen: false },
+      ui: { panelOpen: false, actionActor: 'player', justOpenedPanel: false, panelScrollPositions: {}, focusedButtonLabel: null, menuStack: [], unifiedMenuStack: [], returnToStation: null, suppressMenuOpen: false, sensorsLastScan: '', sensorsLastDeepScan: '' },
       keys: { left: false, right: false },
       nearStation: null,
       pendingSpawn: null,
@@ -1031,6 +1042,17 @@
         ]
       },
 
+      // Throttle (submenu)
+      throttle: {
+        isRoot: false,
+        title: 'THROTTLE',
+        overview: 'Set engine throttle:',
+        itemBuilder: 'buildThrottleItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
       // Power Routing (root)
       powerRouting: {
         isRoot: true,
@@ -1062,6 +1084,18 @@
         title: 'COMMS — CONTRACTS',
         overview: 'Available contracts:',
         itemBuilder: 'buildContractItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Cockpit (root)
+      cockpit: {
+        isRoot: true,
+        stationType: 'cockpit',
+        title: 'COCKPIT',
+        overview: 'Command, navigation, and comms:',
+        itemBuilder: 'buildCockpitItems',
         actions: [
           { label: 'Back', behavior: 'back' }
         ]
@@ -1346,8 +1380,10 @@
       buildFabricatorItems,
       buildNavigationItems,
       buildNavigationDestinations,
+      buildThrottleItems,
       buildPowerRoutingItems,
       buildContractItems,
+      buildCockpitItems,
       buildCargoItems,
       buildEngineItems,
       buildLifeSupportItems,
@@ -1420,7 +1456,15 @@
         if (state.ui.unifiedMenuStack.length > 0) {
           // Return to previous menu in stack (don't push again)
           const prev = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
-          renderUnifiedMenu(prev.definition, prev.items, { _skipPush: true });
+          let items = prev.definition.items || [];
+          if (prev.definition.itemBuilder) {
+            const builder = MENU_HANDLERS[prev.definition.itemBuilder];
+            if (typeof builder === 'function') {
+              items = builder();
+            }
+          }
+          prev.items = items;
+          renderUnifiedMenu(prev.definition, items, { _skipPush: true });
         } else {
           // Stack is empty, close panel
           state.ui.focusedButtonLabel = null;
@@ -1640,6 +1684,7 @@
     function renderUnifiedSettingItem(container, item, menuDef) {
       const div = document.createElement('div');
       div.className = 'menu-setting-item';
+      if (item.multiline) div.classList.add('multiline');
       div.dataset.menuLabel = item.label;
 
       const label = document.createElement('div');
@@ -1648,6 +1693,7 @@
 
       const value = document.createElement('div');
       value.className = 'menu-setting-value';
+      if (item.multiline) value.classList.add('multiline');
       value.textContent = item.value || '';
       value.dataset.menuValueFor = item.label;
 
@@ -1888,7 +1934,7 @@
         markDirty();
         updateHUD();
       }}] });
-      items.push({ type: 'setting', label: 'Throttle', value: `${thrPct}%`, actions: [{ label: 'Set', action: () => openThrottlePanel('NAVIGATION') }] });
+      items.push({ type: 'setting', label: 'Throttle', value: `${thrPct}%`, actions: [{ label: 'Set', action: () => openThrottleMenu('NAVIGATION') }] });
 
       // Travel info
       if (t.active && t.to) {
@@ -2082,6 +2128,18 @@
     }
 
     /**
+     * Build items for Cockpit menu
+     */
+    function buildCockpitItems(options = {}) {
+      return [
+        { type: 'action', label: 'Navigation', behavior: 'submenu', target: 'navigation' },
+        { type: 'action', label: 'Power Routing', behavior: 'submenu', target: 'powerRouting' },
+        { type: 'action', label: 'Crew Command', behavior: 'submenu', target: 'crewCommand' },
+        { type: 'action', label: 'Comms (Contracts)', behavior: 'submenu', target: 'contracts' }
+      ];
+    }
+
+    /**
      * Build items for Cargo menu
      */
     function buildCargoItems(options = {}) {
@@ -2135,7 +2193,7 @@
           markDirty();
           updateHUD();
         }, behavior: 'keep-open' }] },
-        { type: 'setting', label: 'Throttle', value: `${Math.round(state.throttle * 100)}%`, actions: [{ label: 'Set', action: () => openThrottlePanel('ENGINE') }] },
+        { type: 'setting', label: 'Throttle', value: `${Math.round(state.throttle * 100)}%`, actions: [{ label: 'Set', action: () => openThrottleMenu('ENGINE') }] },
         { type: 'setting', label: 'Heat', value: `${Math.round(state.heat)}%`, actions: [] },
         { type: 'divider' }
       ];
@@ -2248,7 +2306,18 @@
      * Build items for Sensors menu
      */
     function buildSensorsItems(options = {}) {
+      const lastScan = state.ui && state.ui.sensorsLastScan ? state.ui.sensorsLastScan : '—';
+      const lastDeepScan = state.ui && state.ui.sensorsLastDeepScan ? state.ui.sensorsLastDeepScan : '—';
+      const blueprintTypes = Object.keys(MODULE_DEFS || {})
+        .filter((t) => !['rear', 'front', 'doorway', 'elevator', 'empty'].includes(t));
+      const unlockedCount = blueprintTypes.filter((t) => isModuleUnlocked(t)).length;
+      const totalCount = blueprintTypes.length;
+      const blueprintStatus = `${unlockedCount} / ${totalCount}`;
       const items = [
+        { type: 'setting', label: 'Blueprints', value: blueprintStatus, actions: [] },
+        { type: 'setting', label: 'Last Scan', value: lastScan, actions: [], multiline: true },
+        { type: 'setting', label: 'Last Deep Scan', value: lastDeepScan, actions: [], multiline: true },
+        { type: 'divider' },
         { type: 'action', label: 'Scan for Loot', action: () => scanForAnomalies(false), behavior: 'keep-open' },
         { type: 'action', label: 'Deep Scan (Blueprints)', action: () => deepScanBlueprint(false), behavior: 'keep-open' }
       ];
@@ -2821,7 +2890,10 @@
           currentLevel: state.currentLevel,
           currentCorridor: state.currentCorridor,
           powerProfile: state.powerProfile,
-          activePlayerUid: state.activePlayerUid || (state.player && state.player.uid)
+          activePlayerUid: state.activePlayerUid || (state.player && state.player.uid),
+          engineActive: !!state.engineActive,
+          throttlePct: Math.round(clamp(safeNumber(state.throttle, 0), 0, 1) * 100),
+          speed: Math.round(safeNumber(state.speed, 0))
         },
         systems: {
           power: Math.round(state.power),
@@ -3100,6 +3172,7 @@
         '- Avoid walk_to loops: if State.npcs already shows a destinationType, destinationCorridorKey, or destinationModuleUid for your NPC, do not issue another walk_to.',
         '- use_station_action requires args.action_key (example: cargo.sell.rations).',
         '- Elevators: action use_elevator with direction up/down to move between decks.',
+        '- Throttle: use set_throttle with args.percent (0-100). Engine must be online to gain speed.',
         '- Layout: build_module adds a module at the end of a corridor; requires args.module_type + args.corridor_key (pick from “Valid corridor_key values”).',
         '- build_module: module_type must be from “Module types”; non-structural modules require a Fabricator and an unlocked blueprint.',
         '- build_module: if the module is locked, run sensors_deep_scan to unlock; if you need a second copy, set args.allow_duplicate=true.',
@@ -4857,6 +4930,32 @@
                       properties: {
                         args: {
                           properties: {
+                            action: { const: 'set_throttle' }
+                          }
+                        }
+                      }
+                    },
+                    then: {
+                      properties: {
+                        args: {
+                          properties: {
+                            args: {
+                              type: 'object',
+                              properties: {
+                                percent: { type: 'number' }
+                              },
+                              required: ['percent']
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    if: {
+                      properties: {
+                        args: {
+                          properties: {
                             action: { const: 'rename_self' }
                           }
                         }
@@ -5448,7 +5547,7 @@
             key: 'engine.throttle',
             label: 'Set Throttle',
             requiredRole: ['pilot', 'tech', 'engineer'],
-            action: () => openThrottlePanel('ENGINE')
+            action: () => openThrottleMenu('ENGINE')
           },
           {
             key: 'engine.vent',
@@ -8183,6 +8282,15 @@
 
     document.addEventListener('keydown', (e) => {
       if (state.ui.panelOpen) {
+        if (e.key === 'Escape' && state.ui.unifiedMenuStack.length > 0) {
+          e.preventDefault();
+          if (state.ui.unifiedMenuStack.length > 1) {
+            popUnifiedMenu();
+          } else {
+            closePanel();
+          }
+          return;
+        }
         const textareaEl = document.getElementById('panelTextarea');
         const inputEl = document.getElementById('panelInput');
         if (inputEl && inputEl.style.display !== 'none' && document.activeElement === inputEl) {
@@ -8784,28 +8892,15 @@
     }
 
     function openStationPanel(station) {
-      // Clear both the unified menu stack and old menu stack when opening station
-      state.ui.unifiedMenuStack = [];
-      state.ui.menuStack = [];
-      
-      const actions = station.getActions(station);
-      const buttons = actions.map((action) => {
-        let label = action.label;
-        if (action.requiredRole) {
-          const roles = Array.isArray(action.requiredRole) ? action.requiredRole : [action.requiredRole];
-          label += ` [${roles.join('/')}]`;
-        }
-        return {
-          label,
-          action: () => {
-            // Execute the action directly - it will open any menus it needs to
-            // The action function is responsible for showing the appropriate UI
-            executeAction(action);
-          }
-        };
+      const menuName = Object.keys(MENUS).find((key) => {
+        const def = MENUS[key];
+        return def && def.isRoot && def.stationType === station.type;
       });
-
-      openPanel(station.label.toUpperCase(), `Station: ${station.label}`, buttons);
+      if (menuName) {
+        openMenu(menuName);
+        return;
+      }
+      showMessage('STATION', 'No unified menu available for this station.');
     }
 
     // ============================================================================
@@ -9422,18 +9517,34 @@
         messages.push('Sweep complete. Recovered 1 scrap and 1 ore.');
       }
 
-      if (showPanel && messages.length) {
-        showMessage('SENSORS', messages.join('\n'));
+      const report = messages.join('\n');
+      if (state.ui) state.ui.sensorsLastScan = report;
+      if (state.ui && state.ui.unifiedMenuStack && state.ui.unifiedMenuStack.length) {
+        const current = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
+        if (current && current.name === 'sensors') rebuildUnifiedMenuInPlace();
       }
+      if (showPanel && report) showMessage('SENSORS', report);
     }
 
     function deepScanBlueprint(showPanel = true) {
       if (state.power < 12) {
-        if (showPanel) showMessage('SENSORS', 'Need at least 12 power.');
+        const report = 'Need at least 12 power.';
+        if (state.ui) state.ui.sensorsLastDeepScan = report;
+        if (state.ui && state.ui.unifiedMenuStack && state.ui.unifiedMenuStack.length) {
+          const current = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
+          if (current && current.name === 'sensors') rebuildUnifiedMenuInPlace();
+        }
+        if (showPanel) showMessage('SENSORS', report);
         return false;
       }
       if (!invHas('scrap', 2)) {
-        if (showPanel) showMessage('SENSORS', 'Need 2 scrap to calibrate the array.');
+        const report = 'Need 2 scrap to calibrate the array.';
+        if (state.ui) state.ui.sensorsLastDeepScan = report;
+        if (state.ui && state.ui.unifiedMenuStack && state.ui.unifiedMenuStack.length) {
+          const current = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
+          if (current && current.name === 'sensors') rebuildUnifiedMenuInPlace();
+        }
+        if (showPanel) showMessage('SENSORS', report);
         return false;
       }
       state.power = Math.max(0, state.power - 12);
@@ -9448,9 +9559,13 @@
         unlocked = unlockRecipeBlueprint('plating', 'DEEP SCAN');
       }
 
-      if (showPanel) {
-        showMessage('SENSORS', unlocked ? 'Blueprint data recovered.' : 'No new signatures found.');
+      const report = unlocked ? 'Blueprint data recovered.' : 'No new signatures found.';
+      if (state.ui) state.ui.sensorsLastDeepScan = report;
+      if (state.ui && state.ui.unifiedMenuStack && state.ui.unifiedMenuStack.length) {
+        const current = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
+        if (current && current.name === 'sensors') rebuildUnifiedMenuInPlace();
       }
+      if (showPanel) showMessage('SENSORS', report);
       return unlocked;
     }
 
@@ -9845,24 +9960,43 @@
     }
 
     function openThrottlePanel(context = 'NAV') {
+      openThrottleMenu(context);
+    }
+
+    function openThrottleMenu(context = 'NAVIGATION') {
+      openMenu('throttle', { context: String(context || 'NAVIGATION') });
+    }
+
+    function buildThrottleItems(options = {}) {
+      const context = String(options.context || 'NAVIGATION');
+      const menuDef = MENUS.throttle;
+      if (menuDef) {
+        menuDef.title = `${context} — THROTTLE`;
+        menuDef.overview = 'Set engine throttle:';
+      }
       const thr = clamp(safeNumber(state.throttle, 0), 0, 1);
       const pct = Math.round(thr * 100);
+      const setThrottle = (p) => () => {
+        state.throttle = clamp(p / 100, 0, 1);
+        markDirty();
+        updateHUD();
+        rebuildUnifiedMenuInPlace();
+      };
       const mk = (p) => ({
-        label: p === pct ? `Throttle: ${p}% (current)` : `Throttle: ${p}%`,
-        action: () => {
-          state.throttle = clamp(p / 100, 0, 1);
-          markDirty();
-          updateHUD();
-          showMessage(context, `Throttle set to ${p}%.`);
-        }
+        type: 'action',
+        label: p === pct ? `✓ ${p}% (current)` : `${p}%`,
+        action: setThrottle(p),
+        behavior: 'keep-open'
       });
-
-      openPanel(
-        `${context} — THROTTLE`,
-        'Set engine throttle:',
-        [mk(0), mk(25), mk(50), mk(75), mk(100), { label: 'Back', action: popMenu }],
-        { includeCancel: false }
-      );
+      return [
+        { type: 'setting', label: 'Current Throttle', value: `${pct}%`, actions: [] },
+        { type: 'divider' },
+        mk(0),
+        mk(25),
+        mk(50),
+        mk(75),
+        mk(100)
+      ];
     }
 
     function autoRoutePower() {
@@ -10171,6 +10305,7 @@
 
         if (e.key === 'Escape') {
           e.preventDefault();
+          e.stopPropagation();
           popUnifiedMenu();
         } else if (e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey)) {
           e.preventDefault();
