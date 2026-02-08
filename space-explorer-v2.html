@@ -576,6 +576,22 @@
       outline: none;
     }
 
+    #interactPanel textarea::selection,
+    #interactPanel input::selection,
+    #gameMenuPanel textarea::selection,
+    #gameMenuPanel input::selection {
+      background: rgba(120, 240, 255, 0.8);
+      color: #0a0e27;
+    }
+
+    #interactPanel textarea::-moz-selection,
+    #interactPanel input::-moz-selection,
+    #gameMenuPanel textarea::-moz-selection,
+    #gameMenuPanel input::-moz-selection {
+      background: rgba(120, 240, 255, 0.8);
+      color: #0a0e27;
+    }
+
     #panelInput {
       width: 100%;
       height: 40px;
@@ -1986,6 +2002,28 @@
     /**
      * Build items for Power menu
      */
+    function boostPower(showPanel = false) {
+      state.power = Math.min(120, state.power + 15);
+      markDirty();
+      updateHUD();
+      if (showPanel) showMessage('POWER', 'Power boosted by 15.');
+    }
+
+    function powerCoreCount() {
+      const count = corridorsWithModuleType('power').length;
+      return Math.max(1, Math.floor(safeNumber(count, 1)));
+    }
+
+    function powerSinkCost(baseCost) {
+      const base = Math.max(0, safeNumber(baseCost, 0));
+      return base / powerCoreCount();
+    }
+
+    function formatPowerCost(cost) {
+      const rounded = Math.round(safeNumber(cost, 0) * 10) / 10;
+      return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+    }
+
     function buildPowerItems(options = {}) {
       const items = [
         { type: 'setting', label: 'Power Level', value: `${Math.round(state.power)}/120`, actions: [] },
@@ -1993,11 +2031,7 @@
         { 
           type: 'action', 
           label: 'Boost Power (+15)',
-          action: () => {
-            state.power = Math.min(120, state.power + 15);
-            markDirty();
-            updateHUD();
-          },
+          action: () => boostPower(true),
           behavior: 'keep-open'
         },
         { 
@@ -2185,7 +2219,23 @@
     /**
      * Build items for Engine menu
      */
+    function ventHeat(showPanel = true) {
+      const cost = powerSinkCost(6);
+      if (state.power < cost) {
+        if (showPanel) showMessage('ENGINE', `Need at least ${formatPowerCost(cost)} power.`);
+        return false;
+      }
+      state.power = Math.max(0, state.power - cost);
+      state.heat = Math.max(0, state.heat * 0.5);
+      resolveIncident('fire');
+      markDirty();
+      if (showPanel) showMessage('ENGINE', 'Heat vented.');
+      return true;
+    }
+
     function buildEngineItems(options = {}) {
+      const ventCost = powerSinkCost(6);
+      const ventLabel = `Vent Heat (${formatPowerCost(ventCost)} power)`;
       const items = [
         { type: 'setting', label: 'Status', value: state.engineActive ? 'ONLINE' : 'OFFLINE', actions: [{ label: 'Toggle', action: () => {
           state.engineActive = !state.engineActive;
@@ -2198,23 +2248,14 @@
         { type: 'divider' }
       ];
 
-      if (state.incidents && state.incidents.fire) {
-        items.push({ 
-          type: 'action', 
-          label: 'Vent Heat (6 power)',
-          action: () => {
-            if (state.power < 6) return showMessage('ENGINE', 'Need at least 6 power.');
-            state.power = Math.max(0, state.power - 6);
-            state.heat = Math.max(0, state.heat - 25);
-            resolveIncident('fire');
-            markDirty();
-            showMessage('ENGINE', 'Heat vented.');
-          },
-          behavior: 'keep-open'
-        });
-      } else {
-        items.push({ type: 'action', label: 'Vent Heat (6 power)', action: () => showMessage('ENGINE', 'Heat levels normal.'), behavior: 'keep-open' });
-      }
+      items.push({ 
+        type: 'action', 
+        label: ventLabel,
+        action: () => {
+          ventHeat(true);
+        },
+        behavior: 'keep-open'
+      });
 
       return items;
     }
@@ -2854,8 +2895,16 @@
           task: n.task ? { key: n.task.key, label: n.task.label, targetType: n.task.targetType } : null
         }));
 
+      const travel = state.travel && typeof state.travel === 'object' ? state.travel : { active: false };
+      const anomalyTarget = buildLmStudioAnomalyTargetData();
+
       return {
         timestamp: new Date().toISOString(),
+        location: {
+          system: currentSystem(),
+          inTransit: !!travel.active,
+          course: travel && travel.active ? { from: travel.from || '', to: travel.to || '' } : null
+        },
         captain: (() => {
           const captain = Array.isArray(state.playerCharacters)
             ? state.playerCharacters.find((pc) => pc.slot === 1) || state.player
@@ -2895,6 +2944,7 @@
           throttlePct: Math.round(clamp(safeNumber(state.throttle, 0), 0, 1) * 100),
           speed: Math.round(safeNumber(state.speed, 0))
         },
+        anomalyTarget,
         systems: {
           power: Math.round(state.power),
           oxygen: Math.round(state.oxygen),
@@ -3117,6 +3167,57 @@
       return `Module types (module_type): ${types.join(', ')}`;
     }
 
+    function buildLmStudioAnomalySummary({ maxItems = 6 } = {}) {
+      const anomalies = Array.isArray(state.anomalies) ? state.anomalies : [];
+      const unresolved = anomalies.filter((a) => a && !a.resolved && a.system);
+      if (!unresolved.length) return 'Unresolved anomalies: none';
+      const counts = {};
+      for (const a of unresolved) {
+        const sys = String(a.system || '').toUpperCase();
+        if (!sys) continue;
+        counts[sys] = (counts[sys] || 0) + 1;
+      }
+      const rows = Object.entries(counts)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, maxItems)
+        .map(([sys, count]) => `${sys}: ${count}`);
+      return `Unresolved anomalies by system:
+${rows.join('\n')}`;
+    }
+
+    function buildLmStudioAnomalyTargetData() {
+      const anomalies = Array.isArray(state.anomalies) ? state.anomalies : [];
+      const unresolved = anomalies.filter((a) => a && !a.resolved && a.system);
+      if (!unresolved.length) {
+        return { system: '', count: 0, isCurrent: false, tied: [] };
+      }
+      const counts = {};
+      for (const a of unresolved) {
+        const sys = String(a.system || '').toUpperCase();
+        if (!sys) continue;
+        counts[sys] = (counts[sys] || 0) + 1;
+      }
+      const entries = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      if (!entries.length) return { system: '', count: 0, isCurrent: false, tied: [] };
+      const maxCount = entries[0][1];
+      const tied = entries.filter(([, count]) => count === maxCount).map(([sys]) => sys);
+      const system = tied[0] || '';
+      return {
+        system,
+        count: maxCount,
+        isCurrent: system ? system === currentSystem() : false,
+        tied
+      };
+    }
+
+    function buildLmStudioAnomalyTargetSummary() {
+      const target = buildLmStudioAnomalyTargetData();
+      if (!target || !target.system) return 'Anomaly target: none';
+      const current = currentSystem();
+      const tieNote = target.tied && target.tied.length > 1 ? ` (tie: ${target.tied.join(', ')})` : '';
+      return `Anomaly target: ${target.system} (${target.count})${tieNote}. Current system: ${current}.`;
+    }
+
     function buildLmStudioModuleAliasHints({ maxItems = 24 } = {}) {
       const levels = SHIP_LAYOUT && SHIP_LAYOUT.levels ? SHIP_LAYOUT.levels : {};
       const entries = [];
@@ -3178,6 +3279,7 @@
         '- build_module: if the module is locked, run sensors_deep_scan to unlock; if you need a second copy, set args.allow_duplicate=true.',
         '- Structural modules (doorway/elevator/front/rear/empty) require args.allow_structure=true; elevators can be linked via create_elevator_link (direction up/down).',
         '- Navigation: action set_course to travel; action cancel_course to stop travel; cockpit_set_course uses cockpit nav.',
+        '- Anomalies: prioritize the system with the most unresolved anomalies (see State.anomalyTarget). If already there, use use_station_action with action_key "cockpit.investigate".',
         '- Cockpit: use_station_action cockpit.power or cockpit.comms; cockpit_set_course with args.destination.',
         '- O2 low: toggle life_support or use_station_action life.emergency; seal o2 leak.',
         '- Rations low: toggle hydroponics then hydro.harvest; or cargo.buy.rations; feed via canteen.eat.',
@@ -3975,8 +4077,9 @@
           break;
         }
         case 'sensors_deep_scan': {
-          if (state.power < 12) {
-            result = { ok: false, error: 'Need at least 12 power. Route power or disable other systems.' };
+          const scanCost = powerSinkCost(12);
+          if (state.power < scanCost) {
+            result = { ok: false, error: `Need at least ${formatPowerCost(scanCost)} power. Route power or disable other systems.` };
             break;
           }
           if (!invHas('scrap', 2)) {
@@ -4605,11 +4708,13 @@
         const hereIndicator = buildLmStudioHereIndicator();
         const corridorKeys = buildLmStudioCorridorKeys();
         const moduleTypes = buildLmStudioModuleTypeHints();
+        const anomalySummary = buildLmStudioAnomalySummary();
+        const anomalyTarget = buildLmStudioAnomalyTargetSummary();
         const recentTools = buildLmStudioRecentToolCalls();
         const aiRoster = buildLmStudioAiRoster(selfId);
         const characterLookup = buildLmStudioCharacterLookup();
         const memoryBlocks = [pinnedMemory, relatedMemory, searchMemory].filter(Boolean).join('\n\n');
-        const contextBlocks = [chatHistory, npcActions, recentTools, aiRoster, characterLookup, corridorKeys, moduleTypes, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
+        const contextBlocks = [chatHistory, npcActions, recentTools, aiRoster, characterLookup, corridorKeys, moduleTypes, anomalySummary, anomalyTarget, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
         const identityLine = selfName
           ? `You are ${selfName}, ${roleLabel}.`
           : `You are ${roleLabel}.`;
@@ -5515,12 +5620,26 @@
         label: 'Power Core',
         width: MODULE_WIDTH,
         station: { ...STATION_SIZE },
+        aiActions: [
+          {
+            key: 'power.boost',
+            label: 'Boost Power',
+            roles: ['engineer', 'tech'],
+            perform: () => boostPower(false)
+          }
+        ],
         actions: () => [
           {
             key: 'power.menu',
             label: 'Power Control',
             action: () => openMenu('power'),
             perform: () => {}
+          },
+          {
+            key: 'power.boost',
+            label: 'Boost Power (+15)',
+            action: () => boostPower(true),
+            perform: () => boostPower(false)
           }
         ]
       },
@@ -5554,19 +5673,10 @@
             label: 'Vent Heat',
             requiredRole: ['engineer', 'tech'],
             action: () => {
-              if (state.power < 6) return showMessage('ENGINE', 'Need at least 6 power.');
-              state.power = Math.max(0, state.power - 6);
-              state.heat = Math.max(0, state.heat - 25);
-              resolveIncident('fire');
-              markDirty();
-              showMessage('ENGINE', 'Heat vented.');
+              ventHeat(true);
             },
             perform: () => {
-              if (state.power < 6) return;
-              state.power = Math.max(0, state.power - 6);
-              state.heat = Math.max(0, state.heat - 25);
-              resolveIncident('fire');
-              markDirty();
+              ventHeat(false);
             }
           }
         ]
@@ -5673,6 +5783,15 @@
         label: 'Cockpit',
         width: MODULE_WIDTH,
         station: { ...STATION_SIZE },
+        aiActions: [
+          {
+            key: 'cockpit.investigate',
+            label: 'Investigate Anomalies',
+            roles: ['pilot'],
+            requires: { power: 10, predicate: () => state.power >= 12 },
+            perform: () => cockpitInvestigateAnomaly(false)
+          }
+        ],
         actions: () => [
           {
             key: 'cockpit.nav',
@@ -5696,6 +5815,13 @@
             requiredRole: ['pilot', 'quartermaster'],
             action: () => openMenu('contracts'),
             perform: () => autoManageContracts()
+          },
+          {
+            key: 'cockpit.investigate',
+            label: 'Investigate Anomalies',
+            requiredRole: ['pilot'],
+            action: () => cockpitInvestigateAnomaly(true),
+            perform: () => cockpitInvestigateAnomaly(false)
           }
         ]
       },
@@ -8666,7 +8792,7 @@
 
     function computePowerDrain(profile, dt) {
       const profileDrain = profile === 'combat' ? 0.08 : profile === 'survival' ? 0.05 : profile === 'industry' ? 0.07 : 0;
-      return (
+      const baseDrain = (
         0.08 +
         (state.lightsOn ? 0.05 : 0) +
         (state.lifeSupportOn ? 0.12 : 0) +
@@ -8676,6 +8802,7 @@
         (state.incidents.fire ? 0.06 : 0) +
         profileDrain
       ) * dt;
+      return powerSinkCost(baseDrain);
     }
 
     function applyPowerTick(profile, dt) {
@@ -8690,7 +8817,7 @@
     function applyOxygenTick(profile, dt) {
       const crewCount = 1 + (Array.isArray(state.npcs) ? state.npcs.length : 0);
       const o2Use = 0.06 * Math.sqrt(Math.max(1, crewCount));
-      const o2Gain = state.lifeSupportOn && state.power >= 8 ? 1.1 : 0;
+      const o2Gain = state.lifeSupportOn && state.power >= powerSinkCost(8) ? 1.1 : 0;
       state.oxygen = clampPercent(state.oxygen + (o2Gain - o2Use) * dt);
     }
 
@@ -8703,8 +8830,8 @@
       const heatCooling = 0.25 + 0.015 * clampPercent(state.heat);
       state.heat = clampPercent(state.heat + (heatGain - heatCooling) * dt);
 
-      if (state.crewAI && state.crewAI.autoVentHeat && state.heat > 70 && state.power > 10) {
-        state.power = clampPercent(state.power - 0.4 * dt);
+      if (state.crewAI && state.crewAI.autoVentHeat && state.heat > 70 && state.power > powerSinkCost(10)) {
+        state.power = clampPercent(state.power - powerSinkCost(0.4 * dt));
         state.heat = clampPercent(state.heat - 1.2 * dt);
       }
     }
@@ -8739,7 +8866,7 @@
       }
       if (state.incidents.o2Leak) state.oxygen = clampPercent(state.oxygen - 1.2 * dt);
       if (state.incidents.fire) state.heat = clampPercent(state.heat + 1.6 * dt);
-      if (state.incidents.powerTrip) state.power = clampPercent(state.power - 0.6 * dt);
+      if (state.incidents.powerTrip) state.power = clampPercent(state.power - powerSinkCost(0.6 * dt));
       state.hull = clamp(state.hull, 0, state.hullMax);
     }
 
@@ -9027,7 +9154,10 @@
       if (!action || !aiHasModule(action.module)) return false;
       if (!aiHasRole(npc, action.roles)) return false;
       const req = action.requires || {};
-      if (Number.isFinite(req.power) && state.power < req.power) return false;
+      if (Number.isFinite(req.power)) {
+        const required = powerSinkCost(req.power);
+        if (state.power < required) return false;
+      }
       if (req.flags) {
         for (const [flag, val] of Object.entries(req.flags)) {
           if (Boolean(state[flag]) !== Boolean(val)) return false;
@@ -9482,12 +9612,13 @@
     function scanForAnomalies(showPanel = true) {
       const sys = currentSystem();
       const messages = [];
-      const hasPower = state.power >= 5;
+      const scanCost = powerSinkCost(5);
+      const hasPower = state.power >= scanCost;
       if (!hasPower) {
         // Emergency low-power sweep to avoid early-game deadlock.
         messages.push('Low power sweep engaged.');
       } else {
-        state.power = Math.max(0, state.power - 5);
+        state.power = Math.max(0, state.power - scanCost);
       }
 
       const existing = Array.isArray(state.anomalies) ? state.anomalies.filter((a) => a && a.system === sys && !a.resolved) : [];
@@ -9527,8 +9658,9 @@
     }
 
     function deepScanBlueprint(showPanel = true) {
-      if (state.power < 12) {
-        const report = 'Need at least 12 power.';
+      const scanCost = powerSinkCost(12);
+      if (state.power < scanCost) {
+        const report = `Need at least ${formatPowerCost(scanCost)} power.`;
         if (state.ui) state.ui.sensorsLastDeepScan = report;
         if (state.ui && state.ui.unifiedMenuStack && state.ui.unifiedMenuStack.length) {
           const current = state.ui.unifiedMenuStack[state.ui.unifiedMenuStack.length - 1];
@@ -9547,7 +9679,7 @@
         if (showPanel) showMessage('SENSORS', report);
         return false;
       }
-      state.power = Math.max(0, state.power - 12);
+      state.power = Math.max(0, state.power - scanCost);
       invTake('scrap', 2);
 
       const locked = listLockedAdvancedModuleTypes();
@@ -9583,8 +9715,9 @@
 
       const buttons = [];
       if (!anomaly.resolved) {
+        const cost = powerSinkCost(10);
         buttons.push({
-          label: 'Investigate (Cost: 10 power)',
+          label: `Investigate (Cost: ${formatPowerCost(cost)} power)`,
           action: () => {
             investigateAnomaly(anomaly, true);
           }
@@ -9596,13 +9729,23 @@
 
     function investigateAnomaly(anomaly, showPanel = true) {
       if (!anomaly || anomaly.resolved) return false;
-      if (state.power < 10) {
-        if (showPanel) showMessage('ANOMALY', 'Need at least 10 power.');
+      const cost = powerSinkCost(10);
+      if (state.power < cost) {
+        if (showPanel) showMessage('ANOMALY', `Need at least ${formatPowerCost(cost)} power.`);
         return false;
       }
-      state.power = Math.max(0, state.power - 10);
+      state.power = Math.max(0, state.power - cost);
       resolveAnomaly(anomaly, showPanel);
       return true;
+    }
+
+    function cockpitInvestigateAnomaly(showPanel = false) {
+      const sys = currentSystem();
+      const anomalies = Array.isArray(state.anomalies)
+        ? state.anomalies.filter((a) => a && !a.resolved && a.system === sys)
+        : [];
+      if (!anomalies.length) return false;
+      return investigateAnomaly(anomalies[0], showPanel);
     }
 
     function ensureContracts() {
@@ -10046,11 +10189,12 @@
     }
 
     function emergencyScrubbers(showPanel = true) {
-      if (state.power < 8) {
-        if (showPanel) showMessage('LIFE', 'Need at least 8 power.');
+      const cost = powerSinkCost(8);
+      if (state.power < cost) {
+        if (showPanel) showMessage('LIFE', `Need at least ${formatPowerCost(cost)} power.`);
         return false;
       }
-      state.power = Math.max(0, state.power - 8);
+      state.power = Math.max(0, state.power - cost);
       if (invHas('filter', 1)) invTake('filter', 1);
       state.oxygen = Math.min(100, state.oxygen + 35);
       resolveIncident('o2Leak');
@@ -10069,11 +10213,12 @@
         if (showPanel) showMessage('HYDRO', 'Hydroponics are offline.');
         return false;
       }
-      if (state.power < 4) {
-        if (showPanel) showMessage('HYDRO', 'Need at least 4 power.');
+      const cost = powerSinkCost(4);
+      if (state.power < cost) {
+        if (showPanel) showMessage('HYDRO', `Need at least ${formatPowerCost(cost)} power.`);
         return false;
       }
-      state.power = Math.max(0, state.power - 4);
+      state.power = Math.max(0, state.power - cost);
       invAdd('rations', 2);
       markDirty();
       if (showPanel) showMessage('HYDRO', 'Harvest complete: +2 rations.');
@@ -10114,11 +10259,12 @@
         if (showPanel) showMessage('SHIELDS', 'Bulkheads sealed. No breach detected.');
         return false;
       }
-      if (state.power < 6) {
-        if (showPanel) showMessage('SHIELDS', 'Need at least 6 power.');
+      const cost = powerSinkCost(6);
+      if (state.power < cost) {
+        if (showPanel) showMessage('SHIELDS', `Need at least ${formatPowerCost(cost)} power.`);
         return false;
       }
-      state.power = Math.max(0, state.power - 6);
+      state.power = Math.max(0, state.power - cost);
       resolveIncident('breach');
       markDirty();
       if (showPanel) showMessage('SHIELDS', 'Bulkheads sealed. Breach contained.');
@@ -10202,12 +10348,13 @@
         if (showPanel) showMessage('DRONES', 'Need drone parts.');
         return false;
       }
-      if (state.power < 6) {
-        if (showPanel) showMessage('DRONES', 'Need at least 6 power.');
+      const cost = powerSinkCost(6);
+      if (state.power < cost) {
+        if (showPanel) showMessage('DRONES', `Need at least ${formatPowerCost(cost)} power.`);
         invAdd('droneParts', 1);
         return false;
       }
-      state.power = Math.max(0, state.power - 6);
+      state.power = Math.max(0, state.power - cost);
       resolveIncident('breach');
       resolveIncident('fire');
       state.hull = Math.min(state.hullMax, state.hull + 12);
@@ -10221,12 +10368,13 @@
         if (showPanel) showMessage('DRONES', 'Need drone parts.');
         return false;
       }
-      if (state.power < 6) {
-        if (showPanel) showMessage('DRONES', 'Need at least 6 power.');
+      const cost = powerSinkCost(6);
+      if (state.power < cost) {
+        if (showPanel) showMessage('DRONES', `Need at least ${formatPowerCost(cost)} power.`);
         invAdd('droneParts', 1);
         return false;
       }
-      state.power = Math.max(0, state.power - 6);
+      state.power = Math.max(0, state.power - cost);
       invAdd('scrap', 3);
       if (Math.random() < 0.4) invAdd('ore', 2);
       markDirty();
@@ -11924,10 +12072,15 @@
         const anyAvailable = required.some((role) => hasCrewRole(role));
         return !anyAvailable;
       };
+      const lowPowerThreshold = Math.max(12, Math.round(120 * 0.2));
       const hasActiveTaskTarget = (type) => {
         if (!type || !Array.isArray(state.npcs)) return false;
         return state.npcs.some((n) => n && n.task && n.task.targetType === type);
       };
+      if (state.power <= lowPowerThreshold && hasModule('power') && canRole(['engineer', 'tech'])) {
+        assignNpcTask(npc, { key: 'power.boost', label: 'Boost Power', targetType: 'power', onComplete: () => boostPower(false) });
+        return;
+      }
       const assignMaterialTask = (material) => {
         if (!material) return false;
         if (canRole(['scientist', 'tech']) && hasModule('sensors')) {
@@ -12025,6 +12178,142 @@
         return false;
       };
 
+      const assignAutoTravel = (pilotNpc) => {
+        if (!pilotNpc || npcRole(pilotNpc) !== 'pilot') return false;
+        if (!state.crewAI.autoTravel || !hasModule('engine') || pilotCritical()) return false;
+        const t = state.travel && typeof state.travel === 'object' ? state.travel : { active: false };
+        const safeToTravel = !anyActiveIncident() && state.oxygen >= 20 && state.power >= 12 && state.hull >= Math.max(10, state.hullMax * 0.5);
+        if (t.active || !safeToTravel) return false;
+
+        const sys = currentSystem();
+        const unresolved = Array.isArray(state.anomalies)
+          ? state.anomalies.filter((a) => a && !a.resolved && typeof a.system === 'string' && a.system.length)
+          : [];
+        const counts = {};
+        for (const a of unresolved) {
+          const key = String(a.system || '').toUpperCase();
+          if (!key) continue;
+          counts[key] = (counts[key] || 0) + 1;
+        }
+        const entries = Object.entries(counts);
+        let destination = null;
+
+        if (entries.length) {
+          entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+          const maxCount = entries[0][1];
+          const topSystems = entries.filter(([, count]) => count === maxCount).map(([system]) => system);
+
+          if (topSystems.includes(sys)) {
+            if (hasModule('cockpit')) {
+              if (state.power < 12) return false;
+              assignNpcTask(pilotNpc, {
+                key: 'cockpit.investigate',
+                label: 'Investigate Anomalies',
+                targetType: 'cockpit',
+                onComplete: () => cockpitInvestigateAnomaly(false)
+              });
+              return true;
+            }
+          } else {
+            let best = null;
+            let bestDist = Infinity;
+            for (const cand of topSystems) {
+              const path = findShortestPath(sys, cand);
+              if (!path || path.length < 2) continue;
+              let sum = 0;
+              for (let i = 0; i < path.length - 1; i++) {
+                const w = distanceBetween(path[i], path[i + 1]);
+                sum += Number.isFinite(w) ? w : 0;
+              }
+              if (sum < bestDist) {
+                bestDist = sum;
+                best = cand;
+              }
+            }
+            destination = best;
+          }
+        }
+
+        if (!destination) {
+          const dests = listDestinations(sys);
+          if (dests.length) destination = dests[(Math.random() * dests.length) | 0];
+        }
+        if (destination && destination !== sys) {
+          const path = findShortestPath(sys, destination);
+          const nextHop = path && path.length >= 2 ? path[1] : null;
+          if (nextHop) {
+            assignNpcTask(pilotNpc, {
+              key: 'cockpit.nav',
+              label: `Plot Course ${sys} → ${nextHop}`,
+              targetType: 'cockpit',
+              onComplete: () => {
+                state.throttle = clamp(Math.max(0.6, safeNumber(state.throttle, 0)), 0, 1);
+                startTravelAuto(nextHop, 'AUTOMATION');
+                updateHUD();
+              }
+            });
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const assignPilotCockpitTasks = (pilotNpc) => {
+        if (!pilotNpc || npcRole(pilotNpc) !== 'pilot') return false;
+        const prevNpc = npc;
+        npc = pilotNpc;
+
+        if (hasModule('cockpit')) {
+          const localAnoms = Array.isArray(state.anomalies)
+            ? state.anomalies.filter((a) => a && !a.resolved && a.system === currentSystem())
+            : [];
+          if (localAnoms.length && !(state.travel && state.travel.active)) {
+            if (state.power < 12) {
+              npc = prevNpc;
+              return false;
+            }
+            assignNpcTask(pilotNpc, {
+              key: 'cockpit.investigate',
+              label: 'Investigate Anomalies',
+              targetType: 'cockpit',
+              onComplete: () => cockpitInvestigateAnomaly(false)
+            });
+            npc = prevNpc;
+            return true;
+          }
+        }
+
+        if (state.crewAI.autoContracts && !pilotCritical()) {
+          if (resolveContractDependencies()) {
+            npc = prevNpc;
+            return true;
+          }
+          if (!state.contract.active || contractReady(state.contract.active)) {
+            if (hasModule('comms')) {
+              assignNpcTask(pilotNpc, { key: 'comms.contracts', label: 'Manage Contracts', targetType: 'comms', onComplete: () => autoManageContracts() });
+              npc = prevNpc;
+              return true;
+            }
+            if (hasModule('cockpit')) {
+              assignNpcTask(pilotNpc, { key: 'cockpit.comms', label: 'Contracts', targetType: 'cockpit', onComplete: () => autoManageContracts() });
+              npc = prevNpc;
+              return true;
+            }
+          }
+        }
+
+        if (assignAutoTravel(pilotNpc)) {
+          npc = prevNpc;
+          return true;
+        }
+
+        npc = prevNpc;
+        return false;
+      };
+
+      const idlePilot = idle.find((n) => npcRole(n) === 'pilot');
+      if (idlePilot && assignPilotCockpitTasks(idlePilot)) return;
+
       if (canRole(['quartermaster']) && hasModule('cargo')) {
         if (needs && needs.filter > 0 && state.credits >= 10) {
           assignNpcTask(npc, { key: 'cargo.buy.filter', label: 'Buy Filter', targetType: 'cargo', onComplete: () => buyCargoItem('filter', 10) });
@@ -12098,13 +12387,8 @@
         assignNpcTask(npc, { key: 'engine.fire', label: 'Extinguish Fire', targetType: 'engine', onComplete: () => resolveIncident('fire') });
         return;
       }
-      if (state.heat > 75 && state.crewAI.autoVentHeat && canRole(['engineer', 'tech']) && hasModule('engine')) {
-        assignNpcTask(npc, { key: 'engine.vent', label: 'Vent Heat', targetType: 'engine', onComplete: () => {
-          state.power = Math.max(0, state.power - 6);
-          state.heat = Math.max(0, state.heat - 25);
-          resolveIncident('fire');
-          markDirty();
-        } });
+      if (state.heat > 50 && state.crewAI.autoVentHeat && canRole(['engineer', 'tech']) && hasModule('engine')) {
+        assignNpcTask(npc, { key: 'engine.vent', label: 'Vent Heat', targetType: 'engine', onComplete: () => ventHeat(false) });
         return;
       }
       if (state.incidents.powerTrip && state.crewAI.autoRepair && hasModule('power')) {
@@ -12424,55 +12708,7 @@
         }
       }
       if (state.crewAI.autoTravel && canRole(['pilot']) && hasModule('engine') && !pilotCritical()) {
-        const t = state.travel && typeof state.travel === 'object' ? state.travel : { active: false };
-        const safeToTravel = !anyActiveIncident() && state.oxygen >= 20 && state.power >= 12 && state.hull >= Math.max(10, state.hullMax * 0.5);
-        if (!t.active && safeToTravel) {
-          const sys = currentSystem();
-          const unresolved = Array.isArray(state.anomalies)
-            ? state.anomalies.filter((a) => a && !a.resolved && typeof a.system === 'string' && a.system.length).map((a) => a.system.toUpperCase())
-            : [];
-          const targets = [...new Set(unresolved)].filter((s) => s !== sys);
-          let destination = null;
-          if (targets.length) {
-            let best = null;
-            let bestDist = Infinity;
-            for (const cand of targets) {
-              const path = findShortestPath(sys, cand);
-              if (!path || path.length < 2) continue;
-              let sum = 0;
-              for (let i = 0; i < path.length - 1; i++) {
-                const w = distanceBetween(path[i], path[i + 1]);
-                sum += Number.isFinite(w) ? w : 0;
-              }
-              if (sum < bestDist) {
-                bestDist = sum;
-                best = cand;
-              }
-            }
-            destination = best;
-          }
-          if (!destination) {
-            const dests = listDestinations(sys);
-            if (dests.length) destination = dests[(Math.random() * dests.length) | 0];
-          }
-          if (destination && destination !== sys) {
-            const path = findShortestPath(sys, destination);
-            const nextHop = path && path.length >= 2 ? path[1] : null;
-            if (nextHop) {
-              assignNpcTask(npc, {
-                key: 'cockpit.nav',
-                label: `Plot Course ${sys} → ${nextHop}`,
-                targetType: 'cockpit',
-                onComplete: () => {
-                  state.throttle = clamp(Math.max(0.6, safeNumber(state.throttle, 0)), 0, 1);
-                  startTravelAuto(nextHop, 'AUTOMATION');
-                  updateHUD();
-                }
-              });
-              return;
-            }
-          }
-        }
+        if (assignAutoTravel(npc)) return;
       }
       if (state.crewAI.autoHydro && canRole(['scientist', 'tech']) && hasModule('sensors')) {
         const localAnoms = Array.isArray(state.anomalies) ? state.anomalies.filter((a) => a && !a.resolved && a.system === currentSystem()) : [];
