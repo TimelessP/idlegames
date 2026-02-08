@@ -998,6 +998,9 @@
         chatHistory: {},
         toolLog: []
       },
+      spacebook: {
+        posts: []
+      },
       playerMessageQueues: {},
       meta: { inventoryAcc: 0, powerShedAt: 0, autoAt: 0 },
       
@@ -3618,6 +3621,8 @@ ${rows.join('\n')}`;
         '- Auto-build: ensure fabricator, then build missing crew/engineering/ops/science modules.',
         '- Auto Build toggle: if State.crewAI.autoBuild is OFF, do not call build_module or create_elevator_link.',
         '- Power profiles: survival (life), combat (shields/engine), industry (hydro/fabricator), balanced (default).',
+        '- SpaceBook: use spacebook.post with args.content (optional args.postedby) to broadcast.',
+        '- SpaceBook: use spacebook.delete with args.uid to remove a post.',
         '- Memory: use memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search often, and you may combine them with other tool calls in the same response.',
         '- Memory is private to you (the current AI); you can only read/write your own memories.',
         '- Crew comms: speak_to targets any player or AI uid (see “Character lookup” for uids).',
@@ -3645,6 +3650,75 @@ ${rows.join('\n')}`;
     const LMS_MEMORY_LIMIT = 100;
     const LMS_CHAT_LIMIT = 8;
     const LMS_CHAT_MESSAGE_MAX = 600;
+    const SPACEBOOK_POST_LIMIT = 200;
+    const SPACEBOOK_RECENT_LIMIT = 4;
+
+    function ensureSpacebook() {
+      if (!state.spacebook || typeof state.spacebook !== 'object') {
+        state.spacebook = { posts: [] };
+      }
+      if (!Array.isArray(state.spacebook.posts)) state.spacebook.posts = [];
+      return state.spacebook;
+    }
+
+    function spacebookNewUid() {
+      return `sb_${Math.random().toString(36).slice(2, 8)}_${Date.now().toString(36)}`;
+    }
+
+    function spacebookAddPost({ postedBy = '', content = '', datetime = null, uid = null } = {}) {
+      const text = String(content || '').trim();
+      if (!text) return null;
+      const postedby = String(postedBy || 'Unknown').trim() || 'Unknown';
+      const timestamp = datetime ? new Date(datetime).toISOString() : new Date().toISOString();
+      const entry = {
+        uid: uid || spacebookNewUid(),
+        datetime: timestamp,
+        postedby,
+        content: text
+      };
+      const book = ensureSpacebook();
+      book.posts.push(entry);
+      if (book.posts.length > SPACEBOOK_POST_LIMIT) {
+        book.posts = book.posts.slice(-SPACEBOOK_POST_LIMIT);
+      }
+      markDirty();
+      return entry;
+    }
+
+    function spacebookDeletePost(uid) {
+      const id = String(uid || '').trim();
+      if (!id) return false;
+      const book = ensureSpacebook();
+      const before = book.posts.length;
+      book.posts = book.posts.filter((post) => post && post.uid !== id);
+      if (book.posts.length !== before) markDirty();
+      return book.posts.length !== before;
+    }
+
+    function formatSpacebookTimestamp(datetime) {
+      const stamp = new Date(datetime || Date.now());
+      if (Number.isNaN(stamp.getTime())) return '';
+      return stamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function formatSpacebookPostLine(post, { includeUid = false, includeDatetime = false } = {}) {
+      if (!post) return '';
+      const time = formatSpacebookTimestamp(post.datetime);
+      const timeTag = time ? `[${time}] ` : '';
+      const by = String(post.postedby || 'Unknown');
+      const idTag = includeUid && post.uid ? ` uid:${post.uid}` : '';
+      const datetimeTag = includeDatetime && post.datetime ? ` (${post.datetime})` : '';
+      const text = String(post.content || '').trim();
+      return `${timeTag}${by}${idTag}${datetimeTag}: ${text}`;
+    }
+
+    function buildSpacebookRecentPostsBlock({ limit = SPACEBOOK_RECENT_LIMIT, includeUid = false, includeDatetime = false, emptyLabel = 'SpaceBook: no posts yet.' } = {}) {
+      const book = ensureSpacebook();
+      const posts = book.posts.slice(-limit);
+      if (!posts.length) return emptyLabel;
+      const lines = posts.map((post) => `- ${formatSpacebookPostLine(post, { includeUid, includeDatetime })}`);
+      return `SpaceBook (recent posts):\n${lines.join('\n')}`;
+    }
 
     function lmStudioNormalizeMemoryItem(item) {
       return {
@@ -4159,7 +4233,9 @@ ${rows.join('\n')}`;
         'memory_pin',
         'memory_unpin',
         'memory_search',
-        'rename_self'
+        'rename_self',
+        'spacebook.post',
+        'spacebook.delete'
       ]);
       const args = call.args || {};
       if (call.name !== 'action' && !directTools.has(call.name)) {
@@ -4708,6 +4784,34 @@ ${rows.join('\n')}`;
           result = { ok: true, count: results.length };
           break;
         }
+        case 'spacebook.post': {
+          const content = String(args.content || '').trim();
+          if (!content) {
+            result = { ok: false, error: 'content required' };
+            break;
+          }
+          const aiNpc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
+          const fallbackName = aiNpc ? formatAiDisplayName(aiNpc.name) : 'AI';
+          const postedBy = String(args.postedby || args.postedBy || `${fallbackName}${aiNpc ? ` (${aiNpc.uid})` : ''}`).trim();
+          const entry = spacebookAddPost({ postedBy, content });
+          result = entry ? { ok: true, uid: entry.uid } : { ok: false, error: 'Post failed' };
+          break;
+        }
+        case 'spacebook.delete': {
+          const uid = String(args.uid || '').trim();
+          if (!uid) {
+            result = { ok: false, error: 'uid required' };
+            break;
+          }
+          const aiNpc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
+          if (!aiNpc) {
+            result = { ok: false, error: 'Only AI crew can delete SpaceBook posts.' };
+            break;
+          }
+          const ok = spacebookDeletePost(uid);
+          result = ok ? { ok: true } : { ok: false, error: 'Unknown SpaceBook uid' };
+          break;
+        }
         case 'rename_self': {
           const rawName = String(args.name || '').trim();
           const cleaned = normalizeAiNamePart(rawName);
@@ -4776,7 +4880,7 @@ ${rows.join('\n')}`;
           type: 'function',
           function: {
             name: 'action',
-            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message, optional args.walkto. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self.',
+            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message, optional args.walkto. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. spacebook.post uses args.content (optional args.postedby). spacebook.delete uses args.uid. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self, spacebook.post, spacebook.delete.',
             parameters: {
               type: 'object',
               properties: {
@@ -5021,6 +5125,7 @@ ${rows.join('\n')}`;
         const relatedMemory = buildLmStudioRelatedMemories(selfId);
         const searchMemory = buildLmStudioMemorySearchResults(selfId);
         const chatHistory = buildLmStudioChatHistory(selfId);
+        const spacebookPosts = buildSpacebookRecentPostsBlock({ includeUid: true, includeDatetime: true });
         const npcActions = buildLmStudioNpcActionHistory(selfId);
         const supplyTargets = buildLmStudioSupplyTargets();
         const moduleTable = buildLmStudioModuleTableSummary();
@@ -5033,7 +5138,7 @@ ${rows.join('\n')}`;
         const aiRoster = buildLmStudioAiRoster(selfId);
         const characterLookup = buildLmStudioCharacterLookup();
         const memoryBlocks = [pinnedMemory, relatedMemory, searchMemory].filter(Boolean).join('\n\n');
-        const contextBlocks = [chatHistory, npcActions, recentTools, aiRoster, characterLookup, corridorKeys, moduleTypes, anomalySummary, anomalyTarget, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
+        const contextBlocks = [chatHistory, spacebookPosts, npcActions, recentTools, aiRoster, characterLookup, corridorKeys, moduleTypes, anomalySummary, anomalyTarget, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
         const identityLine = selfName
           ? `You are ${selfName}, ${roleLabel}.`
           : `You are ${roleLabel}.`;
@@ -11219,6 +11324,43 @@ ${rows.join('\n')}`;
       });
     }
 
+    function buildSpacebookPanelDescription() {
+      const feed = buildSpacebookRecentPostsBlock({ includeUid: true, includeDatetime: true });
+      return `${feed}\n\nChoose an AI recipient or broadcast a new SpaceBook post:`;
+    }
+
+    function openSpacebookComposePanel() {
+      const sender = state.player || getPlayerBySlot(1);
+      const speaker = sender ? formatPlayerSpeaker(sender) : 'Crew';
+      openTextPanel(
+        'SPACEBOOK',
+        `Post as ${speaker} (broadcast to all):`,
+        '',
+        {
+          placeholder: 'Write a SpaceBook post...',
+          singleLine: false,
+          includeCancel: true,
+          cancelLabel: 'Cancel',
+          buttons: [
+            {
+              label: 'Post',
+              action: () => {
+                const textarea = document.getElementById('panelTextarea');
+                const raw = textarea ? textarea.value : '';
+                const message = String(raw || '').trim();
+                if (!message) {
+                  showMessage('SPACEBOOK', 'Post cannot be empty.');
+                  return;
+                }
+                spacebookAddPost({ postedBy: speaker, content: message });
+                closePanel();
+              }
+            }
+          ]
+        }
+      );
+    }
+
     function openMessageAiPanel() {
       ensureLmStudioConfig();
       if (!state.lmStudio || !state.lmStudio.enabled) {
@@ -11230,15 +11372,17 @@ ${rows.join('\n')}`;
         showMessage('MESSAGE AI', 'No AI crew available.');
         return;
       }
-      if (aiNpcs.length === 1) {
-        openMessageAiCompose(aiNpcs[0]);
-        return;
-      }
-      const buttons = aiNpcs.map((npc) => ({
-        label: formatAiDisplayName(npc.name),
-        action: () => openMessageAiCompose(npc)
-      }));
-      openPanel('MESSAGE AI', 'Choose an AI recipient:', buttons, { includeCancel: true, cancelLabel: 'Cancel' });
+      const buttons = [
+        {
+          label: 'New SpaceBook Post',
+          action: () => openSpacebookComposePanel()
+        },
+        ...aiNpcs.map((npc) => ({
+          label: formatAiDisplayName(npc.name),
+          action: () => openMessageAiCompose(npc)
+        }))
+      ];
+      openPanel('MESSAGE AI', buildSpacebookPanelDescription(), buttons, { includeCancel: true, cancelLabel: 'Cancel' });
     }
 
     function openMessageAiCompose(npc) {
