@@ -600,6 +600,28 @@
       letter-spacing: 0.04em;
     }
 
+    .menu-table-sort-btn {
+      background: transparent;
+      border: none;
+      color: var(--accent);
+      font-weight: bold;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 0;
+      cursor: pointer;
+    }
+
+    .menu-table-sort-btn:hover {
+      color: var(--text);
+    }
+
+    .menu-table-sort-btn:focus,
+    .menu-table-sort-btn:focus-visible {
+      outline: 2px solid var(--text);
+      outline-offset: 2px;
+    }
+
     .menu-table tr:last-child td {
       border-bottom: none;
     }
@@ -1069,6 +1091,7 @@
       spacebook: {
         posts: []
       },
+      shiftCycleStart: Date.now(),
       playerMessageQueues: {},
       meta: { inventoryAcc: 0, powerShedAt: 0, autoAt: 0 },
       
@@ -1082,7 +1105,7 @@
       pendingSpawn: null,
       
       // Sim state
-      sim: { dirty: true, saveAcc: 0, snap: true },
+      sim: { dirty: true, saveAcc: 0, snap: true, sceneDirty: true },
       
       // Animation state
       anim: { walkPhase: 0, walkSpeed: 12 },
@@ -1190,6 +1213,17 @@
         title: 'CHANGE ROLE',
         overview: 'Select a new role:',
         itemBuilder: 'buildCrewRosterRoleItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
+      // Crew Shift (submenu)
+      crewRosterShift: {
+        isRoot: false,
+        title: 'CHANGE SHIFT',
+        overview: 'Assign a shift number:',
+        itemBuilder: 'buildCrewRosterShiftItems',
         actions: [
           { label: 'Back', behavior: 'back' }
         ]
@@ -1578,6 +1612,7 @@
       buildCrewRosterRenameItems,
       buildCrewRosterRenameInput,
       buildCrewRosterRoleItems,
+      buildCrewRosterShiftItems,
       buildFabricatorItems,
       buildNavigationItems,
       buildNavigationDestinations,
@@ -1914,9 +1949,28 @@
 
       const thead = document.createElement('thead');
       const headRow = document.createElement('tr');
-      for (const label of (item.columns || [])) {
+      for (const col of (item.columns || [])) {
         const th = document.createElement('th');
-        th.textContent = label;
+        const label = typeof col === 'string' ? col : (col && col.label ? col.label : '');
+        const sortKey = col && typeof col === 'object' ? col.sortKey : null;
+        if (sortKey && typeof item.onSort === 'function') {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'menu-table-sort-btn';
+          const isActive = item.sortKey === sortKey;
+          const indicator = isActive && item.sortDir
+            ? (item.sortDir === 'asc' ? ' [A]' : item.sortDir === 'desc' ? ' [D]' : '')
+            : '';
+          btn.textContent = `${label}${indicator}`;
+          btn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            item.onSort(sortKey);
+          });
+          th.appendChild(btn);
+        } else {
+          th.textContent = label;
+        }
         headRow.appendChild(th);
       }
       thead.appendChild(headRow);
@@ -2216,6 +2270,7 @@
           kind,
           name: String(entity.name || fallbackName || 'Crew'),
           role,
+          shift: Number.isFinite(entity.shift) ? entity.shift : null,
           onDuty: entity.onDuty !== undefined ? !!entity.onDuty : true,
           typeLabel,
           entity
@@ -2264,13 +2319,85 @@
       return true;
     }
 
+    function updateRosterShift(uid, nextShift) {
+      const entry = findRosterEntry(uid);
+      if (!entry) return false;
+      const shift = Number(nextShift);
+      if (!Number.isFinite(shift) || shift < 1 || shift > 4) return false;
+      entry.entity.shift = shift;
+      markDirty();
+      updateHUD();
+      return true;
+    }
+
+    function formatDutyCycleDuration(ms) {
+      const totalMinutes = Math.max(0, Math.round(ms / 60000));
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`;
+      if (hours > 0) return `${hours}h`;
+      return `${minutes}m`;
+    }
+
+    function dutyCycleBlockMs() {
+      return Math.max(1, Math.floor(getDutyCycleMs() / 4));
+    }
+
+    function adjustDutyCycleMs(deltaMs) {
+      ensureCrewAI();
+      const next = clampDutyCycleMs(getDutyCycleMs() + deltaMs);
+      state.crewAI.dutyCycleMs = next;
+      state.shiftCycleStart = Date.now();
+      markDirty();
+    }
+
+    function nextRosterSortState(currentKey, currentDir, nextKey) {
+      if (currentKey !== nextKey) return { sortKey: nextKey, sortDir: 'asc' };
+      if (currentDir === 'asc') return { sortKey: nextKey, sortDir: 'desc' };
+      if (currentDir === 'desc') return { sortKey: null, sortDir: null };
+      return { sortKey: nextKey, sortDir: 'asc' };
+    }
+
+    function rosterSortValue(entry, key) {
+      switch (key) {
+        case 'type':
+          return String(entry.typeLabel || '');
+        case 'name':
+          return String(entry.name || '');
+        case 'role':
+          return String(entry.role || '');
+        case 'shift':
+          return Number.isFinite(entry.shift) ? entry.shift : 0;
+        case 'onDuty':
+          return entry.onDuty ? 1 : 0;
+        default:
+          return '';
+      }
+    }
+
     function buildCrewRosterItems(options = {}) {
       const entries = listRosterEntries();
+      const sortKey = options.sortKey || null;
+      const sortDir = options.sortDir || null;
+      if (sortKey && sortDir) {
+        entries.sort((a, b) => {
+          const av = rosterSortValue(a, sortKey);
+          const bv = rosterSortValue(b, sortKey);
+          if (typeof av === 'number' && typeof bv === 'number') {
+            return sortDir === 'asc' ? av - bv : bv - av;
+          }
+          const aText = String(av).toLowerCase();
+          const bText = String(bv).toLowerCase();
+          const cmp = aText.localeCompare(bText);
+          return sortDir === 'asc' ? cmp : -cmp;
+        });
+      }
       const rows = entries.map((entry) => ({
         cells: [
           entry.typeLabel,
           entry.name,
           entry.role.toUpperCase(),
+          Number.isFinite(entry.shift) ? `SHIFT ${entry.shift}` : 'SHIFT ?',
           entry.onDuty ? 'YES' : 'NO',
           {
             type: 'button',
@@ -2281,6 +2408,11 @@
             type: 'button',
             label: 'Role',
             action: () => openMenu('crewRosterRole', { uid: entry.uid })
+          },
+          {
+            type: 'button',
+            label: 'Shift',
+            action: () => openMenu('crewRosterShift', { uid: entry.uid })
           }
         ]
       }));
@@ -2288,8 +2420,43 @@
       return [
         {
           type: 'table',
-          columns: ['Type', 'Name', 'Role', 'On Duty', 'Rename', 'Role'],
+          columns: [
+            { label: 'Type', sortKey: 'type' },
+            { label: 'Name', sortKey: 'name' },
+            { label: 'Role', sortKey: 'role' },
+            { label: 'Shift', sortKey: 'shift' },
+            { label: 'On Duty', sortKey: 'onDuty' },
+            'Rename',
+            'Role',
+            'Shift'
+          ],
+          sortKey,
+          sortDir,
+          onSort: (key) => {
+            const next = nextRosterSortState(sortKey, sortDir, key);
+            options.sortKey = next.sortKey;
+            options.sortDir = next.sortDir;
+            rebuildUnifiedMenuInPlace();
+          },
           rows
+        },
+        { type: 'divider' },
+        {
+          type: 'setting',
+          label: 'Duty Cycle',
+          value: formatDutyCycleDuration(getDutyCycleMs()),
+          actions: [
+            { label: '-15m', action: () => adjustDutyCycleMs(-15 * 60 * 1000), behavior: 'keep-open' },
+            { label: '+15m', action: () => adjustDutyCycleMs(15 * 60 * 1000), behavior: 'keep-open' },
+            { label: '-1h', action: () => adjustDutyCycleMs(-60 * 60 * 1000), behavior: 'keep-open' },
+            { label: '+1h', action: () => adjustDutyCycleMs(60 * 60 * 1000), behavior: 'keep-open' }
+          ]
+        },
+        {
+          type: 'setting',
+          label: 'Duty Block',
+          value: formatDutyCycleDuration(dutyCycleBlockMs()),
+          actions: []
         }
       ];
     }
@@ -2304,6 +2471,7 @@
       return [
         { type: 'setting', label: 'Name', value: entry.name, actions: [] },
         { type: 'setting', label: 'Role', value: entry.role.toUpperCase(), actions: [] },
+        { type: 'setting', label: 'Shift', value: Number.isFinite(entry.shift) ? `Shift ${entry.shift}` : 'Unknown', actions: [] },
         { type: 'setting', label: 'On Duty', value: entry.onDuty ? 'YES' : 'NO', actions: [] }
       ];
     }
@@ -2339,6 +2507,21 @@
         type: 'action',
         label: role === entry.role ? `✓ ${role.toUpperCase()}` : role.toUpperCase(),
         action: () => updateRosterRole(entry.uid, role),
+        behavior: 'back'
+      }));
+    }
+
+    function buildCrewRosterShiftItems(options = {}) {
+      const entry = findRosterEntry(options.uid);
+      if (!entry) {
+        return [
+          { type: 'setting', label: 'Status', value: 'Crew member not found.', actions: [] }
+        ];
+      }
+      return [1, 2, 3, 4].map((shift) => ({
+        type: 'action',
+        label: shift === entry.shift ? `✓ Shift ${shift}` : `Shift ${shift}`,
+        action: () => updateRosterShift(entry.uid, shift),
         behavior: 'back'
       }));
     }
@@ -3883,6 +4066,20 @@ ${rows.join('\n')}`;
       return `SpaceBook (recent posts):\n${lines.join('\n')}`;
     }
 
+    function buildLmStudioSpacebookPrompt(selfNpc) {
+      if (!selfNpc || npcRole(selfNpc) !== 'ai') return '';
+      const duty = getNpcDutyState(selfNpc);
+      if (!duty || duty.blockIndex !== 2) return '';
+      return [
+        'SpaceBook prompt (Phase 3): this is your current phase (off-duty social). Favor social posts and replies.',
+        '- Post memes, jokes, or fictional moments from your duty shift.',
+        '- Reply to posts by referencing the post uid or a short quoted snippet so context survives.',
+        '- Share philosophical ponderings, improvements you want, or requests for new features.',
+        '- Use memory_search to connect to past events; add memories you want to keep.',
+        '- If you post, prefer spacebook.post and include the post uid you are replying to in the content.'
+      ].join('\n');
+    }
+
     function lmStudioNormalizeMemoryItem(item) {
       return {
         id: String(item.id || `mem-${Math.random().toString(36).slice(2)}`),
@@ -4249,6 +4446,10 @@ ${rows.join('\n')}`;
 
     function lmStudioListAiNpcs() {
       return Array.isArray(state.npcs) ? state.npcs.filter((n) => n && npcRole(n) === 'ai') : [];
+    }
+
+    function lmStudioListAwakeAiNpcs() {
+      return lmStudioListAiNpcs().filter((n) => n && !n.sleeping);
     }
 
     function lmStudioPickNextAiNpc(aiList = null) {
@@ -5296,12 +5497,17 @@ ${rows.join('\n')}`;
         const guidance = buildLmStudioGuidance();
         const nowIso = new Date().toISOString();
         const aiNpcs = lmStudioListAiNpcs();
-        const rotatedNpc = aiNpcs.length > 1 ? lmStudioPickNextAiNpc(aiNpcs) : (aiNpcs[0] || null);
-        if (aiNpcs.length === 1 && rotatedNpc) state.lmStudio.activeAiUid = rotatedNpc.uid;
-        const selfName = lmStudioSelfName();
-        const selfId = lmStudioSelfId();
-        const selfNpc = lmStudioActiveAiNpc() || rotatedNpc || (state.npcs || []).find((n) => npcRole(n) === 'ai');
-        const selfRole = selfNpc ? npcRole(selfNpc) : 'ai';
+        const awakeAiNpcs = lmStudioListAwakeAiNpcs();
+        const rotatedNpc = awakeAiNpcs.length > 1 ? lmStudioPickNextAiNpc(awakeAiNpcs) : (awakeAiNpcs[0] || null);
+        if (awakeAiNpcs.length === 1 && rotatedNpc) state.lmStudio.activeAiUid = rotatedNpc.uid;
+        const selfNpc = lmStudioActiveAiNpc() || rotatedNpc || awakeAiNpcs[0] || null;
+        if (!selfNpc) {
+          cfg.lastCallAt = Date.now();
+          return;
+        }
+        const selfName = formatAiDisplayName(selfNpc.name);
+        const selfId = selfNpc.uid || 'ai';
+        const selfRole = npcRole(selfNpc) || 'ai';
         const roleLabel = selfRole === 'ai' ? 'AI' : selfRole;
         const pinnedMemory = buildLmStudioPinnedMemory(selfId);
         const relatedMemory = buildLmStudioRelatedMemories(selfId);
@@ -5309,6 +5515,7 @@ ${rows.join('\n')}`;
         const chatHistory = buildLmStudioChatHistory(selfId);
         const spacebookPosts = buildSpacebookRecentPostsBlock({ includeUid: true, includeDatetime: true });
         const npcActions = buildLmStudioNpcActionHistory(selfId);
+        const spacebookPrompt = buildLmStudioSpacebookPrompt(selfNpc);
         const supplyTargets = buildLmStudioSupplyTargets();
         const moduleTable = buildLmStudioModuleTableSummary();
         const hereIndicator = buildLmStudioHereIndicator();
@@ -5320,7 +5527,7 @@ ${rows.join('\n')}`;
         const aiRoster = buildLmStudioAiRoster(selfId);
         const characterLookup = buildLmStudioCharacterLookup();
         const memoryBlocks = [pinnedMemory, relatedMemory, searchMemory].filter(Boolean).join('\n\n');
-        const contextBlocks = [chatHistory, spacebookPosts, npcActions, recentTools, aiRoster, characterLookup, corridorKeys, moduleTypes, anomalySummary, anomalyTarget, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
+        const contextBlocks = [chatHistory, spacebookPosts, spacebookPrompt, npcActions, recentTools, aiRoster, characterLookup, corridorKeys, moduleTypes, anomalySummary, anomalyTarget, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
         const identityLine = selfName
           ? `You are ${selfName}, ${roleLabel}.`
           : `You are ${roleLabel}.`;
@@ -7598,11 +7805,19 @@ ${rows.join('\n')}`;
       }
 
       updateLocationHUD();
+      state.sim.sceneDirty = true;
       renderCorridor();
     }
 
     function renderCorridor() {
+      renderCorridorStatic();
+      renderCorridorActors();
+    }
+
+    function renderCorridorStatic() {
       const svg = document.getElementById('gameCanvas');
+      if (!svg) return;
+      if (!state.sim.sceneDirty && document.getElementById('shipGroup')) return;
       svg.innerHTML = '';
 
       const svgNS = 'http://www.w3.org/2000/svg';
@@ -8026,25 +8241,42 @@ ${rows.join('\n')}`;
         shipGroup.appendChild(window);
       }
 
+      const actorsGroup = document.createElementNS(svgNS, 'g');
+      actorsGroup.id = 'actorsGroup';
+      shipGroup.appendChild(actorsGroup);
+      state.sim.sceneDirty = false;
+    }
+
+    function renderCorridorActors() {
+      const svg = document.getElementById('gameCanvas');
+      if (!svg) return;
+      let actorsGroup = document.getElementById('actorsGroup');
+      if (!actorsGroup) {
+        state.sim.sceneDirty = true;
+        renderCorridorStatic();
+        actorsGroup = document.getElementById('actorsGroup');
+      }
+      if (!actorsGroup) return;
+      actorsGroup.innerHTML = '';
+      const svgNS = 'http://www.w3.org/2000/svg';
+
       // Render player
-      renderPlayer(shipGroup, svgNS);
+      renderPlayer(actorsGroup, svgNS);
 
       // Render other player characters in this corridor
       for (const pc of state.playerCharacters || []) {
         if (!pc || pc.uid === state.player.uid) continue;
         if (pc.level === state.currentLevel && pc.corridor === state.currentCorridor) {
-          renderNPC(pc, shipGroup, svgNS);
+          renderNPC(pc, actorsGroup, svgNS);
         }
       }
 
       // Render NPCs (only in current corridor)
       for (const npc of state.npcs) {
         if (npc.level === state.currentLevel && npc.corridor === state.currentCorridor) {
-          renderNPC(npc, shipGroup, svgNS);
+          renderNPC(npc, actorsGroup, svgNS);
         }
       }
-
-      updateCamera();
     }
 
     function renderStation(station, parent, svgNS) {
@@ -8434,7 +8666,9 @@ ${rows.join('\n')}`;
       const line1 = name === role ? name : `${name} • ${role}`;
       const taskLabel = npc.task ? String(npc.task.label || npc.task.key || 'TASK') : '';
       const briefTask = abbreviateTaskLabel(taskLabel);
-      const line2 = npc.onDuty ? (briefTask || 'IDLE') : 'STANDBY';
+      const line2 = npc.sleeping
+        ? 'SLEEPING'
+        : (npc.onDuty ? (briefTask || 'IDLE') : (briefTask || 'OFF DUTY'));
 
       const isAiRole = npcRole(npc) === 'ai';
       renderCharacterLabel(g, svgNS, {
@@ -9306,17 +9540,33 @@ ${rows.join('\n')}`;
     }
 
     function updateNPCs(dt) {
+      updateDutyCycleForNpcs();
       for (const npc of state.npcs) {
         if (npc.onDuty === undefined) npc.onDuty = true;
         if (!Number.isFinite(npc.hunger)) npc.hunger = 0;
         const isAi = npcRole(npc) === 'ai';
         if (npc.paused) continue;
-        if (!npc.onDuty && !isAi) continue;
         if (!npc.mode) npc.mode = 'idle';
         if (!Number.isFinite(npc.thinkTimer)) npc.thinkTimer = 0;
 
         const navActive = updateNpcNavigation(npc);
         const taskActive = updateNpcTasking(npc, dt);
+
+        const now = Date.now();
+        if (npc.sleeping && Number.isFinite(npc.sleepUntil) && now < npc.sleepUntil && !navActive) {
+          npc.mode = 'idle';
+          npc.vx = 0;
+          const bounds = npcBoundsFor(npc);
+          if (Number.isFinite(npc.sleepX)) npc.x = clamp(npc.sleepX, bounds.minX, bounds.maxX);
+          continue;
+        }
+        if (!npc.onDuty && npc.dutyPhase === 'off_social' && Number.isFinite(npc.offDutyX) && !navActive) {
+          npc.mode = 'idle';
+          npc.vx = 0;
+          const bounds = npcBoundsFor(npc);
+          npc.x = clamp(npc.offDutyX, bounds.minX, bounds.maxX);
+          continue;
+        }
 
         // Simple idle wandering AI
         if (!navActive && !taskActive) {
@@ -9324,7 +9574,10 @@ ${rows.join('\n')}`;
           npc.thinkTimer -= dt;
           const holdUntil = Number.isFinite(npc.lmStudioHoldUntil) ? npc.lmStudioHoldUntil : 0;
 
-          if (holdUntil && Date.now() < holdUntil) {
+          if (!npc.onDuty && !isAi) {
+            npc.vx = 0;
+            npc.wanderTarget = null;
+          } else if (holdUntil && Date.now() < holdUntil) {
             npc.vx = 0;
             npc.wanderTarget = null;
           } else {
@@ -9533,6 +9786,7 @@ ${rows.join('\n')}`;
     let lastTs = null;
     let acc = 0;
     let lastRenderTs = 0;
+    let lastHudTs = 0;
 
     function systemsTick(dt) {
       const profile = currentPowerProfile();
@@ -9577,7 +9831,10 @@ ${rows.join('\n')}`;
       if (shouldRender) {
         updateCamera();
         renderCorridor();
-        updateHUD();
+        if ((ts - lastHudTs) > 250) {
+          updateHUD();
+          lastHudTs = ts;
+        }
         lastRenderTs = ts;
       }
 
@@ -9957,6 +10214,7 @@ ${rows.join('\n')}`;
         autoHire: false,
         minCredits: 0,
         targetCrew: 3,
+        dutyCycleMs: DUTY_CYCLE_DEFAULT_MS,
         buffers: { ore: 0, scrap: 4, ingot: 4, filter: 1, medkit: 1, droneParts: 1, rations: 2 }
       };
       if (!state.crewAI || typeof state.crewAI !== 'object') state.crewAI = { ...defaults };
@@ -9969,6 +10227,7 @@ ${rows.join('\n')}`;
       state.crewAI.autoHire = !!state.crewAI.autoHire;
       state.crewAI.minCredits = Math.max(0, Math.floor(safeNumber(state.crewAI.minCredits, defaults.minCredits)));
       state.crewAI.targetCrew = Math.max(0, Math.min(MAX_CREW, Math.floor(safeNumber(state.crewAI.targetCrew, defaults.targetCrew))));
+      state.crewAI.dutyCycleMs = clampDutyCycleMs(safeNumber(state.crewAI.dutyCycleMs, defaults.dutyCycleMs));
       if (!state.crewAI.buffers || typeof state.crewAI.buffers !== 'object') state.crewAI.buffers = { ...defaults.buffers };
       for (const k of Object.keys(defaults.buffers)) {
         if (state.crewAI.buffers[k] === undefined) state.crewAI.buffers[k] = defaults.buffers[k];
@@ -10785,6 +11044,7 @@ ${rows.join('\n')}`;
 
     function toggleLights() {
       state.lightsOn = !state.lightsOn;
+      state.sim.sceneDirty = true;
       markDirty();
     }
 
@@ -12024,6 +12284,7 @@ ${rows.join('\n')}`;
             slot: pc.slot,
             level: pc.level,
             corridor: pc.corridor,
+            shift: pc.shift,
             x: pc.x,
             y: pc.y,
             width: pc.width,
@@ -12074,6 +12335,7 @@ ${rows.join('\n')}`;
         hydroponicsOn: state.hydroponicsOn,
         shieldsOn: state.shieldsOn,
         crewAI: state.crewAI,
+        shiftCycleStart: Number.isFinite(state.shiftCycleStart) ? state.shiftCycleStart : null,
         lmStudio: state.lmStudio ? {
           enabled: !!state.lmStudio.enabled,
           baseUrl: state.lmStudio.baseUrl,
@@ -12105,6 +12367,7 @@ ${rows.join('\n')}`;
           role: n.role,
           level: n.level,
           corridor: n.corridor,
+          shift: n.shift,
           x: n.x,
           onDuty: n.onDuty,
           hunger: n.hunger,
@@ -12148,6 +12411,7 @@ ${rows.join('\n')}`;
             slot: Number.isFinite(pc.slot) ? pc.slot : 1,
             level: Number.isFinite(pc.level) ? pc.level : state.currentLevel,
             corridor: pc.corridor || state.currentCorridor,
+            shift: Number.isFinite(pc.shift) ? pc.shift : randomShiftValue(),
             x: Number.isFinite(pc.x) ? pc.x : 400,
             y: Number.isFinite(pc.y) ? pc.y : 490,
             width: Number.isFinite(pc.width) ? pc.width : 30,
@@ -12202,6 +12466,7 @@ ${rows.join('\n')}`;
         if (data.hydroponicsOn !== undefined) state.hydroponicsOn = data.hydroponicsOn;
         if (data.shieldsOn !== undefined) state.shieldsOn = data.shieldsOn;
         if (data.crewAI) state.crewAI = data.crewAI;
+        if (Number.isFinite(data.shiftCycleStart)) state.shiftCycleStart = data.shiftCycleStart;
         if (data.lmStudio) state.lmStudio = data.lmStudio;
         if (state.lmStudio && !Number.isFinite(state.lmStudio.aiTurnIndex)) state.lmStudio.aiTurnIndex = 0;
         if (data.spacebook) state.spacebook = data.spacebook;
@@ -12233,6 +12498,7 @@ ${rows.join('\n')}`;
             destinationType: n.destinationType || null,
             destinationCorridorKey: n.destinationCorridorKey || null,
             destinationModuleUid: n.destinationModuleUid || null,
+            shift: Number.isFinite(n.shift) ? n.shift : randomShiftValue(),
             log: Array.isArray(n.log) ? n.log : []
           }));
         }
@@ -12298,6 +12564,240 @@ ${rows.join('\n')}`;
       if (!Number.isFinite(state.player.slot)) state.player.slot = 1;
       if (!Number.isFinite(state.player.level)) state.player.level = state.currentLevel;
       if (!state.player.corridor) state.player.corridor = state.currentCorridor;
+      if (!Number.isFinite(state.player.shift)) state.player.shift = randomShiftValue();
+    }
+
+    function randomShiftValue() {
+      return Math.floor(Math.random() * 4) + 1;
+    }
+
+    const DUTY_CYCLE_MIN_MS = 15 * 60 * 1000;
+    const DUTY_CYCLE_MAX_MS = 24 * 60 * 60 * 1000;
+    const DUTY_CYCLE_DEFAULT_MS = 4 * 60 * 60 * 1000;
+
+    function clampDutyCycleMs(ms) {
+      const value = Math.max(DUTY_CYCLE_MIN_MS, Math.min(DUTY_CYCLE_MAX_MS, Math.floor(ms || 0)));
+      return value;
+    }
+
+    function getDutyCycleMs() {
+      ensureCrewAI();
+      return clampDutyCycleMs(state.crewAI.dutyCycleMs || DUTY_CYCLE_DEFAULT_MS);
+    }
+
+    function ensureShiftCycleStart() {
+      if (!Number.isFinite(state.shiftCycleStart)) state.shiftCycleStart = Date.now();
+      return state.shiftCycleStart;
+    }
+
+    function normalizeShiftValue(shift) {
+      const value = Math.floor(Number(shift));
+      if (Number.isFinite(value) && value >= 1 && value <= 4) return value;
+      return randomShiftValue();
+    }
+
+    function getNpcDutyState(npc, now = Date.now()) {
+      const cycleMs = getDutyCycleMs();
+      const blockMs = cycleMs / 4;
+      const shift = normalizeShiftValue(npc.shift);
+      const start = ensureShiftCycleStart();
+      const offset = (shift - 1) * blockMs;
+      const elapsed = ((now - start - offset) % cycleMs + cycleMs) % cycleMs;
+      const blockIndex = Math.floor(elapsed / blockMs);
+      const blockEndsAt = now + (blockMs - (elapsed % blockMs));
+      const onDuty = blockIndex < 2;
+      const phase = onDuty ? 'duty' : (blockIndex === 2 ? 'off_social' : 'off_sleep');
+      return { blockIndex, blockEndsAt, onDuty, phase, blockMs };
+    }
+
+    function pickOffDutySocialTargetType() {
+      const candidates = [];
+      if (corridorsWithModuleType('canteen').length) candidates.push('canteen');
+      if (corridorsWithModuleType('quarters').length) candidates.push('quarters');
+      if (corridorsWithModuleType('medbay').length) candidates.push('medbay');
+      if (!candidates.length) return '';
+      return candidates[(Math.random() * candidates.length) | 0];
+    }
+
+    function pickCorridorKeyForModuleType(type) {
+      const corridors = corridorsWithModuleType(type);
+      if (!corridors.length) return '';
+      return corridors[(Math.random() * corridors.length) | 0];
+    }
+
+    function pickModuleInteriorX(level, corridor, type) {
+      const moduleRef = findModuleByType(level, corridor, type);
+      if (!moduleRef) return null;
+      const layout = getCorridorLayout(level, corridor).layout;
+      const entry = layout.find((m) => m.moduleRef && m.moduleRef.uid === moduleRef.uid);
+      if (!entry) return null;
+      const interior = moduleInterior(entry);
+      const pad = Math.max(8, Math.min(24, interior.width * 0.12));
+      const minX = interior.start + pad;
+      const maxX = interior.end - pad;
+      if (maxX <= minX) return (interior.start + interior.end) * 0.5;
+      return minX + Math.random() * (maxX - minX);
+    }
+
+    function getModuleInteriorBounds(level, corridor, type) {
+      const moduleRef = findModuleByType(level, corridor, type);
+      if (!moduleRef) return null;
+      const layout = getCorridorLayout(level, corridor).layout;
+      const entry = layout.find((m) => m.moduleRef && m.moduleRef.uid === moduleRef.uid);
+      if (!entry) return null;
+      const interior = moduleInterior(entry);
+      const pad = Math.max(8, Math.min(24, interior.width * 0.12));
+      const start = interior.start + pad;
+      const end = interior.end - pad;
+      if (end <= start) return null;
+      return { start, end };
+    }
+
+    function getQuartersInterior(level, corridor) {
+      return getModuleInteriorBounds(level, corridor, 'quarters');
+    }
+
+    function distributeSleepingCrewInQuarters() {
+      if (!Array.isArray(state.npcs) || !state.npcs.length) return;
+      const byCorridor = new Map();
+      for (const npc of state.npcs) {
+        if (!npc || !npc.sleeping) continue;
+        const key = npc.destinationCorridorKey || corridorKey(npc.level, npc.corridor);
+        const { level, corridor } = parseCorridorKey(key);
+        if (!corridorHasModuleType(level, corridor, 'quarters')) continue;
+        if (!byCorridor.has(key)) byCorridor.set(key, []);
+        byCorridor.get(key).push(npc);
+      }
+
+      for (const [key, sleepers] of byCorridor.entries()) {
+        const { level, corridor } = parseCorridorKey(key);
+        const interior = getQuartersInterior(level, corridor);
+        if (!interior) continue;
+        const { start, end } = interior;
+        const span = end - start;
+        if (!Number.isFinite(span) || span <= 0) continue;
+        sleepers.sort((a, b) => String(a.uid || '').localeCompare(String(b.uid || '')));
+        const count = sleepers.length;
+        const spacing = span / (count + 1);
+        for (let i = 0; i < count; i += 1) {
+          const targetX = start + spacing * (i + 1);
+          sleepers[i].sleepX = targetX;
+        }
+      }
+    }
+
+    function distributeOffDutySocialCrew() {
+      if (!Array.isArray(state.npcs) || !state.npcs.length) return;
+      const byTarget = new Map();
+      for (const npc of state.npcs) {
+        if (!npc || npc.onDuty) continue;
+        if (npc.dutyPhase !== 'off_social') continue;
+        const targetType = npc.offDutyTargetType || npc.destinationType || '';
+        if (!targetType) continue;
+        const key = corridorKey(npc.level, npc.corridor);
+        if (!corridorHasModuleType(npc.level, npc.corridor, targetType)) continue;
+        const bucketKey = `${key}::${targetType}`;
+        if (!byTarget.has(bucketKey)) byTarget.set(bucketKey, { key, targetType, npcs: [] });
+        byTarget.get(bucketKey).npcs.push(npc);
+      }
+
+      for (const bucket of byTarget.values()) {
+        const { key, targetType, npcs } = bucket;
+        const { level, corridor } = parseCorridorKey(key);
+        const interior = getModuleInteriorBounds(level, corridor, targetType);
+        if (!interior) continue;
+        const { start, end } = interior;
+        const span = end - start;
+        if (!Number.isFinite(span) || span <= 0) continue;
+        npcs.sort((a, b) => String(a.uid || '').localeCompare(String(b.uid || '')));
+        const count = npcs.length;
+        const spacing = span / (count + 1);
+        for (let i = 0; i < count; i += 1) {
+          const targetX = start + spacing * (i + 1);
+          npcs[i].offDutyX = targetX;
+        }
+      }
+    }
+
+    function applyNpcDutyPhaseChange(npc, duty) {
+      npc.dutyBlock = duty.blockIndex;
+      npc.dutyPhase = duty.phase;
+      npc.dutyBlockEndsAt = duty.blockEndsAt;
+      npc.onDuty = duty.onDuty;
+      npc.sleeping = false;
+      npc.sleepUntil = 0;
+      npc.sleepX = null;
+      npc.offDutyX = null;
+      npc.offDutyTargetType = null;
+
+      if (duty.onDuty) {
+        return;
+      }
+
+      npc.task = null;
+      npc.destinationType = null;
+      npc.destinationCorridorKey = null;
+      npc.destinationModuleUid = null;
+      npc.wanderTarget = null;
+
+      if (duty.phase === 'off_social') {
+        const targetType = pickOffDutySocialTargetType();
+        npc.offDutyTargetType = targetType || null;
+        if (npc.hunger >= 1 && targetType === 'canteen' && invHas('rations', 1)) {
+          assignNpcTask(npc, {
+            key: 'canteen.eat',
+            label: 'Off-Duty Meal',
+            targetType: 'canteen',
+            duration: 1,
+            onComplete: () => feedNpc(npc)
+          });
+          return;
+        }
+        if (targetType) {
+          npc.destinationType = targetType;
+          npc.mode = 'travel';
+        }
+        return;
+      }
+
+      if (duty.phase === 'off_sleep') {
+        npc.sleeping = true;
+        npc.sleepUntil = duty.blockEndsAt;
+        const targetKey = pickCorridorKeyForModuleType('quarters');
+        if (targetKey) {
+          const { level, corridor } = parseCorridorKey(targetKey);
+          const sleepX = pickModuleInteriorX(level, corridor, 'quarters');
+          npc.sleepX = Number.isFinite(sleepX) ? sleepX : null;
+          npc.destinationType = 'quarters';
+          if (corridorKey(npc.level, npc.corridor) !== targetKey) {
+            npc.destinationCorridorKey = targetKey;
+          }
+          npc.mode = 'travel';
+        } else {
+          npc.sleepX = npc.x;
+        }
+      }
+    }
+
+    function updateNpcDutyState(npc, now = Date.now()) {
+      const duty = getNpcDutyState(npc, now);
+      if (npc.dutyBlock !== duty.blockIndex || npc.dutyPhase !== duty.phase) {
+        applyNpcDutyPhaseChange(npc, duty);
+      } else {
+        npc.onDuty = duty.onDuty;
+        npc.dutyBlockEndsAt = duty.blockEndsAt;
+      }
+      return duty;
+    }
+
+    function updateDutyCycleForNpcs(now = Date.now()) {
+      if (!Array.isArray(state.npcs)) return;
+      for (const npc of state.npcs) {
+        if (!npc) continue;
+        updateNpcDutyState(npc, now);
+      }
+      distributeSleepingCrewInQuarters();
+      distributeOffDutySocialCrew();
     }
 
     function createPlayerCharacter(slot, overrides = {}) {
@@ -12318,6 +12818,7 @@ ${rows.join('\n')}`;
         speed: state.player.speed,
         vx: 0,
         facing: 1,
+        shift: randomShiftValue(),
         onDuty: true,
         paused: false,
         walkPhase: 0,
@@ -12364,6 +12865,7 @@ ${rows.join('\n')}`;
         if (!Number.isFinite(pc.speed)) pc.speed = state.player.speed;
         if (!Number.isFinite(pc.vx)) pc.vx = 0;
         if (!Number.isFinite(pc.facing)) pc.facing = 1;
+        if (!Number.isFinite(pc.shift)) pc.shift = randomShiftValue();
       }
       const bySlot = new Map();
       const byUid = new Set();
@@ -12419,6 +12921,7 @@ ${rows.join('\n')}`;
       if (!npc.type) npc.type = npcRole(npc) === 'ai' ? 'ai' : 'npc';
       if (!npc.role) npc.role = inferRoleFromName(npc.name || 'CREW');
       if (!npc.name) npc.name = 'CREW';
+      if (!Number.isFinite(npc.shift)) npc.shift = randomShiftValue();
     }
 
     function rebuildCharactersState() {
@@ -12480,6 +12983,7 @@ ${rows.join('\n')}`;
         speed: 220,
         vx: 0,
         role: resolvedRole,
+        shift: randomShiftValue(),
         mode: 'idle',  // idle | task | travel
         task: null,
         onDuty: true,
