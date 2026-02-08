@@ -132,6 +132,24 @@ function refreshUnifiedMenuValues(menuDef, items) {
     }
   }
 }
+
+### 2b) Custom Item Types (Non-Standard Rows)
+When you introduce a new item type (for example, a feed entry with metadata + buttons), add a dedicated renderer and wire it in `renderUnifiedMenu`.
+
+```js
+// In renderUnifiedMenu
+if (item.type === 'spacebook') {
+  renderUnifiedSpacebookItem(menuItemsEl, item, menuDef);
+}
+
+// Dedicated renderer
+function renderUnifiedSpacebookItem(container, item, menuDef) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'spacebook-post';
+  // ...header/meta/content and per-item actions...
+  container.appendChild(wrapper);
+}
+```
 ```
 
 ### 3) Full Menu Rebuild for List Changes
@@ -327,6 +345,7 @@ Menus should **not pause** the simulation. Keep game state updates independent a
 - Use a single menu key handler tied to the panel.
 - Avoid stealing focus when closing menus.
 - If you close the panel, blur the active element and return focus to the game canvas.
+- Always stop propagation for menu Enter/Escape/Space so input does not leak to gameplay.
 
 ```js
 if (document.activeElement && document.activeElement !== document.body) {
@@ -334,6 +353,15 @@ if (document.activeElement && document.activeElement !== document.body) {
 }
 const gameCanvas = document.getElementById('gameCanvas');
 if (gameCanvas?.focus) gameCanvas.focus();
+```
+
+```js
+// Inside the menu key handler
+if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+  e.preventDefault();
+  e.stopPropagation();
+  // ...menu handling...
+}
 ```
 
 ## Checklist
