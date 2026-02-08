@@ -132,6 +132,7 @@ function refreshUnifiedMenuValues(menuDef, items) {
     }
   }
 }
+```
 
 ### 2b) Custom Item Types (Non-Standard Rows)
 When you introduce a new item type (for example, a feed entry with metadata + buttons), add a dedicated renderer and wire it in `renderUnifiedMenu`.
@@ -150,7 +151,42 @@ function renderUnifiedSpacebookItem(container, item, menuDef) {
   container.appendChild(wrapper);
 }
 ```
+
+### 2c) Tables With Button Columns
+Use a `table` item when you need rows with button actions. Each row is an array of cells; button cells use `{ type: 'button', label, action, behavior }`.
+
+```js
+function buildCrewRosterItems() {
+  const rows = listRosterEntries().map((entry) => ({
+    cells: [
+      entry.typeLabel,
+      entry.name,
+      entry.role.toUpperCase(),
+      entry.onDuty ? 'YES' : 'NO',
+      {
+        type: 'button',
+        label: 'Rename',
+        action: () => openMenu('crewRosterRename', { uid: entry.uid })
+      },
+      {
+        type: 'button',
+        label: 'Role',
+        action: () => openMenu('crewRosterRole', { uid: entry.uid })
+      }
+    ]
+  }));
+
+  return [
+    {
+      type: 'table',
+      columns: ['Type', 'Name', 'Role', 'On Duty', 'Rename', 'Role'],
+      rows
+    }
+  ];
+}
 ```
+
+Render buttons inside `renderUnifiedTableItem` and wire `behavior` through `handleMenuBehavior` so table actions can keep the menu open or navigate.
 
 ### 3) Full Menu Rebuild for List Changes
 When items are added/removed (crew hired, inventory exhausted), rebuild the DOM:
