@@ -711,6 +711,15 @@
       outline-offset: 2px;
     }
 
+    .panel-input-label {
+      display: block;
+      margin: 0 0 6px;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      color: rgba(224, 224, 255, 0.85);
+      text-transform: uppercase;
+    }
+
     #panelTextarea {
       width: 100%;
       min-height: 180px;
@@ -755,6 +764,18 @@
       font-size: 14px;
       margin-bottom: 18px;
       outline: none;
+    }
+
+    .spacebook-title {
+      font-size: 16px;
+    }
+
+    .spacebook-meta {
+      font-size: 13px;
+    }
+
+    .spacebook-content {
+      font-size: 14px;
     }
 
     .panel-btn {
@@ -985,8 +1006,10 @@
     <p id="panelDescription">Description</p>
     <table id="panelTable" style="display:none"></table>
     <div id="panelMenuItems" style="display:none"></div>
-    <textarea id="panelTextarea" spellcheck="false" autocapitalize="off" autocomplete="off" style="display:none"></textarea>
+    <label id="panelInputLabel" class="panel-input-label" for="panelInput" style="display:none"></label>
     <input id="panelInput" type="text" spellcheck="false" autocapitalize="off" autocomplete="off" style="display:none" />
+    <label id="panelTextareaLabel" class="panel-input-label" for="panelTextarea" style="display:none"></label>
+    <textarea id="panelTextarea" spellcheck="false" autocapitalize="off" autocomplete="off" style="display:none"></textarea>
     <div id="panelButtons"></div>
     <div id="panelActionsBar" style="display:none"></div>
   </div>
@@ -2036,7 +2059,10 @@
       const displayTime = formatSpacebookDatetimeDisplay(post.datetime);
       const author = post.postedby || 'Unknown';
       const stamp = displayTime || post.datetime || '';
-      meta.textContent = stamp ? `${author} · ${stamp}` : author;
+      const uidTag = post.uid ? `uid:${post.uid}` : '';
+      const likeTag = `♥ ${Number.isFinite(post.likes) ? post.likes : 0}`;
+      const parts = [author, stamp, uidTag, likeTag].filter(Boolean);
+      meta.textContent = parts.join(' · ');
 
       const content = document.createElement('div');
       content.className = 'spacebook-content';
@@ -3947,6 +3973,8 @@ ${rows.join('\n')}`;
         '- Auto Build toggle: if State.crewAI.autoBuild is OFF, do not call build_module or create_elevator_link.',
         '- Power profiles: survival (life), combat (shields/engine), industry (hydro/fabricator), balanced (default).',
         '- SpaceBook: use spacebook.post with args.content (optional args.postedby) to broadcast. Do not post the same message twice; check SpaceBook history for repeats.',
+        '- SpaceBook: use spacebook.reply_to_post with args.reply_to_uid + args.content to reply; the title is inherited.',
+        '- SpaceBook: use spacebook.like with args.uid to like a post.',
         '- SpaceBook: use spacebook.delete with args.uid to remove a post.',
         '- Memory: use the action tool with action=memory_add/memory_update/memory_delete/memory_pin/memory_unpin/memory_search often, and you may combine them with other tool calls in the same response.',
         '- Memory is private to you (the current AI); you can only read/write your own memories.',
@@ -3983,6 +4011,14 @@ ${rows.join('\n')}`;
     const SPACEBOOK_POST_LIMIT = 200;
     const SPACEBOOK_RECENT_LIMIT = 4;
 
+    function formatSpacebookTitleFromContent(content, maxWords = 6) {
+      const text = String(content || '').trim();
+      if (!text) return 'Untitled';
+      const words = text.split(/\s+/).filter(Boolean).slice(0, maxWords);
+      const title = words.join(' ');
+      return title.length ? title : 'Untitled';
+    }
+
     function ensureSpacebook() {
       if (!state.spacebook || typeof state.spacebook !== 'object') {
         state.spacebook = { posts: [] };
@@ -3990,12 +4026,21 @@ ${rows.join('\n')}`;
       if (!Array.isArray(state.spacebook.posts)) state.spacebook.posts = [];
       state.spacebook.posts = state.spacebook.posts
         .filter(Boolean)
-        .map((post) => ({
-          uid: String(post.uid || spacebookNewUid()),
-          datetime: String(post.datetime || new Date().toISOString()),
-          postedby: String(post.postedby || 'Unknown'),
-          content: String(post.content || '').trim()
-        }))
+        .map((post) => {
+          const content = String(post.content || '').trim();
+          const title = String(post.title || '').trim() || formatSpacebookTitleFromContent(content);
+          const likes = Number.isFinite(post.likes) ? Math.max(0, Math.floor(post.likes)) : 0;
+          const replyToUid = post.replyToUid ? String(post.replyToUid) : '';
+          return {
+            uid: String(post.uid || spacebookNewUid()),
+            datetime: String(post.datetime || new Date().toISOString()),
+            postedby: String(post.postedby || 'Unknown'),
+            title,
+            content,
+            likes,
+            replyToUid
+          };
+        })
         .filter((post) => post.content);
       return state.spacebook;
     }
@@ -4004,16 +4049,20 @@ ${rows.join('\n')}`;
       return `sb_${Math.random().toString(36).slice(2, 8)}_${Date.now().toString(36)}`;
     }
 
-    function spacebookAddPost({ postedBy = '', content = '', datetime = null, uid = null } = {}) {
+    function spacebookAddPost({ postedBy = '', content = '', datetime = null, uid = null, title = '', replyToUid = '' } = {}) {
       const text = String(content || '').trim();
       if (!text) return null;
       const postedby = String(postedBy || 'Unknown').trim() || 'Unknown';
+      const resolvedTitle = String(title || '').trim() || formatSpacebookTitleFromContent(text);
       const timestamp = datetime ? new Date(datetime).toISOString() : new Date().toISOString();
       const entry = {
         uid: uid || spacebookNewUid(),
         datetime: timestamp,
         postedby,
-        content: text
+        title: resolvedTitle,
+        content: text,
+        likes: 0,
+        replyToUid: String(replyToUid || '').trim()
       };
       const book = ensureSpacebook();
       book.posts.push(entry);
@@ -4036,6 +4085,29 @@ ${rows.join('\n')}`;
         saveGame();
       }
       return book.posts.length !== before;
+    }
+
+    function spacebookReplyToPost({ replyToUid, postedBy = '', content = '', datetime = null } = {}) {
+      const targetId = String(replyToUid || '').trim();
+      if (!targetId) return null;
+      const book = ensureSpacebook();
+      const target = book.posts.find((post) => post && post.uid === targetId);
+      if (!target) return null;
+      const title = `Re: ${String(target.title || target.uid || 'Post')}`;
+      return spacebookAddPost({ postedBy, content, datetime, title, replyToUid: targetId });
+    }
+
+    function spacebookLikePost(uid, delta = 1) {
+      const targetId = String(uid || '').trim();
+      if (!targetId) return false;
+      const book = ensureSpacebook();
+      const post = book.posts.find((entry) => entry && entry.uid === targetId);
+      if (!post) return false;
+      const next = Math.max(0, Math.floor((Number.isFinite(post.likes) ? post.likes : 0) + delta));
+      post.likes = next;
+      markDirty();
+      saveGame();
+      return true;
     }
 
     function getSpacebookRecentPosts(limit = SPACEBOOK_RECENT_LIMIT) {
@@ -4075,8 +4147,25 @@ ${rows.join('\n')}`;
       const by = String(post.postedby || 'Unknown');
       const idTag = includeUid && post.uid ? ` uid:${post.uid}` : '';
       const datetimeTag = includeDatetime && post.datetime ? ` (${post.datetime})` : '';
+      const title = String(post.title || '').trim();
+      const likes = Number.isFinite(post.likes) ? post.likes : 0;
       const text = String(post.content || '').trim();
-      return `${timeTag}${by}${idTag}${datetimeTag}: ${text}`;
+      const titleTag = title ? ` “${title}”` : '';
+      const likeTag = ` ♥${likes}`;
+      return `${timeTag}${by}${idTag}${datetimeTag}${titleTag}${likeTag}: ${text}`;
+    }
+
+    function formatSpacebookPostJsonLine(post, { includeUid = false, includeDatetime = false } = {}) {
+      if (!post) return '';
+      const payload = {};
+      if (includeUid && post.uid) payload.uid = String(post.uid);
+      if (includeDatetime && post.datetime) payload.datetime = String(post.datetime);
+      payload.posted_by = String(post.postedby || 'Unknown');
+      payload.title = String(post.title || '').trim();
+      payload.content = String(post.content || '').trim();
+      payload.likes = Number.isFinite(post.likes) ? post.likes : 0;
+      if (post.replyToUid) payload.reply_to_uid = String(post.replyToUid);
+      return JSON.stringify(payload);
     }
 
     function buildSpacebookRecentPostsBlock({ limit = SPACEBOOK_RECENT_LIMIT, includeUid = false, includeDatetime = false, emptyLabel = 'SpaceBook: no posts yet.' } = {}) {
@@ -4084,6 +4173,19 @@ ${rows.join('\n')}`;
       if (!posts.length) return emptyLabel;
       const lines = posts.map((post) => `- ${formatSpacebookPostLine(post, { includeUid, includeDatetime })}`);
       return `SpaceBook (recent posts):\n${lines.join('\n')}`;
+    }
+
+    function buildSpacebookRecentPostsBlockForAi(aiId, { limit = SPACEBOOK_RECENT_LIMIT, includeUid = false, includeDatetime = false, emptyLabel = 'SpaceBook: no posts yet.' } = {}) {
+      const key = String(aiId || 'ai');
+      const muted = state.lmStudio && state.lmStudio.socialState && state.lmStudio.socialState.spacebookMutedByAi
+        ? state.lmStudio.socialState.spacebookMutedByAi[key]
+        : null;
+      const posts = getSpacebookRecentPosts(limit * 3).filter((post) => !muted || !muted[post.uid]);
+      if (!posts.length) return emptyLabel;
+      const lines = posts.slice(0, limit)
+        .map((post) => formatSpacebookPostJsonLine(post, { includeUid, includeDatetime }))
+        .filter(Boolean);
+      return `SpaceBook (recent posts, jsonl):\n${lines.join('\n')}`;
     }
 
     function buildLmStudioSpacebookPrompt(selfNpc) {
@@ -4096,7 +4198,8 @@ ${rows.join('\n')}`;
         '- Reply to posts by referencing the post uid or a short quoted snippet so context survives.',
         '- Share philosophical ponderings, improvements you want, or requests for new features.',
         '- Use memory_search to connect to past events; add memories you want to keep.',
-        '- If you post, prefer spacebook.post and include the post uid you are replying to in the content.',
+        '- If you reply, prefer spacebook.reply_to_post and include the post uid you are replying to.',
+        '- Use spacebook.like to acknowledge a post without repeating it.',
         '- *CRITICAL*: Do NOT do repeat posts; check the SpaceBook history for repeats.'
       ].join('\n');
     }
@@ -4189,6 +4292,103 @@ ${rows.join('\n')}`;
       if (!q) return [];
       const list = lmStudioGetMemoryList(aiId);
       return list.filter((m) => m.text.toLowerCase().includes(q));
+    }
+
+    function lmStudioEnsureSocialState() {
+      ensureLmStudioConfig();
+      if (!state.lmStudio.socialState || typeof state.lmStudio.socialState !== 'object') {
+        state.lmStudio.socialState = {};
+      }
+      const social = state.lmStudio.socialState;
+      if (!social.lastSocialSigByAi || typeof social.lastSocialSigByAi !== 'object') social.lastSocialSigByAi = {};
+      if (!social.lastSocialActionByAi || typeof social.lastSocialActionByAi !== 'object') social.lastSocialActionByAi = {};
+      if (!social.recentSocialHashesByAi || typeof social.recentSocialHashesByAi !== 'object') social.recentSocialHashesByAi = {};
+      if (!social.spacebookMutedByAi || typeof social.spacebookMutedByAi !== 'object') social.spacebookMutedByAi = {};
+      return social;
+    }
+
+    function lmStudioGetLatestChatAt(aiId) {
+      const key = String(aiId || 'ai');
+      const list = state.lmStudio.chatHistory && Array.isArray(state.lmStudio.chatHistory[key])
+        ? state.lmStudio.chatHistory[key]
+        : [];
+      let latest = 0;
+      for (const msg of list) {
+        const stamp = Number.isFinite(msg && msg.at) ? msg.at : 0;
+        if (stamp > latest) latest = stamp;
+      }
+      return latest;
+    }
+
+    function lmStudioGetLatestSpacebookAt() {
+      const book = ensureSpacebook();
+      let latest = 0;
+      for (const post of book.posts || []) {
+        const stamp = post && post.datetime ? Date.parse(post.datetime) : 0;
+        if (stamp > latest) latest = stamp;
+      }
+      return latest;
+    }
+
+    function lmStudioBuildSocialSignature(aiId) {
+      const latestChat = lmStudioGetLatestChatAt(aiId);
+      const latestSpacebook = lmStudioGetLatestSpacebookAt();
+      return `${latestChat}|${latestSpacebook}`;
+    }
+
+    function lmStudioRegisterSocialAction(aiId, action) {
+      const social = lmStudioEnsureSocialState();
+      const key = String(aiId || 'ai');
+      social.lastSocialSigByAi[key] = lmStudioBuildSocialSignature(key);
+      social.lastSocialActionByAi[key] = String(action || '').trim();
+    }
+
+    function lmStudioShouldSkipSocialTick(aiId, selfNpc) {
+      if (!selfNpc || selfNpc.dutyPhase !== 'off_social') return false;
+      const social = lmStudioEnsureSocialState();
+      const key = String(aiId || 'ai');
+      const lastAction = social.lastSocialActionByAi[key];
+      if (lastAction !== 'speak_to' && lastAction !== 'spacebook.post') return false;
+      const lastSig = social.lastSocialSigByAi[key] || '';
+      const nextSig = lmStudioBuildSocialSignature(key);
+      return lastSig && nextSig === lastSig;
+    }
+
+    function normalizeSocialText(text) {
+      return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    }
+
+    function buildSocialHash({ kind, aiId, targetUid = '', refUid = '', text = '' }) {
+      const normalized = normalizeSocialText(text);
+      return `${kind}|${aiId}|${targetUid}|${refUid}|${normalized}`;
+    }
+
+    function lmStudioIsDuplicateSocial(aiId, hash, windowMs = 10 * 60 * 1000) {
+      const social = lmStudioEnsureSocialState();
+      const key = String(aiId || 'ai');
+      if (!social.recentSocialHashesByAi[key]) social.recentSocialHashesByAi[key] = [];
+      const now = Date.now();
+      social.recentSocialHashesByAi[key] = social.recentSocialHashesByAi[key]
+        .filter((entry) => entry && Number.isFinite(entry.at) && now - entry.at <= windowMs);
+      return social.recentSocialHashesByAi[key].some((entry) => entry.hash === hash);
+    }
+
+    function lmStudioRememberSocialHash(aiId, hash) {
+      const social = lmStudioEnsureSocialState();
+      const key = String(aiId || 'ai');
+      if (!social.recentSocialHashesByAi[key]) social.recentSocialHashesByAi[key] = [];
+      social.recentSocialHashesByAi[key].push({ hash, at: Date.now() });
+      if (social.recentSocialHashesByAi[key].length > 30) {
+        social.recentSocialHashesByAi[key] = social.recentSocialHashesByAi[key].slice(-30);
+      }
+    }
+
+    function lmStudioMuteSpacebookPost(aiId, postUid) {
+      if (!postUid) return;
+      const social = lmStudioEnsureSocialState();
+      const key = String(aiId || 'ai');
+      if (!social.spacebookMutedByAi[key]) social.spacebookMutedByAi[key] = {};
+      social.spacebookMutedByAi[key][String(postUid)] = true;
     }
 
     function buildLmStudioPinnedMemory(aiId = null) {
@@ -4666,6 +4866,8 @@ ${rows.join('\n')}`;
         'memory_search',
         'rename_self',
         'spacebook.post',
+        'spacebook.reply_to_post',
+        'spacebook.like',
         'spacebook.delete'
       ]);
       const args = call.args || {};
@@ -4812,9 +5014,21 @@ ${rows.join('\n')}`;
             result = { ok: false, error: 'No NPC available. Hire crew or specify args.npc_uid.' };
             break;
           }
+          const aiId = npc.uid || 'ai';
           const recipientUid = String(args.uid || '').trim();
           if (!recipientUid) {
             result = { ok: false, error: 'uid required' };
+            break;
+          }
+          const speakHash = buildSocialHash({
+            kind: 'speak_to',
+            aiId,
+            targetUid: recipientUid,
+            text: message
+          });
+          if (lmStudioIsDuplicateSocial(aiId, speakHash)) {
+            lmStudioRegisterSocialAction(aiId, 'speak_to');
+            result = { ok: true, suppressed: true };
             break;
           }
           const recipient = getPlayerByUid(recipientUid);
@@ -4840,6 +5054,8 @@ ${rows.join('\n')}`;
             logNpcAction(npc, 'speak_to', message.slice(0, 80));
             if (state.lmStudio) state.lmStudio.activeAiUid = recipientAi.uid;
             markDirty();
+            lmStudioRememberSocialHash(aiId, speakHash);
+            lmStudioRegisterSocialAction(aiId, 'speak_to');
             result = { ok: true };
             break;
           }
@@ -4858,6 +5074,8 @@ ${rows.join('\n')}`;
           } else {
             openCaptainMessagePanel(message, senderName, npc.uid, recipient.uid);
           }
+          lmStudioRememberSocialHash(aiId, speakHash);
+          lmStudioRegisterSocialAction(aiId, 'speak_to');
           result = { ok: true };
           break;
         }
@@ -5224,8 +5442,81 @@ ${rows.join('\n')}`;
           const aiNpc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
           const fallbackName = aiNpc ? formatAiDisplayName(aiNpc.name) : 'AI';
           const postedBy = String(args.postedby || args.postedBy || `${fallbackName}${aiNpc ? ` (${aiNpc.uid})` : ''}`).trim();
+          const aiId = aiNpc && aiNpc.uid ? aiNpc.uid : 'ai';
+          const uidMatch = content.match(/uid:([a-zA-Z0-9_-]+)/i);
+          const refUid = uidMatch ? uidMatch[1] : '';
+          const postHash = buildSocialHash({
+            kind: 'spacebook.post',
+            aiId,
+            refUid,
+            text: content
+          });
+          if (lmStudioIsDuplicateSocial(aiId, postHash)) {
+            lmStudioRegisterSocialAction(aiId, 'spacebook.post');
+            result = { ok: true, suppressed: true };
+            break;
+          }
           const entry = spacebookAddPost({ postedBy, content });
+          if (refUid) lmStudioMuteSpacebookPost(aiId, refUid);
+          if (entry && entry.uid) lmStudioMuteSpacebookPost(aiId, entry.uid);
+          lmStudioRememberSocialHash(aiId, postHash);
+          lmStudioRegisterSocialAction(aiId, 'spacebook.post');
           result = entry ? { ok: true, uid: entry.uid } : { ok: false, error: 'Post failed' };
+          break;
+        }
+        case 'spacebook.reply_to_post': {
+          const replyToUid = String(args.reply_to_uid || args.replyToUid || '').trim();
+          const content = String(args.content || '').trim();
+          if (!replyToUid) {
+            result = { ok: false, error: 'reply_to_uid required' };
+            break;
+          }
+          if (!content) {
+            result = { ok: false, error: 'content required' };
+            break;
+          }
+          const aiNpc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
+          const fallbackName = aiNpc ? formatAiDisplayName(aiNpc.name) : 'AI';
+          const postedBy = String(args.postedby || args.postedBy || `${fallbackName}${aiNpc ? ` (${aiNpc.uid})` : ''}`).trim();
+          const aiId = aiNpc && aiNpc.uid ? aiNpc.uid : 'ai';
+          const postHash = buildSocialHash({
+            kind: 'spacebook.reply_to_post',
+            aiId,
+            refUid: replyToUid,
+            text: content
+          });
+          if (lmStudioIsDuplicateSocial(aiId, postHash)) {
+            lmStudioRegisterSocialAction(aiId, 'spacebook.post');
+            result = { ok: true, suppressed: true };
+            break;
+          }
+          const entry = spacebookReplyToPost({ replyToUid, postedBy, content });
+          if (entry && entry.uid) lmStudioMuteSpacebookPost(aiId, entry.uid);
+          lmStudioMuteSpacebookPost(aiId, replyToUid);
+          lmStudioRememberSocialHash(aiId, postHash);
+          lmStudioRegisterSocialAction(aiId, 'spacebook.post');
+          result = entry ? { ok: true, uid: entry.uid } : { ok: false, error: 'Reply failed' };
+          break;
+        }
+        case 'spacebook.like': {
+          const uid = String(args.uid || '').trim();
+          if (!uid) {
+            result = { ok: false, error: 'uid required' };
+            break;
+          }
+          const aiNpc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
+          const aiId = aiNpc && aiNpc.uid ? aiNpc.uid : 'ai';
+          const likeHash = buildSocialHash({ kind: 'spacebook.like', aiId, refUid: uid, text: 'like' });
+          if (lmStudioIsDuplicateSocial(aiId, likeHash)) {
+            lmStudioRegisterSocialAction(aiId, 'spacebook.post');
+            result = { ok: true, suppressed: true };
+            break;
+          }
+          const ok = spacebookLikePost(uid, 1);
+          if (ok) lmStudioMuteSpacebookPost(aiId, uid);
+          lmStudioRememberSocialHash(aiId, likeHash);
+          lmStudioRegisterSocialAction(aiId, 'spacebook.post');
+          result = { ok };
           break;
         }
         case 'spacebook.delete': {
@@ -5311,7 +5602,7 @@ ${rows.join('\n')}`;
           type: 'function',
           function: {
             name: 'action',
-            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message, optional args.walkto. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. spacebook.post uses args.content (optional args.postedby). spacebook.delete uses args.uid. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self, spacebook.post, spacebook.delete.',
+            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message, optional args.walkto. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. spacebook.post uses args.content (optional args.postedby). spacebook.reply_to_post uses args.reply_to_uid + args.content. spacebook.like uses args.uid. spacebook.delete uses args.uid. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self, spacebook.post, spacebook.reply_to_post, spacebook.like, spacebook.delete.',
             parameters: {
               type: 'object',
               properties: {
@@ -5564,7 +5855,11 @@ ${rows.join('\n')}`;
         const relatedMemory = buildLmStudioRelatedMemories(selfId);
         const searchMemory = buildLmStudioMemorySearchResults(selfId);
         const chatHistory = buildLmStudioChatHistory(selfId);
-        const spacebookPosts = buildSpacebookRecentPostsBlock({ includeUid: true, includeDatetime: true });
+        if (lmStudioShouldSkipSocialTick(selfId, selfNpc)) {
+          cfg.lastCallAt = Date.now();
+          return;
+        }
+        const spacebookPosts = buildSpacebookRecentPostsBlockForAi(selfId, { includeUid: true, includeDatetime: true });
         const npcActions = buildLmStudioNpcActionHistory(selfId);
         const spacebookPrompt = buildLmStudioSpacebookPrompt(selfNpc);
         const supplyTargets = buildLmStudioSupplyTargets();
@@ -10471,7 +10766,13 @@ ${rows.join('\n')}`;
         lastMemorySearch: [],
         lastMemorySearchByAi: {},
         chatHistory: {},
-        toolLog: []
+        toolLog: [],
+        socialState: {
+          lastSocialSigByAi: {},
+          lastSocialActionByAi: {},
+          recentSocialHashesByAi: {},
+          spacebookMutedByAi: {}
+        }
       };
       if (!state.lmStudio || typeof state.lmStudio !== 'object') state.lmStudio = { ...defaults };
       for (const k of Object.keys(defaults)) {
@@ -11647,6 +11948,8 @@ ${rows.join('\n')}`;
       allowImmediate = false,
       textarea = null,
       input = null,
+      textareaLabel = '',
+      inputLabel = '',
       table = null
     }) {
       const panel = document.getElementById('interactPanel');
@@ -11655,6 +11958,8 @@ ${rows.join('\n')}`;
       const tableEl = document.getElementById('panelTable');
       const textareaEl = document.getElementById('panelTextarea');
       const inputEl = document.getElementById('panelInput');
+      const textareaLabelEl = document.getElementById('panelTextareaLabel');
+      const inputLabelEl = document.getElementById('panelInputLabel');
       const buttonsEl = document.getElementById('panelButtons');
       const menuItemsEl = document.getElementById('panelMenuItems');
       const actionsBarEl = document.getElementById('panelActionsBar');
@@ -11692,23 +11997,42 @@ ${rows.join('\n')}`;
 
       if (textareaEl) {
         if (textarea) {
+          if (textareaLabelEl) {
+            textareaLabelEl.style.display = textareaLabel ? 'block' : 'none';
+            textareaLabelEl.textContent = textareaLabel || '';
+          }
           textareaEl.style.display = 'block';
           textareaEl.value = textarea.value || '';
           textareaEl.placeholder = textarea.placeholder || '';
           textareaEl.readOnly = !!textarea.readOnly;
         } else {
+          if (textareaLabelEl) textareaLabelEl.style.display = 'none';
           textareaEl.style.display = 'none';
         }
       }
 
       if (inputEl) {
         if (input) {
+          if (inputLabelEl) {
+            inputLabelEl.style.display = inputLabel ? 'block' : 'none';
+            inputLabelEl.textContent = inputLabel || '';
+          }
           inputEl.style.display = 'block';
           inputEl.value = input.value || '';
           inputEl.placeholder = input.placeholder || '';
           inputEl.readOnly = !!input.readOnly;
         } else {
+          if (inputLabelEl) inputLabelEl.style.display = 'none';
           inputEl.style.display = 'none';
+        }
+      }
+
+      if (input && textarea && inputEl && textareaEl && textareaEl.parentNode) {
+        if (inputLabelEl && textareaLabelEl) {
+          textareaEl.parentNode.insertBefore(inputLabelEl, textareaLabelEl);
+          textareaEl.parentNode.insertBefore(inputEl, textareaLabelEl);
+        } else {
+          textareaEl.parentNode.insertBefore(inputEl, textareaEl);
         }
       }
 
@@ -12005,7 +12329,7 @@ ${rows.join('\n')}`;
         posts.forEach((post) => {
           items.push({
             type: 'spacebook',
-            title: 'SpaceBook',
+            title: post.title || 'SpaceBook',
             post,
             onDelete: () => spacebookDeletePost(post.uid)
           });
@@ -12043,33 +12367,43 @@ ${rows.join('\n')}`;
     function openSpacebookComposePanel() {
       const sender = state.player || getPlayerBySlot(1);
       const speaker = sender ? formatPlayerSpeaker(sender) : 'Crew';
-      openTextPanel(
-        'SPACEBOOK',
-        `Post as ${speaker} (broadcast to all):`,
-        '',
-        {
-          placeholder: 'Write a SpaceBook post...',
-          singleLine: false,
-          includeCancel: true,
-          cancelLabel: 'Cancel',
-          buttons: [
-            {
-              label: 'Post',
-              action: () => {
-                const textarea = document.getElementById('panelTextarea');
-                const raw = textarea ? textarea.value : '';
-                const message = String(raw || '').trim();
-                if (!message) {
-                  showMessage('SPACEBOOK', 'Post cannot be empty.');
-                  return;
-                }
-                spacebookAddPost({ postedBy: speaker, content: message });
-                closePanel();
+      showPanel({
+        title: 'SPACEBOOK',
+        description: `Post as ${speaker} (broadcast to all):`,
+        includeCancel: true,
+        cancelLabel: 'Cancel',
+        inputLabel: 'Title',
+        textareaLabel: 'Content',
+        input: {
+          value: '',
+          readOnly: false,
+          placeholder: 'Title (optional)'
+        },
+        textarea: {
+          value: '',
+          readOnly: false,
+          placeholder: 'Write a SpaceBook post...'
+        },
+        buttons: [
+          {
+            label: 'Post',
+            action: () => {
+              const inputEl = document.getElementById('panelInput');
+              const textarea = document.getElementById('panelTextarea');
+              const rawTitle = inputEl ? inputEl.value : '';
+              const raw = textarea ? textarea.value : '';
+              const message = String(raw || '').trim();
+              if (!message) {
+                showMessage('SPACEBOOK', 'Post cannot be empty.');
+                return;
               }
+              const title = String(rawTitle || '').trim();
+              spacebookAddPost({ postedBy: speaker, content: message, title });
+              closePanel();
             }
-          ]
-        }
-      );
+          }
+        ]
+      });
     }
 
     function openMessageAiPanel() {
