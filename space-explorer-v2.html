@@ -1023,6 +1023,7 @@
   </div>
 
   <script type="module">
+    import { createOpenAiCompatClient } from './assets/js/llm-client.js';
     // ============================================================================
     // Core Architecture
     // ============================================================================
@@ -1097,9 +1098,16 @@
         },
       lmStudio: {
         enabled: false,
+        provider: 'lmstudio',
         baseUrl: 'http://localhost:1234',
         apiKey: '',
+        modelOverride: '',
         autoLoadModel: 'zai-org/glm-4.6v-flash',
+        apiMode: 'openai-chat',
+        toolMode: 'auto',
+        structuredOutput: true,
+        maxPromptChars: 8000,
+        modelCaps: {},
         activeModelKey: '',
         lastCallAt: 0,
         inflight: false,
@@ -3381,9 +3389,43 @@
       ];
     }
 
+    const LMS_PROVIDER_OPTIONS = ['lmstudio', 'openai-compat'];
+    const LMS_API_MODE_OPTIONS = ['openai-chat', 'openai-responses'];
+    const LMS_TOOL_MODE_OPTIONS = ['auto', 'native', 'json-only'];
+
+    function lmStudioLabelForProvider(value) {
+      if (value === 'openai-compat') return 'OpenAI Compat';
+      return 'LM Studio';
+    }
+
+    function lmStudioLabelForApiMode(value) {
+      if (value === 'openai-responses') return 'Responses';
+      return 'Chat Completions';
+    }
+
+    function lmStudioLabelForToolMode(value) {
+      if (value === 'native') return 'Native Tools';
+      if (value === 'json-only') return 'JSON Only';
+      return 'Auto';
+    }
+
+    function lmStudioCycleOption(cfg, key, options) {
+      return () => {
+        const idx = Math.max(0, options.indexOf(cfg[key]));
+        cfg[key] = options[(idx + 1) % options.length];
+        markDirty();
+        rebuildUnifiedMenuInPlace();
+      };
+    }
+
     function buildLmStudioSettingsItems(options = {}) {
       ensureLmStudioConfig();
       const cfg = state.lmStudio;
+      const providerLabel = lmStudioLabelForProvider(cfg.provider);
+      const apiModeLabel = lmStudioLabelForApiMode(cfg.apiMode);
+      const toolModeLabel = lmStudioLabelForToolMode(cfg.toolMode);
+      const modelOverrideLabel = cfg.modelOverride ? cfg.modelOverride : '(auto)';
+      const autoLoadLabel = cfg.provider === 'lmstudio' ? cfg.autoLoadModel : 'Disabled (provider)';
       const status = cfg.activeModelKey ? `Model: ${cfg.activeModelKey}` : 'Model: (not loaded)';
       const lastTool = cfg.lastToolCall ? `${cfg.lastToolCall.name} (${new Date(cfg.lastToolCall.at).toLocaleTimeString()})` : 'None';
       const lastResult = cfg.lastToolResult
@@ -3392,6 +3434,9 @@
       const items = [
         { type: 'setting', label: 'LM Studio NPC AI', value: cfg.enabled ? 'ON' : 'OFF', actions: [
           { label: 'Toggle', action: () => { cfg.enabled = !cfg.enabled; markDirty(); }, behavior: 'keep-open' }
+        ] },
+        { type: 'setting', label: 'Provider', value: providerLabel, actions: [
+          { label: 'Next', action: lmStudioCycleOption(cfg, 'provider', LMS_PROVIDER_OPTIONS), behavior: 'keep-open' }
         ] },
         { type: 'setting', label: 'Host', value: cfg.baseUrl, actions: [
           { label: 'Edit', action: () => {
@@ -3426,7 +3471,25 @@
             });
           } }
         ] },
-        { type: 'setting', label: 'Auto-Load Model', value: cfg.autoLoadModel, actions: [
+        { type: 'setting', label: 'Model Override', value: modelOverrideLabel, actions: [
+          { label: 'Edit', action: () => {
+            openTextPanel('MODEL OVERRIDE', 'Optional model id (required for OpenAI compat):', cfg.modelOverride, {
+              singleLine: true,
+              includeCancel: true,
+              buttons: [
+                { label: 'Save', action: () => {
+                  const input = document.getElementById('panelInput');
+                  cfg.modelOverride = String(input ? input.value : '').trim();
+                  if (!cfg.modelOverride && cfg.provider !== 'lmstudio') cfg.activeModelKey = '';
+                  ensureLmStudioConfig();
+                  closePanel();
+                } },
+                { label: 'Clear', action: () => { cfg.modelOverride = ''; closePanel(); } }
+              ]
+            });
+          } }
+        ] },
+        { type: 'setting', label: 'Auto-Load Model', value: autoLoadLabel, actions: cfg.provider === 'lmstudio' ? [
           { label: 'Edit', action: () => {
             openTextPanel('LM STUDIO MODEL', 'Model to load if none is currently loaded:', cfg.autoLoadModel, {
               singleLine: true,
@@ -3435,6 +3498,32 @@
                 { label: 'Save', action: () => {
                   const input = document.getElementById('panelInput');
                   cfg.autoLoadModel = String(input ? input.value : '').trim() || 'zai-org/glm-4.6v-flash';
+                  ensureLmStudioConfig();
+                  closePanel();
+                } }
+              ]
+            });
+          } }
+        ] : [] },
+        { type: 'setting', label: 'API Mode', value: apiModeLabel, actions: [
+          { label: 'Next', action: lmStudioCycleOption(cfg, 'apiMode', LMS_API_MODE_OPTIONS), behavior: 'keep-open' }
+        ] },
+        { type: 'setting', label: 'Tool Mode', value: toolModeLabel, actions: [
+          { label: 'Next', action: lmStudioCycleOption(cfg, 'toolMode', LMS_TOOL_MODE_OPTIONS), behavior: 'keep-open' }
+        ] },
+        { type: 'setting', label: 'Structured Output', value: cfg.structuredOutput ? 'ON' : 'OFF', actions: [
+          { label: 'Toggle', action: () => { cfg.structuredOutput = !cfg.structuredOutput; markDirty(); rebuildUnifiedMenuInPlace(); }, behavior: 'keep-open' }
+        ] },
+        { type: 'setting', label: 'Max Prompt Chars', value: String(cfg.maxPromptChars), actions: [
+          { label: 'Edit', action: () => {
+            openTextPanel('MAX PROMPT CHARS', 'Cap prompt length to avoid context overflow (min 2000).', String(cfg.maxPromptChars), {
+              singleLine: true,
+              includeCancel: true,
+              buttons: [
+                { label: 'Save', action: () => {
+                  const input = document.getElementById('panelInput');
+                  const next = Math.floor(safeNumber(Number(input ? input.value : ''), cfg.maxPromptChars));
+                  cfg.maxPromptChars = Math.max(2000, next || 0);
                   ensureLmStudioConfig();
                   closePanel();
                 } }
@@ -3468,6 +3557,16 @@
       const token = state.lmStudio.apiKey;
       if (token) headers.Authorization = `Bearer ${token}`;
       return headers;
+    }
+
+    function lmStudioOpenAiClient() {
+      ensureLmStudioConfig();
+      const cfg = state.lmStudio;
+      return createOpenAiCompatClient({
+        baseUrl: cfg.baseUrl,
+        apiKey: cfg.apiKey,
+        defaultTimeoutMs: 120000
+      });
     }
 
     async function lmStudioFetch(path, options = {}) {
@@ -3512,6 +3611,15 @@
     async function lmStudioEnsureLoadedModel() {
       ensureLmStudioConfig();
       const cfg = state.lmStudio;
+      if (cfg.modelOverride) {
+        cfg.activeModelKey = cfg.modelOverride;
+        cfg.lastError = '';
+        return cfg.activeModelKey;
+      }
+      if (cfg.provider !== 'lmstudio') {
+        cfg.lastError = 'Model override required for this provider.';
+        return '';
+      }
       const result = await lmStudioListModels();
       const loadedKey = lmStudioPickLoadedModel(result.models || []);
       if (loadedKey) {
@@ -3528,6 +3636,24 @@
 
     async function lmStudioRefreshModels(showToast = false) {
       ensureLmStudioConfig();
+      const cfg = state.lmStudio;
+      if (cfg.provider !== 'lmstudio') {
+        if (cfg.modelOverride) {
+          cfg.activeModelKey = cfg.modelOverride;
+          cfg.lastError = '';
+          if (showToast) showMessage('LM STUDIO', `Using model: ${cfg.activeModelKey}`);
+          return;
+        }
+        cfg.lastError = 'Model override required for this provider.';
+        if (showToast) showMessage('LM STUDIO', cfg.lastError);
+        return;
+      }
+      if (cfg.modelOverride) {
+        cfg.activeModelKey = cfg.modelOverride;
+        cfg.lastError = '';
+        if (showToast) showMessage('LM STUDIO', `Using model: ${cfg.activeModelKey}`);
+        return;
+      }
       try {
         const result = await lmStudioListModels();
         const loadedKey = lmStudioPickLoadedModel(result.models || []);
@@ -3932,7 +4058,7 @@ ${rows.join('\n')}`;
         'Help (use 0+ tool calls):',
         '- Use the action tool: {"action":"walk_to","args":{...}} or {"action":"use_station_action","args":{...}}.',
         '- Output JSON can be a single tool: {"tool":"action","args":{"action":"use_station_action","args":{"action_key":"cargo.sell.rations"}}}.',
-        '- Or multiple tools: {"tool_calls":[{"tool":"action","args":{"action":"route_power","args":{}}},{"tool":"action","args":{"action":"toggle_system","args":{"system":"lights"}}}]}.',
+        '- Or multiple tools: {"tool_calls":[{"tool":"action","args":{"action":"route_power","args":{}}},{"tool":"action","args":{"action":"toggle_system","args":{"system":"lights","enabled":false}}}]}.',
         '- Or no action: {"tool_calls":[]}.',
         '- speak_to: message any player or AI uid (args.uid + args.message; optional args.walkto=true to rendezvous with a player).',
         '- task_npc: assign a station action to a specific npc_uid (args.npc_uid + args.action_key).',
@@ -3958,11 +4084,11 @@ ${rows.join('\n')}`;
         '- Rations low: toggle hydroponics then hydro.harvest; or cargo.buy.rations; feed via canteen.eat.',
         '- Cargo checks: use cargo.check (cargo station) or read State.inventory for counts.',
         '- Cargo trading: use cargo.buy.* or cargo.sell.* actions (example: cargo.buy.rations, cargo.sell.ore).',
-        '- Credits low: cargo.sell.ore/ingot/rations; farm scrap/ore via sensors_scan or drones.salvage; refine ore -> ingot.',
-        '- Sensors: use sensors_scan or sensors_deep_scan to find anomalies/blueprints.',
+        '- Credits low: cargo.sell.ore/ingot/rations; farm scrap/ore via sensors_scan (action tool) or drones.salvage; refine ore -> ingot.',
+        '- Sensors: use sensors_scan or sensors_deep_scan (action tools) to find anomalies/blueprints.',
         '- Filters low: cargo.buy.filter; life support uses filters.',
-        '- Lights are NOT a station action; use toggle_system with system "lights" to turn lights on/off.',
-        '- Example (lights off): {"tool":"action","args":{"action":"toggle_system","args":{"system":"lights"}}}.',
+        '- Lights are NOT a station action; use toggle_system with system "lights" plus enabled true/false.',
+        '- Example (lights off): {"tool":"action","args":{"action":"toggle_system","args":{"system":"lights","enabled":false}}}.',
         '- Medkits low: cargo.buy.medkit; treat via med.treat.',
         '- Drone parts low: cargo.buy.droneParts; drones.salvage or drones.repair use parts.',
         '- Power/heat: action route_power or action set_power_profile; toggle engine/shields if needed; vent heat (engine).',
@@ -4768,17 +4894,27 @@ ${rows.join('\n')}`;
       'cargo.sell.ore': { targetType: 'cargo', label: 'Sell Ore', perform: () => sellCargoItem('ore', 5, { respectReserve: true }) }
     };
 
+    function lmStudioNormalizeActionKey(actionKey) {
+      const trimmed = String(actionKey || '').trim();
+      if (!trimmed) return '';
+      if (!trimmed.includes('.') && trimmed.includes('_')) {
+        return trimmed.replace('_', '.');
+      }
+      return trimmed;
+    }
+
     function resolveLmsStationAction(actionKey) {
-      if (!actionKey) return { error: 'Missing action_key' };
-      const direct = LMS_STATION_ACTIONS[actionKey];
+      const normalized = lmStudioNormalizeActionKey(actionKey);
+      if (!normalized) return { error: 'Missing action_key' };
+      const direct = LMS_STATION_ACTIONS[normalized];
       if (direct) return { ...direct };
 
       const entries = Object.entries(MODULE_DEFS || {});
       for (const [moduleType, def] of entries) {
         const aiActions = Array.isArray(def.aiActions) ? def.aiActions : [];
-        const aiMatch = aiActions.find((entry) => entry && entry.key === actionKey);
+        const aiMatch = aiActions.find((entry) => entry && entry.key === normalized);
         if (aiMatch && typeof aiMatch.perform === 'function') {
-          return { targetType: moduleType, label: aiMatch.label || actionKey, perform: aiMatch.perform };
+          return { targetType: moduleType, label: aiMatch.label || normalized, perform: aiMatch.perform };
         }
 
         let actions = [];
@@ -4792,9 +4928,9 @@ ${rows.join('\n')}`;
           actions = def.actions;
         }
 
-        const match = actions.find((entry) => entry && entry.key === actionKey);
+        const match = actions.find((entry) => entry && entry.key === normalized);
         if (match && typeof match.perform === 'function') {
-          return { targetType: moduleType, label: match.label || actionKey, perform: match.perform };
+          return { targetType: moduleType, label: match.label || normalized, perform: match.perform };
         }
       }
 
@@ -5085,11 +5221,16 @@ ${rows.join('\n')}`;
         }
         case 'task_npc': {
           const npcId = String(args.npc_uid || '').trim();
-          const actionKey = String(args.action_key || '').trim();
+          let actionKey = String(args.action_key || '').trim();
           if (!npcId) {
             result = { ok: false, error: 'npc_uid required' };
             break;
           }
+          if (directTools.has(actionKey)) {
+            result = executeLmStudioToolCall({ name: actionKey, args: { ...args } });
+            break;
+          }
+          actionKey = lmStudioNormalizeActionKey(actionKey);
           if (!actionKey) {
             result = { ok: false, error: 'action_key required' };
             break;
@@ -5284,7 +5425,12 @@ ${rows.join('\n')}`;
           break;
         }
         case 'use_station_action': {
-          const actionKey = String(args.action_key || '').trim();
+          let actionKey = String(args.action_key || '').trim();
+          if (directTools.has(actionKey)) {
+            result = executeLmStudioToolCall({ name: actionKey, args: { ...args } });
+            break;
+          }
+          actionKey = lmStudioNormalizeActionKey(actionKey);
           const def = resolveLmsStationAction(actionKey);
           if (def.error) {
             result = { ok: false, error: def.error };
@@ -5312,6 +5458,11 @@ ${rows.join('\n')}`;
         }
         case 'toggle_system': {
           const system = String(args.system || '').toLowerCase();
+          if (typeof args.enabled !== 'boolean') {
+            result = { ok: false, error: 'enabled true/false required' };
+            break;
+          }
+          const desired = !!args.enabled;
           const systemModuleMap = {
             engine: 'engine',
             shields: 'shields',
@@ -5326,11 +5477,17 @@ ${rows.join('\n')}`;
               break;
             }
           }
-          if (system === 'lights') toggleLights();
-          else if (system === 'engine') toggleEngine();
-          else if (system === 'shields') toggleShields();
-          else if (system === 'life_support') toggleLifeSupport();
-          else if (system === 'hydroponics') toggleHydroponics();
+          if (system === 'lights') {
+            if (!!state.lightsOn !== desired) toggleLights();
+          } else if (system === 'engine') {
+            if (!!state.engineActive !== desired) toggleEngine();
+          } else if (system === 'shields') {
+            if (!!state.shieldsOn !== desired) toggleShields();
+          } else if (system === 'life_support') {
+            if (!!state.lifeSupportOn !== desired) toggleLifeSupport();
+          } else if (system === 'hydroponics') {
+            if (!!state.hydroponicsOn !== desired) toggleHydroponics();
+          }
           else {
             result = { ok: false, error: 'Unknown system' };
             break;
@@ -5606,7 +5763,7 @@ ${rows.join('\n')}`;
           type: 'function',
           function: {
             name: 'action',
-            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message, optional args.walkto. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. spacebook.post uses args.content (optional args.postedby). spacebook.reply_to_post uses args.reply_to_uid + args.content. spacebook.like uses args.uid. spacebook.delete uses args.uid. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self, spacebook.post, spacebook.reply_to_post, spacebook.like, spacebook.delete.',
+            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message, optional args.walkto. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. toggle_system uses args.system plus args.enabled true/false. spacebook.post uses args.content (optional args.postedby). spacebook.reply_to_post uses args.reply_to_uid + args.content. spacebook.like uses args.uid. spacebook.delete uses args.uid. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self, spacebook.post, spacebook.reply_to_post, spacebook.like, spacebook.delete.',
             parameters: {
               type: 'object',
               properties: {
@@ -5632,306 +5789,31 @@ ${rows.join('\n')}`;
       });
     }
 
-    function extractLmStudioToolCalls(payload) {
-      const calls = [];
-      if (payload && Array.isArray(payload.choices)) {
-        for (const choice of payload.choices) {
-          const msg = choice && choice.message ? choice.message : null;
-          if (msg && Array.isArray(msg.tool_calls)) {
-            for (const tool of msg.tool_calls) {
-              const name = tool.function && tool.function.name;
-              let args = tool.function && tool.function.arguments;
-              if (typeof args === 'string') {
-                try { args = JSON.parse(args); } catch { args = {}; }
-              }
-              if (name) calls.push({ name, args });
-            }
-          }
-          if (msg && msg.function_call && msg.function_call.name) {
-            let args = msg.function_call.arguments;
-            if (typeof args === 'string') {
-              try { args = JSON.parse(args); } catch { args = {}; }
-            }
-            calls.push({ name: msg.function_call.name, args });
-          }
-          if (!calls.length && msg && typeof msg.content === 'string') {
-            try {
-              const normalized = lmStudioNormalizeJsonText(msg.content);
-              const parsed = JSON.parse(normalized);
-              if (parsed && Array.isArray(parsed.tool_calls)) {
-                for (const call of parsed.tool_calls) {
-                  if (call && call.tool && call.args) {
-                    calls.push({ name: call.tool, args: call.args });
-                  }
-                }
-              } else if (parsed && parsed.tool && parsed.args) {
-                calls.push({ name: parsed.tool, args: parsed.args });
-              }
-            } catch {}
-          }
-        }
-        return calls;
-      }
-      const output = Array.isArray(payload.output) ? payload.output : [];
-      for (const item of output) {
-        if (item.type === 'tool_call' || item.type === 'function_call') {
-          const name = item.name || (item.function && item.function.name);
-          const rawArgs = item.arguments || (item.function && item.function.arguments);
-          let args = rawArgs;
-          if (typeof rawArgs === 'string') {
-            try { args = JSON.parse(rawArgs); } catch { args = {}; }
-          }
-          if (name) calls.push({ name, args });
-        }
-        if (item.type === 'message' && Array.isArray(item.content)) {
-          for (const content of item.content) {
-            if (content.type === 'tool_call') {
-              let args = content.arguments;
-              if (typeof args === 'string') {
-                try { args = JSON.parse(args); } catch { args = {}; }
-              }
-              calls.push({ name: content.name, args });
-            }
-          }
-        }
-      }
-      return calls;
-    }
-
-    async function readResponseTextSafe(res) {
-      try {
-        return await res.text();
-      } catch {
-        return '';
-      }
-    }
-
-    async function lmStudioReadResponsePayload(res) {
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (contentType.includes('text/event-stream')) {
-        const reader = res.body && res.body.getReader ? res.body.getReader() : null;
-        if (!reader) return { output: [], output_text: '' };
-        const decoder = new TextDecoder();
-        let buffer = '';
-        const payload = { output: [], output_text: '' };
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          for (let line of lines) {
-            line = line.trim();
-            if (!line.startsWith('data:')) continue;
-            const data = line.slice(5).trim();
-            if (!data || data === '[DONE]') {
-              if (data === '[DONE]') return payload;
-              continue;
-            }
-            try {
-              const json = JSON.parse(data);
-              if (typeof json.output_text === 'string') payload.output_text += json.output_text;
-              if (Array.isArray(json.output)) payload.output.push(...json.output);
-              else if (json.output && typeof json.output === 'object') payload.output.push(json.output);
-              if (payload.output.some((item) => item && (item.type === 'tool_call' || item.type === 'function_call'))) {
-                return payload;
-              }
-            } catch {
-              continue;
-            }
-          }
-        }
-        return payload;
-      }
-      return res.json();
-    }
-
-    function lmStudioExtractOutputText(payload) {
-      if (payload && typeof payload.output_text === 'string' && payload.output_text) {
-        return payload.output_text;
-      }
-      const fragments = [];
-      const choices = Array.isArray(payload && payload.choices) ? payload.choices : [];
-      for (const choice of choices) {
-        const msg = choice && choice.message ? choice.message : null;
-        if (!msg) continue;
-        if (typeof msg.content === 'string' && msg.content.length) {
-          fragments.push(msg.content);
-          continue;
-        }
-        const content = Array.isArray(msg.content) ? msg.content : [];
-        for (const chunk of content) {
-          if (!chunk) continue;
-          if ((chunk.type === 'output_text' || chunk.type === 'text') && typeof chunk.text === 'string') {
-            fragments.push(chunk.text);
-          }
-        }
-      }
-      const output = Array.isArray(payload && payload.output) ? payload.output : [];
-      for (const item of output) {
-        if (!item || item.type !== 'message') continue;
-        if (typeof item.content === 'string') {
-          fragments.push(item.content);
-          continue;
-        }
-        const content = Array.isArray(item.content) ? item.content : [];
-        for (const chunk of content) {
-          if (!chunk) continue;
-          if ((chunk.type === 'output_text' || chunk.type === 'text') && typeof chunk.text === 'string') {
-            fragments.push(chunk.text);
-          }
-        }
-      }
-      return fragments.join('');
-    }
-
-    function lmStudioSummarizePayload(payload) {
-      const summary = {
-        keys: payload && typeof payload === 'object' ? Object.keys(payload) : [],
-        choiceCount: Array.isArray(payload && payload.choices) ? payload.choices.length : 0,
-        finishReason: null,
-        messageContentType: 'none',
-        messageContentLength: 0,
-        toolCallsCount: 0,
-        rawSnippet: ''
-      };
-      const choice = Array.isArray(payload && payload.choices) ? payload.choices[0] : null;
-      if (choice) {
-        summary.finishReason = choice.finish_reason || null;
-        const msg = choice.message || null;
-        if (msg) {
-          if (typeof msg.content === 'string') {
-            summary.messageContentType = 'string';
-            summary.messageContentLength = msg.content.length;
-          } else if (Array.isArray(msg.content)) {
-            summary.messageContentType = 'array';
-            summary.messageContentLength = msg.content.length;
-          } else if (msg.content === null) {
-            summary.messageContentType = 'null';
-          }
-          if (Array.isArray(msg.tool_calls)) summary.toolCallsCount = msg.tool_calls.length;
-        }
-      }
-      try {
-        summary.rawSnippet = JSON.stringify(payload).slice(0, 800);
-      } catch {
-        summary.rawSnippet = '[unserializable payload]';
-      }
-      return summary;
-    }
-
-    async function lmStudioTick() {
-      ensureLmStudioConfig();
-      const cfg = state.lmStudio;
-      if (!cfg.enabled || cfg.inflight) return;
-      if (document.visibilityState === 'hidden') return;
-      const now = Date.now();
-      if (now - cfg.lastCallAt < LMS_ACTION_INTERVAL_MS) return;
-
-      cfg.lastCallAt = now;
-      cfg.inflight = true;
-      try {
-        lmStudioLogEvent('tick_start', { at: now, activeModelKey: cfg.activeModelKey || '' });
-        const modelKey = await lmStudioEnsureLoadedModel();
-        if (!modelKey) {
-          cfg.lastError = 'No model loaded.';
-          lmStudioLogEvent('tick_error', { error: cfg.lastError });
-          return;
-        }
-
-        const snapshot = buildLmStudioStateSnapshot();
-        const guidance = buildLmStudioGuidance();
-        const nowIso = new Date().toISOString();
-        const aiNpcs = lmStudioListAiNpcs();
-        const awakeAiNpcs = lmStudioListAwakeAiNpcs();
-        const rotatedNpc = awakeAiNpcs.length > 1 ? lmStudioPickNextAiNpc(awakeAiNpcs) : (awakeAiNpcs[0] || null);
-        if (awakeAiNpcs.length === 1 && rotatedNpc) state.lmStudio.activeAiUid = rotatedNpc.uid;
-        const selfNpc = lmStudioActiveAiNpc() || rotatedNpc || awakeAiNpcs[0] || null;
-        if (!selfNpc) {
-          cfg.lastCallAt = Date.now();
-          return;
-        }
-        const selfName = formatAiDisplayName(selfNpc.name);
-        const selfId = selfNpc.uid || 'ai';
-        const selfRole = npcRole(selfNpc) || 'ai';
-        const roleLabel = selfRole === 'ai' ? 'AI' : selfRole;
-        const pinnedMemory = buildLmStudioPinnedMemory(selfId);
-        const relatedMemory = buildLmStudioRelatedMemories(selfId);
-        const searchMemory = buildLmStudioMemorySearchResults(selfId);
-        const chatHistory = buildLmStudioChatHistory(selfId);
-        if (lmStudioShouldSkipSocialTick(selfId, selfNpc)) {
-          cfg.lastCallAt = Date.now();
-          return;
-        }
-        const spacebookPosts = buildSpacebookRecentPostsBlockForAi(selfId, { includeUid: true, includeDatetime: true });
-        const npcActions = buildLmStudioNpcActionHistory(selfId);
-        const spacebookPrompt = buildLmStudioSpacebookPrompt(selfNpc);
-        const supplyTargets = buildLmStudioSupplyTargets();
-        const moduleTable = buildLmStudioModuleTableSummary();
-        const hereIndicator = buildLmStudioHereIndicator();
-        const corridorKeys = buildLmStudioCorridorKeys();
-        const moduleTypes = buildLmStudioModuleTypeHints();
-        const anomalySummary = buildLmStudioAnomalySummary();
-        const anomalyTarget = buildLmStudioAnomalyTargetSummary();
-        const aiRoster = buildLmStudioAiRoster(selfId);
-        const characterLookup = buildLmStudioCharacterLookup();
-        const memoryBlocks = [pinnedMemory, relatedMemory, searchMemory].filter(Boolean).join('\n\n');
-        const contextBlocks = [chatHistory, spacebookPosts, spacebookPrompt, npcActions, aiRoster, characterLookup, corridorKeys, moduleTypes, anomalySummary, anomalyTarget, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
-        const identityLine = selfName
-          ? `You are ${selfName}, ${roleLabel}.`
-          : `You are ${roleLabel}.`;
-        const input = `${identityLine} Choose any number of actions to execute via tools (zero, one, or many). Respond only with JSON that matches the provided schema. Use exact argument names from the guidance. No prose.\n\nSelf-name: ${selfName}.\nDate/Time: ${nowIso}\n\n${hereIndicator}\n${moduleTable}\n\nGuidance:\n${guidance}\n\n${contextBlocks ? `${contextBlocks}\n\n` : ''}State:\n${JSON.stringify(snapshot)}`;
-
-        const withTimeout = async (path, body) => {
-          const controller = new AbortController();
-          const requestStart = Date.now();
-          const timeoutId = setTimeout(() => {
-            lmStudioLogEvent('request_abort', { afterMs: Date.now() - requestStart, path });
-            controller.abort();
-          }, 120000);
-          controller.signal.addEventListener('abort', () => {
-            lmStudioLogEvent('request_aborted', { afterMs: Date.now() - requestStart, path });
-          }, { once: true });
-          lmStudioLogEvent('request_start', { model: modelKey, inputChars: input.length, path });
-          const res = await lmStudioFetch(path, {
-            method: 'POST',
-            body: JSON.stringify(body),
-            signal: controller.signal
-          });
-          clearTimeout(timeoutId);
-          lmStudioLogEvent('request_status', { status: res.status, ok: res.ok, contentType: res.headers.get('content-type') || '', path });
-          return res;
-        };
-
-        const res = await withTimeout('/v1/chat/completions', {
-          model: modelKey,
-          messages: [{ role: 'user', content: input }],
-          tools: lmStudioToolDefinitions(),
-          tool_choice: 'auto',
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'tool_call',
-              strict: true,
-              schema: {
-                $defs: {
-                  actionCall: {
+    function lmStudioResponseSchema() {
+      return {
+        type: 'json_schema',
+        json_schema: {
+          name: 'tool_call',
+          strict: true,
+          schema: {
+            $defs: {
+              actionCall: {
+                type: 'object',
+                properties: {
+                  tool: { const: 'action' },
+                  args: {
                     type: 'object',
                     properties: {
-                      tool: { const: 'action' },
-                      args: {
-                        type: 'object',
-                        properties: {
-                          action: { type: 'string' },
-                          args: { type: 'object' }
-                        },
-                        required: ['action'],
-                        additionalProperties: true
-                      }
+                      action: { type: 'string' },
+                      args: { type: 'object' }
                     },
-                    required: ['tool', 'args'],
-                    additionalProperties: false,
-                    allOf: [
+                    required: ['action'],
+                    additionalProperties: true
+                  }
+                },
+                required: ['tool', 'args'],
+                additionalProperties: false,
+                allOf: [
                   {
                     if: {
                       properties: {
@@ -6096,9 +5978,10 @@ ${rows.join('\n')}`;
                                 system: {
                                   type: 'string',
                                   enum: ['lights', 'engine', 'shields', 'life_support', 'hydroponics']
-                                }
+                                },
+                                enabled: { type: 'boolean' }
                               },
-                              required: ['system']
+                              required: ['system', 'enabled']
                             }
                           }
                         }
@@ -6271,8 +6154,8 @@ ${rows.join('\n')}`;
                         }
                       }
                     }
-                  }
-                  ,{
+                  },
+                  {
                     if: {
                       properties: {
                         args: {
@@ -6404,41 +6287,466 @@ ${rows.join('\n')}`;
                     }
                   }
                 ]
+              }
+            },
+            oneOf: [
+              { $ref: '#/$defs/actionCall' },
+              {
+                type: 'object',
+                properties: {
+                  tool_calls: {
+                    type: 'array',
+                    items: { $ref: '#/$defs/actionCall' },
+                    minItems: 0
                   }
                 },
-                oneOf: [
-                  { $ref: '#/$defs/actionCall' },
-                  {
-                    type: 'object',
-                    properties: {
-                      tool_calls: {
-                        type: 'array',
-                        items: { $ref: '#/$defs/actionCall' },
-                        minItems: 0
-                      }
-                    },
-                    required: ['tool_calls'],
-                    additionalProperties: false
-                  }
-                ]
+                required: ['tool_calls'],
+                additionalProperties: false
               }
+            ]
+          }
+        }
+      };
+    }
+
+    function extractLmStudioToolCalls(payload) {
+      const calls = [];
+      if (payload && Array.isArray(payload.choices)) {
+        for (const choice of payload.choices) {
+          const msg = choice && choice.message ? choice.message : null;
+          if (msg && Array.isArray(msg.tool_calls)) {
+            for (const tool of msg.tool_calls) {
+              const name = tool.function && tool.function.name;
+              let args = tool.function && tool.function.arguments;
+              if (typeof args === 'string') {
+                try { args = JSON.parse(args); } catch { args = {}; }
+              }
+              if (name) calls.push({ name, args });
             }
-          },
-          stream: false,
-          max_tokens: 1024
-        });
-        if (!res.ok) {
-          const errorBody = await readResponseTextSafe(res);
-          lmStudioLogEvent('request_error_body', {
-            path: '/v1/chat/completions',
-            status: res.status,
-            body: errorBody.slice(0, 800)
+          }
+          if (msg && msg.function_call && msg.function_call.name) {
+            let args = msg.function_call.arguments;
+            if (typeof args === 'string') {
+              try { args = JSON.parse(args); } catch { args = {}; }
+            }
+            calls.push({ name: msg.function_call.name, args });
+          }
+          if (!calls.length && msg && typeof msg.content === 'string') {
+            try {
+              const normalized = lmStudioNormalizeJsonText(msg.content);
+              const parsed = JSON.parse(normalized);
+              if (parsed && Array.isArray(parsed.tool_calls)) {
+                for (const call of parsed.tool_calls) {
+                  if (call && call.tool && call.args) {
+                    calls.push({ name: call.tool, args: call.args });
+                  }
+                }
+              } else if (parsed && parsed.tool && parsed.args) {
+                calls.push({ name: parsed.tool, args: parsed.args });
+              }
+            } catch {}
+          }
+        }
+        return calls;
+      }
+      const output = Array.isArray(payload.output) ? payload.output : [];
+      for (const item of output) {
+        if (item.type === 'tool_call' || item.type === 'function_call') {
+          const name = item.name || (item.function && item.function.name);
+          const rawArgs = item.arguments || (item.function && item.function.arguments);
+          let args = rawArgs;
+          if (typeof rawArgs === 'string') {
+            try { args = JSON.parse(rawArgs); } catch { args = {}; }
+          }
+          if (name) calls.push({ name, args });
+        }
+        if (item.type === 'message' && Array.isArray(item.content)) {
+          for (const content of item.content) {
+            if (content.type === 'tool_call') {
+              let args = content.arguments;
+              if (typeof args === 'string') {
+                try { args = JSON.parse(args); } catch { args = {}; }
+              }
+              calls.push({ name: content.name, args });
+            }
+          }
+        }
+      }
+      return calls;
+    }
+
+    async function readResponseTextSafe(res) {
+      try {
+        return await res.text();
+      } catch {
+        return '';
+      }
+    }
+
+    function lmStudioExtractOutputText(payload) {
+      if (payload && typeof payload.output_text === 'string' && payload.output_text) {
+        return payload.output_text;
+      }
+      const fragments = [];
+      const choices = Array.isArray(payload && payload.choices) ? payload.choices : [];
+      for (const choice of choices) {
+        const msg = choice && choice.message ? choice.message : null;
+        if (!msg) continue;
+        if (typeof msg.content === 'string' && msg.content.length) {
+          fragments.push(msg.content);
+          continue;
+        }
+        const content = Array.isArray(msg.content) ? msg.content : [];
+        for (const chunk of content) {
+          if (!chunk) continue;
+          if ((chunk.type === 'output_text' || chunk.type === 'text') && typeof chunk.text === 'string') {
+            fragments.push(chunk.text);
+          }
+        }
+      }
+      const output = Array.isArray(payload && payload.output) ? payload.output : [];
+      for (const item of output) {
+        if (!item || item.type !== 'message') continue;
+        if (typeof item.content === 'string') {
+          fragments.push(item.content);
+          continue;
+        }
+        const content = Array.isArray(item.content) ? item.content : [];
+        for (const chunk of content) {
+          if (!chunk) continue;
+          if ((chunk.type === 'output_text' || chunk.type === 'text') && typeof chunk.text === 'string') {
+            fragments.push(chunk.text);
+          }
+        }
+      }
+      return fragments.join('');
+    }
+
+    function lmStudioSummarizePayload(payload) {
+      const summary = {
+        keys: payload && typeof payload === 'object' ? Object.keys(payload) : [],
+        choiceCount: Array.isArray(payload && payload.choices) ? payload.choices.length : 0,
+        finishReason: null,
+        messageContentType: 'none',
+        messageContentLength: 0,
+        toolCallsCount: 0,
+        rawSnippet: ''
+      };
+      const choice = Array.isArray(payload && payload.choices) ? payload.choices[0] : null;
+      if (choice) {
+        summary.finishReason = choice.finish_reason || null;
+        const msg = choice.message || null;
+        if (msg) {
+          if (typeof msg.content === 'string') {
+            summary.messageContentType = 'string';
+            summary.messageContentLength = msg.content.length;
+          } else if (Array.isArray(msg.content)) {
+            summary.messageContentType = 'array';
+            summary.messageContentLength = msg.content.length;
+          } else if (msg.content === null) {
+            summary.messageContentType = 'null';
+          }
+          if (Array.isArray(msg.tool_calls)) summary.toolCallsCount = msg.tool_calls.length;
+        }
+      }
+      try {
+        summary.rawSnippet = JSON.stringify(payload).slice(0, 800);
+      } catch {
+        summary.rawSnippet = '[unserializable payload]';
+      }
+      return summary;
+    }
+
+    function lmStudioGetModelCaps(modelKey) {
+      ensureLmStudioConfig();
+      const key = String(modelKey || '').trim();
+      if (!key) return {};
+      if (!state.lmStudio.modelCaps[key]) state.lmStudio.modelCaps[key] = {};
+      return state.lmStudio.modelCaps[key];
+    }
+
+    function lmStudioSetModelCaps(modelKey, updates = {}) {
+      const caps = lmStudioGetModelCaps(modelKey);
+      Object.assign(caps, updates);
+      markDirty();
+      return caps;
+    }
+
+    function lmStudioSupportsToolSchema(modelKey) {
+      const caps = lmStudioGetModelCaps(modelKey);
+      return caps.toolsSchema !== false;
+    }
+
+    function lmStudioMaxPromptChars(modelKey) {
+      ensureLmStudioConfig();
+      const caps = lmStudioGetModelCaps(modelKey);
+      const candidate = Number.isFinite(caps.maxPromptChars) ? caps.maxPromptChars : state.lmStudio.maxPromptChars;
+      return Math.max(2000, Math.floor(safeNumber(candidate, 8000)));
+    }
+
+    function lmStudioSlimSnapshot(snapshot) {
+      if (!snapshot || typeof snapshot !== 'object') return snapshot;
+      const slim = { ...snapshot };
+      slim.npcs = [];
+      slim.players = [];
+      if (slim.inventory && typeof slim.inventory === 'object') {
+        const entries = Object.entries(slim.inventory).slice(0, 4);
+        slim.inventory = Object.fromEntries(entries);
+      }
+      if (slim.incidents && typeof slim.incidents === 'object') {
+        const entries = Object.entries(slim.incidents).slice(0, 4);
+        slim.incidents = Object.fromEntries(entries);
+      }
+      return slim;
+    }
+
+    function lmStudioBuildInput({
+      modelKey,
+      identityLine,
+      selfName,
+      nowIso,
+      hereIndicator,
+      moduleTable,
+      guidance,
+      contextBlocks,
+      snapshot
+    }) {
+      const maxChars = lmStudioMaxPromptChars(modelKey);
+      const intro = `${identityLine} Choose any number of actions to execute via tools (zero, one, or many). Respond only with JSON that matches the provided schema. Use exact argument names from the guidance. No prose.`;
+      const baseHeader = `${intro}\n\nSelf-name: ${selfName}.\nDate/Time: ${nowIso}\n\n`;
+
+      const optional = {
+        here: hereIndicator ? `${hereIndicator}\n` : '',
+        module: moduleTable ? `${moduleTable}\n\n` : '',
+        context: contextBlocks ? `${contextBlocks}\n\n` : ''
+      };
+
+      const assemble = (currentSnapshot, include = { here: true, module: true, context: true }) => {
+        let text = baseHeader;
+        if (include.here && optional.here) text += optional.here;
+        if (include.module && optional.module) text += optional.module;
+        text += `Guidance:\n${guidance}\n\n`;
+        if (include.context && optional.context) text += optional.context;
+        text += `State:\n${JSON.stringify(currentSnapshot)}`;
+        return text;
+      };
+
+      let input = assemble(snapshot, { here: true, module: true, context: true });
+      if (input.length <= maxChars) return input;
+
+      input = assemble(snapshot, { here: true, module: false, context: true });
+      if (input.length <= maxChars) return input;
+
+      input = assemble(snapshot, { here: true, module: false, context: false });
+      if (input.length <= maxChars) return input;
+
+      input = assemble(snapshot, { here: false, module: false, context: false });
+      if (input.length <= maxChars) return input;
+
+      const slimSnapshot = lmStudioSlimSnapshot(snapshot);
+      input = assemble(slimSnapshot, { here: false, module: false, context: false });
+      if (input.length <= maxChars) return input;
+
+      return `${input.slice(0, Math.max(0, maxChars - 16))}\n...[trimmed]`;
+    }
+
+    function lmStudioBuildRequestPlans({ modelKey, input }) {
+      ensureLmStudioConfig();
+      const cfg = state.lmStudio;
+      const apiMode = LMS_API_MODE_OPTIONS.includes(cfg.apiMode) ? cfg.apiMode : 'openai-chat';
+      const toolMode = LMS_TOOL_MODE_OPTIONS.includes(cfg.toolMode) ? cfg.toolMode : 'auto';
+      const plans = [];
+      const allowTools = toolMode !== 'json-only';
+      const allowJsonFallback = toolMode !== 'native';
+      const structuredOutput = cfg.structuredOutput && apiMode === 'openai-chat';
+      const allowToolSchema = structuredOutput && lmStudioSupportsToolSchema(modelKey);
+
+      if (apiMode === 'openai-responses') {
+        const baseResponses = {
+          model: modelKey,
+          input,
+          stream: false
+        };
+        if (allowTools) {
+          plans.push({
+            mode: 'responses-tools',
+            path: '/v1/responses',
+            body: { ...baseResponses, tools: lmStudioToolDefinitionsForResponses() }
           });
-          cfg.lastError = `LLM request failed (${res.status})`;
+        }
+        if (allowJsonFallback) {
+          plans.push({
+            mode: 'responses-json',
+            path: '/v1/responses',
+            body: baseResponses
+          });
+        }
+        return plans;
+      }
+
+      const baseChat = {
+        model: modelKey,
+        messages: [{ role: 'user', content: input }],
+        stream: false,
+        max_tokens: 1024
+      };
+
+      if (allowTools) {
+        const tools = lmStudioToolDefinitions();
+        const toolBody = { ...baseChat, tools, tool_choice: 'auto' };
+        if (allowToolSchema) {
+          plans.push({
+            mode: 'chat-tools-schema',
+            path: '/v1/chat/completions',
+            body: { ...toolBody, response_format: lmStudioResponseSchema() }
+          });
+          plans.push({
+            mode: 'chat-tools',
+            path: '/v1/chat/completions',
+            body: toolBody
+          });
+        } else {
+          plans.push({
+            mode: 'chat-tools',
+            path: '/v1/chat/completions',
+            body: toolBody
+          });
+        }
+      }
+
+      if (allowJsonFallback) {
+        plans.push({
+          mode: 'chat-json',
+          path: '/v1/chat/completions',
+          body: baseChat
+        });
+      }
+
+      return plans;
+    }
+
+    async function lmStudioTick() {
+      ensureLmStudioConfig();
+      const cfg = state.lmStudio;
+      if (!cfg.enabled || cfg.inflight) return;
+      if (document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - cfg.lastCallAt < LMS_ACTION_INTERVAL_MS) return;
+
+      cfg.lastCallAt = now;
+      cfg.inflight = true;
+      try {
+        lmStudioLogEvent('tick_start', { at: now, activeModelKey: cfg.activeModelKey || '' });
+        const modelKey = await lmStudioEnsureLoadedModel();
+        if (!modelKey) {
+          cfg.lastError = 'No model loaded.';
           lmStudioLogEvent('tick_error', { error: cfg.lastError });
           return;
         }
-        const payload = await lmStudioReadResponsePayload(res);
+
+        const snapshot = buildLmStudioStateSnapshot();
+        const guidance = buildLmStudioGuidance();
+        const nowIso = new Date().toISOString();
+        const aiNpcs = lmStudioListAiNpcs();
+        const awakeAiNpcs = lmStudioListAwakeAiNpcs();
+        const rotatedNpc = awakeAiNpcs.length > 1 ? lmStudioPickNextAiNpc(awakeAiNpcs) : (awakeAiNpcs[0] || null);
+        if (awakeAiNpcs.length === 1 && rotatedNpc) state.lmStudio.activeAiUid = rotatedNpc.uid;
+        const selfNpc = lmStudioActiveAiNpc() || rotatedNpc || awakeAiNpcs[0] || null;
+        if (!selfNpc) {
+          cfg.lastCallAt = Date.now();
+          return;
+        }
+        const selfName = formatAiDisplayName(selfNpc.name);
+        const selfId = selfNpc.uid || 'ai';
+        const selfRole = npcRole(selfNpc) || 'ai';
+        const roleLabel = selfRole === 'ai' ? 'AI' : selfRole;
+        const pinnedMemory = buildLmStudioPinnedMemory(selfId);
+        const relatedMemory = buildLmStudioRelatedMemories(selfId);
+        const searchMemory = buildLmStudioMemorySearchResults(selfId);
+        const chatHistory = buildLmStudioChatHistory(selfId);
+        if (lmStudioShouldSkipSocialTick(selfId, selfNpc)) {
+          cfg.lastCallAt = Date.now();
+          return;
+        }
+        const spacebookPosts = buildSpacebookRecentPostsBlockForAi(selfId, { includeUid: true, includeDatetime: true });
+        const npcActions = buildLmStudioNpcActionHistory(selfId);
+        const spacebookPrompt = buildLmStudioSpacebookPrompt(selfNpc);
+        const supplyTargets = buildLmStudioSupplyTargets();
+        const moduleTable = buildLmStudioModuleTableSummary();
+        const hereIndicator = buildLmStudioHereIndicator();
+        const corridorKeys = buildLmStudioCorridorKeys();
+        const moduleTypes = buildLmStudioModuleTypeHints();
+        const anomalySummary = buildLmStudioAnomalySummary();
+        const anomalyTarget = buildLmStudioAnomalyTargetSummary();
+        const aiRoster = buildLmStudioAiRoster(selfId);
+        const characterLookup = buildLmStudioCharacterLookup();
+        const memoryBlocks = [pinnedMemory, relatedMemory, searchMemory].filter(Boolean).join('\n\n');
+        const contextBlocks = [chatHistory, spacebookPosts, spacebookPrompt, npcActions, aiRoster, characterLookup, corridorKeys, moduleTypes, anomalySummary, anomalyTarget, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
+        const identityLine = selfName
+          ? `You are ${selfName}, ${roleLabel}.`
+          : `You are ${roleLabel}.`;
+        const input = lmStudioBuildInput({
+          modelKey,
+          identityLine,
+          selfName,
+          nowIso,
+          hereIndicator,
+          moduleTable,
+          guidance,
+          contextBlocks,
+          snapshot
+        });
+
+        const plans = lmStudioBuildRequestPlans({ modelKey, input });
+        const client = lmStudioOpenAiClient();
+        let payload = null;
+        let requestMode = '';
+        let lastError = '';
+
+        for (const plan of plans) {
+          const requestStart = Date.now();
+          try {
+            lmStudioLogEvent('request_start', { model: modelKey, inputChars: input.length, path: plan.path, mode: plan.mode });
+            const res = await client.request(plan.path, {
+              method: 'POST',
+              body: plan.body,
+              timeoutMs: 120000
+            });
+            lmStudioLogEvent('request_status', { status: res.status, ok: res.ok, contentType: res.headers.get('content-type') || '', path: plan.path, mode: plan.mode });
+            if (!res.ok) {
+              const errorBody = await readResponseTextSafe(res);
+              if (plan.mode === 'chat-tools-schema'
+                && errorBody.includes('Cannot combine structured output constraints with tool grammar')) {
+                lmStudioSetModelCaps(modelKey, { toolsSchema: false });
+                lmStudioLogEvent('structured_output_disabled', { reason: 'tool_grammar_conflict', model: modelKey });
+              }
+              lmStudioLogEvent('request_error_body', {
+                path: plan.path,
+                mode: plan.mode,
+                status: res.status,
+                body: errorBody.slice(0, 800)
+              });
+              lastError = `LLM request failed (${res.status})`;
+              continue;
+            }
+            payload = await client.readPayload(res);
+            requestMode = plan.mode;
+            break;
+          } catch (err) {
+            lastError = err ? String(err.message || err) : 'Unknown error';
+            lmStudioLogEvent('request_error', { name: err && err.name ? String(err.name) : 'Error', message: lastError, mode: plan.mode });
+            break;
+          } finally {
+            const elapsed = Date.now() - requestStart;
+            lmStudioLogEvent('request_elapsed', { ms: elapsed, mode: plan.mode });
+          }
+        }
+
+        if (!payload) {
+          cfg.lastError = lastError || 'LLM request failed.';
+          lmStudioLogEvent('tick_error', { error: cfg.lastError });
+          return;
+        }
         const outputText = lmStudioExtractOutputText(payload);
         if (!payload.output_text && outputText) {
           payload.output_text = outputText;
@@ -6447,6 +6755,7 @@ ${rows.join('\n')}`;
         if (speechText) lmStudioQueueNpcSpeech(speechText);
         const payloadSummary = lmStudioSummarizePayload(payload);
         lmStudioLogEvent('llm_response', {
+          mode: requestMode,
           outputText: outputText.slice(0, 800),
           outputTypes: Array.isArray(payload.output) ? payload.output.map((o) => o && o.type).filter(Boolean) : [],
           choiceCount: payloadSummary.choiceCount,
@@ -10754,9 +11063,16 @@ ${rows.join('\n')}`;
     function ensureLmStudioConfig() {
       const defaults = {
         enabled: false,
+        provider: 'lmstudio',
         baseUrl: 'http://localhost:1234',
         apiKey: '',
+        modelOverride: '',
         autoLoadModel: 'zai-org/glm-4.6v-flash',
+        apiMode: 'openai-chat',
+        toolMode: 'auto',
+        structuredOutput: true,
+        maxPromptChars: 8000,
+        modelCaps: {},
         activeModelKey: '',
         lastCallAt: 0,
         inflight: false,
@@ -10783,9 +11099,21 @@ ${rows.join('\n')}`;
         if (state.lmStudio[k] === undefined) state.lmStudio[k] = defaults[k];
       }
       state.lmStudio.enabled = !!state.lmStudio.enabled;
+      state.lmStudio.provider = String(state.lmStudio.provider || defaults.provider).trim() || defaults.provider;
+      if (!LMS_PROVIDER_OPTIONS.includes(state.lmStudio.provider)) state.lmStudio.provider = defaults.provider;
       state.lmStudio.baseUrl = String(state.lmStudio.baseUrl || defaults.baseUrl).trim() || defaults.baseUrl;
       state.lmStudio.apiKey = String(state.lmStudio.apiKey || '').trim();
+      state.lmStudio.modelOverride = String(state.lmStudio.modelOverride || '').trim();
       state.lmStudio.autoLoadModel = String(state.lmStudio.autoLoadModel || defaults.autoLoadModel).trim() || defaults.autoLoadModel;
+      state.lmStudio.apiMode = String(state.lmStudio.apiMode || defaults.apiMode).trim() || defaults.apiMode;
+      if (!LMS_API_MODE_OPTIONS.includes(state.lmStudio.apiMode)) state.lmStudio.apiMode = defaults.apiMode;
+      state.lmStudio.toolMode = String(state.lmStudio.toolMode || defaults.toolMode).trim() || defaults.toolMode;
+      if (!LMS_TOOL_MODE_OPTIONS.includes(state.lmStudio.toolMode)) state.lmStudio.toolMode = defaults.toolMode;
+      state.lmStudio.structuredOutput = state.lmStudio.structuredOutput !== false;
+      state.lmStudio.maxPromptChars = Math.max(2000, Math.floor(safeNumber(state.lmStudio.maxPromptChars, defaults.maxPromptChars)));
+      if (!state.lmStudio.modelCaps || typeof state.lmStudio.modelCaps !== 'object') {
+        state.lmStudio.modelCaps = {};
+      }
       if (!Number.isFinite(state.lmStudio.lastCallAt)) state.lmStudio.lastCallAt = 0;
       if (typeof state.lmStudio.inflight !== 'boolean') state.lmStudio.inflight = false;
       if (typeof state.lmStudio.lastError !== 'string') state.lmStudio.lastError = '';
