@@ -4440,11 +4440,17 @@ ${rows.join('\n')}`;
     }
 
     function lmStudioNormalizeMemoryItem(item) {
+      const createdAt = Number.isFinite(item.createdAt) ? item.createdAt : Date.now();
+      const pinned = !!item.pinned;
+      const pinnedAt = Number.isFinite(item.pinnedAt) ? item.pinnedAt : (pinned ? createdAt : null);
+      const updatedAt = Number.isFinite(item.updatedAt) ? item.updatedAt : createdAt;
       return {
         id: String(item.id || `mem-${Math.random().toString(36).slice(2)}`),
         text: String(item.text || '').trim(),
-        pinned: !!item.pinned,
-        createdAt: Number.isFinite(item.createdAt) ? item.createdAt : Date.now()
+        pinned,
+        createdAt,
+        pinnedAt,
+        updatedAt
       };
     }
 
@@ -4483,10 +4489,12 @@ ${rows.join('\n')}`;
     }
 
     function lmStudioMemoryAdd(text, pinned = false, aiId = null) {
-      const item = lmStudioNormalizeMemoryItem({ text, pinned });
+      const now = Date.now();
+      const item = lmStudioNormalizeMemoryItem({ text, pinned, pinnedAt: pinned ? now : null, updatedAt: now, createdAt: now });
       if (!item.text) return null;
       const list = lmStudioGetMemoryList(aiId);
       list.push(item);
+      if (item.pinned) lmStudioEnforcePinnedLimit(aiId);
       lmStudioTrimMemory(aiId);
       markDirty();
       return item;
@@ -4498,6 +4506,7 @@ ${rows.join('\n')}`;
       const next = list.filter((m) => m.id !== id);
       list.length = 0;
       list.push(...next);
+      if (list.length !== before) markDirty();
       return list.length !== before;
     }
 
@@ -4506,6 +4515,8 @@ ${rows.join('\n')}`;
       const item = list.find((m) => m.id === id);
       if (!item) return false;
       item.pinned = pinned;
+      item.pinnedAt = pinned ? Date.now() : null;
+      if (pinned) lmStudioEnforcePinnedLimit(aiId);
       markDirty();
       return true;
     }
@@ -4517,16 +4528,127 @@ ${rows.join('\n')}`;
       const nextText = String(text || '').trim();
       if (!nextText) return false;
       item.text = nextText;
-      if (pinned !== null) item.pinned = !!pinned;
+      item.updatedAt = Date.now();
+      if (pinned !== null) {
+        item.pinned = !!pinned;
+        item.pinnedAt = item.pinned ? (item.pinnedAt || Date.now()) : null;
+        if (item.pinned) lmStudioEnforcePinnedLimit(aiId);
+      }
       markDirty();
       return true;
     }
 
+    function formatMemoryDatetime(value) {
+      if (!Number.isFinite(value)) return '';
+      return new Date(value).toISOString();
+    }
+
     function lmStudioMemorySearch(query, aiId = null) {
-      const q = String(query || '').toLowerCase();
+      const q = String(query || '').trim();
       if (!q) return [];
       const list = lmStudioGetMemoryList(aiId);
-      return list.filter((m) => m.text.toLowerCase().includes(q));
+      return lmStudioRankMemoriesBySimilarity(q, list).map((entry) => ({
+        ...entry.mem,
+        score: entry.score
+      }));
+    }
+
+    function lmStudioEnforcePinnedLimit(aiId = null, maxPinned = 4) {
+      const list = lmStudioGetMemoryList(aiId);
+      const pinned = list.filter((m) => m.pinned);
+      if (pinned.length <= maxPinned) return;
+      pinned.sort((a, b) => (a.pinnedAt || a.createdAt || 0) - (b.pinnedAt || b.createdAt || 0));
+      const overflow = pinned.length - maxPinned;
+      for (let i = 0; i < overflow; i += 1) {
+        const victim = pinned[i];
+        victim.pinned = false;
+        victim.pinnedAt = null;
+      }
+    }
+
+    function lmStudioTokenizeForSimilarity(text) {
+      const raw = String(text || '').toLowerCase();
+      const tokens = raw.match(/[a-z0-9]{3,}/g) || [];
+      const stopwords = new Set([
+        'about', 'after', 'again', 'before', 'below', 'could', 'every', 'first', 'found', 'from',
+        'going', 'hello', 'there', 'their', 'these', 'thing', 'think', 'today', 'under', 'until',
+        'where', 'which', 'would', 'your', 'youre', 'with', 'just', 'have', 'this', 'that', 'what',
+        'when', 'then', 'will', 'than', 'into', 'over', 'only', 'some', 'more', 'need', 'been',
+        'were', 'them', 'they', 'here', 'also', 'will', 'cant', 'dont', 'should', 'could', 'would'
+      ]);
+      return tokens.filter((token) => !stopwords.has(token));
+    }
+
+    function lmStudioBuildTermVector(tokens) {
+      const vec = new Map();
+      for (const token of tokens) {
+        vec.set(token, (vec.get(token) || 0) + 1);
+      }
+      return vec;
+    }
+
+    function lmStudioCosineSimilarity(vecA, vecB) {
+      if (!vecA.size || !vecB.size) return 0;
+      let dot = 0;
+      let normA = 0;
+      let normB = 0;
+      for (const value of vecA.values()) normA += value * value;
+      for (const value of vecB.values()) normB += value * value;
+      const [small, large] = vecA.size < vecB.size ? [vecA, vecB] : [vecB, vecA];
+      for (const [key, value] of small.entries()) {
+        const other = large.get(key);
+        if (other) dot += value * other;
+      }
+      if (!dot || !normA || !normB) return 0;
+      return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    }
+
+    function lmStudioRankMemoriesBySimilarity(queryText, memories) {
+      const queryTokens = lmStudioTokenizeForSimilarity(queryText);
+      const queryVec = lmStudioBuildTermVector(queryTokens);
+      if (!queryVec.size) return [];
+      const scored = [];
+      for (const mem of memories) {
+        const text = String(mem && mem.text ? mem.text : '').trim();
+        if (!text) continue;
+        const memTokens = lmStudioTokenizeForSimilarity(text);
+        const memVec = lmStudioBuildTermVector(memTokens);
+        const score = lmStudioCosineSimilarity(queryVec, memVec);
+        if (score > 0) scored.push({ mem, score });
+      }
+      scored.sort((a, b) => (b.score - a.score) || ((b.mem.createdAt || 0) - (a.mem.createdAt || 0)));
+      return scored;
+    }
+
+    function lmStudioBuildRecentContextText(aiId, { maxChat = 6, maxSpacebook = 6 } = {}) {
+      const key = String(aiId || 'ai');
+      const chat = state.lmStudio.chatHistory && Array.isArray(state.lmStudio.chatHistory[key])
+        ? state.lmStudio.chatHistory[key].slice(-maxChat)
+        : [];
+      const chatLines = chat.map((entry) => {
+        const speaker = String(entry && entry.speaker ? entry.speaker : '').trim();
+        const role = String(entry && entry.role ? entry.role : '').trim();
+        const text = String(entry && entry.text ? entry.text : '').trim();
+        if (!text) return '';
+        return `${speaker || role}: ${text}`;
+      }).filter(Boolean);
+      const spacebook = ensureSpacebook().posts
+        .slice()
+        .sort((a, b) => {
+          const at = a && a.datetime ? Date.parse(a.datetime) : 0;
+          const bt = b && b.datetime ? Date.parse(b.datetime) : 0;
+          return (bt || 0) - (at || 0);
+        })
+        .slice(0, maxSpacebook)
+        .map((post) => {
+          const author = String(post && post.postedby ? post.postedby : '').trim();
+          const title = String(post && post.title ? post.title : '').trim();
+          const content = String(post && post.content ? post.content : '').trim();
+          if (!content) return '';
+          return `${author}: ${title ? `${title} — ` : ''}${content}`;
+        })
+        .filter(Boolean);
+      return [...chatLines, ...spacebook].join(' ');
     }
 
     function lmStudioEnsureSocialState() {
@@ -4626,12 +4748,37 @@ ${rows.join('\n')}`;
       social.spacebookMutedByAi[key][String(postUid)] = true;
     }
 
-    function buildLmStudioPinnedMemory(aiId = null) {
+    function buildLmStudioPinnedMemory(aiId = null, { limit = 4 } = {}) {
       const list = lmStudioGetMemoryList(aiId);
-      const pinned = list.filter((m) => m.pinned).slice(0, 20);
+      const pinned = list
+        .filter((m) => m.pinned)
+        .sort((a, b) => (b.pinnedAt || b.createdAt || 0) - (a.pinnedAt || a.createdAt || 0))
+        .slice(0, limit);
       if (!pinned.length) return '';
-      const lines = pinned.map((m) => `- ${m.text}`);
-      return `Pinned memory:\n${lines.join('\n')}`;
+      const lines = pinned.map((m) => {
+        const stamp = formatMemoryDatetime(m.updatedAt || m.createdAt);
+        const prefix = stamp ? `[${stamp}] ` : '';
+        return `- ${prefix}${m.text}`;
+      });
+      return `Pinned memory (top ${limit}):\n${lines.join('\n')}`;
+    }
+
+    function buildLmStudioRelevantMemories(aiId = null, { limit = 4 } = {}) {
+      const list = lmStudioGetMemoryList(aiId);
+      if (!list.length) return '';
+      const contextText = lmStudioBuildRecentContextText(aiId);
+      if (!contextText) return '';
+      const ranked = lmStudioRankMemoriesBySimilarity(contextText, list)
+        .filter((entry) => !entry.mem.pinned)
+        .slice(0, limit);
+      if (!ranked.length) return '';
+      const lines = ranked.map((entry) => {
+        const mem = entry.mem;
+        const stamp = formatMemoryDatetime(mem.updatedAt || mem.createdAt);
+        const prefix = stamp ? `[${stamp}] ` : '';
+        return `- ${prefix}${mem.text}`;
+      });
+      return `Relevant memories (from recent chat + SpaceBook):\n${lines.join('\n')}`;
     }
 
     function buildLmStudioMemorySearchResults(aiId = null) {
@@ -6772,9 +6919,8 @@ ${rows.join('\n')}`;
         const selfId = selfNpc.uid || 'ai';
         const selfRole = npcRole(selfNpc) || 'ai';
         const roleLabel = selfRole === 'ai' ? 'AI' : selfRole;
-        const pinnedMemory = buildLmStudioPinnedMemory(selfId);
-        const relatedMemory = buildLmStudioRelatedMemories(selfId);
-        const searchMemory = buildLmStudioMemorySearchResults(selfId);
+        const pinnedMemory = buildLmStudioPinnedMemory(selfId, { limit: 4 });
+        const relevantMemory = buildLmStudioRelevantMemories(selfId, { limit: 4 });
         const chatHistory = buildLmStudioChatHistory(selfId);
         if (lmStudioShouldSkipSocialTick(selfId, selfNpc)) {
           cfg.lastCallAt = Date.now();
@@ -6792,7 +6938,7 @@ ${rows.join('\n')}`;
         const anomalyTarget = buildLmStudioAnomalyTargetSummary();
         const aiRoster = buildLmStudioAiRoster(selfId);
         const characterLookup = buildLmStudioCharacterLookup();
-        const memoryBlocks = [pinnedMemory, relatedMemory, searchMemory].filter(Boolean).join('\n\n');
+        const memoryBlocks = [pinnedMemory, relevantMemory].filter(Boolean).join('\n\n');
         const contextBlocks = [chatHistory, spacebookPosts, spacebookPrompt, npcActions, aiRoster, characterLookup, corridorKeys, moduleTypes, anomalySummary, anomalyTarget, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
         const identityLine = selfName
           ? `You are ${selfName}, ${roleLabel}.`
