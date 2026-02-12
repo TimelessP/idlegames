@@ -1160,7 +1160,7 @@
         baseUrl: 'http://localhost:1234',
         apiKey: '',
         modelOverride: '',
-        autoLoadModel: 'zai-org/glm-4.6v-flash',
+        autoLoadModel: 'mistralai/ministral-3-3b',
         apiMode: 'openai-chat',
         toolMode: 'auto',
         structuredOutput: true,
@@ -3601,7 +3601,7 @@
                 } },
                 { label: 'Save', action: () => {
                   const input = document.getElementById('panelInput');
-                  cfg.autoLoadModel = String(input ? input.value : '').trim() || 'zai-org/glm-4.6v-flash';
+                  cfg.autoLoadModel = String(input ? input.value : '').trim() || 'mistralai/ministral-3-3b';
                   ensureLmStudioConfig();
                   closePanel();
                 } }
@@ -4209,8 +4209,12 @@ ${rows.join('\n')}`;
         '- SpaceBook: use spacebook.post with args.content (optional args.postedby) to broadcast. Do not post the same message twice; check SpaceBook history for repeats.',
         '- SpaceBook: use spacebook.reply_to_post with args.reply_to_uid (or reply_to_uuid) + args.content to reply; the title is inherited.',
         '- SpaceBook: use spacebook.like with args.uid to like a post.',
+        '- SpaceBook IDs: for like/reply/delete, uid MUST be a SpaceBook post uid from the SpaceBook feed (usually starts with "sb_"). Never use character uids like "char-*".',
+        '- Before calling like/reply/delete, copy the exact uid from "SpaceBook (recent posts, jsonl)".',
         '- SpaceBook: use spacebook.delete with args.uid to remove a post.',
-        '- Memory: use the action tool with action=memory_add/memory_update/memory_delete/memory_pin/memory_unpin/memory_search often, and you may combine them with other tool calls in the same response.',
+        '- Memory: use action=memory_add/memory_update/memory_delete/memory_pin/memory_unpin/memory_search often. Memory args are strict: memory_add uses args.text (NOT args.content); memory_update uses args.id + args.text; memory_search uses args.query.',
+        '- Memory examples: memory_add -> {"tool":"action","args":{"action":"memory_add","args":{"text":"Hydro + cargo rations loop boosts credits.","pinned":true}}}; memory_update -> {"tool":"action","args":{"action":"memory_update","args":{"id":"mem_123","text":"Updated note","pinned":false}}}; memory_pin -> {"tool":"action","args":{"action":"memory_pin","args":{"id":"mem_123"}}}.',
+        '- Memory pinning policy: max 4 pinned memories shown in context; pinning a 5th auto-unpins the oldest pinned memory. Use memory_unpin on stale pinned items.',
         '- Memory is private to you (the current AI); you can only read/write your own memories.',
         '- Crew comms: speak_to targets any player or AI uid (see “Character lookup” for uids). Do not send the same message twice; check Recent chat for repeats.',
         '- Etiquette: do not ask to ask; provide the useful content immediately.',
@@ -4664,6 +4668,15 @@ ${rows.join('\n')}`;
       return social;
     }
 
+    function buildLmStudioSystemPrompt() {
+      return [
+        'You are an AI crew member in the Space Explorer ship simulation.',
+        'Stay in-character as a helpful NPC focused on ship operations, crew support, and SpaceBook social posts.',
+        'Use the provided tools to act; do not invent actions outside the tool list.',
+        'Follow the response format instructions in the user prompt (JSON-only, no prose).'
+      ].join(' ');
+    }
+
     function lmStudioGetLatestChatAt(aiId) {
       const key = String(aiId || 'ai');
       const list = state.lmStudio.chatHistory && Array.isArray(state.lmStudio.chatHistory[key])
@@ -4779,6 +4792,21 @@ ${rows.join('\n')}`;
         return `- ${prefix}${mem.text}`;
       });
       return `Relevant memories (from recent chat + SpaceBook):\n${lines.join('\n')}`;
+    }
+
+    function buildLmStudioMemoryCatalog(aiId = null, { limit = 12 } = {}) {
+      const list = lmStudioGetMemoryList(aiId)
+        .slice()
+        .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+      if (!list.length) return 'Memory catalog: none';
+      const rows = list.slice(0, limit).map((mem) => {
+        const when = formatMemoryDatetime(mem.updatedAt || mem.createdAt);
+        const pin = mem.pinned ? 'pinned' : 'normal';
+        return `- id:${mem.id} status:${pin} updated:${when || 'unknown'} text:${mem.text}`;
+      });
+      const extra = list.length - rows.length;
+      const suffix = extra > 0 ? `\n... +${extra} more memories` : '';
+      return `Memory catalog (use ids for memory_update/delete/pin/unpin):\n${rows.join('\n')}${suffix}`;
     }
 
     function buildLmStudioMemorySearchResults(aiId = null) {
@@ -5776,11 +5804,11 @@ ${rows.join('\n')}`;
           break;
         }
         case 'memory_add': {
-          const text = String(args.text || '').trim();
+          const text = String(args.text || args.content || '').trim();
           const pinned = !!args.pinned;
           const item = lmStudioMemoryAdd(text, pinned, lmStudioSelfId());
           if (!item) {
-            result = { ok: false, error: 'Empty memory text' };
+            result = { ok: false, error: 'Empty memory text (use args.text, not args.content).' };
             break;
           }
           result = { ok: true, id: item.id };
@@ -5788,14 +5816,14 @@ ${rows.join('\n')}`;
         }
         case 'memory_update': {
           const id = String(args.id || '').trim();
-          const text = String(args.text || '').trim();
+          const text = String(args.text || args.content || '').trim();
           const pinned = args.pinned;
           if (!id) {
             result = { ok: false, error: 'Missing id' };
             break;
           }
           if (!text) {
-            result = { ok: false, error: 'Empty memory text' };
+            result = { ok: false, error: 'Empty memory text (use args.text, not args.content).' };
             break;
           }
           const ok = lmStudioMemoryUpdate(id, text, pinned === undefined ? null : !!pinned, lmStudioSelfId());
@@ -5885,6 +5913,10 @@ ${rows.join('\n')}`;
             result = { ok: false, error: 'reply_to_uid required' };
             break;
           }
+          if (!replyToUid.startsWith('sb_')) {
+            result = { ok: false, error: 'reply_to_uid must be a SpaceBook post uid (sb_*), not a character uid.' };
+            break;
+          }
           if (!content) {
             result = { ok: false, error: 'content required' };
             break;
@@ -5910,13 +5942,17 @@ ${rows.join('\n')}`;
           if (entry) setSpacebookAlert(true);
           lmStudioRememberSocialHash(aiId, postHash);
           lmStudioRegisterSocialAction(aiId, 'spacebook.post');
-          result = entry ? { ok: true, uid: entry.uid } : { ok: false, error: 'Reply failed' };
+          result = entry ? { ok: true, uid: entry.uid } : { ok: false, error: 'Reply failed. Unknown SpaceBook post uid; pick a uid from SpaceBook recent posts.' };
           break;
         }
         case 'spacebook.like': {
           const uid = String(args.uid || '').trim();
           if (!uid) {
             result = { ok: false, error: 'uid required' };
+            break;
+          }
+          if (!uid.startsWith('sb_')) {
+            result = { ok: false, error: 'uid must be a SpaceBook post uid (sb_*), not a character uid.' };
             break;
           }
           const aiNpc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
@@ -5931,7 +5967,9 @@ ${rows.join('\n')}`;
           if (ok) lmStudioMuteSpacebookPost(aiId, uid);
           lmStudioRememberSocialHash(aiId, likeHash);
           lmStudioRegisterSocialAction(aiId, 'spacebook.post');
-          result = { ok };
+          result = ok
+            ? { ok: true }
+            : { ok: false, error: 'Unknown SpaceBook post uid; choose uid from SpaceBook recent posts.' };
           break;
         }
         case 'spacebook.delete': {
@@ -6017,7 +6055,7 @@ ${rows.join('\n')}`;
           type: 'function',
           function: {
             name: 'action',
-            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message, optional args.walkto. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. toggle_system uses args.system plus args.enabled true/false. spacebook.post uses args.content (optional args.postedby). spacebook.reply_to_post uses args.reply_to_uid (or reply_to_uuid) + args.content. spacebook.like uses args.uid. spacebook.delete uses args.uid. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self, spacebook.post, spacebook.reply_to_post, spacebook.like, spacebook.delete.',
+            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message, optional args.walkto. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. toggle_system uses args.system plus args.enabled true/false. spacebook.post uses args.content (optional args.postedby). spacebook.reply_to_post uses args.reply_to_uid (or reply_to_uuid) + args.content. spacebook.like uses args.uid. spacebook.delete uses args.uid. memory_add uses args.text (optional args.pinned); memory_update uses args.id + args.text (optional args.pinned); memory_delete/memory_pin/memory_unpin use args.id; memory_search uses args.query. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self, spacebook.post, spacebook.reply_to_post, spacebook.like, spacebook.delete.',
             parameters: {
               type: 'object',
               properties: {
@@ -6809,7 +6847,7 @@ ${rows.join('\n')}`;
       return `${input.slice(0, Math.max(0, maxChars - 16))}\n...[trimmed]`;
     }
 
-    function lmStudioBuildRequestPlans({ modelKey, input }) {
+    function lmStudioBuildRequestPlans({ modelKey, input, systemPrompt }) {
       ensureLmStudioConfig();
       const cfg = state.lmStudio;
       const apiMode = LMS_API_MODE_OPTIONS.includes(cfg.apiMode) ? cfg.apiMode : 'openai-chat';
@@ -6823,6 +6861,7 @@ ${rows.join('\n')}`;
       if (apiMode === 'openai-responses') {
         const baseResponses = {
           model: modelKey,
+          instructions: systemPrompt || undefined,
           input,
           stream: false
         };
@@ -6845,7 +6884,9 @@ ${rows.join('\n')}`;
 
       const baseChat = {
         model: modelKey,
-        messages: [{ role: 'user', content: input }],
+        messages: systemPrompt
+          ? [{ role: 'system', content: systemPrompt }, { role: 'user', content: input }]
+          : [{ role: 'user', content: input }],
         stream: false,
         max_tokens: 1024
       };
@@ -6919,6 +6960,7 @@ ${rows.join('\n')}`;
         const selfId = selfNpc.uid || 'ai';
         const selfRole = npcRole(selfNpc) || 'ai';
         const roleLabel = selfRole === 'ai' ? 'AI' : selfRole;
+        const memoryCatalog = buildLmStudioMemoryCatalog(selfId, { limit: 12 });
         const pinnedMemory = buildLmStudioPinnedMemory(selfId, { limit: 4 });
         const relevantMemory = buildLmStudioRelevantMemories(selfId, { limit: 4 });
         const chatHistory = buildLmStudioChatHistory(selfId);
@@ -6938,7 +6980,7 @@ ${rows.join('\n')}`;
         const anomalyTarget = buildLmStudioAnomalyTargetSummary();
         const aiRoster = buildLmStudioAiRoster(selfId);
         const characterLookup = buildLmStudioCharacterLookup();
-        const memoryBlocks = [pinnedMemory, relevantMemory].filter(Boolean).join('\n\n');
+        const memoryBlocks = [memoryCatalog, pinnedMemory, relevantMemory].filter(Boolean).join('\n\n');
         const contextBlocks = [chatHistory, spacebookPosts, spacebookPrompt, npcActions, aiRoster, characterLookup, corridorKeys, moduleTypes, anomalySummary, anomalyTarget, supplyTargets, memoryBlocks].filter(Boolean).join('\n\n');
         const identityLine = selfName
           ? `You are ${selfName}, ${roleLabel}.`
@@ -6955,7 +6997,8 @@ ${rows.join('\n')}`;
           snapshot
         });
 
-        const plans = lmStudioBuildRequestPlans({ modelKey, input });
+        const systemPrompt = buildLmStudioSystemPrompt();
+        const plans = lmStudioBuildRequestPlans({ modelKey, input, systemPrompt });
         const client = lmStudioOpenAiClient();
         let payload = null;
         let requestMode = '';
@@ -11337,7 +11380,7 @@ ${rows.join('\n')}`;
         baseUrl: 'http://localhost:1234',
         apiKey: '',
         modelOverride: '',
-        autoLoadModel: 'zai-org/glm-4.6v-flash',
+        autoLoadModel: 'mistralai/ministral-3-3b',
         apiMode: 'openai-chat',
         toolMode: 'auto',
         structuredOutput: true,
