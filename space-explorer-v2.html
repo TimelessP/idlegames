@@ -1686,6 +1686,18 @@
         actions: [
           { label: 'Cancel', behavior: 'close' }
         ]
+      },
+
+      // Rover Bay (root)
+      rover: {
+        isRoot: true,
+        stationType: 'rover',
+        title: 'ROVER BAY',
+        overview: 'Deploy rover to mine ore or salvage scrap from the planet surface:',
+        itemBuilder: 'buildRoverItems',
+        actions: [
+          { label: 'Close', behavior: 'close' }
+        ]
       }
     };
 
@@ -1731,6 +1743,7 @@
       buildGameMenuItems,
       buildLmStudioSettingsItems,
       buildMessageAiItems,
+      buildRoverItems,
       
       // Action handlers
       copyDebugJson,
@@ -1886,6 +1899,95 @@
 
       // Render action bar
       renderUnifiedActionBar(actionsBarEl, menuDef.actions || [], menuDef);
+
+      // Rover mini-game: inject SVG canvas and controls when rover menu is open
+      if (menuDef.stationType === 'rover') {
+        // SVG canvas
+        let roverSvg = document.getElementById('roverGameSvg');
+        if (!roverSvg) {
+          roverSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          roverSvg.id = 'roverGameSvg';
+          roverSvg.setAttribute('viewBox', '0 0 700 420');
+          roverSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+          roverSvg.style.cssText = 'width:100%;max-width:700px;height:auto;display:block;margin:8px auto 0;border:2px solid var(--accent);border-radius:6px;background:#0a0a1a;';
+        }
+        menuItemsEl.insertBefore(roverSvg, menuItemsEl.firstChild);
+
+        // Controls bar
+        let ctrlBar = document.getElementById('roverControlsBar');
+        if (!ctrlBar) {
+          ctrlBar = document.createElement('div');
+          ctrlBar.id = 'roverControlsBar';
+          ctrlBar.style.cssText = 'display:flex;gap:8px;justify-content:center;margin:10px auto 4px;max-width:700px;';
+          const mkBtn = (id, label, icon) => {
+            const btn = document.createElement('button');
+            btn.id = id;
+            btn.textContent = icon ? icon : label;
+            btn.title = label;
+            btn.className = 'menu-action-btn';
+            btn.style.cssText = 'flex:1 1 0;min-width:0;padding:10px 6px;font-size:18px;text-align:center;user-select:none;-webkit-user-select:none;touch-action:manipulation;';
+            return btn;
+          };
+          const zoomOutBtn = mkBtn('roverZoomOutBtn', 'Zoom Out', '−');
+          zoomOutBtn.style.cssText = 'flex:0 0 44px;padding:10px 0;font-size:18px;text-align:center;user-select:none;-webkit-user-select:none;touch-action:manipulation;';
+          zoomOutBtn.addEventListener('click', roverZoomOut);
+          const leftBtn = mkBtn('roverLeftBtn', 'Left', '◀');
+          const drillBtn = mkBtn('roverDrillBtn', 'Drill', '⛏ DRILL');
+          drillBtn.style.fontSize = '14px';
+          drillBtn.style.fontWeight = 'bold';
+          const rightBtn = mkBtn('roverRightBtn', 'Right', '▶');
+          const zoomInBtn = mkBtn('roverZoomInBtn', 'Zoom In', '+');
+          zoomInBtn.style.cssText = 'flex:0 0 44px;padding:10px 0;font-size:18px;text-align:center;user-select:none;-webkit-user-select:none;touch-action:manipulation;';
+          zoomInBtn.addEventListener('click', roverZoomIn);
+          ctrlBar.appendChild(zoomOutBtn);
+          ctrlBar.appendChild(leftBtn);
+          ctrlBar.appendChild(drillBtn);
+          ctrlBar.appendChild(rightBtn);
+          ctrlBar.appendChild(zoomInBtn);
+
+          // Hold-to-move for left/right
+          const bindRoverHold = (btn, dir) => {
+            let holding = false;
+            const start = (e) => { e.preventDefault(); holding = true; ROVER_GAME.roverDir = dir; };
+            const stop = () => { if (holding) { holding = false; if (ROVER_GAME.roverDir === dir) ROVER_GAME.roverDir = 0; } };
+            btn.addEventListener('pointerdown', start);
+            btn.addEventListener('pointerup', stop);
+            btn.addEventListener('pointercancel', stop);
+            btn.addEventListener('pointerleave', stop);
+            btn.addEventListener('contextmenu', e => e.preventDefault());
+          };
+          bindRoverHold(leftBtn, -1);
+          bindRoverHold(rightBtn, 1);
+          drillBtn.addEventListener('click', () => {
+            if (ROVER_GAME.drilling) roverStopDrill();
+            else roverStartDrill();
+          });
+        }
+        menuItemsEl.insertBefore(ctrlBar, roverSvg.nextSibling);
+
+        // Keyboard controls for rover
+        if (!panel._roverKeyHandler) {
+          panel._roverKeyHandler = (e) => {
+            if (!ROVER_GAME.active) return;
+            if (e.key === 'ArrowLeft' || e.key === 'a') { e.preventDefault(); ROVER_GAME.roverDir = -1; }
+            else if (e.key === 'ArrowRight' || e.key === 'd') { e.preventDefault(); ROVER_GAME.roverDir = 1; }
+            else if (e.key === ' ' || e.key === 'ArrowDown') {
+              e.preventDefault();
+              if (ROVER_GAME.drilling) roverStopDrill();
+              else roverStartDrill();
+            }
+            else if (e.key === '=' || e.key === '+') { e.preventDefault(); roverZoomIn(); }
+            else if (e.key === '-' || e.key === '_') { e.preventDefault(); roverZoomOut(); }
+          };
+          panel._roverKeyUpHandler = (e) => {
+            if (!ROVER_GAME.active) return;
+            if ((e.key === 'ArrowLeft' || e.key === 'a') && ROVER_GAME.roverDir === -1) ROVER_GAME.roverDir = 0;
+            if ((e.key === 'ArrowRight' || e.key === 'd') && ROVER_GAME.roverDir === 1) ROVER_GAME.roverDir = 0;
+          };
+          document.addEventListener('keydown', panel._roverKeyHandler);
+          document.addEventListener('keyup', panel._roverKeyUpHandler);
+        }
+      }
 
       // Show panel
       panel.style.display = 'block';
@@ -3465,6 +3567,791 @@
       return items;
     }
 
+    // ============================================================================
+    // Rover Mini-Game
+    // ============================================================================
+
+    const ROVER_GAME = {
+      active: false,
+      animFrame: null,
+      lastTs: 0,
+      // World state
+      camX: 0,
+      roverX: 200,
+      roverSpeed: 0,
+      roverDir: 0,      // -1 left, 0 stop, 1 right
+      drilling: false,
+      drillProgress: 0,
+      drillTarget: null,
+      totalOre: 0,
+      beamTimer: 0,
+      beamOre: 0,
+      // Terrain
+      terrainSeed: 1,
+      terrainChunks: [],
+      CHUNK_W: 400,
+      // World objects (rocks, deposits, aliens, artefacts)
+      worldObjects: [],
+      objSpawnX: 0,
+      // Parallax layers
+      stars: [],
+      mountains: [],
+      farStructures: [],
+      fgRocks: [],
+      // Signal animation
+      signalPhase: 0,
+      // Scan lines
+      scanLineOffset: 0,
+      zoom: 1
+    };
+
+    function roverSeededRandom(seed) {
+      let s = seed | 0;
+      return () => {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        return s / 0x7fffffff;
+      };
+    }
+
+    function roverTerrainHeight(worldX) {
+      // Gentle rolling terrain with small bumps
+      const base = 320;
+      const h = Math.sin(worldX * 0.003) * 18
+              + Math.sin(worldX * 0.007 + 1.3) * 10
+              + Math.sin(worldX * 0.02 + 2.6) * 4
+              + Math.sin(worldX * 0.05 + 0.8) * 2;
+      return base + h;
+    }
+
+    function roverTerrainSlope(worldX) {
+      const dx = 2;
+      return (roverTerrainHeight(worldX + dx) - roverTerrainHeight(worldX - dx)) / (dx * 2);
+    }
+
+    function roverEnsureWorldObjects(fromX, toX) {
+      const rv = ROVER_GAME;
+      if (rv.objSpawnX === 0 && rv.worldObjects.length === 0) rv.objSpawnX = fromX - 100;
+      while (rv.objSpawnX < toX + 600) {
+        const rng = roverSeededRandom(Math.floor(rv.objSpawnX * 0.37) + 777);
+        const r = rng();
+        if (r < 0.18) {
+          // Ore deposit
+          rv.worldObjects.push({
+            type: 'ore',
+            x: rv.objSpawnX,
+            y: roverTerrainHeight(rv.objSpawnX),
+            mined: false,
+            size: 8 + rng() * 8
+          });
+        } else if (r < 0.35) {
+          // Rock
+          rv.worldObjects.push({
+            type: 'rock',
+            x: rv.objSpawnX,
+            y: roverTerrainHeight(rv.objSpawnX),
+            size: 6 + rng() * 14,
+            shape: Math.floor(rng() * 3)
+          });
+        } else if (r < 0.42) {
+          // Artefact
+          rv.worldObjects.push({
+            type: 'artefact',
+            x: rv.objSpawnX,
+            y: roverTerrainHeight(rv.objSpawnX),
+            mined: false,
+            variant: Math.floor(rng() * 3)
+          });
+        } else if (r < 0.50) {
+          // Alien arthropod
+          rv.worldObjects.push({
+            type: 'alien',
+            x: rv.objSpawnX,
+            y: roverTerrainHeight(rv.objSpawnX),
+            legPhase: rng() * Math.PI * 2,
+            moveTimer: rng() * 8,
+            facing: rng() > 0.5 ? 1 : -1,
+            variant: Math.floor(rng() * 3)
+          });
+        }
+        rv.objSpawnX += 60 + rng() * 120;
+      }
+    }
+
+    function roverEnsureParallax() {
+      const rv = ROVER_GAME;
+      if (rv.stars.length === 0) {
+        const rng = roverSeededRandom(42);
+        for (let i = 0; i < 80; i++) {
+          rv.stars.push({ x: rng() * 2000, y: rng() * 200, r: 0.5 + rng() * 1.5, bright: rng() });
+        }
+        for (let i = 0; i < 12; i++) {
+          rv.mountains.push({
+            x: i * 200 + rng() * 80,
+            h: 40 + rng() * 60,
+            w: 120 + rng() * 160
+          });
+        }
+        for (let i = 0; i < 6; i++) {
+          rv.farStructures.push({
+            x: i * 400 + rng() * 200,
+            type: Math.floor(rng() * 3),
+            h: 20 + rng() * 30
+          });
+        }
+        for (let i = 0; i < 20; i++) {
+          rv.fgRocks.push({
+            x: rng() * 2400,
+            size: 3 + rng() * 6,
+            y: 8 + rng() * 16
+          });
+        }
+      }
+    }
+
+    function roverFindNearestDrillable() {
+      const rv = ROVER_GAME;
+      let best = null;
+      let bestDist = 60; // max interact distance
+      for (const obj of rv.worldObjects) {
+        if ((obj.type === 'ore' || obj.type === 'artefact') && !obj.mined) {
+          const d = Math.abs(obj.x - rv.roverX);
+          if (d < bestDist) {
+            best = obj;
+            bestDist = d;
+          }
+        }
+      }
+      return best;
+    }
+
+    function roverFindNearestDeposit() {
+      const rv = ROVER_GAME;
+      let best = null;
+      let bestDist = 60;
+      for (const obj of rv.worldObjects) {
+        if (obj.type === 'ore' && !obj.mined) {
+          const d = Math.abs(obj.x - rv.roverX);
+          if (d < bestDist) {
+            best = obj;
+            bestDist = d;
+          }
+        }
+      }
+      return best;
+    }
+
+    function roverStartDrill() {
+      const rv = ROVER_GAME;
+      if (rv.drilling) return;
+      const target = roverFindNearestDrillable();
+      if (!target) return;
+      rv.drilling = true;
+      rv.drillProgress = 0;
+      rv.drillTarget = target;
+    }
+
+    function roverStopDrill() {
+      ROVER_GAME.drilling = false;
+      ROVER_GAME.drillProgress = 0;
+      ROVER_GAME.drillTarget = null;
+    }
+
+    function roverUpdate(dt) {
+      const rv = ROVER_GAME;
+
+      // Signal animation
+      rv.signalPhase += dt * 1.2;
+      rv.scanLineOffset = (rv.scanLineOffset + dt * 40) % 12;
+
+      // Movement
+      const maxSpeed = 120;
+      const accel = 200;
+      const friction = 160;
+      if (rv.roverDir !== 0 && !rv.drilling) {
+        rv.roverSpeed += rv.roverDir * accel * dt;
+        rv.roverSpeed = Math.max(-maxSpeed, Math.min(maxSpeed, rv.roverSpeed));
+      } else {
+        // Friction
+        if (Math.abs(rv.roverSpeed) < friction * dt) rv.roverSpeed = 0;
+        else rv.roverSpeed -= Math.sign(rv.roverSpeed) * friction * dt;
+      }
+      rv.roverX += rv.roverSpeed * dt;
+
+      // Camera follows rover
+      const targetCam = rv.roverX - 300;
+      rv.camX += (targetCam - rv.camX) * 4 * dt;
+
+      // Ensure objects are spawned
+      roverEnsureWorldObjects(rv.camX - 200, rv.camX + 900);
+
+      // Update aliens
+      for (const obj of rv.worldObjects) {
+        if (obj.type === 'alien') {
+          obj.moveTimer -= dt;
+          if (obj.moveTimer <= 0) {
+            obj.moveTimer = 4 + Math.random() * 8;
+            obj.legPhase += Math.PI * 0.5;
+            // Occasionally shift position
+            if (Math.random() < 0.3) {
+              obj.x += (Math.random() - 0.5) * 20;
+              obj.y = roverTerrainHeight(obj.x);
+              obj.facing = Math.random() > 0.5 ? 1 : -1;
+            }
+          }
+        }
+      }
+
+      // Drilling
+      if (rv.drilling && rv.drillTarget) {
+        rv.drillProgress += dt * 0.4; // ~2.5 seconds to mine
+        if (rv.drillProgress >= 1) {
+          rv.drillTarget.mined = true;
+          rv.beamTimer = 1.0;
+          if (rv.drillTarget.type === 'artefact') {
+            // Artefact yields scrap
+            const scrapAmt = 4;
+            rv.beamOre += scrapAmt;
+            invAdd('scrap', scrapAmt);
+          } else {
+            // Ore deposit yields random 2-10 ore
+            const oreAmt = 2 + Math.floor(Math.random() * 9); // 2..10
+            rv.beamOre += oreAmt;
+            rv.totalOre += oreAmt;
+            invAdd('ore', oreAmt);
+          }
+          markDirty();
+          rv.drilling = false;
+          rv.drillProgress = 0;
+          rv.drillTarget = null;
+          // Update the displays in the menu without full rebuild
+          const valEls = document.querySelectorAll('#panelMenuItems .menu-setting-value');
+          if (valEls.length >= 1) valEls[0].textContent = `${invGet('ore')}`;
+          if (valEls.length >= 2) valEls[1].textContent = `${invGet('scrap')}`;
+        }
+      }
+
+      // Beam animation
+      if (rv.beamTimer > 0) rv.beamTimer -= dt;
+
+      // Respawn: occasionally regenerate ore/artefacts in areas already visited
+      if (Math.random() < 0.02 * dt) {
+        const spawnX = rv.camX + Math.random() * 700;
+        const r = Math.random();
+        if (r < 0.6) {
+          rv.worldObjects.push({
+            type: 'ore', x: spawnX, y: roverTerrainHeight(spawnX),
+            mined: false, size: 8 + Math.random() * 8
+          });
+        } else {
+          rv.worldObjects.push({
+            type: 'artefact', x: spawnX, y: roverTerrainHeight(spawnX),
+            mined: false, variant: Math.floor(Math.random() * 3)
+          });
+        }
+      }
+
+      // Prune far-away objects (and mined objects once off-screen)
+      rv.worldObjects = rv.worldObjects.filter(o => {
+        if (o.x < rv.camX - 800) return false;
+        if (o.mined && (o.x < rv.camX - 100 || o.x > rv.camX + 800)) return false;
+        return true;
+      });
+    }
+
+    function roverRender(svgEl) {
+      const rv = ROVER_GAME;
+      const ns = 'http://www.w3.org/2000/svg';
+      const width = 700;
+      const height = 420;
+
+      // Clear
+      svgEl.innerHTML = '';
+
+      // Zoom viewport
+      const z = rv.zoom || 1;
+      const vbW = width / z;
+      const vbH = height / z;
+      let vbX = 0, vbY = 0;
+      if (z > 1) {
+        const rScrX = rv.roverX - rv.camX;
+        const rGndY = roverTerrainHeight(rv.roverX);
+        vbX = rScrX - vbW * 0.5;
+        vbY = (rGndY - 20) - vbH * 0.45;
+      }
+      const hs = 1 / Math.sqrt(z);
+      svgEl.setAttribute('viewBox', `${vbX.toFixed(1)} ${vbY.toFixed(1)} ${vbW.toFixed(1)} ${vbH.toFixed(1)}`);
+
+      const mk = (name, attrs = {}) => {
+        const el = document.createElementNS(ns, name);
+        for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+        return el;
+      };
+
+      // Scale factor for line widths
+      const sw = 1.5;
+
+      // ---- Sky gradient ----
+      const defs = mk('defs');
+      const grad = mk('linearGradient', { id: 'rvSky', x1: 0, y1: 0, x2: 0, y2: 1 });
+      grad.appendChild(mk('stop', { offset: '0%', 'stop-color': '#0a0a1a' }));
+      grad.appendChild(mk('stop', { offset: '60%', 'stop-color': '#1a1035' }));
+      grad.appendChild(mk('stop', { offset: '100%', 'stop-color': '#2d1f40' }));
+      defs.appendChild(grad);
+      svgEl.appendChild(defs);
+      svgEl.appendChild(mk('rect', { x: 0, y: 0, width, height, fill: 'url(#rvSky)' }));
+
+      // ---- Stars (furthest parallax, 0.05x) ----
+      roverEnsureParallax();
+      const starOffX = rv.camX * 0.05;
+      for (const star of rv.stars) {
+        const sx = ((star.x - starOffX) % 2000 + 2000) % 2000 * (width / 2000);
+        const twinkle = 0.5 + 0.5 * Math.sin(rv.signalPhase * 2 + star.bright * 10);
+        svgEl.appendChild(mk('circle', { cx: sx.toFixed(1), cy: star.y.toFixed(1), r: star.r.toFixed(1), fill: '#fff', opacity: (0.3 + twinkle * 0.7).toFixed(2) }));
+      }
+
+      // ---- Far mountains (parallax 0.15x) ----
+      const mtnOffX = rv.camX * 0.15;
+      for (const mtn of rv.mountains) {
+        const mx = ((mtn.x - mtnOffX) % 2400 + 2400) % 2400 * (width / 2400);
+        const my = 230;
+        svgEl.appendChild(mk('polygon', {
+          points: `${mx.toFixed(1)},${my} ${(mx + mtn.w / 2).toFixed(1)},${(my - mtn.h).toFixed(1)} ${(mx + mtn.w).toFixed(1)},${my}`,
+          fill: '#1a1530', stroke: '#2a2050', 'stroke-width': sw * 0.6
+        }));
+      }
+
+      // ---- Distant alien structures (parallax 0.25x) ----
+      const strOffX = rv.camX * 0.25;
+      for (const st of rv.farStructures) {
+        const sx2 = ((st.x - strOffX) % 2800 + 2800) % 2800 * (width / 2800);
+        const sy2 = 240 - st.h;
+        if (st.type === 0) {
+          // Tower / obelisk
+          svgEl.appendChild(mk('rect', { x: sx2.toFixed(1), y: sy2.toFixed(1), width: 6, height: st.h, fill: '#362860', stroke: '#4a3878', 'stroke-width': sw * 0.5 }));
+          svgEl.appendChild(mk('circle', { cx: (sx2 + 3).toFixed(1), cy: sy2.toFixed(1), r: 3, fill: '#6a50a0', opacity: 0.6 }));
+        } else if (st.type === 1) {
+          // Dome
+          svgEl.appendChild(mk('ellipse', { cx: (sx2 + 10).toFixed(1), cy: '240', rx: 14, ry: st.h * 0.5, fill: '#2a2050', stroke: '#4a3878', 'stroke-width': sw * 0.5 }));
+        } else {
+          // Antenna array
+          for (let j = 0; j < 3; j++) {
+            svgEl.appendChild(mk('line', { x1: (sx2 + j * 8).toFixed(1), y1: '240', x2: (sx2 + j * 8).toFixed(1), y2: (240 - st.h).toFixed(1), stroke: '#4a3878', 'stroke-width': sw * 0.5 }));
+          }
+          svgEl.appendChild(mk('line', { x1: sx2.toFixed(1), y1: (240 - st.h + 5).toFixed(1), x2: (sx2 + 16).toFixed(1), y2: (240 - st.h + 5).toFixed(1), stroke: '#4a3878', 'stroke-width': sw * 0.5 }));
+        }
+      }
+
+      // ---- Terrain (mid-layer) ----
+      const terrainPts = [];
+      const STEP = 4;
+      for (let screenX = -STEP; screenX <= width + STEP; screenX += STEP) {
+        const worldX = rv.camX + screenX;
+        const ty = roverTerrainHeight(worldX);
+        const screenY = ty;
+        terrainPts.push(`${screenX.toFixed(1)},${screenY.toFixed(1)}`);
+      }
+      terrainPts.push(`${width},${height}`);
+      terrainPts.push(`0,${height}`);
+
+      svgEl.appendChild(mk('polygon', {
+        points: terrainPts.join(' '),
+        fill: '#3d2e1a', stroke: 'none'
+      }));
+      // Terrain surface line
+      const surfacePts = [];
+      for (let screenX = -STEP; screenX <= width + STEP; screenX += STEP) {
+        const worldX = rv.camX + screenX;
+        surfacePts.push(`${screenX.toFixed(1)},${roverTerrainHeight(worldX).toFixed(1)}`);
+      }
+      svgEl.appendChild(mk('polyline', {
+        points: surfacePts.join(' '),
+        fill: 'none', stroke: '#5a4530', 'stroke-width': sw * 1.2
+      }));
+
+      // Sub-terrain strata lines
+      for (let layer = 1; layer <= 3; layer++) {
+        const strataPts = [];
+        for (let screenX = -STEP; screenX <= width + STEP; screenX += STEP * 2) {
+          const worldX = rv.camX + screenX;
+          const ty = roverTerrainHeight(worldX) + layer * 25 + Math.sin(worldX * 0.01 + layer) * 6;
+          strataPts.push(`${screenX.toFixed(1)},${ty.toFixed(1)}`);
+        }
+        svgEl.appendChild(mk('polyline', {
+          points: strataPts.join(' '),
+          fill: 'none', stroke: 'rgba(90,70,50,0.25)', 'stroke-width': sw * 0.5, 'stroke-dasharray': '6,8'
+        }));
+      }
+
+      // ---- World objects ----
+      for (const obj of rv.worldObjects) {
+        const ox = obj.x - rv.camX;
+        if (ox < -60 || ox > width + 60) continue;
+
+        if (obj.type === 'ore' && !obj.mined) {
+          const oy = obj.y;
+          const s = obj.size;
+          // Glowing ore crystal
+          svgEl.appendChild(mk('polygon', {
+            points: `${ox.toFixed(1)},${(oy - s).toFixed(1)} ${(ox - s * 0.6).toFixed(1)},${oy.toFixed(1)} ${(ox + s * 0.6).toFixed(1)},${oy.toFixed(1)}`,
+            fill: '#d4a020', stroke: '#000', 'stroke-width': sw, opacity: 0.9
+          }));
+          svgEl.appendChild(mk('polygon', {
+            points: `${(ox + 3).toFixed(1)},${(oy - s * 0.7).toFixed(1)} ${(ox - s * 0.3).toFixed(1)},${(oy + 1).toFixed(1)} ${(ox + s * 0.4).toFixed(1)},${(oy + 1).toFixed(1)}`,
+            fill: '#f0c040', stroke: 'none', opacity: 0.5
+          }));
+          // Sparkle
+          const sparkle = 0.5 + 0.5 * Math.sin(rv.signalPhase * 3 + ox);
+          svgEl.appendChild(mk('circle', { cx: ox.toFixed(1), cy: (oy - s - 3).toFixed(1), r: (1.5 + sparkle).toFixed(1), fill: '#ffe080', opacity: sparkle.toFixed(2) }));
+        } else if (obj.type === 'rock') {
+          const oy = obj.y;
+          const s = obj.size;
+          if (obj.shape === 0) {
+            svgEl.appendChild(mk('polygon', {
+              points: `${(ox - s * 0.5).toFixed(1)},${oy.toFixed(1)} ${(ox - s * 0.3).toFixed(1)},${(oy - s).toFixed(1)} ${(ox + s * 0.4).toFixed(1)},${(oy - s * 0.8).toFixed(1)} ${(ox + s * 0.6).toFixed(1)},${oy.toFixed(1)}`,
+              fill: '#4a4040', stroke: '#000', 'stroke-width': sw
+            }));
+          } else if (obj.shape === 1) {
+            svgEl.appendChild(mk('ellipse', { cx: ox.toFixed(1), cy: (oy - s * 0.3).toFixed(1), rx: (s * 0.7).toFixed(1), ry: (s * 0.4).toFixed(1), fill: '#504545', stroke: '#000', 'stroke-width': sw }));
+          } else {
+            svgEl.appendChild(mk('polygon', {
+              points: `${(ox - s * 0.6).toFixed(1)},${oy.toFixed(1)} ${(ox - s * 0.1).toFixed(1)},${(oy - s * 1.2).toFixed(1)} ${(ox + s * 0.2).toFixed(1)},${(oy - s * 0.6).toFixed(1)} ${(ox + s * 0.5).toFixed(1)},${oy.toFixed(1)}`,
+              fill: '#3a3535', stroke: '#000', 'stroke-width': sw
+            }));
+          }
+        } else if (obj.type === 'artefact' && !obj.mined) {
+          const oy = obj.y;
+          if (obj.variant === 0) {
+            // Small ruin pillar
+            svgEl.appendChild(mk('rect', { x: (ox - 4).toFixed(1), y: (oy - 18).toFixed(1), width: 8, height: 18, fill: '#5a5570', stroke: '#000', 'stroke-width': sw, rx: 1 }));
+            svgEl.appendChild(mk('rect', { x: (ox - 6).toFixed(1), y: (oy - 20).toFixed(1), width: 12, height: 4, fill: '#6a6580', stroke: '#000', 'stroke-width': sw * 0.7 }));
+          } else if (obj.variant === 1) {
+            // Strange sphere
+            svgEl.appendChild(mk('circle', { cx: ox.toFixed(1), cy: (oy - 8).toFixed(1), r: 7, fill: '#4a6070', stroke: '#000', 'stroke-width': sw }));
+            svgEl.appendChild(mk('ellipse', { cx: (ox - 2).toFixed(1), cy: (oy - 10).toFixed(1), rx: 2, ry: 3, fill: 'rgba(255,255,255,0.2)', stroke: 'none' }));
+          } else {
+            // Glyph-marked slab
+            svgEl.appendChild(mk('rect', { x: (ox - 10).toFixed(1), y: (oy - 12).toFixed(1), width: 20, height: 12, fill: '#5a5060', stroke: '#000', 'stroke-width': sw, rx: 2 }));
+            svgEl.appendChild(mk('line', { x1: (ox - 5).toFixed(1), y1: (oy - 9).toFixed(1), x2: (ox + 5).toFixed(1), y2: (oy - 9).toFixed(1), stroke: '#8a80a0', 'stroke-width': sw * 0.5 }));
+            svgEl.appendChild(mk('line', { x1: (ox - 3).toFixed(1), y1: (oy - 5).toFixed(1), x2: (ox + 3).toFixed(1), y2: (oy - 5).toFixed(1), stroke: '#8a80a0', 'stroke-width': sw * 0.5 }));
+          }
+        } else if (obj.type === 'alien') {
+          const oy = obj.y;
+          const facing = obj.facing;
+          const legAmt = Math.sin(obj.legPhase) * 0.15;
+          // Body (oval arthropod)
+          const bw = 18;
+          const bh = 7;
+          svgEl.appendChild(mk('ellipse', {
+            cx: ox.toFixed(1), cy: (oy - 6).toFixed(1),
+            rx: bw * 0.5, ry: bh * 0.5,
+            fill: obj.variant === 0 ? '#607050' : obj.variant === 1 ? '#706858' : '#506068',
+            stroke: '#000', 'stroke-width': sw
+          }));
+          // Segmentation lines
+          svgEl.appendChild(mk('line', { x1: (ox - 4).toFixed(1), y1: (oy - 9).toFixed(1), x2: (ox - 4).toFixed(1), y2: (oy - 3).toFixed(1), stroke: '#000', 'stroke-width': sw * 0.4, opacity: 0.5 }));
+          svgEl.appendChild(mk('line', { x1: (ox + 4).toFixed(1), y1: (oy - 9).toFixed(1), x2: (ox + 4).toFixed(1), y2: (oy - 3).toFixed(1), stroke: '#000', 'stroke-width': sw * 0.4, opacity: 0.5 }));
+          // Legs (3 pairs, slight animation)
+          for (let li = 0; li < 3; li++) {
+            const lx = ox - 6 + li * 6;
+            const lAngle = legAmt + li * 0.1;
+            svgEl.appendChild(mk('line', {
+              x1: lx.toFixed(1), y1: (oy - 4).toFixed(1),
+              x2: (lx - 3 + lAngle * 10).toFixed(1), y2: oy.toFixed(1),
+              stroke: '#000', 'stroke-width': sw * 0.8
+            }));
+            svgEl.appendChild(mk('line', {
+              x1: lx.toFixed(1), y1: (oy - 4).toFixed(1),
+              x2: (lx + 3 - lAngle * 10).toFixed(1), y2: oy.toFixed(1),
+              stroke: '#000', 'stroke-width': sw * 0.8
+            }));
+          }
+          // Eyes (tiny dots)
+          const eyeX = ox + facing * 7;
+          svgEl.appendChild(mk('circle', { cx: (eyeX - 1.5).toFixed(1), cy: (oy - 7).toFixed(1), r: 1, fill: '#fff', stroke: '#000', 'stroke-width': sw * 0.3 }));
+          svgEl.appendChild(mk('circle', { cx: (eyeX + 1.5).toFixed(1), cy: (oy - 7).toFixed(1), r: 1, fill: '#fff', stroke: '#000', 'stroke-width': sw * 0.3 }));
+          // Small antennae
+          svgEl.appendChild(mk('line', { x1: (eyeX - 1).toFixed(1), y1: (oy - 9).toFixed(1), x2: (eyeX - 3).toFixed(1), y2: (oy - 14).toFixed(1), stroke: '#000', 'stroke-width': sw * 0.5 }));
+          svgEl.appendChild(mk('line', { x1: (eyeX + 1).toFixed(1), y1: (oy - 9).toFixed(1), x2: (eyeX + 3).toFixed(1), y2: (oy - 14).toFixed(1), stroke: '#000', 'stroke-width': sw * 0.5 }));
+        }
+      }
+
+      // ---- Rover ----
+      const roverScreenX = rv.roverX - rv.camX;
+      const roverGroundY = roverTerrainHeight(rv.roverX);
+      const slope = roverTerrainSlope(rv.roverX);
+      const roverAngle = Math.atan(slope);
+
+      // Wheel positions
+      const wheelBase = 28;
+      const wheelR = 8;
+      const w1x = roverScreenX - wheelBase * 0.5;
+      const w2x = roverScreenX + wheelBase * 0.5;
+      const w1y = roverTerrainHeight(rv.roverX - wheelBase * 0.5);
+      const w2y = roverTerrainHeight(rv.roverX + wheelBase * 0.5);
+
+      // Suspension: body rides between wheel heights
+      const bodyY = Math.min(w1y, w2y) - wheelR - 8;
+      const bodyAngle = Math.atan2(w2y - w1y, wheelBase) * (180 / Math.PI);
+
+      const roverGroup = mk('g', { transform: `translate(${roverScreenX.toFixed(1)},${bodyY.toFixed(1)}) rotate(${bodyAngle.toFixed(1)})` });
+
+      // Suspension struts
+      const localW1x = -wheelBase * 0.5;
+      const localW2x = wheelBase * 0.5;
+      const localW1y = w1y - bodyY;
+      const localW2y = w2y - bodyY;
+      roverGroup.appendChild(mk('line', { x1: (localW1x).toFixed(1), y1: '8', x2: (localW1x).toFixed(1), y2: (localW1y).toFixed(1), stroke: '#555', 'stroke-width': sw * 1.5 }));
+      roverGroup.appendChild(mk('line', { x1: (localW2x).toFixed(1), y1: '8', x2: (localW2x).toFixed(1), y2: (localW2y).toFixed(1), stroke: '#555', 'stroke-width': sw * 1.5 }));
+
+      // Chassis body
+      roverGroup.appendChild(mk('rect', { x: -22, y: -6, width: 44, height: 14, rx: 4, ry: 4, fill: '#c8a030', stroke: '#000', 'stroke-width': sw * 1.2 }));
+      // Cabin
+      roverGroup.appendChild(mk('rect', { x: -14, y: -14, width: 22, height: 10, rx: 3, ry: 3, fill: '#a08028', stroke: '#000', 'stroke-width': sw }));
+      // Window
+      roverGroup.appendChild(mk('rect', { x: -10, y: -12, width: 10, height: 6, rx: 2, ry: 2, fill: '#80c0d0', stroke: '#000', 'stroke-width': sw * 0.7 }));
+      // Antenna
+      roverGroup.appendChild(mk('line', { x1: '10', y1: '-6', x2: '14', y2: '-20', stroke: '#000', 'stroke-width': sw * 0.8 }));
+      roverGroup.appendChild(mk('circle', { cx: '14', cy: '-21', r: 2, fill: '#60d060', stroke: '#000', 'stroke-width': sw * 0.5 }));
+      // Signal dish on top
+      roverGroup.appendChild(mk('path', { d: 'M 6,-14 Q 10,-22 14,-14', fill: 'none', stroke: '#000', 'stroke-width': sw }));
+
+      // Wheels (world-space, drawn relative to rover transform origin)
+      // Front wheel
+      roverGroup.appendChild(mk('circle', { cx: localW1x.toFixed(1), cy: localW1y.toFixed(1), r: wheelR, fill: '#333', stroke: '#000', 'stroke-width': sw * 1.2 }));
+      roverGroup.appendChild(mk('circle', { cx: localW1x.toFixed(1), cy: localW1y.toFixed(1), r: wheelR * 0.5, fill: '#555', stroke: '#000', 'stroke-width': sw * 0.5 }));
+      // Wheel tread marks
+      const wheelRot = rv.roverX * 0.08;
+      for (let ti = 0; ti < 6; ti++) {
+        const a = wheelRot + ti * Math.PI / 3;
+        const tx1 = localW1x + Math.cos(a) * wheelR * 0.65;
+        const ty1 = localW1y + Math.sin(a) * wheelR * 0.65;
+        const tx2 = localW1x + Math.cos(a) * wheelR * 0.95;
+        const ty2 = localW1y + Math.sin(a) * wheelR * 0.95;
+        roverGroup.appendChild(mk('line', { x1: tx1.toFixed(1), y1: ty1.toFixed(1), x2: tx2.toFixed(1), y2: ty2.toFixed(1), stroke: '#222', 'stroke-width': sw * 0.6 }));
+      }
+      // Rear wheel
+      roverGroup.appendChild(mk('circle', { cx: localW2x.toFixed(1), cy: localW2y.toFixed(1), r: wheelR, fill: '#333', stroke: '#000', 'stroke-width': sw * 1.2 }));
+      roverGroup.appendChild(mk('circle', { cx: localW2x.toFixed(1), cy: localW2y.toFixed(1), r: wheelR * 0.5, fill: '#555', stroke: '#000', 'stroke-width': sw * 0.5 }));
+      for (let ti = 0; ti < 6; ti++) {
+        const a = wheelRot + ti * Math.PI / 3;
+        const tx1 = localW2x + Math.cos(a) * wheelR * 0.65;
+        const ty1 = localW2y + Math.sin(a) * wheelR * 0.65;
+        const tx2 = localW2x + Math.cos(a) * wheelR * 0.95;
+        const ty2 = localW2y + Math.sin(a) * wheelR * 0.95;
+        roverGroup.appendChild(mk('line', { x1: tx1.toFixed(1), y1: ty1.toFixed(1), x2: tx2.toFixed(1), y2: ty2.toFixed(1), stroke: '#222', 'stroke-width': sw * 0.6 }));
+      }
+
+      // Core drill
+      const drillExtend = rv.drilling ? (6 + rv.drillProgress * 18) : 4;
+      roverGroup.appendChild(mk('polygon', {
+        points: `${-2},${8} ${2},${8} ${1},${(8 + drillExtend).toFixed(1)} ${-1},${(8 + drillExtend).toFixed(1)}`,
+        fill: '#888', stroke: '#000', 'stroke-width': sw
+      }));
+      // Drill bit
+      roverGroup.appendChild(mk('polygon', {
+        points: `${-2},${(8 + drillExtend).toFixed(1)} ${2},${(8 + drillExtend).toFixed(1)} ${0},${(12 + drillExtend).toFixed(1)}`,
+        fill: '#aaa', stroke: '#000', 'stroke-width': sw * 0.8
+      }));
+      if (rv.drilling) {
+        // Drill sparks
+        for (let sp = 0; sp < 4; sp++) {
+          const sa = rv.signalPhase * 8 + sp * 1.5;
+          const spx = Math.cos(sa) * (3 + Math.random() * 5);
+          const spy = 12 + drillExtend + Math.sin(sa) * 3;
+          roverGroup.appendChild(mk('circle', { cx: spx.toFixed(1), cy: spy.toFixed(1), r: (0.8 + Math.random()).toFixed(1), fill: '#ffe060', opacity: (0.4 + Math.random() * 0.6).toFixed(2) }));
+        }
+      }
+
+      svgEl.appendChild(roverGroup);
+
+      // ---- Beam-up effect ----
+      if (rv.beamTimer > 0) {
+        const beamAlpha = rv.beamTimer;
+        const bx = roverScreenX;
+        const by = bodyY - 10;
+        svgEl.appendChild(mk('line', { x1: bx.toFixed(1), y1: by.toFixed(1), x2: (bx + 5).toFixed(1), y2: '0',
+          stroke: `rgba(255,220,60,${beamAlpha.toFixed(2)})`, 'stroke-width': sw * 2, 'stroke-dasharray': '4,6' }));
+        svgEl.appendChild(mk('circle', { cx: bx.toFixed(1), cy: (by - 10 * (1 - rv.beamTimer)).toFixed(1), r: 3, fill: '#ffe040',
+          opacity: beamAlpha.toFixed(2) }));
+      }
+
+      // ---- Foreground rocks (parallax 1.3x) ----
+      const fgOffX = rv.camX * 1.3;
+      for (const fr of rv.fgRocks) {
+        const fx = ((fr.x - fgOffX) % 2400 + 2400) % 2400 * (width / 2400);
+        const fy = height - fr.y;
+        svgEl.appendChild(mk('polygon', {
+          points: `${fx.toFixed(1)},${fy.toFixed(1)} ${(fx - fr.size * 0.5).toFixed(1)},${(fy + fr.size * 0.3).toFixed(1)} ${(fx + fr.size * 0.5).toFixed(1)},${(fy + fr.size * 0.3).toFixed(1)}`,
+          fill: '#2a2018', stroke: '#1a1008', 'stroke-width': sw * 0.6, opacity: 0.5
+        }));
+      }
+
+      // ---- HUD: Signal strength bars (top-right) ----
+      const bars = 5;
+      const sigBarW = 6 * hs;
+      const sigSp = 9 * hs;
+      const sigX = vbX + vbW - (bars * sigSp + 8 * hs);
+      const sigY = vbY + 14 * hs;
+      const activeBars = Math.floor(3 + 2 * Math.abs(Math.sin(rv.signalPhase * 0.5)));
+      for (let i = 0; i < bars; i++) {
+        const bh2 = (4 + i * 3) * hs;
+        const bx2 = sigX + i * sigSp;
+        const by2 = sigY + (bars * 3 * hs - bh2);
+        svgEl.appendChild(mk('rect', {
+          x: bx2.toFixed(1), y: by2.toFixed(1), width: sigBarW.toFixed(1), height: bh2.toFixed(1), rx: (1 * hs).toFixed(1), ry: (1 * hs).toFixed(1),
+          fill: i < activeBars ? '#60e060' : '#303030',
+          stroke: '#000', 'stroke-width': (sw * 0.5 * hs).toFixed(2)
+        }));
+      }
+      // "SIG" label
+      const sigLabel = mk('text', { x: sigX.toFixed(1), y: (sigY - 3 * hs).toFixed(1), fill: '#60e060', 'font-size': (7 * hs).toFixed(1), 'font-family': 'monospace', opacity: 0.7 });
+      sigLabel.textContent = 'SIG';
+      svgEl.appendChild(sigLabel);
+
+      // ---- Scan lines overlay ----
+      const scanGroup = mk('g', { opacity: 0.06 });
+      const scanStep = 6 * hs;
+      const scanOff = (rv.scanLineOffset * hs) % scanStep;
+      for (let sy = vbY + scanOff; sy < vbY + vbH; sy += scanStep) {
+        scanGroup.appendChild(mk('line', { x1: vbX.toFixed(1), y1: sy.toFixed(1), x2: (vbX + vbW).toFixed(1), y2: sy.toFixed(1), stroke: '#fff', 'stroke-width': hs.toFixed(2) }));
+      }
+      svgEl.appendChild(scanGroup);
+      // Slight vignette
+      svgEl.appendChild(mk('rect', { x: vbX.toFixed(1), y: vbY.toFixed(1), width: vbW.toFixed(1), height: vbH.toFixed(1), fill: 'none', stroke: 'rgba(0,0,0,0.35)', 'stroke-width': (30 * hs).toFixed(1), rx: (10 * hs).toFixed(1), ry: (10 * hs).toFixed(1) }));
+
+      // ---- Drill indicator ----
+      if (rv.drilling) {
+        const barW = 60;
+        const barH = 6;
+        const barX = roverScreenX - barW / 2;
+        const barY = bodyY - 28;
+        svgEl.appendChild(mk('rect', { x: barX, y: barY, width: barW, height: barH, rx: 3, ry: 3, fill: '#222', stroke: '#555', 'stroke-width': sw * 0.5 }));
+        svgEl.appendChild(mk('rect', { x: barX + 1, y: barY + 1, width: Math.max(0, (barW - 2) * rv.drillProgress), height: barH - 2, rx: 2, ry: 2, fill: '#ffe040' }));
+        const drillLabel = mk('text', { x: roverScreenX, y: barY - 3, fill: '#ffe040', 'font-size': 8, 'font-family': 'monospace', 'text-anchor': 'middle' });
+        drillLabel.textContent = 'DRILLING...';
+        svgEl.appendChild(drillLabel);
+      }
+
+      // Nearby drillable indicator
+      const nearTarget = roverFindNearestDrillable();
+      if (nearTarget && !rv.drilling) {
+        const dox = nearTarget.x - rv.camX;
+        const doy = nearTarget.y - (nearTarget.size || 20) - 14;
+        const isArtefact = nearTarget.type === 'artefact';
+        const indicator = mk('text', { x: dox.toFixed(1), y: doy.toFixed(1), fill: isArtefact ? '#8a80d0' : '#ffe040', 'font-size': 8, 'font-family': 'monospace', 'text-anchor': 'middle', opacity: (0.6 + 0.4 * Math.sin(rv.signalPhase * 3)).toFixed(2) });
+        indicator.textContent = isArtefact ? '▼ SCRAP' : '▼ ORE';
+        svgEl.appendChild(indicator);
+      }
+
+      // Ore counter (top-left)
+      const oreLabel = mk('text', { x: (vbX + 10 * hs).toFixed(1), y: (vbY + 20 * hs).toFixed(1), fill: '#d4a020', 'font-size': (10 * hs).toFixed(1), 'font-family': 'monospace', 'font-weight': 'bold' });
+      oreLabel.textContent = `ORE MINED: ${rv.totalOre}`;
+      svgEl.appendChild(oreLabel);
+
+      // Distance counter
+      const distLabel = mk('text', { x: (vbX + 10 * hs).toFixed(1), y: (vbY + 34 * hs).toFixed(1), fill: '#8888aa', 'font-size': (8 * hs).toFixed(1), 'font-family': 'monospace' });
+      distLabel.textContent = `DIST: ${Math.floor(rv.roverX * 0.1)}m`;
+      svgEl.appendChild(distLabel);
+
+      // Zoom level indicator
+      if (z > 1) {
+        const zoomLabel = mk('text', { x: (vbX + vbW - 10 * hs).toFixed(1), y: (vbY + vbH - 8 * hs).toFixed(1), fill: '#8888aa', 'font-size': (9 * hs).toFixed(1), 'font-family': 'monospace', 'text-anchor': 'end', opacity: 0.7 });
+        zoomLabel.textContent = `${z}\u00d7`;
+        svgEl.appendChild(zoomLabel);
+      }
+    }
+
+    function roverGameLoop(ts) {
+      const rv = ROVER_GAME;
+      if (!rv.active) return;
+      const dt = rv.lastTs ? Math.min((ts - rv.lastTs) / 1000, 0.1) : 0.016;
+      rv.lastTs = ts;
+      roverUpdate(dt);
+      const svgEl = document.getElementById('roverGameSvg');
+      if (svgEl) roverRender(svgEl);
+      rv.animFrame = requestAnimationFrame(roverGameLoop);
+    }
+
+    function roverStart() {
+      const rv = ROVER_GAME;
+      rv.active = true;
+      rv.lastTs = 0;
+      rv.camX = rv.roverX - 300;
+      roverEnsureWorldObjects(rv.camX - 200, rv.camX + 900);
+      rv.animFrame = requestAnimationFrame(roverGameLoop);
+    }
+
+    function roverStop() {
+      const rv = ROVER_GAME;
+      rv.active = false;
+      if (rv.animFrame) {
+        cancelAnimationFrame(rv.animFrame);
+        rv.animFrame = null;
+      }
+      rv.roverDir = 0;
+      rv.drilling = false;
+      rv.drillProgress = 0;
+      rv.drillTarget = null;
+    }
+
+    function roverRunAutomatedMission(actor = null) {
+      const oreChance = 0.65;
+      const actorName = actor && actor.name ? actor.name : 'Crew';
+      if (Math.random() < oreChance) {
+        const oreAmt = 2 + Math.floor(Math.random() * 9); // 2..10
+        invAdd('ore', oreAmt);
+        queueNotification('ROVER', `${actorName} recovered ${oreAmt} ore.`);
+        markDirty();
+        return { resource: 'ore', amount: oreAmt, logDetail: `+${oreAmt} ore`, odds: { ore: oreChance, scrap: 1 - oreChance } };
+      }
+      const scrapAmt = 4;
+      invAdd('scrap', scrapAmt);
+      queueNotification('ROVER', `${actorName} salvaged ${scrapAmt} scrap.`);
+      markDirty();
+      return { resource: 'scrap', amount: scrapAmt, logDetail: `+${scrapAmt} scrap`, odds: { ore: oreChance, scrap: 1 - oreChance } };
+    }
+
+    const ROVER_ZOOM_STEPS = [1, 2, 4, 6, 8, 10];
+
+    function roverZoomIn() {
+      const rv = ROVER_GAME;
+      const idx = ROVER_ZOOM_STEPS.indexOf(rv.zoom);
+      if (idx < ROVER_ZOOM_STEPS.length - 1) rv.zoom = ROVER_ZOOM_STEPS[idx + 1];
+    }
+
+    function roverZoomOut() {
+      const rv = ROVER_GAME;
+      const idx = ROVER_ZOOM_STEPS.indexOf(rv.zoom);
+      if (idx > 0) rv.zoom = ROVER_ZOOM_STEPS[idx - 1];
+    }
+
+    /**
+     * Build items for Rover menu
+     */
+    function buildRoverItems(options = {}) {
+      // Start the rover game when the menu opens
+      if (!ROVER_GAME.active) roverStart();
+
+      const items = [
+        {
+          type: 'setting',
+          label: 'Ship Ore',
+          value: `${invGet('ore')}`,
+          valueAttr: 'data-rover-ore',
+          actions: []
+        },
+        {
+          type: 'setting',
+          label: 'Ship Scrap',
+          value: `${invGet('scrap')}`,
+          valueAttr: 'data-rover-scrap',
+          actions: []
+        }
+      ];
+
+      return items;
+    }
+
     /**
      * Build items for Game Menu
      */
@@ -4189,6 +5076,7 @@ ${rows.join('\n')}`;
         '- Cargo checks: use cargo.check (cargo station) or read State.inventory for counts.',
         '- Cargo trading: use cargo.buy.* or cargo.sell.* actions (example: cargo.buy.rations, cargo.sell.ore).',
         '- Credits low: cargo.sell.ore/ingot/rations; farm scrap/ore via sensors_scan (action tool) or drones.salvage; refine ore -> ingot.',
+        '- Rover Bay: use_station_action with action_key "rover.menu" runs an automated rover mission. Odds: 65% for ore (2-10 ore), 35% for scrap (4 scrap).',
         '- Sensors: use sensors_scan or sensors_deep_scan (action tools) to find anomalies/blueprints.',
         '- Filters low: cargo.buy.filter; life support uses filters.',
         '- Lights are NOT a station action; use toggle_system with system "lights" plus enabled true/false.',
@@ -8060,6 +8948,28 @@ ${rows.join('\n')}`;
             perform: () => restCrew(false)
           }
         ]
+      },
+      rover: {
+        label: 'Rover Bay',
+        width: MODULE_WIDTH,
+        station: { ...STATION_SIZE },
+        aiActions: [
+          {
+            key: 'rover.menu',
+            label: 'Deploy Rover',
+            roles: ['pilot', 'specialist', 'tech'],
+            produces: { ore: 1, scrap: 1 },
+            perform: (npc) => roverRunAutomatedMission(npc)
+          }
+        ],
+        actions: () => [
+          {
+            key: 'rover.menu',
+            label: 'Deploy Rover',
+            action: () => openMenu('rover'),
+            perform: (npc) => roverRunAutomatedMission(npc)
+          }
+        ]
       }
     };
 
@@ -8144,6 +9054,10 @@ ${rows.join('\n')}`;
       science: {
         label: 'Science',
         types: new Set(['computer'])
+      },
+      exploration: {
+        label: 'Exploration',
+        types: new Set(['rover'])
       }
     };
 
@@ -9642,6 +10556,21 @@ ${rows.join('\n')}`;
           fill: C.accent, opacity: 0.8 }));
         art.appendChild(mk('polygon', { points: `${screenX + screenW * 0.5 - 6},${screenY + screenH - 28} ${screenX + screenW * 0.5 + 6},${screenY + screenH - 28} ${screenX + screenW * 0.5},${screenY + screenH - 18}`,
           fill: C.accent, opacity: 0.8 }));
+      } else if (station.type === 'rover') {
+        // Rover bay art: small rover silhouette on terrain
+        const gy = screenY + screenH * 0.72;
+        art.appendChild(mk('rect', { x: screenX + 10, y: gy, width: screenW - 20, height: 4, rx: 2, ry: 2, fill: 'rgba(180,140,80,0.55)' }));
+        // Rover body
+        const rx = screenX + screenW * 0.38;
+        const ry2 = gy - 14;
+        art.appendChild(mk('rect', { x: rx, y: ry2, width: 36, height: 14, rx: 4, ry: 4, fill: C.warning, opacity: 0.85, stroke: 'rgba(0,0,0,0.4)', 'stroke-width': 1 }));
+        // Wheels
+        art.appendChild(mk('circle', { cx: rx + 8, cy: gy, r: 5, fill: '#333', stroke: 'rgba(255,255,255,0.25)', 'stroke-width': 1 }));
+        art.appendChild(mk('circle', { cx: rx + 28, cy: gy, r: 5, fill: '#333', stroke: 'rgba(255,255,255,0.25)', 'stroke-width': 1 }));
+        // Drill
+        art.appendChild(mk('polygon', { points: `${rx + 18},${gy + 2} ${rx + 14},${gy + 14} ${rx + 22},${gy + 14}`, fill: C.accent, opacity: 0.75 }));
+        // Signal dish
+        art.appendChild(mk('path', { d: `M ${rx + 30} ${ry2 - 2} Q ${rx + 38} ${ry2 - 14} ${rx + 42} ${ry2 - 2}`, fill: 'none', stroke: 'rgba(180,220,255,0.6)', 'stroke-width': 1.5 }));
       }
 
       parent.appendChild(group);
@@ -13310,6 +14239,14 @@ ${rows.join('\n')}`;
         panel.removeEventListener('keydown', panel.menuKeyHandler);
         panel.menuKeyHandler = null;
       }
+      // Stop rover game if running
+      if (ROVER_GAME.active) roverStop();
+      if (panel._roverKeyHandler) {
+        document.removeEventListener('keydown', panel._roverKeyHandler);
+        document.removeEventListener('keyup', panel._roverKeyUpHandler);
+        panel._roverKeyHandler = null;
+        panel._roverKeyUpHandler = null;
+      }
       state.ui.focusedButtonLabel = null;
       state.ui.menuStack = []; // Clear old menu stack
       state.ui.unifiedMenuStack = []; // Clear unified menu stack
@@ -14368,6 +15305,20 @@ ${rows.join('\n')}`;
       if (npc.log.length > 20) npc.log = npc.log.slice(-20);
     }
 
+    function formatNpcTaskResultDetail(task, result) {
+      if (!task || !result || typeof result !== 'object') return '';
+      const key = String(task.key || '').trim();
+      if (typeof result.logDetail === 'string' && result.logDetail.trim()) {
+        return result.logDetail.trim();
+      }
+      if (key === 'rover.menu' && Number.isFinite(result.amount)) {
+        const amount = Math.max(0, Math.floor(result.amount));
+        const resource = String(result.resource || '').trim().toLowerCase();
+        if (resource === 'ore' || resource === 'scrap') return `+${amount} ${resource}`;
+      }
+      return '';
+    }
+
     function npcHasRole(npc, required) {
       if (!required || !Array.isArray(required)) return true;
       return required.includes(npcRole(npc));
@@ -14465,7 +15416,11 @@ ${rows.join('\n')}`;
         npc.vx = 0;
         npc.task.progress += dt;
         if (npc.task.progress >= task.duration) {
-          if (typeof task.onComplete === 'function') task.onComplete(npc);
+          if (typeof task.onComplete === 'function') {
+            const completionResult = task.onComplete(npc);
+            const detail = formatNpcTaskResultDetail(task, completionResult);
+            if (detail) logNpcAction(npc, task.key || 'task', detail);
+          }
           npc.task = null;
           npc.mode = 'idle';
           npc.destinationType = null;
