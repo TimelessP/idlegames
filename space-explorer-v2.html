@@ -7655,6 +7655,35 @@ ${rows.join('\n')}`;
       };
     }
 
+    function lmStudioCollectCallsFromJsonText(text, calls) {
+      if (!text || !Array.isArray(calls)) return false;
+      try {
+        const normalized = lmStudioExtractJsonPayload(String(text));
+        if (!normalized) return false;
+        const parsed = JSON.parse(normalized);
+        let added = false;
+        if (parsed && Array.isArray(parsed.tool_calls)) {
+          for (const call of parsed.tool_calls) {
+            if (!call) continue;
+            const name = call.tool || call.name || (call.function && call.function.name);
+            const args = call.args || call.arguments || (call.function && call.function.arguments) || {};
+            if (name) {
+              calls.push({ name, args });
+              added = true;
+            }
+          }
+        } else if (parsed && (parsed.tool || parsed.name || (parsed.function && parsed.function.name))) {
+          const name = parsed.tool || parsed.name || (parsed.function && parsed.function.name);
+          const args = parsed.args || parsed.arguments || (parsed.function && parsed.function.arguments) || {};
+          calls.push({ name, args });
+          added = true;
+        }
+        return added;
+      } catch {
+        return false;
+      }
+    }
+
     function extractLmStudioToolCalls(payload) {
       const calls = [];
       if (payload && payload.message && typeof payload.message === 'object') {
@@ -7677,19 +7706,16 @@ ${rows.join('\n')}`;
           calls.push({ name: msg.function_call.name, args });
         }
         if (!calls.length && typeof msg.content === 'string') {
-          try {
-            const normalized = lmStudioExtractJsonPayload(msg.content);
-            const parsed = JSON.parse(normalized);
-            if (parsed && Array.isArray(parsed.tool_calls)) {
-              for (const call of parsed.tool_calls) {
-                if (call && call.tool && call.args) {
-                  calls.push({ name: call.tool, args: call.args });
-                }
-              }
-            } else if (parsed && parsed.tool && parsed.args) {
-              calls.push({ name: parsed.tool, args: parsed.args });
-            }
-          } catch {}
+          lmStudioCollectCallsFromJsonText(msg.content, calls);
+        }
+        if (!calls.length && Array.isArray(msg.content)) {
+          for (const chunk of msg.content) {
+            if (!chunk) continue;
+            const text = typeof chunk === 'string'
+              ? chunk
+              : (typeof chunk.text === 'string' ? chunk.text : (typeof chunk.content === 'string' ? chunk.content : ''));
+            if (text && lmStudioCollectCallsFromJsonText(text, calls)) break;
+          }
         }
       }
       if (!calls.length && Array.isArray(payload && payload.tool_calls)) {
@@ -7725,20 +7751,20 @@ ${rows.join('\n')}`;
             calls.push({ name: msg.function_call.name, args });
           }
           if (!calls.length && msg && typeof msg.content === 'string') {
-            try {
-              const normalized = lmStudioExtractJsonPayload(msg.content);
-              const parsed = JSON.parse(normalized);
-              if (parsed && Array.isArray(parsed.tool_calls)) {
-                for (const call of parsed.tool_calls) {
-                  if (call && call.tool && call.args) {
-                    calls.push({ name: call.tool, args: call.args });
-                  }
-                }
-              } else if (parsed && parsed.tool && parsed.args) {
-                calls.push({ name: parsed.tool, args: parsed.args });
-              }
-            } catch {}
+            lmStudioCollectCallsFromJsonText(msg.content, calls);
           }
+          if (!calls.length && msg && Array.isArray(msg.content)) {
+            for (const chunk of msg.content) {
+              if (!chunk) continue;
+              const text = typeof chunk === 'string'
+                ? chunk
+                : (typeof chunk.text === 'string' ? chunk.text : (typeof chunk.content === 'string' ? chunk.content : ''));
+              if (text && lmStudioCollectCallsFromJsonText(text, calls)) break;
+            }
+          }
+        }
+        if (!calls.length && typeof payload.output_text === 'string') {
+          lmStudioCollectCallsFromJsonText(payload.output_text, calls);
         }
         return calls;
       }
@@ -7761,9 +7787,17 @@ ${rows.join('\n')}`;
                 try { args = JSON.parse(args); } catch { args = {}; }
               }
               calls.push({ name: content.name, args });
+            } else {
+              const text = typeof content === 'string'
+                ? content
+                : (typeof content.text === 'string' ? content.text : (typeof content.content === 'string' ? content.content : ''));
+              if (text && lmStudioCollectCallsFromJsonText(text, calls)) break;
             }
           }
         }
+      }
+      if (!calls.length && typeof payload.output_text === 'string') {
+        lmStudioCollectCallsFromJsonText(payload.output_text, calls);
       }
       return calls;
     }
@@ -8018,6 +8052,26 @@ ${rows.join('\n')}`;
             body: baseNativeChat
           });
         }
+
+        // Compatibility fallback: some LM Studio builds reject /api/v1/chat payloads with 400,
+        // while OpenAI-compatible chat completions works.
+        const compatChat = {
+          model: modelKey,
+          messages,
+          stream: false
+        };
+        if (allowTools) {
+          plans.push({
+            mode: 'native-compat-chat-tools',
+            path: '/v1/chat/completions',
+            body: { ...compatChat, tools: lmStudioToolDefinitions(), tool_choice: 'auto' }
+          });
+        }
+        plans.push({
+          mode: 'native-compat-chat-json',
+          path: '/v1/chat/completions',
+          body: compatChat
+        });
 
         return plans;
       }
