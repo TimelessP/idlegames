@@ -1161,7 +1161,7 @@
         apiKey: '',
         modelOverride: '',
         autoLoadModel: 'mistralai/ministral-3-3b',
-        apiMode: 'openai-chat',
+        apiMode: 'lmstudio-chat',
         toolMode: 'auto',
         structuredOutput: true,
         maxPromptChars: 8000,
@@ -4372,7 +4372,7 @@
     }
 
     const LMS_PROVIDER_OPTIONS = ['lmstudio', 'openai-compat'];
-    const LMS_API_MODE_OPTIONS = ['openai-chat', 'openai-responses'];
+    const LMS_API_MODE_OPTIONS = ['lmstudio-chat', 'openai-chat', 'openai-responses'];
     const LMS_TOOL_MODE_OPTIONS = ['auto', 'native', 'json-only'];
 
     function lmStudioLabelForProvider(value) {
@@ -4381,6 +4381,7 @@
     }
 
     function lmStudioLabelForApiMode(value) {
+      if (value === 'lmstudio-chat') return 'LM Studio Chat';
       if (value === 'openai-responses') return 'Responses';
       return 'Chat Completions';
     }
@@ -4659,8 +4660,119 @@
       }
     }
 
-    function lmStudioTestConnection() {
-      return lmStudioRefreshModels(true);
+    async function lmStudioTestConnection() {
+      ensureLmStudioConfig();
+      const cfg = state.lmStudio;
+      const selectedApiMode = LMS_API_MODE_OPTIONS.includes(cfg.apiMode) ? cfg.apiMode : 'lmstudio-chat';
+
+      async function probe(path) {
+        try {
+          const res = await lmStudioFetch(path, { method: 'GET' });
+          if (!res.ok) return { ok: false, status: res.status };
+          const payload = await res.json().catch(() => ({}));
+          const list = Array.isArray(payload && payload.data)
+            ? payload.data
+            : (Array.isArray(payload && payload.models) ? payload.models : []);
+          const modelKeys = list
+            .map((item) => {
+              if (!item || typeof item !== 'object') return '';
+              return String(item.id || item.key || item.model || item.display_name || '').trim();
+            })
+            .filter(Boolean);
+          return { ok: true, status: res.status, count: list.length, modelKeys };
+        } catch (err) {
+          return { ok: false, error: err ? String(err.message || err) : 'Network error' };
+        }
+      }
+
+      async function probeInference(modelKey) {
+        if (!modelKey) return { ok: false, error: 'No model selected' };
+        const client = lmStudioOpenAiClient();
+        let path = '/api/v1/chat';
+        let body = {
+          model: modelKey,
+          messages: [{ role: 'user', content: 'ping' }],
+          stream: false
+        };
+        if (selectedApiMode === 'openai-chat') {
+          path = '/v1/chat/completions';
+        } else if (selectedApiMode === 'openai-responses') {
+          path = '/v1/responses';
+          body = {
+            model: modelKey,
+            input: [{ role: 'user', content: [{ type: 'input_text', text: 'ping' }] }],
+            stream: false,
+            max_output_tokens: 4
+          };
+        }
+
+        try {
+          const res = await client.request(path, {
+            method: 'POST',
+            body,
+            timeoutMs: 15000
+          });
+          if (!res.ok) {
+            return { ok: false, status: res.status, mode: selectedApiMode };
+          }
+          await client.readPayload(res);
+          return { ok: true, status: res.status, mode: selectedApiMode };
+        } catch (err) {
+          return {
+            ok: false,
+            error: err ? String(err.message || err) : 'Network error',
+            mode: selectedApiMode
+          };
+        }
+      }
+
+      const [nativeModels, openAiModels] = await Promise.all([
+        probe('/api/v1/models'),
+        probe('/v1/models')
+      ]);
+
+      const modelFromCfg = String(cfg.activeModelKey || cfg.modelOverride || '').trim();
+      const modelFromNative = nativeModels.ok && Array.isArray(nativeModels.modelKeys) ? nativeModels.modelKeys[0] : '';
+      const modelFromOpenAi = openAiModels.ok && Array.isArray(openAiModels.modelKeys) ? openAiModels.modelKeys[0] : '';
+      const probeModel = modelFromCfg || modelFromNative || modelFromOpenAi || '';
+      const inference = await probeInference(probeModel);
+
+      const endpointLabel = (result, shortName) => {
+        if (!result.ok) {
+          if (result.status) return `${shortName}: HTTP ${result.status}`;
+          return `${shortName}: FAIL`;
+        }
+        const count = Number.isFinite(result.count) ? result.count : 0;
+        return `${shortName}: OK (${count})`;
+      };
+
+      const inferenceLabel = (result) => {
+        const modeLabel = selectedApiMode === 'lmstudio-chat'
+          ? 'LM Chat'
+          : (selectedApiMode === 'openai-responses' ? 'Responses' : 'Chat');
+        if (!result.ok) {
+          if (result.status) return `${modeLabel}: HTTP ${result.status}`;
+          return `${modeLabel}: FAIL`;
+        }
+        return `${modeLabel}: OK`;
+      };
+
+      const allFailed = !nativeModels.ok && !openAiModels.ok && !inference.ok;
+      if (allFailed) {
+        const detail = inference.error || nativeModels.error || openAiModels.error || '';
+        cfg.lastError = detail ? `Connection failed: ${detail}` : 'Connection failed.';
+      } else {
+        cfg.lastError = '';
+      }
+
+      const message = [
+        endpointLabel(nativeModels, 'API'),
+        endpointLabel(openAiModels, 'OpenAI'),
+        inferenceLabel(inference)
+      ].join(' | ');
+      showMessage('LM STUDIO', message);
+      markDirty();
+      rebuildUnifiedMenuInPlace();
     }
 
     function buildLmStudioStateSnapshot() {
@@ -7545,6 +7657,53 @@ ${rows.join('\n')}`;
 
     function extractLmStudioToolCalls(payload) {
       const calls = [];
+      if (payload && payload.message && typeof payload.message === 'object') {
+        const msg = payload.message;
+        if (Array.isArray(msg.tool_calls)) {
+          for (const tool of msg.tool_calls) {
+            const name = tool.function && tool.function.name;
+            let args = tool.function && tool.function.arguments;
+            if (typeof args === 'string') {
+              try { args = JSON.parse(args); } catch { args = {}; }
+            }
+            if (name) calls.push({ name, args });
+          }
+        }
+        if (msg.function_call && msg.function_call.name) {
+          let args = msg.function_call.arguments;
+          if (typeof args === 'string') {
+            try { args = JSON.parse(args); } catch { args = {}; }
+          }
+          calls.push({ name: msg.function_call.name, args });
+        }
+        if (!calls.length && typeof msg.content === 'string') {
+          try {
+            const normalized = lmStudioExtractJsonPayload(msg.content);
+            const parsed = JSON.parse(normalized);
+            if (parsed && Array.isArray(parsed.tool_calls)) {
+              for (const call of parsed.tool_calls) {
+                if (call && call.tool && call.args) {
+                  calls.push({ name: call.tool, args: call.args });
+                }
+              }
+            } else if (parsed && parsed.tool && parsed.args) {
+              calls.push({ name: parsed.tool, args: parsed.args });
+            }
+          } catch {}
+        }
+      }
+      if (!calls.length && Array.isArray(payload && payload.tool_calls)) {
+        for (const call of payload.tool_calls) {
+          if (!call) continue;
+          const name = call.name || (call.function && call.function.name);
+          const rawArgs = call.arguments || (call.function && call.function.arguments);
+          let args = rawArgs;
+          if (typeof rawArgs === 'string') {
+            try { args = JSON.parse(rawArgs); } catch { args = {}; }
+          }
+          if (name) calls.push({ name, args });
+        }
+      }
       if (payload && Array.isArray(payload.choices)) {
         for (const choice of payload.choices) {
           const msg = choice && choice.message ? choice.message : null;
@@ -7622,6 +7781,25 @@ ${rows.join('\n')}`;
         return payload.output_text;
       }
       const fragments = [];
+      const topMessage = payload && payload.message && typeof payload.message === 'object'
+        ? payload.message
+        : null;
+      if (topMessage) {
+        if (typeof topMessage.content === 'string' && topMessage.content.length) {
+          fragments.push(topMessage.content);
+        } else {
+          const topContent = Array.isArray(topMessage.content) ? topMessage.content : [];
+          for (const chunk of topContent) {
+            if (!chunk) continue;
+            if ((chunk.type === 'output_text' || chunk.type === 'text') && typeof chunk.text === 'string') {
+              fragments.push(chunk.text);
+            }
+          }
+        }
+      }
+      if (typeof payload?.content === 'string' && payload.content.length) {
+        fragments.push(payload.content);
+      }
       const choices = Array.isArray(payload && payload.choices) ? payload.choices : [];
       for (const choice of choices) {
         const msg = choice && choice.message ? choice.message : null;
@@ -7682,6 +7860,19 @@ ${rows.join('\n')}`;
           }
           if (Array.isArray(msg.tool_calls)) summary.toolCallsCount = msg.tool_calls.length;
         }
+      }
+      if (!choice && payload && payload.message && typeof payload.message === 'object') {
+        const msg = payload.message;
+        if (typeof msg.content === 'string') {
+          summary.messageContentType = 'string';
+          summary.messageContentLength = msg.content.length;
+        } else if (Array.isArray(msg.content)) {
+          summary.messageContentType = 'array';
+          summary.messageContentLength = msg.content.length;
+        } else if (msg.content === null) {
+          summary.messageContentType = 'null';
+        }
+        if (Array.isArray(msg.tool_calls)) summary.toolCallsCount = msg.tool_calls.length;
       }
       try {
         summary.rawSnippet = JSON.stringify(payload).slice(0, 800);
@@ -7794,17 +7985,48 @@ ${rows.join('\n')}`;
       const cfg = state.lmStudio;
       const apiMode = LMS_API_MODE_OPTIONS.includes(cfg.apiMode) ? cfg.apiMode : 'openai-chat';
       const toolMode = LMS_TOOL_MODE_OPTIONS.includes(cfg.toolMode) ? cfg.toolMode : 'auto';
+      const promptText = String(input || '').trim() || 'ping';
+      const systemText = String(systemPrompt || '').trim();
+      const messages = systemText
+        ? [{ role: 'system', content: systemText }, { role: 'user', content: promptText }]
+        : [{ role: 'user', content: promptText }];
       const plans = [];
       const allowTools = toolMode !== 'json-only' && lmStudioSupportsTools(modelKey);
       const allowJsonFallback = toolMode !== 'native';
       const structuredOutput = cfg.structuredOutput && apiMode === 'openai-chat';
       const allowToolSchema = structuredOutput && lmStudioSupportsToolSchema(modelKey);
 
+      if (apiMode === 'lmstudio-chat') {
+        const baseNativeChat = {
+          model: modelKey,
+          messages,
+          stream: false
+        };
+
+        if (allowTools) {
+          plans.push({
+            mode: 'native-chat-tools',
+            path: '/api/v1/chat',
+            body: { ...baseNativeChat, tools: lmStudioToolDefinitions(), tool_choice: 'auto' }
+          });
+        }
+
+        if (allowJsonFallback) {
+          plans.push({
+            mode: 'native-chat-json',
+            path: '/api/v1/chat',
+            body: baseNativeChat
+          });
+        }
+
+        return plans;
+      }
+
       if (apiMode === 'openai-responses') {
         const baseResponses = {
           model: modelKey,
-          instructions: systemPrompt || undefined,
-          input,
+          instructions: systemText || undefined,
+          input: promptText,
           stream: false
         };
         if (allowTools) {
@@ -7826,11 +8048,8 @@ ${rows.join('\n')}`;
 
       const baseChat = {
         model: modelKey,
-        messages: systemPrompt
-          ? [{ role: 'system', content: systemPrompt }, { role: 'user', content: input }]
-          : [{ role: 'user', content: input }],
-        stream: false,
-        max_tokens: 1024
+        messages,
+        stream: false
       };
 
       if (allowTools) {
@@ -12364,7 +12583,7 @@ ${rows.join('\n')}`;
         apiKey: '',
         modelOverride: '',
         autoLoadModel: 'mistralai/ministral-3-3b',
-        apiMode: 'openai-chat',
+        apiMode: 'lmstudio-chat',
         toolMode: 'auto',
         structuredOutput: true,
         maxPromptChars: 8000,
