@@ -1194,7 +1194,7 @@
       pendingSpawn: null,
       
       // Sim state
-      sim: { dirty: true, saveAcc: 0, snap: true, sceneDirty: true },
+      sim: { dirty: true, saveAcc: 0, snap: true, sceneDirty: true, maxFps: 20 },
       
       // Animation state
       anim: { walkPhase: 0, walkSpeed: 12 },
@@ -1659,6 +1659,17 @@
         ]
       },
 
+      // Graphics Settings (submenu)
+      graphicsSettings: {
+        isRoot: false,
+        title: 'GRAPHICS',
+        overview: 'Display and performance options:',
+        itemBuilder: 'buildGraphicsSettingsItems',
+        actions: [
+          { label: 'Back', behavior: 'back' }
+        ]
+      },
+
       // New Game Confirmation (submenu)
       newGameConfirm: {
         isRoot: false,
@@ -1741,6 +1752,7 @@
       buildInsertModuleItems,
       buildPowerItems,
       buildGameMenuItems,
+      buildGraphicsSettingsItems,
       buildLmStudioSettingsItems,
       buildMessageAiItems,
       buildRoverItems,
@@ -3575,6 +3587,7 @@
       active: false,
       animFrame: null,
       lastTs: 0,
+      lastFrameTs: 0,
       // World state
       camX: 0,
       roverX: 200,
@@ -4264,6 +4277,13 @@
     function roverGameLoop(ts) {
       const rv = ROVER_GAME;
       if (!rv.active) return;
+      const maxFps = getGlobalMaxFps();
+      const minFrameMs = 1000 / Math.max(1, maxFps);
+      if (rv.lastFrameTs && (ts - rv.lastFrameTs) < minFrameMs) {
+        rv.animFrame = requestAnimationFrame(roverGameLoop);
+        return;
+      }
+      rv.lastFrameTs = ts;
       const dt = rv.lastTs ? Math.min((ts - rv.lastTs) / 1000, 0.1) : 0.016;
       rv.lastTs = ts;
       roverUpdate(dt);
@@ -4276,6 +4296,7 @@
       const rv = ROVER_GAME;
       rv.active = true;
       rv.lastTs = 0;
+      rv.lastFrameTs = 0;
       rv.camX = rv.roverX - 300;
       roverEnsureWorldObjects(rv.camX - 200, rv.camX + 900);
       rv.animFrame = requestAnimationFrame(roverGameLoop);
@@ -4292,6 +4313,7 @@
       rv.drilling = false;
       rv.drillProgress = 0;
       rv.drillTarget = null;
+      rv.lastFrameTs = 0;
     }
 
     function roverRunAutomatedMission(actor = null) {
@@ -4363,11 +4385,58 @@
           danger: true,
           action: () => openMenu('newGameConfirm')
         },
+        { type: 'action', label: 'Graphics', action: () => openMenu('graphicsSettings') },
         { type: 'action', label: 'LM Studio Settings', action: () => openMenu('lmStudioSettings') },
         { type: 'action', label: 'Export JSON', action: openExportPanel },
         { type: 'action', label: 'Import JSON', action: openImportPanel },
         { type: 'divider' },
         { type: 'action', label: 'Exit Game', danger: true, action: () => { window.location.href = 'index.html'; } }
+      ];
+    }
+
+    const GRAPHICS_FPS_OPTIONS = [20, 30, 40, 60];
+
+    function getGlobalMaxFps() {
+      const candidate = state && state.sim ? Number(state.sim.maxFps) : NaN;
+      const normalized = Number.isFinite(candidate) ? Math.floor(candidate) : 20;
+      return GRAPHICS_FPS_OPTIONS.includes(normalized) ? normalized : 20;
+    }
+
+    function setGlobalMaxFps(nextFps) {
+      if (!state.sim || typeof state.sim !== 'object') {
+        state.sim = { dirty: true, saveAcc: 0, snap: true, sceneDirty: true, maxFps: 20 };
+      }
+      const parsed = Number(nextFps);
+      const value = Number.isFinite(parsed) ? Math.floor(parsed) : 20;
+      state.sim.maxFps = GRAPHICS_FPS_OPTIONS.includes(value) ? value : 20;
+      markDirty();
+    }
+
+    function decreaseGlobalMaxFps() {
+      const current = getGlobalMaxFps();
+      const idx = Math.max(0, GRAPHICS_FPS_OPTIONS.indexOf(current));
+      if (idx > 0) setGlobalMaxFps(GRAPHICS_FPS_OPTIONS[idx - 1]);
+      rebuildUnifiedMenuInPlace();
+    }
+
+    function increaseGlobalMaxFps() {
+      const current = getGlobalMaxFps();
+      const idx = Math.max(0, GRAPHICS_FPS_OPTIONS.indexOf(current));
+      if (idx < GRAPHICS_FPS_OPTIONS.length - 1) setGlobalMaxFps(GRAPHICS_FPS_OPTIONS[idx + 1]);
+      rebuildUnifiedMenuInPlace();
+    }
+
+    function buildGraphicsSettingsItems(options = {}) {
+      return [
+        {
+          type: 'setting',
+          label: 'Global Max FPS',
+          value: `${getGlobalMaxFps()}`,
+          actions: [
+            { label: '-', action: decreaseGlobalMaxFps, behavior: 'keep-open' },
+            { label: '+', action: increaseGlobalMaxFps, behavior: 'keep-open' }
+          ]
+        }
       ];
     }
 
@@ -12186,9 +12255,7 @@ ${rows.join('\n')}`;
       }
     }
 
-    // Fixed timestep game loop (20 FPS like original)
-    const FIXED_FPS = 20;
-    const STEP = 1 / FIXED_FPS;
+    // Fixed timestep game loop (global max FPS configurable in Graphics settings)
     const MAX_CATCHUP_STEPS = 5;
     let lastTs = null;
     let acc = 0;
@@ -12212,17 +12279,25 @@ ${rows.join('\n')}`;
 
     function gameLoop(ts) {
       if (lastTs === null) lastTs = ts;
+      const maxFps = getGlobalMaxFps();
+      const minFrameMs = 1000 / Math.max(1, maxFps);
+      const elapsedSinceLast = ts - lastTs;
+      if (elapsedSinceLast < minFrameMs) {
+        requestAnimationFrame(gameLoop);
+        return;
+      }
       const deltaMs = Math.min(ts - lastTs, 50);
       lastTs = ts;
       acc += deltaMs / 1000;
+      const step = 1 / Math.max(1, maxFps);
 
       let steps = 0;
-      while (acc >= STEP && steps < MAX_CATCHUP_STEPS) {
-        updatePlayer(STEP);
-        updateNPCs(STEP);
-        systemsTick(STEP);
+      while (acc >= step && steps < MAX_CATCHUP_STEPS) {
+        updatePlayer(step);
+        updateNPCs(step);
+        systemsTick(step);
         
-        state.sim.saveAcc += STEP;
+        state.sim.saveAcc += step;
         if (state.sim.saveAcc >= 10) {
           if (state.sim.dirty) {
             saveGame();
@@ -12230,7 +12305,7 @@ ${rows.join('\n')}`;
           state.sim.saveAcc = 0;
         }
         
-        acc -= STEP;
+        acc -= step;
         steps++;
       }
 
@@ -14574,6 +14649,7 @@ ${rows.join('\n')}`;
 
     function newGame() {
       const lmStudioConfig = state.lmStudio ? { ...state.lmStudio } : null;
+      const maxFps = getGlobalMaxFps();
       try {
         localStorage.removeItem(STORAGE_KEY);
       } catch {}
@@ -14661,6 +14737,7 @@ ${rows.join('\n')}`;
       rebuildCharactersState();
       state.meta.autoAt = 2;
       state.sim.snap = true;
+      state.sim.maxFps = maxFps;
       ensureBlueprints();
       ensureContracts();
       markDirty();
@@ -14831,6 +14908,7 @@ ${rows.join('\n')}`;
     function getSaveData() {
       return {
         v: 2,
+        simMaxFps: getGlobalMaxFps(),
         shipLayout: SHIP_LAYOUT,
         level: state.currentLevel,
         corridor: state.currentCorridor,
@@ -14968,6 +15046,8 @@ ${rows.join('\n')}`;
     function loadGame() {
       try {
         const data = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+        if (!state.sim || typeof state.sim !== 'object') state.sim = { dirty: true, saveAcc: 0, snap: true, sceneDirty: true, maxFps: 20 };
+        if (Number.isFinite(data.simMaxFps)) state.sim.maxFps = Math.floor(data.simMaxFps);
         if (data.shipLayout && data.shipLayout.levels) SHIP_LAYOUT = data.shipLayout;
         if (data.level) state.currentLevel = data.level;
         if (data.corridor) state.currentCorridor = data.corridor;
@@ -15086,6 +15166,9 @@ ${rows.join('\n')}`;
         if (!state.notifications || !Array.isArray(state.notifications)) state.notifications = [];
         if (!state.aiBlockers || typeof state.aiBlockers !== 'object') state.aiBlockers = {};
         if (!state.meta || typeof state.meta !== 'object') state.meta = { inventoryAcc: 0, powerShedAt: 0, autoAt: 0 };
+        if (!state.sim || typeof state.sim !== 'object') state.sim = { dirty: true, saveAcc: 0, snap: true, sceneDirty: true, maxFps: 20 };
+        if (!Number.isFinite(state.sim.maxFps)) state.sim.maxFps = 20;
+        if (!GRAPHICS_FPS_OPTIONS.includes(Math.floor(state.sim.maxFps))) state.sim.maxFps = 20;
         ensureCrewAI();
         ensureLmStudioConfig();
         ensureSpacebook();
