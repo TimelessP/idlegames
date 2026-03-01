@@ -2627,6 +2627,21 @@
                         showHud('Boarded wagon \u2014 A/D drive, W dismount');
                     },
                 });
+
+                if (state.wagon.broken && countItemInWagon('wood') >= 2) {
+                    actions.push({
+                        label: '🛠️ Repair Wheel (2 Wood)',
+                        run: function () {
+                            if (!consumeItemFromWagon('wood', 2)) {
+                                showHud('Need 2 wood in wagon to repair.');
+                                return;
+                            }
+                            state.wagon.broken = false;
+                            state.wagon.wheelHealth = 70;
+                            showHud('🛠️ Repaired wheel with 2 wood.');
+                        },
+                    });
+                }
             }
 
             // Near river
@@ -2714,6 +2729,21 @@
                 const nearCFw = findNearbyCampfire(px, 40);
                 if (nearCFw) {
                     actions.push({ label: 'Camp', opensMenu: true, run: function () { openMenu('campfire'); } });
+                }
+
+                if (state.wagon.broken && countItemInWagon('wood') >= 2) {
+                    actions.push({
+                        label: '🛠️ Repair Wheel (2 Wood)',
+                        run: function () {
+                            if (!consumeItemFromWagon('wood', 2)) {
+                                showHud('Need 2 wood in wagon to repair.');
+                                return;
+                            }
+                            state.wagon.broken = false;
+                            state.wagon.wheelHealth = 70;
+                            showHud('🛠️ Repaired wheel with 2 wood.');
+                        },
+                    });
                 }
             }
 
@@ -2877,6 +2907,7 @@
                 updateStats();
 
                 state.elapsed += dt;
+                maybeAutoSave();
             } else if (resultViewMode) {
                 // Pan camera with A/D in result view
                 const panSpeed = RESULT_VIEW_PAN_SPEED * dt;
@@ -2897,6 +2928,7 @@
             }
 
             state.animFrame += dt * BASE_FPS;
+            maybeAutoSave();
         }
 
         // ---------- DOM stat counters ----------
@@ -4140,17 +4172,58 @@
             showHud('🔥 Campfire lit! Rest by the fire.');
         }
 
+        function countItemInWagon(itemType) {
+            let count = 0;
+            for (let i = 0; i < WAGON_SLOTS; i++) {
+                if (state.wagon.slots[i] === itemType) count++;
+            }
+            return count;
+        }
+
+        function consumeItemFromWagon(itemType, amount) {
+            let remaining = amount;
+            for (let i = 0; i < WAGON_SLOTS && remaining > 0; i++) {
+                if (state.wagon.slots[i] === itemType) {
+                    state.wagon.slots[i] = null;
+                    remaining--;
+                }
+            }
+            return remaining === 0;
+        }
+
+        function storeItemInWagon(itemType) {
+            const def = ITEM_DEFS[itemType];
+            if (!def) return false;
+            const slotsNeeded = def.slots || 1;
+            for (let i = 0; i <= WAGON_SLOTS - slotsNeeded; i++) {
+                let fits = true;
+                for (let s = 0; s < slotsNeeded; s++) {
+                    if (state.wagon.slots[i + s] !== null) { fits = false; break; }
+                }
+                if (!fits) continue;
+                for (let s = 0; s < slotsNeeded; s++) {
+                    state.wagon.slots[i + s] = itemType;
+                }
+                return true;
+            }
+            return false;
+        }
+
         // --- Resource Actions ---
         function fishAtRiver() {
             // 60% success
             if (Math.random() < 0.6) {
-                state.groundItems.push({
-                    id: nextItemId++,
-                    type: 'fish',
-                    x: state.player.x + 15,
-                    y: PATH_CENTER_Y + 5,
-                });
-                showHud('🎣 You caught a fish!');
+                if (storeItemInWagon('fish')) {
+                    showHud('🎣 You caught a fish and stowed it in the wagon!');
+                } else {
+                    state.groundItems.push({
+                        id: nextItemId++,
+                        type: 'fish',
+                        x: state.player.x + 15,
+                        y: PATH_CENTER_Y + 5,
+                    });
+                    showHud('🎣 You caught a fish, but wagon is full (dropped on ground).');
+                }
             } else {
                 showHud('🎣 Nothing biting today...');
             }
@@ -4190,13 +4263,17 @@
         }
 
         function chopTree() {
-            state.groundItems.push({
-                id: nextItemId++,
-                type: 'wood',
-                x: state.player.x + 10,
-                y: PATH_CENTER_Y + 5,
-            });
-            showHud('🪓 Chopped wood!');
+            if (storeItemInWagon('wood')) {
+                showHud('🪓 Chopped wood and stowed it in the wagon!');
+            } else {
+                state.groundItems.push({
+                    id: nextItemId++,
+                    type: 'wood',
+                    x: state.player.x + 10,
+                    y: PATH_CENTER_Y + 5,
+                });
+                showHud('🪓 Chopped wood, but wagon is full (dropped on ground).');
+            }
         }
 
         function convertToRaft() {
@@ -4464,6 +4541,155 @@
             updateCameraFollow();
         }
 
+        // ===================== 6.5 SAVE/RESTORE =====================
+
+        const SAVE_KEY = 'idlegames-oxtrail-save-v1';
+        const AUTO_SAVE_INTERVAL_MS = 400;
+        let lastAutoSaveAt = 0;
+
+        function buildSavePayload() {
+            return {
+                v: 1,
+                savedAt: Date.now(),
+                state: state,
+                meta: {
+                    nextItemId: nextItemId,
+                    lastCheckedSegment: lastCheckedSegment,
+                    eventCooldownSegments: eventCooldownSegments,
+                    resultViewMode: resultViewMode,
+                },
+            };
+        }
+
+        function saveGameNow() {
+            try {
+                localStorage.setItem(SAVE_KEY, JSON.stringify(buildSavePayload()));
+                lastAutoSaveAt = Date.now();
+            } catch (err) {
+                // Ignore quota/storage failures silently; gameplay should continue.
+            }
+        }
+
+        function maybeAutoSave(force) {
+            if (!force) {
+                const now = Date.now();
+                if (now - lastAutoSaveAt < AUTO_SAVE_INTERVAL_MS) return;
+            }
+            saveGameNow();
+        }
+
+        function clearSavedGame() {
+            try { localStorage.removeItem(SAVE_KEY); } catch (err) {}
+        }
+
+        function deriveWorldWidthFromSegments(segments) {
+            if (!Array.isArray(segments) || segments.length === 0) return 0;
+            const last = segments[segments.length - 1];
+            return Math.max(0, (last.startX || 0) + (last.width || 0));
+        }
+
+        function hydrateStateFromSave(savedState) {
+            const base = freshState();
+            const loaded = savedState || {};
+
+            const player = Object.assign({}, base.player, loaded.player || {});
+            const wagon = Object.assign({}, base.wagon, loaded.wagon || {});
+            const world = Object.assign({}, base.world, loaded.world || {});
+
+            const oxen = Array.isArray(loaded.oxen) && loaded.oxen.length > 0
+                ? loaded.oxen.map(function (ox) {
+                    return Object.assign({
+                        name: 'Ox', health: 100, hunger: 0, thirst: 0,
+                        hitched: true, alive: true,
+                        x: player.x, y: PATH_CENTER_Y - OX_FEET_OFFSET,
+                    }, ox || {});
+                })
+                : base.oxen;
+
+            return {
+                player: player,
+                wagon: wagon,
+                oxen: oxen,
+                world: world,
+                campfires: Array.isArray(loaded.campfires) ? loaded.campfires : [],
+                groundItems: Array.isArray(loaded.groundItems) ? loaded.groundItems : [],
+                events: Object.assign({}, base.events, loaded.events || {}),
+                npcs: Array.isArray(loaded.npcs) ? loaded.npcs : [],
+                walkCycle: Number(loaded.walkCycle) || 0,
+                animFrame: Number(loaded.animFrame) || 0,
+                bobPhase: Number.isFinite(loaded.bobPhase) ? loaded.bobPhase : base.bobPhase,
+                moves: Number(loaded.moves) || 0,
+                elapsed: Number(loaded.elapsed) || 0,
+                startTime: Number(loaded.startTime) || 0,
+                timerRunning: !!loaded.timerRunning,
+                distanceTravelled: Number(loaded.distanceTravelled) || 0,
+                destinationDistance: Number(loaded.destinationDistance) || 0,
+                gameOver: !!loaded.gameOver,
+                won: !!loaded.won,
+                menuOpen: false,
+                menuStack: [],
+            };
+        }
+
+        function loadSavedGame() {
+            let raw = null;
+            try {
+                raw = localStorage.getItem(SAVE_KEY);
+            } catch (err) {
+                return false;
+            }
+            if (!raw) return false;
+
+            let payload;
+            try {
+                payload = JSON.parse(raw);
+            } catch (err) {
+                clearSavedGame();
+                return false;
+            }
+            if (!payload || payload.v !== 1 || !payload.state) {
+                clearSavedGame();
+                return false;
+            }
+
+            const hydrated = hydrateStateFromSave(payload.state);
+            if (!hydrated.world || !Array.isArray(hydrated.world.segments) || hydrated.world.segments.length === 0) {
+                clearSavedGame();
+                return false;
+            }
+
+            state = hydrated;
+            nextItemId = (payload.meta && Number(payload.meta.nextItemId)) || 1;
+            lastCheckedSegment = (payload.meta && Number(payload.meta.lastCheckedSegment)) || -1;
+            eventCooldownSegments = (payload.meta && Number(payload.meta.eventCooldownSegments));
+            if (!Number.isFinite(eventCooldownSegments)) eventCooldownSegments = 3;
+            resultViewMode = payload.meta && payload.meta.resultViewMode ? payload.meta.resultViewMode : null;
+            lastFrameTime = 0;
+            accumulator = 0;
+
+            W = deriveWorldWidthFromSegments(state.world.segments);
+            if (!W || W <= 0) {
+                clearSavedGame();
+                return false;
+            }
+            state.destinationDistance = Math.max(state.destinationDistance || 0, W);
+            const totalEl = document.getElementById('totalDistance');
+            if (totalEl) totalEl.textContent = Math.floor(state.destinationDistance);
+
+            fitCanvas();
+            dynamicGroup = null;
+            svg.innerHTML = '';
+            drawScenery();
+            render();
+            updateStats();
+            updateActionLabel();
+
+            if (!state.gameOver) startTimerIfNeeded();
+
+            showHud('🧭 Journey restored from last save.');
+            return true;
+        }
+
         // ===================== 7. INITIALIZATION =====================
 
         function startNewGame() {
@@ -4508,10 +4734,13 @@
 
             showHud('Your journey begins... use WASD to move, E to interact.');
             startTimerIfNeeded();
+            maybeAutoSave(true);
         }
 
         function init() {
-            startNewGame();
+            if (!loadSavedGame()) {
+                startNewGame();
+            }
             requestAnimationFrame(gameLoop);
 
             // Show help on first visit
@@ -4527,6 +4756,7 @@
 
         // --- New Game ---
         document.getElementById('newGameBtn').addEventListener('click', function () {
+            clearSavedGame();
             startNewGame();
         });
 
@@ -4544,6 +4774,7 @@
         document.getElementById('playAgainBtn').addEventListener('click', function () {
             const winModal = document.getElementById('winModal');
             if (winModal) winModal.classList.remove('open');
+            clearSavedGame();
             startNewGame();
         });
         document.getElementById('viewResultBtn').addEventListener('click', function () {
@@ -4556,6 +4787,7 @@
         document.getElementById('tryAgainBtn').addEventListener('click', function () {
             const failModal = document.getElementById('failModal');
             if (failModal) failModal.classList.remove('open');
+            clearSavedGame();
             startNewGame();
         });
         document.getElementById('viewFailResultBtn').addEventListener('click', function () {
@@ -4646,6 +4878,17 @@
         // --- Window resize ---
         window.addEventListener('resize', function () {
             fitCanvas();
+        });
+
+        // --- Save on background/close ---
+        window.addEventListener('pagehide', function () {
+            maybeAutoSave(true);
+        });
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) maybeAutoSave(true);
+        });
+        window.addEventListener('beforeunload', function () {
+            maybeAutoSave(true);
         });
 
         // --- Initialize on load ---
