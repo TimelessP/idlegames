@@ -143,6 +143,27 @@ For one-finger play on mobile and pointer play on desktop:
 - Press on player to trigger action
 - Latch pointer mode until release for stable behavior
 
+Result View mode exception:
+- Determine left/right pan intent relative to **viewport center**, not player position
+- Re-evaluate direction during pointer drag so crossing center flips pan direction immediately
+
+Reference implementation:
+
+```javascript
+svg.addEventListener('pointermove', (ev) => {
+  if (stagePointerId !== ev.pointerId) return;
+  ev.preventDefault();
+
+  if (state.gameOver && resultViewMode) {
+    const world = clientToWorld(ev.clientX, ev.clientY);
+    const viewportCenterX = camera.x + camera.viewW * 0.5;
+    stagePointerMode = world.x < viewportCenterX ? 'left' : 'right';
+  }
+
+  applyStagePointerMode();
+});
+```
+
 ### 4) Prevent Browser Gesture Interference
 
 Use:
@@ -266,6 +287,7 @@ For game-over states, provide:
 - Primary modal actions (`Play Again`, `Try Again`, share)
 - A `View` action to close modal but keep result state active
 - Reopen behavior on explicit interaction while in result-view mode
+- View-mode panning semantics tied to camera viewport center for intuitive off-screen navigation
 
 This allows players to inspect the final scene without losing context.
 
@@ -323,6 +345,10 @@ For input/camera changes, validate manually:
 ### Pointer feels offset from visuals
 - Cause: ignoring SVG rendered-letterbox offsets
 - Fix: convert client coordinates using rendered viewport offset and scale
+
+### View mode pans wrong direction
+- Cause: comparing stage click against player world position while player is off-screen
+- Fix: compare pointer world X against `camera.x + camera.viewW * 0.5` and update this continuously during drag
 
 ### Runtime error from early variable use
 - Cause: event handlers referencing stage/camera before initialization
