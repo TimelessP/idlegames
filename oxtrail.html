@@ -837,6 +837,7 @@
                     camped: false,
                     nightPromptShown: false,
                 },
+                homes: [], // { x, y, scale }
                 campfires: [], // { x, y, fuel: 0-1, segmentIdx }
                 groundItems: [], // { id, type, x, y }
                 events: { active: null, queue: [] },
@@ -2346,6 +2347,14 @@
             return null;
         }
 
+        function findNearbyHome(px, range) {
+            for (let i = 0; i < state.homes.length; i++) {
+                const home = state.homes[i];
+                if (Math.abs(home.x - px) < range) return home;
+            }
+            return null;
+        }
+
         // Visual-center helpers for asymmetric sprites
         function oxVisualCenter(ox) {
             // All player oxen are rendered with state.wagon.facing
@@ -2652,6 +2661,15 @@
 
             // Forest with nearby tree → chop
             const currentSeg = getCurrentSegment();
+
+            // Build house (on foot only, on land, enough wagon wood)
+            if (currentSeg && currentSeg.type !== 'river' && countItemInWagon('wood') >= 6) {
+                actions.push({
+                    label: '🏠 Build House (6 Wood)',
+                    run: function () { buildHome(); },
+                });
+            }
+
             if (currentSeg.type === 'forest') {
                 const nearTree = currentSeg.features.find(function (f) {
                     return f.kind === 'tree' && Math.abs(f.x - px) < 50;
@@ -2711,6 +2729,15 @@
                 }
             }
 
+            // Near home
+            const nearHome = findNearbyHome(px, 55);
+            if (nearHome) {
+                actions.push({
+                    label: '🏠 Rest at Home',
+                    run: function () { restAtHome(); },
+                });
+            }
+
             } // end on-foot-only block
 
             // --- Actions available from wagon seat too ---
@@ -2726,6 +2753,19 @@
 
             // Near campfire (wagon can be near a campfire)
             if (onWagon) {
+                const riverSegW = getRiverSegmentNear(px, 30);
+                if (riverSegW) {
+                    actions.push({ label: 'River', opensMenu: true, run: function () { openMenu('river'); } });
+                }
+
+                const nearHomeW = findNearbyHome(px, 55);
+                if (nearHomeW) {
+                    actions.push({
+                        label: '🏠 Rest at Home',
+                        run: function () { restAtHome(); },
+                    });
+                }
+
                 const nearCFw = findNearbyCampfire(px, 40);
                 if (nearCFw) {
                     actions.push({ label: 'Camp', opensMenu: true, run: function () { openMenu('campfire'); } });
@@ -2791,6 +2831,17 @@
             // Collect all dynamic entities with their base y-position for z-sorting.
             // Base y = the bottom/feet position of the entity (higher y = further down screen = drawn later = on top).
             const entities = [];
+
+            // Player-built homes
+            const scene = getScenePalette();
+            for (let i = 0; i < state.homes.length; i++) {
+                const home = state.homes[i];
+                if (home.x < cullLeft || home.x > cullRight) continue;
+                entities.push({
+                    y: home.y,
+                    draw: function () { drawHouse(home.x, home.y, home.scale || 0.85, scene, dynamicGroup); },
+                });
+            }
 
             // Campfires
             for (let i = 0; i < state.campfires.length; i++) {
@@ -4074,9 +4125,32 @@
                     showHud(event.msg);
                     break;
                 case 'stray_ox': {
-                    const seg = getCurrentSegment();
-                    seg.hasStrayOx = true;
-                    showHud(event.msg);
+                    const currentIdx = getSegmentAt(state.player.x);
+                    let targetSeg = null;
+
+                    if (state.world.segments[currentIdx] && state.world.segments[currentIdx].type !== 'river') {
+                        targetSeg = state.world.segments[currentIdx];
+                    } else {
+                        for (let radius = 1; radius < state.world.segments.length && !targetSeg; radius++) {
+                            const leftIdx = currentIdx - radius;
+                            const rightIdx = currentIdx + radius;
+                            if (leftIdx >= 0) {
+                                const leftSeg = state.world.segments[leftIdx];
+                                if (leftSeg && leftSeg.type !== 'river') targetSeg = leftSeg;
+                            }
+                            if (!targetSeg && rightIdx < state.world.segments.length) {
+                                const rightSeg = state.world.segments[rightIdx];
+                                if (rightSeg && rightSeg.type !== 'river') targetSeg = rightSeg;
+                            }
+                        }
+                    }
+
+                    if (targetSeg) {
+                        targetSeg.hasStrayOx = true;
+                        showHud(event.msg);
+                    } else {
+                        showHud('No safe ground nearby for a stray ox.');
+                    }
                     break;
                 }
                 case 'bandit': {
@@ -4172,6 +4246,64 @@
             showHud('🔥 Campfire lit! Rest by the fire.');
         }
 
+        function buildHome() {
+            const seg = getCurrentSegment();
+            if (!seg || seg.type === 'river') {
+                showHud('You can only build on land.');
+                return;
+            }
+
+            if (countItemInWagon('wood') < 6) {
+                showHud('Need 6 wood in wagon to build a house.');
+                return;
+            }
+
+            const existing = findNearbyHome(state.player.x, 90);
+            if (existing) {
+                showHud('There is already a home nearby.');
+                return;
+            }
+
+            if (!consumeItemFromWagon('wood', 6)) {
+                showHud('Need 6 wood in wagon to build a house.');
+                return;
+            }
+
+            state.homes.push({
+                x: state.player.x,
+                y: GROUND_Y,
+                scale: 0.85,
+            });
+            showHud('🏠 You built a home on the trail.');
+        }
+
+        function restAtHome() {
+            if (state.gameOver) return;
+
+            state.player.health = 100;
+            state.player.hunger = 0;
+            state.player.thirst = 0;
+
+            for (let i = 0; i < state.oxen.length; i++) {
+                const ox = state.oxen[i];
+                if (!ox.alive) continue;
+                ox.health = 100;
+                ox.hunger = 0;
+                ox.thirst = 0;
+            }
+
+            // Match camp sleep behavior
+            state.world.dayTime = 0.3;
+            state.world.camped = true;
+            state.world.day++;
+            state.world.weather = 'clear';
+            state.world.weatherTimer = 300;
+
+            drawScenery();
+            showHud('🏠 Rested at home. Everyone is fully recovered.');
+            closeMenu();
+        }
+
         function countItemInWagon(itemType) {
             let count = 0;
             for (let i = 0; i < WAGON_SLOTS; i++) {
@@ -4211,18 +4343,33 @@
 
         // --- Resource Actions ---
         function fishAtRiver() {
-            // 60% success
-            if (Math.random() < 0.6) {
-                if (storeItemInWagon('fish')) {
-                    showHud('🎣 You caught a fish and stowed it in the wagon!');
+            // Loot table (works from bank and raft):
+            // 10% wagon wheel, 10% wood, 60% fish, 20% nothing
+            const roll = Math.random();
+            let catchType = null;
+            let catchLabel = '';
+            if (roll < 0.10) {
+                catchType = 'wagon_wheel';
+                catchLabel = '🛞 You fished up a wagon wheel!';
+            } else if (roll < 0.20) {
+                catchType = 'wood';
+                catchLabel = '🪵 You fished up driftwood!';
+            } else if (roll < 0.80) {
+                catchType = 'fish';
+                catchLabel = '🐟 You caught a fish!';
+            }
+
+            if (catchType) {
+                if (storeItemInWagon(catchType)) {
+                    showHud(catchLabel + ' Stowed in wagon.');
                 } else {
                     state.groundItems.push({
                         id: nextItemId++,
-                        type: 'fish',
+                        type: catchType,
                         x: state.player.x + 15,
                         y: PATH_CENTER_Y + 5,
                     });
-                    showHud('🎣 You caught a fish, but wagon is full (dropped on ground).');
+                    showHud(catchLabel + ' Wagon is full (dropped on ground).');
                 }
             } else {
                 showHud('🎣 Nothing biting today...');
@@ -4548,10 +4695,35 @@
         let lastAutoSaveAt = 0;
 
         function buildSavePayload() {
+            const snapshot = {
+                player: state.player,
+                wagon: state.wagon,
+                oxen: state.oxen,
+                world: state.world,
+                homes: state.homes,
+                campfires: state.campfires,
+                groundItems: state.groundItems,
+                events: state.events,
+                npcs: state.npcs,
+                walkCycle: state.walkCycle,
+                animFrame: state.animFrame,
+                bobPhase: state.bobPhase,
+                moves: state.moves,
+                elapsed: state.elapsed,
+                startTime: state.startTime,
+                timerRunning: state.timerRunning,
+                distanceTravelled: state.distanceTravelled,
+                destinationDistance: state.destinationDistance,
+                gameOver: state.gameOver,
+                won: state.won,
+                // UI/transient fields intentionally excluded from persistence:
+                // menuOpen/menuStack
+            };
+
             return {
                 v: 1,
                 savedAt: Date.now(),
-                state: state,
+                state: snapshot,
                 meta: {
                     nextItemId: nextItemId,
                     lastCheckedSegment: lastCheckedSegment,
@@ -4611,6 +4783,7 @@
                 wagon: wagon,
                 oxen: oxen,
                 world: world,
+                homes: Array.isArray(loaded.homes) ? loaded.homes : [],
                 campfires: Array.isArray(loaded.campfires) ? loaded.campfires : [],
                 groundItems: Array.isArray(loaded.groundItems) ? loaded.groundItems : [],
                 events: Object.assign({}, base.events, loaded.events || {}),
@@ -4706,6 +4879,7 @@
 
             // Reset state
             state = freshState();
+            state.homes = [];
             nextItemId = 1;
             lastCheckedSegment = -1;
             eventCooldownSegments = 3;
