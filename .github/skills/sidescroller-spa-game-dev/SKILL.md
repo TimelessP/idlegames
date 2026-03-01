@@ -187,29 +187,58 @@ function updateCameraFollow(targetX) {
 }
 ```
 
-### Pointer Mapping with Letterboxing (Critical)
+### Pointer Mapping with Dynamic `preserveAspectRatio` (Critical)
 
-When `preserveAspectRatio="xMidYMid meet"`, pointer coordinates must account for rendered-content offsets, not only element bounds:
+When camera/viewport alignment can switch (`xMin` / `xMid` / `xMax`) or aspect changes frequently, **prefer CTM-based conversion** instead of hand-computing offsets.
 
 ```javascript
-function clientToWorld(clientX, clientY, svg) {
-  const rect = svg.getBoundingClientRect();
-  const view = svg.viewBox.baseVal;
-  const scale = Math.min(rect.width / view.width, rect.height / view.height);
-  const renderedW = view.width * scale;
-  const renderedH = view.height * scale;
-  const offsetX = (rect.width - renderedW) / 2;
-  const offsetY = (rect.height - renderedH) / 2;
-  const localX = clientX - rect.left - offsetX;
-  const localY = clientY - rect.top - offsetY;
-  return {
-    x: view.x + Math.max(0, Math.min(1, localX / renderedW)) * view.width,
-    y: view.y + Math.max(0, Math.min(1, localY / renderedH)) * view.height,
-  };
+function clientToWorld(clientX, clientY, svg, camera) {
+  const ctm = svg.getScreenCTM();
+  if (!ctm) {
+    return {
+      x: camera.x + camera.viewW * 0.5,
+      y: camera.y + camera.viewH * 0.5,
+    };
+  }
+
+  const pt = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+  return { x: pt.x, y: pt.y };
 }
 ```
 
-Without this correction, clicks/touches can appear shifted, especially on wide/tall screens.
+Why this matters:
+- Avoids left/right touch inversion bugs on landscape devices
+- Works regardless of `preserveAspectRatio` mode
+- Eliminates fragile assumptions about letterbox offsets
+
+If CTM is unavailable in a target browser context, use manual letterbox math only as a fallback.
+
+### Exact Camera Edge/Center Switching (No Guess Thresholds)
+
+Do not switch camera mode based on arbitrary pixel tolerance. Compute it from the same clamp math used by follow:
+
+```javascript
+const maxCamX = Math.max(0, W - camera.viewW);
+const desiredX = targetX - camera.viewW * 0.5;
+
+if (desiredX <= 0) {
+  camera.x = 0;
+  cameraMode = 'left';
+} else if (desiredX >= maxCamX) {
+  camera.x = maxCamX;
+  cameraMode = 'right';
+} else {
+  camera.x = desiredX;
+  cameraMode = 'center';
+}
+```
+
+Then map mode to SVG alignment deterministically:
+- `left` → `xMinYMid meet`
+- `center` → `xMidYMid meet`
+- `right` → `xMaxYMid meet`
+
+This keeps transitions correct at both world start and world end for any viewport size.
 
 ## Game Loop and Simulation Stability
 
