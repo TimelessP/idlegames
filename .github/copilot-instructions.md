@@ -82,3 +82,17 @@ if (requestURL.pathname.endsWith('/')) {
 - If you need to update icons or manifest data, ensure `manifest.webmanifest` stays in sync with actual files under `assets/appicons/`.
 
 Use this document as a living reference—update it whenever repo conventions evolve so future agents can ramp up quickly.
+
+## Skills
+
+- **pwa-development**
+  - **Use when:** creating or refining offline-capable PWAs, service worker caching/versioning behavior, and install/manifest flows for this repo.
+  - **File:** `.github/skills/pwa-development/SKILL.md`
+
+- **game-menu-system**
+  - **Use when:** building data-driven, attribute-controlled, non-blocking game menus that preserve simulation and support in-place value updates.
+  - **File:** `.github/skills/game-menu-system/SKILL.md`
+
+- **sidescroller-spa-game-dev**
+  - **Use when:** building or refining production-quality side-scroller SPA games in this repo (single-file HTML/CSS/JS, SVG camera systems, robust controls, modal UX, and mobile/PWA polish).
+  - **File:** `.github/skills/sidescroller-spa-game-dev/SKILL.md`
