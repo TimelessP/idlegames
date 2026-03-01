@@ -20,6 +20,11 @@ Build a menu system that is **data-driven**, **attribute-controlled**, and **non
 ### 1) Menu Definitions
 Define all menus in a single `MENUS` object. Menus are **pure data**.
 
+Implementation note for larger runtimes:
+- Keep menu data/builders in a dedicated module (for example `src/ui/menu-definitions.ts`).
+- Keep row/item renderers in a separate renderer module (for example `src/ui/menu-render.ts`).
+- Keep top-level menu orchestration (stack transitions, queue draining, pointer-lock coupling) in the runtime root (for example `src/main.ts`).
+
 ```js
 const MENUS = {
   computerRoom: {
@@ -66,6 +71,13 @@ if (menuDef.isRoot) {
   state.ui.unifiedMenuStack.push(stackEntry);
 }
 ```
+
+### 3b) Root vs Submenu Action Convention
+Use action buttons consistently:
+- **Root-level menus** should expose **Close** (`behavior: 'close'`).
+- **Submenus** should expose **Back** (`behavior: 'back'`).
+
+This prevents ambiguous navigation and keeps stack behavior predictable when menus are opened directly from world interactions.
 
 ## Rendering and Updates
 
@@ -134,6 +146,53 @@ function refreshUnifiedMenuValues(menuDef, items) {
 }
 ```
 
+### 2e) Queue-Driven Live Bindings (Recommended)
+For frequently changing simulator values (power, fuel, temperatures), prefer a queue-driven, in-place binding approach that never rebuilds the menu DOM while it is visible.
+
+Pattern:
+- Add a stable key per live value (for example `liveValueKey`).
+- During render, bind only the value element node to that key (`Map<key, HTMLElement>`).
+- Emit lightweight UI snapshot events from sim/event-queue only when values actually change.
+- Gate high-frequency stat event emission to when the target menu is visible, and apply a minimum enqueue interval to avoid queue churn.
+- On event consume, update bound text nodes directly (no `renderMenu()` call).
+- Keep `keep-open` behavior for toggle actions, but use a fast path that drains queue + applies live bindings and returns without redraw.
+
+```js
+// 1) Bind during render
+if (item.liveValueKey) {
+  liveMenuValueBindings.set(item.liveValueKey, valueEl);
+}
+
+// 2) Emit only on change
+function enqueueStatsIfChanged(stats) {
+  const nextSig = serialize(stats);
+  if (nextSig === lastSig) return;
+  lastSig = nextSig;
+  queue.push({ type: 'ui/menu-stats', stats });
+}
+
+// 3) Consume and update in-place
+function applyLiveStats(stats) {
+  if (!isTargetMenuVisible()) return;
+  for (const [key, element] of liveMenuValueBindings) {
+    element.textContent = toText(key, stats);
+  }
+}
+
+// 4) keep-open fast path (no redraw)
+if (behavior === 'keep-open' && isTargetMenuVisible()) {
+  drainEvents();
+  applyLiveStats(currentStats());
+  return; // preserve focus + scroll + DOM identity
+}
+```
+
+Why this is preferred:
+- Preserves current focused button and keyboard context.
+- Preserves scroll position in long/scrollable panels.
+- Avoids DOM churn and reduces GC/layout pressure.
+- Keeps simulation/event queue as the source of truth, UI as a consumer.
+
 ### 2b) Custom Item Types (Non-Standard Rows)
 When you introduce a new item type (for example, a feed entry with metadata + buttons), add a dedicated renderer and wire it in `renderUnifiedMenu`.
 
@@ -151,6 +210,25 @@ function renderUnifiedSpacebookItem(container, item, menuDef) {
   container.appendChild(wrapper);
 }
 ```
+
+### 2d) Document/Letter Content Pattern
+For readable in-world documents (letters, logs, memos), prefer one structured custom item over multiple spacer text rows.
+
+```js
+{
+  type: 'letter',
+  from: 'Chief Engineer',
+  to: 'Captain',
+  subject: 'Routing Update',
+  dateUtc: '2026-02-14 22:10:00 UTC',
+  paragraphs: ['Paragraph 1', 'Paragraph 2']
+}
+```
+
+Renderer guidance:
+- Render metadata (from/to/subject/date) in a header block.
+- Render body as paragraph elements from `paragraphs[]`.
+- Set an explicit dark ink text color in the custom row styles; do not rely on global value colors intended for generic menu rows.
 
 ### 2c) Tables With Button Columns
 Use a `table` item when you need rows with button actions. Each row is an array of cells; button cells use `{ type: 'button', label, action, behavior }`.
