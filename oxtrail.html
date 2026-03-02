@@ -725,8 +725,12 @@
 
         // Gameplay
         const WAGON_SLOTS = 8;
+        const CANOPY_BONUS_SLOTS = 8;
         const DAY_DURATION = 600; // real seconds per game day
         const CAMPFIRE_BURN_TIME = 30; // real seconds
+        const CORNFIELD_GROW_TIME = 180; // seconds from planted to ready
+        const CORNFIELD_WATER_BOOST = 0.35; // growth added by watering
+        const TREE_GROW_TIME = 240; // seconds from planted seed to mature tree
         const PLAYER_FEET_OFFSET = 17;
         const OX_FEET_OFFSET = 17;
 
@@ -770,6 +774,8 @@
         const ITEM_DEFS = {
             water_butt:   { name: 'Water Butt',   slots: 2, sellValue: 5,  buyValue: 8,  emoji: '🪣', canDrink: true, hungerRestore: 0, thirstRestore: 30 },
             wood:         { name: 'Wood',          slots: 1, sellValue: 3,  buyValue: 5,  emoji: '🪵', canDrink: false },
+            seed:         { name: 'Seed',          slots: 1, sellValue: 1,  buyValue: 0,  emoji: '🌰', canEat: true, hungerRestore: 6, thirstRestore: 0 },
+            corn:         { name: 'Corn',          slots: 1, sellValue: 4,  buyValue: 6,  emoji: '🌽', canEat: true, hungerRestore: 18, thirstRestore: 0 },
             fish:         { name: 'Fish',          slots: 1, sellValue: 4,  buyValue: 7,  emoji: '🐟', canEat: true, hungerRestore: 25, thirstRestore: 0 },
             ox_meat:      { name: 'Ox Meat',       slots: 1, sellValue: 6,  buyValue: 0,  emoji: '🥩', canEat: true, hungerRestore: 40, thirstRestore: 0 },
             ox_pelt:      { name: 'Ox Pelt',       slots: 1, sellValue: 8,  buyValue: 0,  emoji: '🫎' },
@@ -802,6 +808,22 @@
         let W = 1000; // total world width, set by generateWorld
         let nextItemId = 1;
 
+        function getWagonSlotCapacity(wagonState) {
+            const wagon = wagonState || (state && state.wagon);
+            if (!wagon) return WAGON_SLOTS;
+            return wagon.hasCanopy ? (WAGON_SLOTS + CANOPY_BONUS_SLOTS) : WAGON_SLOTS;
+        }
+
+        function ensureWagonSlotCapacity(wagonState) {
+            const wagon = wagonState || (state && state.wagon);
+            if (!wagon) return;
+            if (!Array.isArray(wagon.slots)) wagon.slots = [];
+            const capacity = getWagonSlotCapacity(wagon);
+            if (wagon.slots.length < capacity) {
+                wagon.slots = wagon.slots.concat(new Array(capacity - wagon.slots.length).fill(null));
+            }
+        }
+
         function freshState() {
             return {
                 player: {
@@ -814,7 +836,7 @@
                 wagon: {
                     x: 120, y: PATH_CENTER_Y - WAGON_WHEEL_BOTTOM_Y,
                     facing: 1, motionDir: 0,
-                    slots: new Array(WAGON_SLOTS).fill(null), // item type strings or null
+                        slots: new Array(WAGON_SLOTS).fill(null), // item type strings or null
                     hasCanopy: false,
                     wheelHealth: 100,
                     isRaft: false,
@@ -847,6 +869,7 @@
                     nightPromptShown: false,
                 },
                 homes: [], // { x, y, scale }
+                cornfields: [], // { x, y, growth:0..1, ready:boolean }
                 campfires: [], // { x, y, fuel: 0-1, segmentIdx }
                 groundItems: [], // { id, type, x, y }
                 events: { active: null, queue: [] },
@@ -1409,6 +1432,18 @@
             (parent || svg).appendChild(g);
         }
 
+        function drawSapling(x, y, growth, scene, parent) {
+            const clamped = Math.max(0, Math.min(1, growth || 0));
+            const h = 10 + clamped * 24;
+            const crown = 5 + clamped * 7;
+            const g = svgEl('g', { transform: `translate(${x},${y})` });
+            g.appendChild(svgEl('line', { x1: 0, y1: 0, x2: 0, y2: -h, stroke: scene.treeTrunk, 'stroke-width': String(2 + clamped * 2), 'stroke-linecap': 'round' }));
+            g.appendChild(svgEl('ellipse', { cx: 0, cy: -h, rx: crown, ry: crown * 0.8, fill: scene.treeLeafB }));
+            g.appendChild(svgEl('ellipse', { cx: -crown * 0.45, cy: -h + 2, rx: crown * 0.55, ry: crown * 0.45, fill: scene.treeLeafC }));
+            g.appendChild(svgEl('ellipse', { cx: crown * 0.45, cy: -h + 1, rx: crown * 0.5, ry: crown * 0.42, fill: scene.treeLeafA }));
+            (parent || svg).appendChild(g);
+        }
+
         // ---- drawFlower ----
         function drawFlower(x, y, color, scene, parent) {
             const g = svgEl('g', { transform: `translate(${x},${y})` });
@@ -1471,6 +1506,8 @@
         function drawFeature(f, scene, seg, parent) {
             if (f.kind === 'tree') {
                 drawTree(f.x, f.y, f.scale || 0.8, scene, parent);
+            } else if (f.kind === 'sapling') {
+                drawSapling(f.x, f.y, f.growth || 0, scene, parent);
             } else if (f.kind === 'bush') {
                 drawBush(f.x, f.y, scene, parent);
             } else if (f.kind === 'flower') {
@@ -1501,6 +1538,7 @@
         function drawScenery() {
             svg.innerHTML = '';
             dynamicGroup = null;
+            topOverlayGroup = null;
             const scene = getScenePalette();
             const darkMode = isDarkWorldTheme();
             const SCENE_EXT = Math.max(W, H) * 2;
@@ -1682,6 +1720,7 @@
 
         // ---- clearDynamic ----
         let dynamicGroup = null;
+        let topOverlayGroup = null;
 
         function clearDynamic() {
             if (dynamicGroup) {
@@ -1695,6 +1734,13 @@
                 } else {
                     svg.appendChild(dynamicGroup);
                 }
+            }
+
+            if (topOverlayGroup) {
+                topOverlayGroup.textContent = '';
+            } else {
+                topOverlayGroup = svgEl('g', { id: 'top-overlays' });
+                svg.appendChild(topOverlayGroup);
             }
         }
 
@@ -1868,14 +1914,13 @@
                     g.appendChild(svgEl('path', { d: 'M-8,-20 Q-8,-38 0,-40 Q8,-38 8,-20', fill: 'none', stroke: '#8b6a45', 'stroke-width': '1' }));
                 }
 
-                // Slot indicators (small boxes inside wagon)
-                const filledSlots = slots ? slots.filter(s => s !== null).length : 0;
-                for (let si = 0; si < Math.min(WAGON_SLOTS, 8); si++) {
+                // Slot indicators (base wagon row + canopy row when installed)
+                const wagonSlots = Array.isArray(slots) ? slots : [];
+                for (let si = 0; si < WAGON_SLOTS; si++) {
                     const sx = -30 + si * 8;
-                    const sy = hasCanopy ? -30 : -16;
-                    const filled = si < filledSlots;
+                    const filled = wagonSlots[si] !== null && wagonSlots[si] !== undefined;
                     g.appendChild(svgEl('rect', {
-                        x: sx, y: sy,
+                        x: sx, y: -16,
                         width: 6, height: 5,
                         fill: filled ? '#c89a15' : 'none',
                         stroke: '#6a4a2a',
@@ -1883,6 +1928,23 @@
                         rx: 0.5,
                         opacity: filled ? '0.9' : '0.4',
                     }));
+                }
+
+                if (hasCanopy) {
+                    for (let si = 0; si < CANOPY_BONUS_SLOTS; si++) {
+                        const sx = -30 + si * 8;
+                        const idx = WAGON_SLOTS + si;
+                        const filled = wagonSlots[idx] !== null && wagonSlots[idx] !== undefined;
+                        g.appendChild(svgEl('rect', {
+                            x: sx, y: -30,
+                            width: 6, height: 5,
+                            fill: filled ? '#c89a15' : 'none',
+                            stroke: '#6a4a2a',
+                            'stroke-width': '0.8',
+                            rx: 0.5,
+                            opacity: filled ? '0.9' : '0.4',
+                        }));
+                    }
                 }
             }
 
@@ -2001,16 +2063,33 @@
                     g.appendChild(svgEl('circle', { cx: -10, cy: 0, r: 1, fill: '#6a4a2a' }));
                     break;
                 }
+                case 'seed': {
+                    g.appendChild(svgEl('ellipse', { cx: 0, cy: 0, rx: 5, ry: 7, fill: '#b07a3f' }));
+                    g.appendChild(svgEl('ellipse', { cx: 1, cy: -1, rx: 2.5, ry: 3.8, fill: '#c99353', opacity: '0.8' }));
+                    g.appendChild(svgEl('path', { d: 'M0,-7 Q2,-10 4,-11', fill: 'none', stroke: '#4f8b3a', 'stroke-width': '1.4', 'stroke-linecap': 'round' }));
+                    break;
+                }
                 case 'fish': {
                     // Fish body
                     g.appendChild(svgEl('ellipse', { cx: 0, cy: 0, rx: 10, ry: 5, fill: '#7ec8e3' }));
                     // Tail
-                    g.appendChild(svgEl('polygon', { points: '10,-4 16,0 10,4', fill: '#5ba8c8' }));
+                    g.appendChild(svgEl('polygon', { points: '14,-4 8,0 14,4', fill: '#5ba8c8' }));
                     // Eye
                     g.appendChild(svgEl('circle', { cx: -5, cy: -1, r: 1.5, fill: '#333' }));
                     g.appendChild(svgEl('circle', { cx: -4.5, cy: -1.5, r: 0.5, fill: '#fff' }));
                     // Belly
                     g.appendChild(svgEl('ellipse', { cx: 0, cy: 2, rx: 7, ry: 2.5, fill: '#c0e8f0' }));
+                    break;
+                }
+                case 'corn': {
+                    g.appendChild(svgEl('ellipse', { cx: 0, cy: 0, rx: 5, ry: 9, fill: '#f1c94a' }));
+                    for (let k = -2; k <= 2; k += 2) {
+                        g.appendChild(svgEl('circle', { cx: k, cy: -3, r: 0.9, fill: '#e3b93b' }));
+                        g.appendChild(svgEl('circle', { cx: k, cy: 0, r: 0.9, fill: '#e3b93b' }));
+                        g.appendChild(svgEl('circle', { cx: k, cy: 3, r: 0.9, fill: '#e3b93b' }));
+                    }
+                    g.appendChild(svgEl('path', { d: 'M-4,4 Q-7,0 -5,-6', fill: 'none', stroke: '#4f8b3a', 'stroke-width': '2', 'stroke-linecap': 'round' }));
+                    g.appendChild(svgEl('path', { d: 'M4,4 Q7,0 5,-6', fill: 'none', stroke: '#4f8b3a', 'stroke-width': '2', 'stroke-linecap': 'round' }));
                     break;
                 }
                 case 'ox_meat': {
@@ -2131,6 +2210,28 @@
             dynamicGroup.appendChild(g);
         }
 
+        function drawCornfieldSprite(x, y, growth, ready) {
+            const g = svgEl('g', { transform: `translate(${x},${y})` });
+            g.appendChild(svgEl('ellipse', { cx: 0, cy: 4, rx: 28, ry: 7, fill: '#8b6a45', opacity: '0.55' }));
+
+            const stalkCount = 8;
+            const h = 8 + growth * 22;
+            for (let i = 0; i < stalkCount; i++) {
+                const sx = -20 + i * (40 / (stalkCount - 1));
+                const sway = Math.sin(state.animFrame * 0.03 + i) * (1 + growth * 1.2);
+                const topY = -h + sway;
+                g.appendChild(svgEl('line', { x1: sx, y1: 2, x2: sx + sway * 0.3, y2: topY, stroke: '#4c8f2f', 'stroke-width': '2', 'stroke-linecap': 'round' }));
+                g.appendChild(svgEl('path', { d: `M${sx},${-h * 0.55} q-6,2 -7,8`, fill: 'none', stroke: '#63a543', 'stroke-width': '1.4' }));
+                g.appendChild(svgEl('path', { d: `M${sx},${-h * 0.4} q6,2 7,8`, fill: 'none', stroke: '#63a543', 'stroke-width': '1.4' }));
+
+                if (ready && i % 2 === 0) {
+                    g.appendChild(svgEl('ellipse', { cx: sx + 3, cy: -h * 0.45, rx: 2.2, ry: 4.5, fill: '#f1c94a' }));
+                }
+            }
+
+            dynamicGroup.appendChild(g);
+        }
+
         // ---- drawNPCSprite ----
         function drawNPCSprite(x, y, facing) {
             const g = svgEl('g', { transform: `translate(${x},${y}) scale(${facing},1)` });
@@ -2219,7 +2320,8 @@
 
                 // Storm: darker tint + occasional lightning
                 if (weather === 'storm') {
-                    dynamicGroup.appendChild(svgEl('rect', {
+                    const tintLayer = topOverlayGroup || dynamicGroup;
+                    tintLayer.appendChild(svgEl('rect', {
                         x: cx, y: cy, width: vw, height: vh,
                         fill: '#000', opacity: '0.15',
                     }));
@@ -2242,7 +2344,7 @@
 
         // ---- drawDayNightTint ----
         function drawDayNightTint(dayTime) {
-            if (!dynamicGroup) return;
+            if (!topOverlayGroup && !dynamicGroup) return;
             let opacity = 0;
             if (dayTime < 0.2) {
                 // Night: 0.5 at 0.0, 0.3 at 0.2
@@ -2262,7 +2364,8 @@
             }
 
             if (opacity > 0.005) {
-                dynamicGroup.appendChild(svgEl('rect', {
+                const tintLayer = topOverlayGroup || dynamicGroup;
+                tintLayer.appendChild(svgEl('rect', {
                     x: camera.x, y: camera.y,
                     width: camera.viewW, height: camera.viewH,
                     fill: '#0a0a2a', opacity: String(opacity),
@@ -2360,6 +2463,14 @@
             for (let i = 0; i < state.homes.length; i++) {
                 const home = state.homes[i];
                 if (Math.abs(home.x - px) < range) return home;
+            }
+            return null;
+        }
+
+        function findNearbyCornfield(px, range) {
+            for (let i = 0; i < state.cornfields.length; i++) {
+                const field = state.cornfields[i];
+                if (Math.abs(field.x - px) < range) return field;
             }
             return null;
         }
@@ -2609,26 +2720,55 @@
                 });
             }
 
-            // Near ground item → pick up
-            const nearItem = findNearbyGroundItem(px, 35);
-            if (nearItem) {
-                actions.push({
-                    label: 'Pick up ' + ITEM_DEFS[nearItem.type].name,
-                    run: function () {
-                        // Drop currently carried item first
-                        if (state.player.carrying) {
-                            const oldType = state.player.carrying;
-                            state.groundItems.push({
-                                id: nextItemId++,
-                                type: oldType,
-                                x: px,
-                                y: PATH_CENTER_Y + 5,
-                            });
-                        }
-                        state.player.carrying = nearItem.type;
-                        state.groundItems = state.groundItems.filter(function (it) { return it.id !== nearItem.id; });
-                        showHud('Picked up ' + ITEM_DEFS[nearItem.type].name);
-                    },
+            // Near ground items → pick up (one action per nearby item type)
+            const nearbyItems = [];
+            for (let i = 0; i < state.groundItems.length; i++) {
+                const item = state.groundItems[i];
+                const dist = Math.abs(item.x - px);
+                if (dist <= 35) {
+                    nearbyItems.push({ item: item, dist: dist });
+                }
+            }
+
+            if (nearbyItems.length > 0) {
+                nearbyItems.sort(function (a, b) { return a.dist - b.dist; });
+
+                const nearestByType = {};
+                const countByType = {};
+                for (let i = 0; i < nearbyItems.length; i++) {
+                    const type = nearbyItems[i].item.type;
+                    if (!nearestByType[type]) {
+                        nearestByType[type] = nearbyItems[i].item;
+                    }
+                    countByType[type] = (countByType[type] || 0) + 1;
+                }
+
+                Object.keys(nearestByType).forEach(function (type) {
+                    const pickupItem = nearestByType[type];
+                    const nearbyCount = countByType[type] || 1;
+                    const itemName = ITEM_DEFS[type] ? ITEM_DEFS[type].name : type;
+                    const label = nearbyCount > 1
+                        ? 'Pick up ' + itemName + ' (x' + nearbyCount + ')'
+                        : 'Pick up ' + itemName;
+
+                    actions.push({
+                        label: label,
+                        run: function () {
+                            // Drop currently carried item first
+                            if (state.player.carrying) {
+                                const oldType = state.player.carrying;
+                                state.groundItems.push({
+                                    id: nextItemId++,
+                                    type: oldType,
+                                    x: px,
+                                    y: PATH_CENTER_Y + 5,
+                                });
+                            }
+                            state.player.carrying = pickupItem.type;
+                            state.groundItems = state.groundItems.filter(function (it) { return it.id !== pickupItem.id; });
+                            showHud('Picked up ' + itemName);
+                        },
+                    });
                 });
             }
 
@@ -2679,12 +2819,43 @@
                 });
             }
 
-            if (currentSeg.type === 'forest') {
+            // Build cornfield (on foot only, on land): 1 water butt + 2 wood
+            if (currentSeg && currentSeg.type !== 'river' && countItemInWagon('water_butt') >= ITEM_DEFS.water_butt.slots && countItemInWagon('wood') >= 2) {
+                actions.push({
+                    label: '🌽 Build Cornfield (1 Water Butt + 2 Wood)',
+                    run: function () { buildCornfield(); },
+                });
+            }
+
+            // Cornfield interactions
+            const nearField = findNearbyCornfield(px, 60);
+            if (nearField) {
+                if (nearField.ready) {
+                    actions.push({
+                        label: '🌽 Reap Corn Crop',
+                        run: function () { reapCornfield(nearField); },
+                    });
+                } else if (countItemInWagon('water_butt') >= ITEM_DEFS.water_butt.slots) {
+                    actions.push({
+                        label: '🪣 Water Cornfield',
+                        run: function () { waterCornfield(nearField); },
+                    });
+                }
+            }
+
+            if (currentSeg && currentSeg.type !== 'river' && countItemInWagon('seed') >= 1) {
+                actions.push({
+                    label: '🌱 Plant Tree (1 Seed)',
+                    run: function () { plantTree(); },
+                });
+            }
+
+            if (currentSeg && currentSeg.type !== 'river') {
                 const nearTree = currentSeg.features.find(function (f) {
                     return f.kind === 'tree' && Math.abs(f.x - px) < 50;
                 });
                 if (nearTree) {
-                    actions.push({ label: 'Chop Wood', run: function () { chopTree(); } });
+                    actions.push({ label: '🪓 Chop Tree', run: function () { chopTree(currentSeg, nearTree); } });
                 }
             }
 
@@ -2856,6 +3027,16 @@
                 });
             }
 
+            // Cornfields
+            for (let i = 0; i < state.cornfields.length; i++) {
+                const field = state.cornfields[i];
+                if (field.x < cullLeft || field.x > cullRight) continue;
+                entities.push({
+                    y: field.y + 11,
+                    draw: function () { drawCornfieldSprite(field.x, field.y, field.growth || 0, !!field.ready); },
+                });
+            }
+
             // Campfires
             for (let i = 0; i < state.campfires.length; i++) {
                 const cf = state.campfires[i];
@@ -2958,6 +3139,8 @@
                 updateWeather(dt);
                 updateStatDecay(dt);
                 updateCampfires(dt);
+                updateCornfields(dt);
+                updateGrowingTrees(dt);
                 checkEvents();
 
                 if (eJustPressed) handleInteract();
@@ -3144,7 +3327,7 @@
             wagonInventory: {
                 isRoot: false,
                 title: 'WAGON INVENTORY',
-                overview: 'Your wagon has 8 slots',
+                overview: 'Your wagon has 8 base slots (+8 with canopy)',
                 itemBuilder: 'buildWagonInventoryItems',
                 actions: [
                     {
@@ -3158,9 +3341,10 @@
                             const itemType = state.player.carrying;
                             const def = ITEM_DEFS[itemType];
                             const slotsNeeded = def ? def.slots : 1;
+                            const wagonCapacity = getWagonSlotCapacity();
                             // Find consecutive empty slots
                             let placed = false;
-                            for (let i = 0; i <= WAGON_SLOTS - slotsNeeded; i++) {
+                            for (let i = 0; i <= wagonCapacity - slotsNeeded; i++) {
                                 let fits = true;
                                 for (let s = 0; s < slotsNeeded; s++) {
                                     if (state.wagon.slots[i + s] !== null) { fits = false; break; }
@@ -3319,7 +3503,8 @@
             buildWagonInventoryItems: function () {
                 const items = [];
                 const seen = new Set();
-                for (let i = 0; i < WAGON_SLOTS; i++) {
+                const wagonCapacity = getWagonSlotCapacity();
+                for (let i = 0; i < wagonCapacity; i++) {
                     if (seen.has(i)) continue;
                     const slot = state.wagon.slots[i];
                     if (slot === null) {
@@ -3370,6 +3555,7 @@
                                 action: function () {
                                     for (let s = 0; s < slotsUsed; s++) state.wagon.slots[slotIdx + s] = null;
                                     state.wagon.hasCanopy = true;
+                                    ensureWagonSlotCapacity();
                                     showHud('Canopy installed!');
                                     rebuildMenuInPlace();
                                 },
@@ -3418,6 +3604,37 @@
 
             buildOxManagementItems: function () {
                 const items = [];
+
+                const waterButtSlots = ITEM_DEFS.water_butt && ITEM_DEFS.water_butt.slots ? ITEM_DEFS.water_butt.slots : 2;
+                if (countItemInWagon('water_butt') >= waterButtSlots) {
+                    items.push({
+                        type: 'action',
+                        label: '🪣 Quench All Oxen (1 Water Butt)',
+                        action: function () {
+                            let aliveCount = 0;
+                            for (let i = 0; i < state.oxen.length; i++) {
+                                if (state.oxen[i].alive) aliveCount++;
+                            }
+                            if (aliveCount === 0) {
+                                showHud('No living oxen to hydrate.');
+                                return;
+                            }
+                            if (!consumeItemFromWagon('water_butt', waterButtSlots)) {
+                                showHud('Need a water butt in wagon.');
+                                return;
+                            }
+                            for (let i = 0; i < state.oxen.length; i++) {
+                                if (!state.oxen[i].alive) continue;
+                                state.oxen[i].thirst = 0;
+                            }
+                            showHud('🪣 All oxen quenched.');
+                            rebuildMenuInPlace();
+                        },
+                        behavior: 'keep-open',
+                    });
+                    items.push({ type: 'divider', label: '── INDIVIDUAL OXEN ──' });
+                }
+
                 for (let i = 0; i < state.oxen.length; i++) {
                     const ox = state.oxen[i];
                     if (!ox.alive) {
@@ -3501,7 +3718,7 @@
                             action: function () {
                                 for (let i = 0; i < state.oxen.length; i++) {
                                     if (state.oxen[i].alive && state.oxen[i].hitched) {
-                                        unleashOx(i);
+                                        unleashOxToDrink(i);
                                     }
                                 }
                                 rebuildMenuInPlace();
@@ -3554,7 +3771,8 @@
                 }
                 items.push({ type: 'divider', label: '── SELL ──' });
                 const seenSell = new Set();
-                for (let i = 0; i < WAGON_SLOTS; i++) {
+                const wagonCapacity = getWagonSlotCapacity();
+                for (let i = 0; i < wagonCapacity; i++) {
                     if (seenSell.has(i)) continue;
                     const slot = state.wagon.slots[i];
                     if (slot === null) continue;
@@ -3663,7 +3881,7 @@
                 items.push({ type: 'setting', label: 'Canopy', value: state.wagon.hasCanopy ? 'Yes' : 'No', actions: [] });
                 items.push({ type: 'setting', label: 'Raft Mode', value: state.wagon.isRaft ? 'Yes' : 'No', actions: [] });
                 const filled = state.wagon.slots.filter(function (s) { return s !== null; }).length;
-                items.push({ type: 'setting', label: 'Slots Used', value: filled + '/' + WAGON_SLOTS, actions: [] });
+                items.push({ type: 'setting', label: 'Slots Used', value: filled + '/' + getWagonSlotCapacity(), actions: [] });
                 items.push({ type: 'divider', label: '── OXEN ──' });
                 const aliveOx = state.oxen.filter(function (o) { return o.alive; }).length;
                 items.push({ type: 'setting', label: 'Alive', value: aliveOx + '/' + state.oxen.length, actions: [] });
@@ -4172,7 +4390,8 @@
                     // Lose a random wagon item
                     const filledSlots = [];
                     const seen = new Set();
-                    for (let i = 0; i < WAGON_SLOTS; i++) {
+                    const wagonCapacity = getWagonSlotCapacity();
+                    for (let i = 0; i < wagonCapacity; i++) {
                         if (seen.has(i)) continue;
                         if (state.wagon.slots[i] !== null) {
                             const def = ITEM_DEFS[state.wagon.slots[i]];
@@ -4232,10 +4451,40 @@
             }
         }
 
+        function updateCornfields(dt) {
+            for (let i = 0; i < state.cornfields.length; i++) {
+                const field = state.cornfields[i];
+                if (field.ready) continue;
+                field.growth = Math.min(1, (field.growth || 0) + dt / CORNFIELD_GROW_TIME);
+                if (field.growth >= 1) {
+                    field.growth = 1;
+                    field.ready = true;
+                }
+            }
+        }
+
+        function updateGrowingTrees(dt) {
+            for (let s = 0; s < state.world.segments.length; s++) {
+                const seg = state.world.segments[s];
+                if (!seg || !Array.isArray(seg.features)) continue;
+                for (let i = 0; i < seg.features.length; i++) {
+                    const feature = seg.features[i];
+                    if (!feature || feature.kind !== 'sapling') continue;
+                    feature.growth = Math.min(1, (feature.growth || 0) + dt / TREE_GROW_TIME);
+                    if (feature.growth >= 1) {
+                        feature.kind = 'tree';
+                        feature.scale = feature.scale || 0.7;
+                        delete feature.growth;
+                    }
+                }
+            }
+        }
+
         function makeCampfire() {
             // Check for wood or firewood in wagon
             let woodIdx = -1;
-            for (let i = 0; i < WAGON_SLOTS; i++) {
+            const wagonCapacity = getWagonSlotCapacity();
+            for (let i = 0; i < wagonCapacity; i++) {
                 if (state.wagon.slots[i] === 'wood' || state.wagon.slots[i] === 'firewood') {
                     woodIdx = i;
                     break;
@@ -4292,6 +4541,87 @@
             showHud('🏠 You built a home on the trail.');
         }
 
+        function buildCornfield() {
+            const seg = getCurrentSegment();
+            if (!seg || seg.type === 'river') {
+                showHud('You can only plant corn on land.');
+                return;
+            }
+            if (countItemInWagon('water_butt') < ITEM_DEFS.water_butt.slots || countItemInWagon('wood') < 2) {
+                showHud('Need 1 water butt and 2 wood in wagon to build a cornfield.');
+                return;
+            }
+            if (findNearbyCornfield(state.player.x, 110)) {
+                showHud('There is already a cornfield nearby.');
+                return;
+            }
+
+            if (!consumeItemFromWagon('water_butt', ITEM_DEFS.water_butt.slots) || !consumeItemFromWagon('wood', 2)) {
+                showHud('Need 1 water butt and 2 wood in wagon to build a cornfield.');
+                return;
+            }
+
+            state.cornfields.push({
+                x: state.player.x,
+                y: BUSH_LINE_Y,
+                growth: 0,
+                ready: false,
+            });
+            showHud('🌱 Cornfield planted. Keep it watered while it grows.');
+        }
+
+        function waterCornfield(field) {
+            if (!field || field.ready) {
+                showHud('This cornfield is already ready to harvest.');
+                return;
+            }
+            if (!consumeItemFromWagon('water_butt', ITEM_DEFS.water_butt.slots)) {
+                showHud('Need a water butt in wagon to water the field.');
+                return;
+            }
+
+            field.growth = Math.min(1, (field.growth || 0) + CORNFIELD_WATER_BOOST);
+            if (field.growth >= 1) {
+                field.growth = 1;
+                field.ready = true;
+                showHud('🌽 Cornfield is now ready to harvest!');
+            } else {
+                showHud('💧 Watered cornfield. Growth boosted.');
+            }
+        }
+
+        function reapCornfield(field) {
+            if (!field || !field.ready) {
+                showHud('Corn is not ready yet.');
+                return;
+            }
+
+            let stored = 0;
+            let dropped = 0;
+            for (let i = 0; i < 4; i++) {
+                if (storeItemInWagon('corn')) {
+                    stored++;
+                } else {
+                    dropped++;
+                    state.groundItems.push({
+                        id: nextItemId++,
+                        type: 'corn',
+                        x: field.x + (i - 1.5) * 7,
+                        y: PATH_CENTER_Y + 5,
+                    });
+                }
+            }
+
+            field.growth = 0;
+            field.ready = false;
+
+            if (dropped > 0) {
+                showHud('🌽 Reaped 4 corn (' + stored + ' stowed, ' + dropped + ' dropped).');
+            } else {
+                showHud('🌽 Reaped 4 corn and stowed in wagon.');
+            }
+        }
+
         function restAtHome() {
             if (state.gameOver) return;
 
@@ -4321,7 +4651,8 @@
 
         function countItemInWagon(itemType) {
             let count = 0;
-            for (let i = 0; i < WAGON_SLOTS; i++) {
+            const wagonCapacity = getWagonSlotCapacity();
+            for (let i = 0; i < wagonCapacity; i++) {
                 if (state.wagon.slots[i] === itemType) count++;
             }
             return count;
@@ -4329,7 +4660,8 @@
 
         function consumeItemFromWagon(itemType, amount) {
             let remaining = amount;
-            for (let i = 0; i < WAGON_SLOTS && remaining > 0; i++) {
+            const wagonCapacity = getWagonSlotCapacity();
+            for (let i = 0; i < wagonCapacity && remaining > 0; i++) {
                 if (state.wagon.slots[i] === itemType) {
                     state.wagon.slots[i] = null;
                     remaining--;
@@ -4342,7 +4674,8 @@
             const def = ITEM_DEFS[itemType];
             if (!def) return false;
             const slotsNeeded = def.slots || 1;
-            for (let i = 0; i <= WAGON_SLOTS - slotsNeeded; i++) {
+            const wagonCapacity = getWagonSlotCapacity();
+            for (let i = 0; i <= wagonCapacity - slotsNeeded; i++) {
                 let fits = true;
                 for (let s = 0; s < slotsNeeded; s++) {
                     if (state.wagon.slots[i + s] !== null) { fits = false; break; }
@@ -4396,8 +4729,9 @@
         function collectWater() {
             // Find empty slot (need 2 for water butt)
             const slotsNeeded = ITEM_DEFS.water_butt.slots;
+            const wagonCapacity = getWagonSlotCapacity();
             let placed = false;
-            for (let i = 0; i <= WAGON_SLOTS - slotsNeeded; i++) {
+            for (let i = 0; i <= wagonCapacity - slotsNeeded; i++) {
                 let fits = true;
                 for (let s = 0; s < slotsNeeded; s++) {
                     if (state.wagon.slots[i + s] !== null) { fits = false; break; }
@@ -4424,18 +4758,66 @@
             }
         }
 
-        function chopTree() {
-            if (storeItemInWagon('wood')) {
-                showHud('🪓 Chopped wood and stowed it in the wagon!');
-            } else {
-                state.groundItems.push({
-                    id: nextItemId++,
-                    type: 'wood',
-                    x: state.player.x + 10,
-                    y: PATH_CENTER_Y + 5,
-                });
-                showHud('🪓 Chopped wood, but wagon is full (dropped on ground).');
+        function chopTree(segment, treeFeature) {
+            if (!segment || !treeFeature || !Array.isArray(segment.features)) {
+                showHud('No tree to chop here.');
+                return;
             }
+
+            const featureIndex = segment.features.indexOf(treeFeature);
+            if (featureIndex < 0) {
+                showHud('No tree to chop here.');
+                return;
+            }
+
+            segment.features.splice(featureIndex, 1);
+            drawScenery();
+
+            const drops = ['wood', 'wood', 'wood', 'seed'];
+            let stored = 0;
+            let dropped = 0;
+            for (let i = 0; i < drops.length; i++) {
+                const itemType = drops[i];
+                if (storeItemInWagon(itemType)) {
+                    stored++;
+                } else {
+                    dropped++;
+                    state.groundItems.push({
+                        id: nextItemId++,
+                        type: itemType,
+                        x: state.player.x + (i - 1.5) * 8,
+                        y: PATH_CENTER_Y + 5,
+                    });
+                }
+            }
+
+            if (dropped > 0) {
+                showHud('🪓 Chopped tree: 3 wood + 1 seed (' + stored + ' stowed, ' + dropped + ' dropped).');
+            } else {
+                showHud('🪓 Chopped tree: 3 wood + 1 seed stowed in wagon.');
+            }
+        }
+
+        function plantTree() {
+            const seg = getCurrentSegment();
+            if (!seg || seg.type === 'river') {
+                showHud('You can only plant trees on land.');
+                return;
+            }
+            if (!consumeItemFromWagon('seed', 1)) {
+                showHud('Need a seed in the wagon to plant.');
+                return;
+            }
+
+            seg.features.push({
+                kind: 'sapling',
+                x: state.player.x,
+                y: TREE_LINE_Y + 2,
+                growth: 0,
+                scale: 0.7,
+            });
+            drawScenery();
+            showHud('🌱 Seed planted. This tree will grow over time.');
         }
 
         function convertToRaft() {
@@ -4472,11 +4854,47 @@
             if (oxIndex < 0 || oxIndex >= state.oxen.length) return;
             const ox = state.oxen[oxIndex];
             if (!ox.alive) return;
+            // Manual unleash = release from herd; ox becomes stray again.
+            const oxX = ox.x;
+            const oxName = ox.name;
+
+            let targetSeg = null;
+            const startIdx = getSegmentAt(oxX);
+            if (state.world.segments[startIdx] && state.world.segments[startIdx].type !== 'river') {
+                targetSeg = state.world.segments[startIdx];
+            } else {
+                for (let radius = 1; radius < state.world.segments.length && !targetSeg; radius++) {
+                    const leftIdx = startIdx - radius;
+                    const rightIdx = startIdx + radius;
+                    if (leftIdx >= 0) {
+                        const leftSeg = state.world.segments[leftIdx];
+                        if (leftSeg && leftSeg.type !== 'river') targetSeg = leftSeg;
+                    }
+                    if (!targetSeg && rightIdx < state.world.segments.length) {
+                        const rightSeg = state.world.segments[rightIdx];
+                        if (rightSeg && rightSeg.type !== 'river') targetSeg = rightSeg;
+                    }
+                }
+            }
+
+            if (targetSeg) {
+                targetSeg.hasStrayOx = true;
+            }
+
+            state.oxen.splice(oxIndex, 1);
+            showHud('🐂 ' + oxName + ' was released and wandered off as a stray.');
+            rebuildMenuInPlace();
+        }
+
+        function unleashOxToDrink(oxIndex) {
+            if (oxIndex < 0 || oxIndex >= state.oxen.length) return;
+            const ox = state.oxen[oxIndex];
+            if (!ox.alive) return;
             ox.hitched = false;
             ox.x = state.player.x + 30 + oxIndex * 20;
             ox.y = PATH_CENTER_Y - OX_FEET_OFFSET;
 
-            // At river: restore thirst/hunger partially
+            // River drink keeps ownership; just recovers thirst/hunger.
             const riverSeg = getRiverSegmentNear(state.player.x, 40);
             if (riverSeg) {
                 ox.thirst = Math.max(0, ox.thirst - 40);
@@ -4522,8 +4940,9 @@
             }
             // Check wagon space
             const slotsNeeded = def.slots || 1;
+            const wagonCapacity = getWagonSlotCapacity();
             let placed = false;
-            for (let i = 0; i <= WAGON_SLOTS - slotsNeeded; i++) {
+            for (let i = 0; i <= wagonCapacity - slotsNeeded; i++) {
                 let fits = true;
                 for (let s = 0; s < slotsNeeded; s++) {
                     if (state.wagon.slots[i + s] !== null) { fits = false; break; }
@@ -4716,6 +5135,7 @@
                 oxen: state.oxen,
                 world: state.world,
                 homes: state.homes,
+                cornfields: state.cornfields,
                 campfires: state.campfires,
                 groundItems: state.groundItems,
                 events: state.events,
@@ -4781,6 +5201,7 @@
 
             const player = Object.assign({}, base.player, loaded.player || {});
             const wagon = Object.assign({}, base.wagon, loaded.wagon || {});
+            ensureWagonSlotCapacity(wagon);
             const world = Object.assign({}, base.world, loaded.world || {});
 
             const oxen = Array.isArray(loaded.oxen) && loaded.oxen.length > 0
@@ -4799,6 +5220,7 @@
                 oxen: oxen,
                 world: world,
                 homes: Array.isArray(loaded.homes) ? loaded.homes : [],
+                cornfields: Array.isArray(loaded.cornfields) ? loaded.cornfields : [],
                 campfires: Array.isArray(loaded.campfires) ? loaded.campfires : [],
                 groundItems: Array.isArray(loaded.groundItems) ? loaded.groundItems : [],
                 events: Object.assign({}, base.events, loaded.events || {}),
