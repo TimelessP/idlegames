@@ -37,8 +37,9 @@ await fs.writeFile(versionModulePath, versionModuleContent, 'utf8');
 await cleanDist();
 await fs.mkdir(distDir, { recursive: true });
 
-const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.github', '.vscode', '.venv', 'scripts']);
-const EXCLUDED_FILES = new Set(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'pnpm-lock.yml', 'yarn.lock']);
+const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.github', '.vscode', '.venv', 'venv', '__pycache__', 'scripts']);
+const EXCLUDED_FILES = new Set(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'pnpm-lock.yml', 'yarn.lock', 'requirements.txt', '.python-version']);
+const EXCLUDED_FILE_EXTENSIONS = new Set(['.py', '.pyc', '.pyo']);
 
 async function copyTree(from, to) {
   await fs.mkdir(to, { recursive: true });
@@ -51,6 +52,8 @@ async function copyTree(from, to) {
       await copyTree(srcPath, destPath);
     } else {
       if (EXCLUDED_FILES.has(entry.name)) continue;
+      const ext = path.extname(entry.name).toLowerCase();
+      if (EXCLUDED_FILE_EXTENSIONS.has(ext)) continue;
       await fs.copyFile(srcPath, destPath);
     }
   }

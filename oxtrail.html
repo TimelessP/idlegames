@@ -1189,6 +1189,7 @@
                     width,
                     features: [],
                     hasStrayOx: false,
+                    strayOxen: [],
                     townName: null,
                     merchantPrices: null,
                 };
@@ -1226,6 +1227,7 @@
                     // Occasional stray ox
                     if (rng.next() < 0.10) {
                         seg.hasStrayOx = true;
+                        seg.strayOxen.push(getStrayOxPosition(seg));
                     }
                 } else if (type === 'forest') {
                     // Many trees above path
@@ -2437,6 +2439,32 @@
             };
         }
 
+        function ensureSegmentStrayOxen(seg) {
+            if (!seg) return [];
+            if (!Array.isArray(seg.strayOxen)) {
+                seg.strayOxen = [];
+            }
+            if (seg.hasStrayOx && seg.strayOxen.length === 0) {
+                seg.strayOxen.push(getStrayOxPosition(seg));
+            }
+            seg.hasStrayOx = seg.strayOxen.length > 0;
+            return seg.strayOxen;
+        }
+
+        function addStrayOxToSegment(seg, xHint) {
+            if (!seg || seg.type === 'river') return null;
+            const list = ensureSegmentStrayOxen(seg);
+            const minX = seg.startX + 24;
+            const maxX = seg.startX + seg.width - 24;
+            const baseX = Number.isFinite(xHint) ? xHint : (seg.startX + seg.width * 0.6);
+            const offset = ((list.length % 4) - 1.5) * 14;
+            const x = Math.max(minX, Math.min(maxX, baseX + offset));
+            const stray = { x: x, y: PATH_CENTER_Y - OX_FEET_OFFSET };
+            list.push(stray);
+            seg.hasStrayOx = true;
+            return stray;
+        }
+
         function findNearbyGroundItem(px, range) {
             let nearest = null;
             let nearDist = range;
@@ -2452,27 +2480,45 @@
         }
 
         function findNearbyCampfire(px, range) {
+            let nearest = null;
+            let nearDist = range;
             for (let i = 0; i < state.campfires.length; i++) {
                 const cf = state.campfires[i];
-                if (Math.abs(cf.x - px) < range) return cf;
+                const dist = Math.abs(cf.x - px);
+                if (dist < nearDist) {
+                    nearDist = dist;
+                    nearest = cf;
+                }
             }
-            return null;
+            return nearest;
         }
 
         function findNearbyHome(px, range) {
+            let nearest = null;
+            let nearDist = range;
             for (let i = 0; i < state.homes.length; i++) {
                 const home = state.homes[i];
-                if (Math.abs(home.x - px) < range) return home;
+                const dist = Math.abs(home.x - px);
+                if (dist < nearDist) {
+                    nearDist = dist;
+                    nearest = home;
+                }
             }
-            return null;
+            return nearest;
         }
 
         function findNearbyCornfield(px, range) {
+            let nearest = null;
+            let nearDist = range;
             for (let i = 0; i < state.cornfields.length; i++) {
                 const field = state.cornfields[i];
-                if (Math.abs(field.x - px) < range) return field;
+                const dist = Math.abs(field.x - px);
+                if (dist < nearDist) {
+                    nearDist = dist;
+                    nearest = field;
+                }
             }
-            return null;
+            return nearest;
         }
 
         // Visual-center helpers for asymmetric sprites
@@ -2743,7 +2789,11 @@
                     countByType[type] = (countByType[type] || 0) + 1;
                 }
 
-                Object.keys(nearestByType).forEach(function (type) {
+                Object.keys(nearestByType).sort(function (a, b) {
+                    const da = Math.abs(nearestByType[a].x - px);
+                    const db = Math.abs(nearestByType[b].x - px);
+                    return da - db;
+                }).forEach(function (type) {
                     const pickupItem = nearestByType[type];
                     const nearbyCount = countByType[type] || 1;
                     const itemName = ITEM_DEFS[type] ? ITEM_DEFS[type].name : type;
@@ -2851,9 +2901,17 @@
             }
 
             if (currentSeg && currentSeg.type !== 'river') {
-                const nearTree = currentSeg.features.find(function (f) {
-                    return f.kind === 'tree' && Math.abs(f.x - px) < 50;
-                });
+                let nearTree = null;
+                let nearTreeDist = 50;
+                for (let i = 0; i < currentSeg.features.length; i++) {
+                    const f = currentSeg.features[i];
+                    if (f.kind !== 'tree') continue;
+                    const dist = Math.abs(f.x - px);
+                    if (dist < nearTreeDist) {
+                        nearTreeDist = dist;
+                        nearTree = f;
+                    }
+                }
                 if (nearTree) {
                     actions.push({ label: '🪓 Chop Tree', run: function () { chopTree(currentSeg, nearTree); } });
                 }
@@ -2888,25 +2946,35 @@
             }
 
             // Near stray ox
-            if (currentSeg.hasStrayOx) {
-                const pos = getStrayOxPosition(currentSeg);
-                if (Math.abs(px - strayOxVisualCenter(pos)) < 50) {
-                    actions.push({
-                        label: 'Hitch Stray Ox',
-                        run: function () {
-                            const rng = createPRNG(Date.now());
-                            const name = OX_NAMES[rng.nextInt(0, OX_NAMES.length - 1)];
-                            state.oxen.push({
-                                name: name,
-                                health: 80, hunger: 20, thirst: 20,
-                                hitched: true, alive: true,
-                                x: pos.x, y: pos.y,
-                            });
-                            currentSeg.hasStrayOx = false;
-                            showHud('Hitched stray ox: ' + name + '!');
-                        },
-                    });
+            const strayList = ensureSegmentStrayOxen(currentSeg);
+            let nearestStrayIndex = -1;
+            let nearestStrayDist = 50;
+            for (let si = 0; si < strayList.length; si++) {
+                const stray = strayList[si];
+                const dist = Math.abs(px - strayOxVisualCenter(stray));
+                if (dist < nearestStrayDist) {
+                    nearestStrayDist = dist;
+                    nearestStrayIndex = si;
                 }
+            }
+            if (nearestStrayIndex >= 0) {
+                actions.push({
+                    label: 'Hitch Stray Ox',
+                    run: function () {
+                        const pos = strayList[nearestStrayIndex];
+                        const rng = createPRNG(Date.now());
+                        const name = OX_NAMES[rng.nextInt(0, OX_NAMES.length - 1)];
+                        state.oxen.push({
+                            name: name,
+                            health: 100, hunger: 0, thirst: 0,
+                            hitched: true, alive: true,
+                            x: pos.x, y: pos.y,
+                        });
+                        strayList.splice(nearestStrayIndex, 1);
+                        currentSeg.hasStrayOx = strayList.length > 0;
+                        showHud('Hitched stray ox: ' + name + '!');
+                    },
+                });
             }
 
             // Near home
@@ -3068,10 +3136,13 @@
             // Stray oxen
             for (let i = 0; i < state.world.segments.length; i++) {
                 const seg = state.world.segments[i];
-                if (!seg.hasStrayOx) continue;
-                const pos = getStrayOxPosition(seg);
-                if (pos.x < cullLeft || pos.x > cullRight) continue;
-                entities.push({ y: pos.y + OX_FEET_OFFSET, draw: function () { drawOxSprite(pos.x, pos.y, -1, state.animFrame, true, false); } });
+                const strayList = ensureSegmentStrayOxen(seg);
+                if (strayList.length === 0) continue;
+                for (let si = 0; si < strayList.length; si++) {
+                    const pos = strayList[si];
+                    if (pos.x < cullLeft || pos.x > cullRight) continue;
+                    entities.push({ y: pos.y + OX_FEET_OFFSET, draw: function () { drawOxSprite(pos.x, pos.y, -1, state.animFrame, true, false); } });
+                }
             }
 
             // Player's oxen
@@ -4379,7 +4450,7 @@
                     }
 
                     if (targetSeg) {
-                        targetSeg.hasStrayOx = true;
+                        addStrayOxToSegment(targetSeg, state.player.x + 40);
                         showHud(event.msg);
                     } else {
                         showHud('No safe ground nearby for a stray ox.');
@@ -4878,7 +4949,7 @@
             }
 
             if (targetSeg) {
-                targetSeg.hasStrayOx = true;
+                addStrayOxToSegment(targetSeg, oxX);
             }
 
             state.oxen.splice(oxIndex, 1);
@@ -5203,6 +5274,19 @@
             const wagon = Object.assign({}, base.wagon, loaded.wagon || {});
             ensureWagonSlotCapacity(wagon);
             const world = Object.assign({}, base.world, loaded.world || {});
+            if (Array.isArray(world.segments)) {
+                world.segments = world.segments.map(function (seg) {
+                    const migrated = Object.assign({ strayOxen: [] }, seg || {});
+                    if (!Array.isArray(migrated.strayOxen)) {
+                        migrated.strayOxen = [];
+                    }
+                    if (migrated.hasStrayOx && migrated.strayOxen.length === 0) {
+                        migrated.strayOxen.push(getStrayOxPosition(migrated));
+                    }
+                    migrated.hasStrayOx = migrated.strayOxen.length > 0;
+                    return migrated;
+                });
+            }
 
             const oxen = Array.isArray(loaded.oxen) && loaded.oxen.length > 0
                 ? loaded.oxen.map(function (ox) {
