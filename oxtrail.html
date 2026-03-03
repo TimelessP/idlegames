@@ -774,7 +774,7 @@
         const ITEM_DEFS = {
             water_butt:   { name: 'Water Butt',   slots: 2, sellValue: 5,  buyValue: 8,  emoji: '🪣', canDrink: true, hungerRestore: 0, thirstRestore: 30 },
             wood:         { name: 'Wood',          slots: 1, sellValue: 3,  buyValue: 5,  emoji: '🪵', canDrink: false },
-            seed:         { name: 'Seed',          slots: 1, sellValue: 1,  buyValue: 0,  emoji: '🌰', canEat: true, hungerRestore: 6, thirstRestore: 0 },
+            seed:         { name: 'Seed',          slots: 1, sellValue: 1,  buyValue: 2,  emoji: '🌰', canEat: true, hungerRestore: 6, thirstRestore: 0 },
             corn:         { name: 'Corn',          slots: 1, sellValue: 4,  buyValue: 6,  emoji: '🌽', canEat: true, hungerRestore: 18, thirstRestore: 0 },
             fish:         { name: 'Fish',          slots: 1, sellValue: 4,  buyValue: 7,  emoji: '🐟', canEat: true, hungerRestore: 25, thirstRestore: 0 },
             ox_meat:      { name: 'Ox Meat',       slots: 1, sellValue: 6,  buyValue: 0,  emoji: '🥩', canEat: true, hungerRestore: 40, thirstRestore: 0 },
@@ -2905,7 +2905,8 @@
                 let nearTreeDist = 50;
                 for (let i = 0; i < currentSeg.features.length; i++) {
                     const f = currentSeg.features[i];
-                    if (f.kind !== 'tree') continue;
+                    const isMatureTree = f.kind === 'tree' && (f.growth === undefined || f.growth >= 1);
+                    if (!isMatureTree) continue;
                     const dist = Math.abs(f.x - px);
                     if (dist < nearTreeDist) {
                         nearTreeDist = dist;
@@ -4025,7 +4026,7 @@
             if (gc && gc.focus) gc.focus();
         }
 
-        function renderMenu(menuDef, items, options) {
+        function renderMenu(menuDef, items, options, restoreState) {
             options = options || {};
             menuPanelHeader.textContent = menuDef.title || 'MENU';
             menuPanelOverview.textContent = menuDef.overview || '';
@@ -4072,6 +4073,8 @@
                             const btn = document.createElement('button');
                             btn.className = 'menu-item-btn' + (act.danger ? ' danger' : '');
                             btn.textContent = act.label;
+                            btn.dataset.menuLabel = item.label;
+                            btn.dataset.actionLabel = act.label;
                             btn.tabIndex = 0;
                             btn.addEventListener('click', function (ev) {
                                 ev.stopPropagation();
@@ -4121,8 +4124,47 @@
             }
 
             menuPanel.classList.add('open');
-            // Auto-focus first focusable item
+            // Auto-focus first item by default, or restore focus/scroll for in-place rebuilds
             requestAnimationFrame(function () {
+                if (restoreState) {
+                    if (typeof restoreState.scrollTop === 'number') {
+                        menuPanelItems.scrollTop = restoreState.scrollTop;
+                    }
+                    let restored = false;
+                    if (restoreState.focusItemLabel && restoreState.focusItemActionLabel) {
+                        const itemBtns = menuPanel.querySelectorAll('.menu-item-btn');
+                        for (let i = 0; i < itemBtns.length; i++) {
+                            const btn = itemBtns[i];
+                            if (btn.dataset.menuLabel === restoreState.focusItemLabel && btn.dataset.actionLabel === restoreState.focusItemActionLabel) {
+                                btn.focus();
+                                restored = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (restoreState.focusLabel) {
+                        const nodes = menuPanel.querySelectorAll('[data-menu-label]');
+                        for (let i = 0; i < nodes.length; i++) {
+                            if (nodes[i].dataset.menuLabel === restoreState.focusLabel) {
+                                nodes[i].focus();
+                                restored = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!restored && restoreState.focusActionLabel) {
+                        const actionBtns = menuPanelActions.querySelectorAll('.menu-action-btn');
+                        for (let i = 0; i < actionBtns.length; i++) {
+                            if (actionBtns[i].textContent === restoreState.focusActionLabel) {
+                                actionBtns[i].focus();
+                                restored = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (restored) return;
+                }
+
                 const first = menuPanel.querySelector('[tabindex="0"]');
                 if (first) first.focus();
             });
@@ -4148,6 +4190,16 @@
         function rebuildMenuInPlace() {
             if (state.menuStack.length === 0) return;
             const current = state.menuStack[state.menuStack.length - 1];
+
+            const activeEl = document.activeElement;
+            const restoreState = {
+                scrollTop: menuPanelItems ? menuPanelItems.scrollTop : 0,
+                focusLabel: activeEl && activeEl.dataset ? activeEl.dataset.menuLabel : null,
+                focusActionLabel: activeEl && activeEl.classList && activeEl.classList.contains('menu-action-btn') ? activeEl.textContent : null,
+                focusItemLabel: activeEl && activeEl.classList && activeEl.classList.contains('menu-item-btn') ? activeEl.dataset.menuLabel : null,
+                focusItemActionLabel: activeEl && activeEl.classList && activeEl.classList.contains('menu-item-btn') ? activeEl.dataset.actionLabel : null,
+            };
+
             let items = current.definition.items || [];
             if (current.definition.itemBuilder) {
                 const builder = MENU_HANDLERS[current.definition.itemBuilder];
@@ -4156,7 +4208,7 @@
                 }
             }
             current.items = items;
-            renderMenu(current.definition, items, current.options);
+            renderMenu(current.definition, items, current.options, restoreState);
         }
 
         function handleMenuBehavior(behavior) {
@@ -4835,6 +4887,11 @@
                 return;
             }
 
+            if (treeFeature.kind !== 'tree' || (treeFeature.growth !== undefined && treeFeature.growth < 1)) {
+                showHud('This tree is not fully grown yet.');
+                return;
+            }
+
             const featureIndex = segment.features.indexOf(treeFeature);
             if (featureIndex < 0) {
                 showHud('No tree to chop here.');
@@ -5288,7 +5345,7 @@
                 });
             }
 
-            const oxen = Array.isArray(loaded.oxen) && loaded.oxen.length > 0
+            const oxen = Array.isArray(loaded.oxen)
                 ? loaded.oxen.map(function (ox) {
                     return Object.assign({
                         name: 'Ox', health: 100, hunger: 0, thirst: 0,
