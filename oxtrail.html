@@ -529,10 +529,9 @@
             <svg id="gameCanvas" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
             <div class="key-hints" id="keyHints">
                 <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move &nbsp;
-                <kbd>E</kbd> Interact &nbsp;
-                <kbd>M</kbd> Menu
+                <kbd>E</kbd> Interact / Actions
             </div>
-            <div class="hud" id="hud">Use WASD to move, E to interact, M for menu</div>
+            <div class="hud" id="hud">Use WASD to move and E to open Actions</div>
             <div class="night-overlay" id="nightOverlay"></div>
             <div class="weather-overlay" id="weatherOverlay"></div>
         </div>
@@ -569,7 +568,7 @@
                 <p><strong>Action Menu:</strong></p>
                 <ul style="margin-left:1.25rem; margin-bottom:1rem;">
                     <li>Press <kbd>E</kbd> or tap <strong>Menu</strong> to open</li>
-                    <li>Nearby actions appear at the top (pick up, chop, fish, trade, build/rest at home…)</li>
+                    <li>Nearby actions appear at the top (pick up, chop, fish, trade, guestbook, build/rest at home…)</li>
                     <li>Manage section: Wagon Inventory, Ox Management, Make Camp, Status</li>
                     <li>Navigate with <kbd>Tab</kbd>, arrows, <kbd>W</kbd>/<kbd>S</kbd>; confirm with <kbd>E</kbd>/<kbd>Enter</kbd>; close with <kbd>Esc</kbd></li>
                 </ul>
@@ -577,7 +576,7 @@
                 <ul style="margin-left:1.25rem; margin-bottom:1rem;">
                     <li>Walk near wagon → Menu → Board Wagon</li>
                     <li>Tap <kbd>A</kbd>/<kbd>D</kbd> to start/stop driving</li>
-                    <li>8 inventory slots — load items via Wagon Inventory</li>
+                    <li>8 base inventory slots; install a canopy to unlock +8 canopy slots (16 total)</li>
                     <li>Speed depends on number of hitched oxen</li>
                     <li>Auto-converts to raft at river crossings</li>
                     <li>If wheel breaks: repair with a spare wheel, or with <strong>2 wood</strong> near the wagon</li>
@@ -586,11 +585,15 @@
                 <ul style="margin-left:1.25rem; margin-bottom:1rem;">
                     <li>Manage hunger, thirst, and health</li>
                     <li>Chop wood → Make Camp → Sleep until dawn</li>
+                    <li>Chopping a mature tree yields <strong>3 wood + 1 seed</strong>; seeds can be eaten, sold, planted, or fed</li>
+                    <li>Planted seeds grow into trees over time; only fully grown trees can be chopped</li>
+                    <li>Build cornfields with <strong>1 water butt + 2 wood</strong>, water while growing, then reap for corn</li>
                     <li>Fish at rivers (bank or raft): 10% wheel, 10% wood, 60% fish, 20% no catch</li>
                     <li>Caught/chopped resources auto-stow in wagon when space is available</li>
                     <li>Oxen need water and grazing — unleash at rivers</li>
                     <li>Trade goods in towns for gold</li>
                     <li>With <strong>6 wood</strong> (on foot, on land), build a permanent house; rest there to fully recover all and reset to morning + clear weather</li>
+                    <li>Any nearby house has a unique <strong>Guestbook</strong> note page that auto-saves as you type</li>
                 </ul>
                 <p><strong>Progress Save:</strong></p>
                 <ul style="margin-left:1.25rem; margin-bottom:1rem;">
@@ -868,7 +871,8 @@
                     camped: false,
                     nightPromptShown: false,
                 },
-                homes: [], // { x, y, scale }
+                homes: [], // { id, x, y, scale }
+                guestbooks: {}, // { [houseKey]: string }
                 cornfields: [], // { x, y, growth:0..1, ready:boolean }
                 campfires: [], // { x, y, fuel: 0-1, segmentIdx }
                 groundItems: [], // { id, type, x, y }
@@ -2507,6 +2511,64 @@
             return nearest;
         }
 
+        function getNextHomeId() {
+            let maxId = 0;
+            for (let i = 0; i < state.homes.length; i++) {
+                const id = Number(state.homes[i].id) || 0;
+                if (id > maxId) maxId = id;
+            }
+            return maxId + 1;
+        }
+
+        function ensureHomeIds() {
+            for (let i = 0; i < state.homes.length; i++) {
+                if (!state.homes[i].id) {
+                    state.homes[i].id = getNextHomeId();
+                }
+            }
+        }
+
+        function findNearbyHouseForGuestbook(px, range) {
+            ensureHomeIds();
+            let nearest = null;
+            let nearDist = range;
+
+            for (let i = 0; i < state.homes.length; i++) {
+                const home = state.homes[i];
+                const dist = Math.abs(home.x - px);
+                if (dist < nearDist) {
+                    nearDist = dist;
+                    nearest = {
+                        key: 'home-' + home.id,
+                        label: 'Your Home',
+                        x: home.x,
+                        y: home.y,
+                    };
+                }
+            }
+
+            for (let si = 0; si < state.world.segments.length; si++) {
+                const seg = state.world.segments[si];
+                if (!seg || !Array.isArray(seg.features)) continue;
+                for (let fi = 0; fi < seg.features.length; fi++) {
+                    const f = seg.features[fi];
+                    if (!f || f.kind !== 'house') continue;
+                    const dist = Math.abs(f.x - px);
+                    if (dist < nearDist) {
+                        nearDist = dist;
+                        nearest = {
+                            key: 'world-house-' + si + '-' + fi,
+                            label: seg.townName ? seg.townName + ' House' : 'House',
+                            x: f.x,
+                            y: f.y,
+                        };
+                    }
+                }
+            }
+
+            return nearest;
+        }
+
         function findNearbyCornfield(px, range) {
             let nearest = null;
             let nearDist = range;
@@ -2987,6 +3049,16 @@
                 });
             }
 
+            const nearGuestbookHouse = findNearbyHouseForGuestbook(px, 60);
+            if (nearGuestbookHouse) {
+                const houseEntry = nearGuestbookHouse;
+                actions.push({
+                    label: '📘 Guestbook',
+                    opensMenu: true,
+                    run: function () { openMenu('guestbook', { house: houseEntry }); },
+                });
+            }
+
             } // end on-foot-only block
 
             // --- Actions available from wagon seat too ---
@@ -3036,6 +3108,16 @@
                             state.wagon.wheelHealth = 70;
                             showHud('🛠️ Repaired wheel with 2 wood.');
                         },
+                    });
+                }
+
+                const nearGuestbookHouseW = findNearbyHouseForGuestbook(px, 60);
+                if (nearGuestbookHouseW) {
+                    const houseEntryW = nearGuestbookHouseW;
+                    actions.push({
+                        label: '📘 Guestbook',
+                        opensMenu: true,
+                        run: function () { openMenu('guestbook', { house: houseEntryW }); },
                     });
                 }
             }
@@ -3481,6 +3563,13 @@
                 overview: 'Current journey status',
                 itemBuilder: 'buildStatusItems',
                 actions: [{ label: 'Back', behavior: 'back' }],
+            },
+            guestbook: {
+                isRoot: false,
+                title: 'GUESTBOOK',
+                overview: 'Leave a note for this house',
+                itemBuilder: 'buildGuestbookItems',
+                actions: [{ label: 'Close', behavior: 'close' }],
             },
             actionMenu: {
                 isRoot: true,
@@ -3961,6 +4050,23 @@
                 return items;
             },
 
+            buildGuestbookItems: function (options) {
+                options = options || {};
+                const house = options.house || { key: 'unknown-house', label: 'House' };
+                const currentText = state.guestbooks && typeof state.guestbooks[house.key] === 'string'
+                    ? state.guestbooks[house.key]
+                    : '';
+                return [
+                    { type: 'setting', label: 'House', value: house.label, actions: [] },
+                    {
+                        type: 'guestbook-editor',
+                        key: house.key,
+                        value: currentText,
+                        placeholder: 'Write a note... (auto-saves as you type)',
+                    },
+                ];
+            },
+
             buildEventItems: function (options) {
                 options = options || {};
                 const items = [];
@@ -4087,6 +4193,42 @@
                     }
 
                     menuPanelItems.appendChild(row);
+                } else if (item.type === 'guestbook-editor') {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'menu-setting-item';
+                    wrapper.dataset.menuLabel = 'guestbook-editor';
+
+                    const ta = document.createElement('textarea');
+                    ta.className = 'menu-setting-value';
+                    ta.value = item.value || '';
+                    ta.placeholder = item.placeholder || '';
+                    ta.wrap = 'soft';
+                    ta.rows = 10;
+                    ta.style.width = '100%';
+                    ta.style.minHeight = '180px';
+                    ta.style.maxHeight = '260px';
+                    ta.style.resize = 'vertical';
+                    ta.style.overflowY = 'auto';
+                    ta.style.overflowX = 'hidden';
+                    ta.style.whiteSpace = 'pre-wrap';
+                    ta.style.wordBreak = 'break-word';
+                    ta.style.lineHeight = '1.35';
+                    ta.style.padding = '0.6rem';
+                    ta.style.borderRadius = '10px';
+                    ta.style.border = '1px solid var(--line)';
+                    ta.style.background = 'var(--surface-2)';
+                    ta.style.color = 'var(--text)';
+                    ta.style.font = 'inherit';
+                    ta.dataset.guestbookKey = item.key;
+                    ta.tabIndex = 0;
+                    ta.addEventListener('input', function () {
+                        if (!state.guestbooks) state.guestbooks = {};
+                        state.guestbooks[item.key] = ta.value;
+                        maybeAutoSave(true);
+                    });
+
+                    wrapper.appendChild(ta);
+                    menuPanelItems.appendChild(wrapper);
                 } else if (item.type === 'action') {
                     const row = document.createElement('div');
                     row.className = 'menu-item';
@@ -4162,6 +4304,13 @@
                             }
                         }
                     }
+                    if (!restored && restoreState.guestbookKey) {
+                        const guestbookTa = menuPanelItems.querySelector('textarea[data-guestbook-key="' + restoreState.guestbookKey + '"]');
+                        if (guestbookTa) {
+                            guestbookTa.focus();
+                            restored = true;
+                        }
+                    }
                     if (restored) return;
                 }
 
@@ -4198,6 +4347,7 @@
                 focusActionLabel: activeEl && activeEl.classList && activeEl.classList.contains('menu-action-btn') ? activeEl.textContent : null,
                 focusItemLabel: activeEl && activeEl.classList && activeEl.classList.contains('menu-item-btn') ? activeEl.dataset.menuLabel : null,
                 focusItemActionLabel: activeEl && activeEl.classList && activeEl.classList.contains('menu-item-btn') ? activeEl.dataset.actionLabel : null,
+                guestbookKey: activeEl && activeEl.tagName === 'TEXTAREA' ? activeEl.dataset.guestbookKey : null,
             };
 
             let items = current.definition.items || [];
@@ -4270,6 +4420,15 @@
         menuPanel.addEventListener('keydown', function (ev) {
             if (!state.menuOpen) return;
             const key = ev.key;
+            const target = ev.target;
+            const tag = target && target.tagName ? target.tagName : '';
+            const isTextEntry = !!(target && (
+                tag === 'TEXTAREA' ||
+                (tag === 'INPUT' && ['button', 'checkbox', 'radio', 'range', 'color', 'file', 'submit', 'reset'].indexOf((target.type || 'text').toLowerCase()) === -1) ||
+                target.isContentEditable
+            ));
+
+            if (isTextEntry) return;
 
             // Navigation: down
             if (key === 'ArrowDown' || key === 's' || key === 'S') {
@@ -4370,7 +4529,7 @@
             // Camp prompt at night (debounced: only once per night)
             if (state.world.isNight && !state.world.camped && !state.world.nightPromptShown) {
                 state.world.nightPromptShown = true;
-                showHud('It\'s getting dark. Find wood and make camp (M)');
+                showHud('It\'s getting dark. Find wood and make camp (E → Actions).');
             }
             if (!state.world.isNight) {
                 state.world.nightPromptShown = false;
@@ -4634,6 +4793,7 @@
         }
 
         function buildHome() {
+            ensureHomeIds();
             const seg = getCurrentSegment();
             if (!seg || seg.type === 'river') {
                 showHud('You can only build on land.');
@@ -4657,6 +4817,7 @@
             }
 
             state.homes.push({
+                id: getNextHomeId(),
                 x: state.player.x,
                 y: GROUND_Y,
                 scale: 0.85,
@@ -5263,6 +5424,7 @@
                 oxen: state.oxen,
                 world: state.world,
                 homes: state.homes,
+                guestbooks: state.guestbooks,
                 cornfields: state.cornfields,
                 campfires: state.campfires,
                 groundItems: state.groundItems,
@@ -5361,6 +5523,7 @@
                 oxen: oxen,
                 world: world,
                 homes: Array.isArray(loaded.homes) ? loaded.homes : [],
+                guestbooks: loaded.guestbooks && typeof loaded.guestbooks === 'object' ? loaded.guestbooks : {},
                 cornfields: Array.isArray(loaded.cornfields) ? loaded.cornfields : [],
                 campfires: Array.isArray(loaded.campfires) ? loaded.campfires : [],
                 groundItems: Array.isArray(loaded.groundItems) ? loaded.groundItems : [],
@@ -5410,6 +5573,7 @@
             }
 
             state = hydrated;
+            ensureHomeIds();
             nextItemId = (payload.meta && Number(payload.meta.nextItemId)) || 1;
             lastCheckedSegment = (payload.meta && Number(payload.meta.lastCheckedSegment)) || -1;
             eventCooldownSegments = (payload.meta && Number(payload.meta.eventCooldownSegments));
