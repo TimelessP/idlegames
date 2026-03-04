@@ -35,6 +35,7 @@
             --menu-item-hover: #f0ead6;
             --menu-border: #d4c9a8;
             --menu-header-bg: #8B6914;
+            --menu-value-color: #5d3f14;
         }
 
         [data-theme="dark"] {
@@ -51,6 +52,7 @@
             --menu-item-hover: #2e4268;
             --menu-border: #3a5070;
             --menu-header-bg: #5a4510;
+            --menu-value-color: #f3dca1;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -351,7 +353,21 @@
             border: 1px solid var(--menu-border);
         }
         .menu-setting-label { font-weight: 600; font-size: 0.9rem; }
-        .menu-setting-value { font-size: 0.9rem; font-weight: 600; color: var(--accent-primary); }
+        .menu-setting-value { font-size: 0.9rem; font-weight: 600; color: var(--menu-value-color); }
+        .menu-map-item {
+            padding: 0.45rem;
+            border-radius: 0.5rem;
+            margin-bottom: 0.35rem;
+            background: var(--menu-item-bg);
+            border: 1px solid var(--menu-border);
+        }
+        .trail-map-svg {
+            width: 100%;
+            height: auto;
+            display: block;
+            border-radius: 0.35rem;
+            background: transparent;
+        }
         .menu-panel-actions {
             display: flex;
             justify-content: center;
@@ -740,6 +756,8 @@
         // Timing
         const FIXED_FPS = 20;
         const FIXED_DT = 1 / FIXED_FPS;
+        const RENDER_FPS = 20;
+        const RENDER_DT = 1 / RENDER_FPS;
         const BASE_FPS = 60;
         const SIDE_SCROLL_VIEW_W = 300;
         const RESULT_VIEW_PAN_SPEED = 220;
@@ -888,6 +906,7 @@
                 timerRunning: false,
                 distanceTravelled: 0,
                 destinationDistance: 0, // set by generateWorld
+                trailMap: null, // procedurally generated route map
                 gameOver: false,
                 won: false,
                 menuOpen: false,
@@ -2434,6 +2453,7 @@
 
         let lastFrameTime = 0;
         let accumulator = 0;
+        let renderAccumulator = 0;
 
         // ---------- helpers used by movement & interaction ----------
 
@@ -2467,6 +2487,1029 @@
             const distRight = Math.abs(worldX - rightShoreX);
             const targetX = distLeft <= distRight ? leftShoreX : rightShoreX;
             return Math.max(20, Math.min(W - 20, targetX));
+        }
+
+        function clampMapCoord(value, size) {
+            return Math.max(0, Math.min(size - 1, value));
+        }
+
+        function sampleHeightMap(heightMap, x, y) {
+            const size = heightMap.size;
+            const heights = heightMap.heights;
+            const cx = clampMapCoord(x, size);
+            const cy = clampMapCoord(y, size);
+            const x0 = Math.floor(cx);
+            const y0 = Math.floor(cy);
+            const x1 = Math.min(size - 1, x0 + 1);
+            const y1 = Math.min(size - 1, y0 + 1);
+            const tx = cx - x0;
+            const ty = cy - y0;
+
+            const h00 = heights[y0 * size + x0];
+            const h10 = heights[y0 * size + x1];
+            const h01 = heights[y1 * size + x0];
+            const h11 = heights[y1 * size + x1];
+
+            const hx0 = h00 * (1 - tx) + h10 * tx;
+            const hx1 = h01 * (1 - tx) + h11 * tx;
+            return hx0 * (1 - ty) + hx1 * ty;
+        }
+
+        function samplePolylinePoint(points, progress) {
+            if (!Array.isArray(points) || points.length === 0) {
+                return { x: 0, y: 0 };
+            }
+            if (points.length === 1) {
+                return { x: points[0].x, y: points[0].y };
+            }
+
+            const t = Math.max(0, Math.min(1, progress));
+            const scaled = t * (points.length - 1);
+            const idx = Math.floor(scaled);
+            const frac = scaled - idx;
+            const a = points[idx];
+            const b = points[Math.min(points.length - 1, idx + 1)];
+            return {
+                x: a.x + (b.x - a.x) * frac,
+                y: a.y + (b.y - a.y) * frac,
+            };
+        }
+
+        function samplePolylineTangent(points, progress) {
+            if (!Array.isArray(points) || points.length < 2) {
+                return { x: 1, y: -1 };
+            }
+
+            const t = Math.max(0, Math.min(1, progress));
+            const scaled = t * (points.length - 1);
+            const idx = Math.floor(scaled);
+            const last = points.length - 1;
+            const prevIdx = Math.max(0, idx - 1);
+            const nextIdx = Math.min(last, idx + 1);
+
+            const prev = points[prevIdx];
+            const next = points[nextIdx];
+            let dx = next.x - prev.x;
+            let dy = next.y - prev.y;
+            let len = Math.hypot(dx, dy);
+
+            if (len < 1e-5) {
+                dx = points[last].x - points[0].x;
+                dy = points[last].y - points[0].y;
+                len = Math.hypot(dx, dy);
+            }
+            if (len < 1e-5) {
+                return { x: 1, y: -1 };
+            }
+
+            return { x: dx / len, y: dy / len };
+        }
+
+        function normalizeVector(x, y, fallbackX, fallbackY) {
+            const len = Math.hypot(x, y);
+            if (len > 1e-6) {
+                return { x: x / len, y: y / len };
+            }
+            const fallbackLen = Math.hypot(fallbackX, fallbackY);
+            if (fallbackLen > 1e-6) {
+                return { x: fallbackX / fallbackLen, y: fallbackY / fallbackLen };
+            }
+            return { x: 1, y: 0 };
+        }
+
+        function getHeightMapPixel(heightMap, x, y) {
+            const size = heightMap.size;
+            const px = clampMapCoord(Math.round(x), size);
+            const py = clampMapCoord(Math.round(y), size);
+            return heightMap.heights[py * size + px];
+        }
+
+        function resamplePolyline(points, targetCount) {
+            if (!Array.isArray(points) || points.length === 0) return [];
+            if (points.length === 1 || targetCount <= 1) return [{ x: points[0].x, y: points[0].y }];
+
+            const cumulative = [0];
+            for (let i = 1; i < points.length; i++) {
+                const segLen = Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+                cumulative.push(cumulative[cumulative.length - 1] + segLen);
+            }
+            const total = cumulative[cumulative.length - 1];
+            if (total < 1e-5) {
+                return points.slice(0, 1).map(function (p) { return { x: p.x, y: p.y }; });
+            }
+
+            const sampled = [];
+            let segIdx = 1;
+            for (let i = 0; i < targetCount; i++) {
+                const targetDist = total * (i / (targetCount - 1));
+                while (segIdx < cumulative.length - 1 && cumulative[segIdx] < targetDist) segIdx++;
+
+                const d0 = cumulative[segIdx - 1];
+                const d1 = cumulative[segIdx];
+                const a = points[segIdx - 1];
+                const b = points[segIdx];
+                const t = d1 <= d0 ? 0 : (targetDist - d0) / (d1 - d0);
+                sampled.push({
+                    x: a.x + (b.x - a.x) * t,
+                    y: a.y + (b.y - a.y) * t,
+                });
+            }
+
+            return sampled;
+        }
+
+        function mixRgb(a, b, t) {
+            const ct = Math.max(0, Math.min(1, t));
+            return {
+                r: Math.round(a.r + (b.r - a.r) * ct),
+                g: Math.round(a.g + (b.g - a.g) * ct),
+                b: Math.round(a.b + (b.b - a.b) * ct),
+            };
+        }
+
+        function rgbCss(rgb, alpha) {
+            const a = Math.max(0, Math.min(1, alpha));
+            return 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',' + a.toFixed(3) + ')';
+        }
+
+        function isMapDarkTheme() {
+            return document.documentElement.getAttribute('data-theme') === 'dark';
+        }
+
+        function getTrailMapPalette(isDark) {
+            if (isDark) {
+                return {
+                    bg: '#040814',
+                    contourLow: { r: 75, g: 103, b: 152 },
+                    contourHigh: { r: 163, g: 198, b: 255 },
+                    contourOpacityBase: 0.14,
+                    contourOpacityRange: 0.26,
+                    trailBase: '#23324f',
+                    trailDash: '#8ea9ff',
+                    river: '#4d9fc4',
+                    riverHighlight: '#8bbfd7',
+                    riverOpacity: 0.5,
+                    riverHighlightOpacity: 0.5,
+                    startFill: '#79dfa3',
+                    startText: '#d6ffea',
+                    endFill: '#ff7f7f',
+                    endText: '#ffdcdc',
+                    markerRing: '#d7e4ff',
+                    markerFill: '#8cb3ff',
+                    markerStroke: '#060d1d',
+                    frame: '#7386ab',
+                    heightSand: { r: 182, g: 160, b: 121 },
+                    heightGrass: { r: 86, g: 133, b: 80 },
+                    heightRock: { r: 123, g: 127, b: 134 },
+                    heightSnow: { r: 235, g: 240, b: 247 },
+                    heightTintOpacity: 0.25,
+                    reliefLight: '#ffffff',
+                    reliefShadow: '#000000',
+                    reliefOverlayOpacity: 0.25,
+                };
+            }
+
+            return {
+                bg: '#f2e5c9',
+                contourLow: { r: 123, g: 103, b: 74 },
+                contourHigh: { r: 171, g: 147, b: 109 },
+                contourOpacityBase: 0.16,
+                contourOpacityRange: 0.24,
+                trailBase: '#6f4b2a',
+                trailDash: '#b77030',
+                river: '#5faecc',
+                riverHighlight: '#d7eef8',
+                riverOpacity: 0.85,
+                riverHighlightOpacity: 0.64,
+                startFill: '#25a85f',
+                startText: '#2d5b39',
+                endFill: '#cf4545',
+                endText: '#6f2222',
+                markerRing: '#fff4ce',
+                markerFill: '#f0bf3f',
+                markerStroke: '#5a3f22',
+                frame: '#a78f64',
+                heightSand: { r: 218, g: 190, b: 139 },
+                heightGrass: { r: 116, g: 168, b: 95 },
+                heightRock: { r: 148, g: 151, b: 156 },
+                heightSnow: { r: 255, g: 255, b: 255 },
+                heightTintOpacity: 0.25,
+                reliefLight: '#ffffff',
+                reliefShadow: '#000000',
+                reliefOverlayOpacity: 0.25,
+            };
+        }
+
+        function buildHeightTintOverlaySvg(mapData, palette) {
+            const heightMap = mapData && mapData.heightMap;
+            if (!heightMap || !heightMap.heights || !heightMap.size) return '';
+
+            const size = heightMap.size;
+            const cellSize = 4;
+            let rects = '';
+
+            function colorAtHeight(height01) {
+                const h = Math.max(0, Math.min(1, height01));
+                if (h < 0.2) {
+                    return palette.heightSand;
+                }
+                if (h < 0.52) {
+                    return mixRgb(palette.heightSand, palette.heightGrass, (h - 0.2) / 0.32);
+                }
+                if (h < 0.78) {
+                    return mixRgb(palette.heightGrass, palette.heightRock, (h - 0.52) / 0.26);
+                }
+                if (h < 0.92) {
+                    return mixRgb(palette.heightRock, palette.heightSnow, (h - 0.78) / 0.14);
+                }
+                return palette.heightSnow;
+            }
+
+            for (let y = 0; y < size; y += cellSize) {
+                for (let x = 0; x < size; x += cellSize) {
+                    const centerX = x + cellSize * 0.5;
+                    const centerY = y + cellSize * 0.5;
+                    const height = sampleHeightMap(heightMap, centerX, centerY) / 255;
+                    const color = colorAtHeight(height);
+
+                    const w = Math.min(cellSize, size - x);
+                    const h = Math.min(cellSize, size - y);
+                    rects += '<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + w.toFixed(2) + '" height="' + h.toFixed(2) + '" fill="' + rgbCss(color, 1) + '" />';
+                }
+            }
+
+            const groupOpacity = (palette.heightTintOpacity != null ? palette.heightTintOpacity : 0.25);
+            return '<g class="map-height-tint" opacity="' + groupOpacity + '" shape-rendering="crispEdges">'
+                + rects
+                + '</g>';
+        }
+
+        function buildHillshadeOverlaySvg(mapData, palette) {
+            const heightMap = mapData && mapData.heightMap;
+            if (!heightMap || !heightMap.heights || !heightMap.size) return '';
+
+            const size = heightMap.size;
+            const cellSize = 4;
+            const lightDir = normalizeVector(-1, -1, -1, -1);
+            const gradientScale = 16.0;
+            const threshold = 0.01;
+
+            let lightRects = '';
+            let shadowRects = '';
+
+            for (let y = 0; y < size; y += cellSize) {
+                for (let x = 0; x < size; x += cellSize) {
+                    const centerX = x + cellSize * 0.5;
+                    const centerY = y + cellSize * 0.5;
+
+                    const hL = sampleHeightMap(heightMap, centerX - cellSize, centerY);
+                    const hR = sampleHeightMap(heightMap, centerX + cellSize, centerY);
+                    const hU = sampleHeightMap(heightMap, centerX, centerY - cellSize);
+                    const hD = sampleHeightMap(heightMap, centerX, centerY + cellSize);
+
+                    const gx = (hR - hL) / (2 * cellSize * 255);
+                    const gy = (hD - hU) / (2 * cellSize * 255);
+                    const nx = -gx;
+                    const ny = -gy;
+                    const slopeTowardLight = (nx * lightDir.x + ny * lightDir.y) * gradientScale;
+
+                    const magnitude = Math.abs(slopeTowardLight);
+                    if (magnitude < threshold) continue;
+
+                    const scaled = Math.max(0, Math.min(1, (magnitude - threshold) / 0.35));
+                    const alpha = Math.max(0, Math.min(1, Math.pow(scaled, 0.85)));
+
+                    const w = Math.min(cellSize, size - x);
+                    const h = Math.min(cellSize, size - y);
+                    const rect = '<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + w.toFixed(2) + '" height="' + h.toFixed(2) + '" fill-opacity="' + alpha.toFixed(3) + '" />';
+
+                    if (slopeTowardLight >= 0) {
+                        lightRects += rect;
+                    } else {
+                        shadowRects += rect;
+                    }
+                }
+            }
+
+            const groupOpacity = (palette.reliefOverlayOpacity != null ? palette.reliefOverlayOpacity : 0.25);
+            return '<g class="map-relief" opacity="' + groupOpacity + '" shape-rendering="crispEdges">'
+                + '<g fill="' + palette.reliefShadow + '">' + shadowRects + '</g>'
+                + '<g fill="' + palette.reliefLight + '">' + lightRects + '</g>'
+                + '</g>';
+        }
+
+        function createTrailHeightMap(seed, size, riverPolylines) {
+            const rng = createPRNG((seed || Date.now()) + 9137);
+
+            const baseCanvas = document.createElement('canvas');
+            baseCanvas.width = size;
+            baseCanvas.height = size;
+            const baseCtx = baseCanvas.getContext('2d');
+            baseCtx.fillStyle = 'rgb(26,26,26)';
+            baseCtx.fillRect(0, 0, size, size);
+
+            const blobCount = 56;
+            for (let i = 0; i < blobCount; i++) {
+                const radius = 10 + rng.next() * 42;
+                const x = rng.next() * size;
+                const y = rng.next() * size;
+                const alpha = 0.2 + rng.next() * 0.65;
+                baseCtx.fillStyle = 'rgba(255,255,255,' + alpha.toFixed(3) + ')';
+                baseCtx.beginPath();
+                baseCtx.arc(x, y, radius, 0, Math.PI * 2);
+                baseCtx.fill();
+            }
+
+            if (Array.isArray(riverPolylines) && riverPolylines.length > 0) {
+                baseCtx.save();
+                baseCtx.lineCap = 'round';
+                baseCtx.lineJoin = 'round';
+
+                const wide = Math.max(11, size * 0.05);
+                const medium = wide * 0.72;
+                const narrow = wide * 0.46;
+
+                const strokeRiverPath = function (nodes, width) {
+                    if (!Array.isArray(nodes) || nodes.length < 2) return;
+                    baseCtx.beginPath();
+                    baseCtx.moveTo(nodes[0].x, nodes[0].y);
+                    for (let i = 1; i < nodes.length; i++) {
+                        baseCtx.lineTo(nodes[i].x, nodes[i].y);
+                    }
+                    baseCtx.strokeStyle = '#000000';
+                    baseCtx.lineWidth = width;
+                    baseCtx.stroke();
+                };
+
+                for (let i = 0; i < riverPolylines.length; i++) {
+                    const nodes = riverPolylines[i];
+                    strokeRiverPath(nodes, wide);
+                    strokeRiverPath(nodes, medium);
+                    strokeRiverPath(nodes, narrow);
+                }
+
+                baseCtx.restore();
+            }
+
+            const blurCanvas = document.createElement('canvas');
+            blurCanvas.width = size;
+            blurCanvas.height = size;
+            const blurCtx = blurCanvas.getContext('2d', { willReadFrequently: true });
+            if (blurCtx && typeof blurCtx.filter === 'string') {
+                blurCtx.filter = 'blur(14px)';
+                blurCtx.drawImage(baseCanvas, 0, 0);
+                blurCtx.filter = 'none';
+            } else if (blurCtx) {
+                for (let pass = 0; pass < 6; pass++) {
+                    blurCtx.globalAlpha = 0.17;
+                    blurCtx.drawImage(baseCanvas, -1, 0);
+                    blurCtx.drawImage(baseCanvas, 1, 0);
+                    blurCtx.drawImage(baseCanvas, 0, -1);
+                    blurCtx.drawImage(baseCanvas, 0, 1);
+                    blurCtx.drawImage(baseCanvas, 0, 0);
+                }
+                blurCtx.globalAlpha = 1;
+            }
+
+            const img = blurCtx.getImageData(0, 0, size, size).data;
+            const heights = new Uint8Array(size * size);
+            let minH = 255;
+            let maxH = 0;
+            for (let i = 0, p = 0; i < heights.length; i++, p += 4) {
+                const gray = Math.round((img[p] + img[p + 1] + img[p + 2]) / 3);
+                heights[i] = gray;
+                if (gray < minH) minH = gray;
+                if (gray > maxH) maxH = gray;
+            }
+
+            const span = Math.max(1, maxH - minH);
+            for (let i = 0; i < heights.length; i++) {
+                const normalized = Math.round(((heights[i] - minH) * 255) / span);
+                heights[i] = Math.max(0, Math.min(255, normalized));
+            }
+
+            return { size: size, heights: heights };
+        }
+
+        function buildInitialTrailNodes(start, end, count) {
+            const nodes = [];
+            const n = Math.max(2, count | 0);
+            for (let i = 0; i < n; i++) {
+                const t = i / (n - 1);
+                nodes.push({
+                    x: start.x + (end.x - start.x) * t,
+                    y: start.y + (end.y - start.y) * t,
+                });
+            }
+            return nodes;
+        }
+
+        function relaxTrailNodesByHeight(nodes, heightMap, iterations, stepPx) {
+            const size = heightMap.size;
+            const offsets = [
+                [0, 0],
+                [stepPx, 0],
+                [-stepPx, 0],
+                [0, stepPx],
+                [0, -stepPx],
+                [stepPx, stepPx],
+                [stepPx, -stepPx],
+                [-stepPx, stepPx],
+                [-stepPx, -stepPx],
+            ];
+
+            for (let it = 0; it < iterations; it++) {
+                for (let i = 1; i < nodes.length - 1; i++) {
+                    const prev = nodes[i - 1];
+                    const next = nodes[i + 1];
+                    const cur = nodes[i];
+                    const targetHeight = (sampleHeightMap(heightMap, prev.x, prev.y) + sampleHeightMap(heightMap, next.x, next.y)) * 0.5;
+                    const midX = (prev.x + next.x) * 0.5;
+                    const midY = (prev.y + next.y) * 0.5;
+
+                    let best = { x: cur.x, y: cur.y };
+                    let bestScore = Number.POSITIVE_INFINITY;
+                    for (let oi = 0; oi < offsets.length; oi++) {
+                        const ox = offsets[oi][0];
+                        const oy = offsets[oi][1];
+                        const candX = Math.max(prev.x + 1, Math.min(next.x - 1, clampMapCoord(cur.x + ox, size)));
+                        const candY = clampMapCoord(cur.y + oy, size);
+                        const candHeight = sampleHeightMap(heightMap, candX, candY);
+                        const smoothPenalty = Math.hypot(candX - midX, candY - midY) * 0.35;
+                        const score = Math.abs(candHeight - targetHeight) + smoothPenalty;
+                        if (score < bestScore) {
+                            bestScore = score;
+                            best.x = candX;
+                            best.y = candY;
+                        }
+                    }
+                    nodes[i].x = best.x;
+                    nodes[i].y = best.y;
+                }
+            }
+        }
+
+        function getLineSquareIntersections(center, dir, size) {
+            const epsilon = 1e-6;
+            const points = [];
+
+            function pushIfValid(x, y, t) {
+                if (x < -0.001 || x > size + 0.001 || y < -0.001 || y > size + 0.001) return;
+                for (let i = 0; i < points.length; i++) {
+                    if (Math.hypot(points[i].x - x, points[i].y - y) < 0.4) return;
+                }
+                points.push({ x: x, y: y, t: t });
+            }
+
+            if (Math.abs(dir.x) > epsilon) {
+                let t = (0 - center.x) / dir.x;
+                pushIfValid(0, center.y + t * dir.y, t);
+                t = (size - center.x) / dir.x;
+                pushIfValid(size, center.y + t * dir.y, t);
+            }
+            if (Math.abs(dir.y) > epsilon) {
+                let t = (0 - center.y) / dir.y;
+                pushIfValid(center.x + t * dir.x, 0, t);
+                t = (size - center.y) / dir.y;
+                pushIfValid(center.x + t * dir.x, size, t);
+            }
+
+            if (points.length < 2) {
+                return [{ x: 2, y: size - 2 }, { x: size - 2, y: 2 }];
+            }
+
+            points.sort(function (a, b) { return a.t - b.t; });
+            return [
+                { x: points[0].x, y: points[0].y },
+                { x: points[points.length - 1].x, y: points[points.length - 1].y },
+            ];
+        }
+
+        function buildContourSegments(heightMap, levelCount, cellSize) {
+            const size = heightMap.size;
+            const h = heightMap.heights;
+            const segments = [];
+
+            function at(x, y) {
+                const cx = Math.max(0, Math.min(size - 1, x));
+                const cy = Math.max(0, Math.min(size - 1, y));
+                return h[cy * size + cx];
+            }
+
+            function interpolate(x1, y1, v1, x2, y2, v2, level) {
+                const denom = (v2 - v1);
+                const t = Math.abs(denom) < 1e-5 ? 0.5 : (level - v1) / denom;
+                const ct = Math.max(0, Math.min(1, t));
+                return { x: x1 + (x2 - x1) * ct, y: y1 + (y2 - y1) * ct };
+            }
+
+            function edgePoint(edge, x, y, v0, v1, v2, v3, level) {
+                switch (edge) {
+                    case 0: return interpolate(x, y, v0, x + cellSize, y, v1, level); // top
+                    case 1: return interpolate(x + cellSize, y, v1, x + cellSize, y + cellSize, v2, level); // right
+                    case 2: return interpolate(x, y + cellSize, v3, x + cellSize, y + cellSize, v2, level); // bottom
+                    case 3: return interpolate(x, y, v0, x, y + cellSize, v3, level); // left
+                    default: return null;
+                }
+            }
+
+            const edgePairsByMask = {
+                1: [[3, 0]],
+                2: [[0, 1]],
+                3: [[3, 1]],
+                4: [[1, 2]],
+                5: [[3, 2], [0, 1]],
+                6: [[0, 2]],
+                7: [[3, 2]],
+                8: [[2, 3]],
+                9: [[0, 2]],
+                10: [[0, 3], [1, 2]],
+                11: [[1, 2]],
+                12: [[1, 3]],
+                13: [[0, 1]],
+                14: [[3, 0]],
+            };
+
+            for (let levelIndex = 1; levelIndex <= levelCount; levelIndex++) {
+                const level = (255 * levelIndex) / (levelCount + 1);
+                const levelRatio = levelIndex / levelCount;
+
+                for (let y = 0; y <= size - cellSize; y += cellSize) {
+                    for (let x = 0; x <= size - cellSize; x += cellSize) {
+                        const v0 = at(x, y);
+                        const v1 = at(x + cellSize, y);
+                        const v2 = at(x + cellSize, y + cellSize);
+                        const v3 = at(x, y + cellSize);
+
+                        const mask =
+                            (v0 >= level ? 1 : 0) |
+                            (v1 >= level ? 2 : 0) |
+                            (v2 >= level ? 4 : 0) |
+                            (v3 >= level ? 8 : 0);
+
+                        const pairs = edgePairsByMask[mask];
+                        if (!pairs) continue;
+                        for (let pi = 0; pi < pairs.length; pi++) {
+                            const pair = pairs[pi];
+                            const p1 = edgePoint(pair[0], x, y, v0, v1, v2, v3, level);
+                            const p2 = edgePoint(pair[1], x, y, v0, v1, v2, v3, level);
+                            if (!p1 || !p2) continue;
+                            if (!Number.isFinite(p1.x) || !Number.isFinite(p1.y) || !Number.isFinite(p2.x) || !Number.isFinite(p2.y)) continue;
+                            segments.push({
+                                x1: p1.x,
+                                y1: p1.y,
+                                x2: p2.x,
+                                y2: p2.y,
+                                levelRatio: levelRatio,
+                            });
+                        }
+                    }
+                }
+            }
+
+            return segments;
+        }
+
+        function getClockwisePerimeterParam(point, size) {
+            const max = Math.max(1, size - 1);
+            const x = clampMapCoord(point.x, size);
+            const y = clampMapCoord(point.y, size);
+            const edgeEpsilon = 1.5;
+
+            if (y <= edgeEpsilon) {
+                return x;
+            }
+            if (x >= max - edgeEpsilon) {
+                return max + y;
+            }
+            if (y >= max - edgeEpsilon) {
+                return max * 2 + (max - x);
+            }
+            return max * 3 + (max - y);
+        }
+
+        function wrapClockwiseParam(value, perimeter) {
+            let wrapped = value % perimeter;
+            if (wrapped < 0) wrapped += perimeter;
+            return wrapped;
+        }
+
+        function clockwiseOffset(param, seam, perimeter) {
+            return wrapClockwiseParam(param - seam, perimeter);
+        }
+
+        function collectRiverSeamCandidates(specs, perimeter) {
+            const half = perimeter * 0.5;
+            const boundaries = [];
+
+            for (let i = 0; i < specs.length; i++) {
+                const params = specs[i].anchorParams;
+                boundaries.push(wrapClockwiseParam(params[0], perimeter));
+                boundaries.push(wrapClockwiseParam(params[1], perimeter));
+                boundaries.push(wrapClockwiseParam(params[0] - half, perimeter));
+                boundaries.push(wrapClockwiseParam(params[1] - half, perimeter));
+            }
+
+            if (boundaries.length === 0) {
+                return [0];
+            }
+
+            boundaries.sort(function (a, b) { return a - b; });
+            const unique = [boundaries[0]];
+            for (let i = 1; i < boundaries.length; i++) {
+                if (Math.abs(boundaries[i] - unique[unique.length - 1]) > 1e-6) {
+                    unique.push(boundaries[i]);
+                }
+            }
+
+            const seams = [];
+            for (let i = 0; i < unique.length; i++) {
+                const cur = unique[i];
+                const next = (i === unique.length - 1) ? (unique[0] + perimeter) : unique[i + 1];
+                const mid = cur + (next - cur) * 0.5;
+                seams.push(wrapClockwiseParam(mid, perimeter));
+            }
+            return seams;
+        }
+
+        function assignRiverAnchorsForSeam(specs, seam, perimeter, strictMode) {
+            const half = perimeter * 0.5;
+            const eps = 1e-5;
+            const n = specs.length;
+            const working = new Array(n);
+            let best = { score: Number.POSITIVE_INFINITY, assignment: null };
+
+            function recurse(index, lastStart, lastEnd, score) {
+                if (!strictMode && score >= best.score) {
+                    return;
+                }
+
+                if (index === n) {
+                    best = {
+                        score: score,
+                        assignment: working.slice(),
+                    };
+                    return;
+                }
+
+                const params = specs[index].anchorParams;
+                for (let choice = 0; choice < 2; choice++) {
+                    const startIdx = choice;
+                    const endIdx = 1 - choice;
+                    const startParam = params[startIdx];
+                    const endParam = params[endIdx];
+                    const startOff = clockwiseOffset(startParam, seam, perimeter);
+                    const endOff = clockwiseOffset(endParam, seam, perimeter);
+
+                    if (strictMode) {
+                        if (startOff > half - eps) continue;
+                        if (endOff < half + eps) continue;
+                        if (index > 0 && startOff + eps < lastStart) continue;
+                        if (index > 0 && endOff - eps > lastEnd) continue;
+
+                        const smoothScore = (index === 0)
+                            ? 0
+                            : Math.pow(startOff - lastStart, 2) * 0.04 + Math.pow(lastEnd - endOff, 2) * 0.04;
+                        working[index] = { startIdx: startIdx, endIdx: endIdx, startOff: startOff, endOff: endOff };
+                        recurse(index + 1, startOff, endOff, score + smoothScore);
+                    } else {
+                        let penalty = 0;
+                        penalty += Math.max(0, startOff - half) * 220;
+                        penalty += Math.max(0, half - endOff) * 220;
+
+                        if (index > 0) {
+                            penalty += Math.max(0, lastStart - startOff) * 360;
+                            penalty += Math.max(0, endOff - lastEnd) * 360;
+                            penalty += Math.abs((startOff - lastStart) - (lastEnd - endOff)) * 0.6;
+                        }
+
+                        working[index] = { startIdx: startIdx, endIdx: endIdx, startOff: startOff, endOff: endOff };
+                        recurse(index + 1, startOff, endOff, score + penalty);
+                    }
+                }
+            }
+
+            recurse(0, null, null, 0);
+            if (!best.assignment) return null;
+            return {
+                seam: seam,
+                score: best.score,
+                assignment: best.assignment,
+            };
+        }
+
+        function applyRiverAnchorAssignment(specs, assignment) {
+            if (!assignment || !Array.isArray(assignment.assignment)) return;
+            const chosen = assignment.assignment;
+            for (let i = 0; i < specs.length; i++) {
+                const spec = specs[i];
+                const choice = chosen[i];
+                if (!choice) continue;
+                spec.startAnchor = spec.edgeAnchors[choice.startIdx];
+                spec.endAnchor = spec.edgeAnchors[choice.endIdx];
+                spec.startPerimeterParam = spec.anchorParams[choice.startIdx];
+                spec.endPerimeterParam = spec.anchorParams[choice.endIdx];
+            }
+        }
+
+        function orientRiverEdgeAnchorsClockwise(specs, mapSize) {
+            if (!Array.isArray(specs) || specs.length === 0) return;
+
+            const max = Math.max(1, mapSize - 1);
+            const halfPerimeter = max * 2;
+            const count = specs.length;
+
+            for (let i = 0; i < count; i++) {
+                const startFraction = (i + 1) / (count + 1);
+                const startProgress = startFraction * halfPerimeter;
+                let startAnchor;
+                if (startProgress <= max) {
+                    startAnchor = {
+                        x: 0,
+                        y: max - startProgress,
+                    };
+                } else {
+                    startAnchor = {
+                        x: startProgress - max,
+                        y: 0,
+                    };
+                }
+
+                const reverseIndex = count - 1 - i;
+                const endFraction = (reverseIndex + 1) / (count + 1);
+                const endProgress = endFraction * halfPerimeter;
+                let endAnchor;
+                if (endProgress <= max) {
+                    endAnchor = {
+                        x: max,
+                        y: endProgress,
+                    };
+                } else {
+                    endAnchor = {
+                        x: max - (endProgress - max),
+                        y: max,
+                    };
+                }
+
+                specs[i].startAnchor = {
+                    x: clampMapCoord(startAnchor.x, mapSize),
+                    y: clampMapCoord(startAnchor.y, mapSize),
+                };
+                specs[i].endAnchor = {
+                    x: clampMapCoord(endAnchor.x, mapSize),
+                    y: clampMapCoord(endAnchor.y, mapSize),
+                };
+                specs[i].startPerimeterParam = getClockwisePerimeterParam(specs[i].startAnchor, mapSize);
+                specs[i].endPerimeterParam = getClockwisePerimeterParam(specs[i].endAnchor, mapSize);
+            }
+        }
+
+        function buildRiverPolylines(trailNodes, size, seed) {
+            const rivers = [];
+            const riverSegments = state.world.segments.filter(function (seg) { return seg.type === 'river'; });
+            if (riverSegments.length === 0) return rivers;
+
+            const mapSize = Math.max(64, size | 0);
+            const baseSeed = seed || Date.now();
+
+            const totalDist = Math.max(1, state.destinationDistance || W);
+            const specs = [];
+            for (let i = 0; i < riverSegments.length; i++) {
+                const seg = riverSegments[i];
+                const progress = Math.max(0, Math.min(1, ((seg.startX || 0) + (seg.width || 0) * 0.5) / totalDist));
+
+                const crossing = samplePolylinePoint(trailNodes, progress);
+                const tangent = samplePolylineTangent(trailNodes, progress);
+                const perp = normalizeVector(tangent.y, -tangent.x, 0, -1);
+                const edgeAnchors = getLineSquareIntersections(crossing, perp, mapSize);
+                const anchorParams = [
+                    getClockwisePerimeterParam(edgeAnchors[0], mapSize),
+                    getClockwisePerimeterParam(edgeAnchors[1], mapSize),
+                ];
+
+                specs.push({
+                    index: i,
+                    progress: progress,
+                    crossing: crossing,
+                    edgeAnchors: edgeAnchors,
+                    anchorParams: anchorParams,
+                });
+            }
+
+            specs.sort(function (a, b) {
+                if (a.progress !== b.progress) return a.progress - b.progress;
+                return a.index - b.index;
+            });
+            orientRiverEdgeAnchorsClockwise(specs, mapSize);
+
+            for (let i = 0; i < specs.length; i++) {
+                const spec = specs[i];
+                const crossing = spec.crossing;
+
+                const start = spec.startAnchor || spec.edgeAnchors[0];
+                const end = spec.endAnchor || spec.edgeAnchors[1];
+                const axis = normalizeVector(end.x - start.x, end.y - start.y, 1, 0);
+                const normal = { x: -axis.y, y: axis.x };
+                const axisLen = Math.max(1, Math.hypot(end.x - start.x, end.y - start.y));
+
+                const riverRng = createPRNG(baseSeed + 14911 + spec.index * 1009);
+                const phase1 = riverRng.next() * Math.PI * 2;
+                const phase2 = riverRng.next() * Math.PI * 2;
+                const freq1 = 0.9 + riverRng.next() * 1.2;
+                const freq2 = 1.7 + riverRng.next() * 2.0;
+                const amp = Math.max(11, axisLen * (0.05 + riverRng.next() * 0.04));
+                const alongAmp = Math.max(2, axisLen * 0.012);
+
+                const vx = end.x - start.x;
+                const vy = end.y - start.y;
+                const denom = vx * vx + vy * vy;
+                const tCrossRaw = denom < 1e-6 ? 0.5 : (((crossing.x - start.x) * vx + (crossing.y - start.y) * vy) / denom);
+                const tCross = Math.max(0, Math.min(1, tCrossRaw));
+                const crossingSuppressionBand = 0.16;
+
+                const nodeCount = 97;
+                const nodes = [];
+                for (let ni = 0; ni < nodeCount; ni++) {
+                    const t = ni / (nodeCount - 1);
+                    const baseX = start.x + vx * t;
+                    const baseY = start.y + vy * t;
+                    const envelope = Math.pow(Math.sin(Math.PI * t), 0.85);
+
+                    const wave = Math.sin(phase1 + t * Math.PI * 2 * freq1) * 0.68
+                        + Math.sin(phase2 + t * Math.PI * 2 * freq2) * 0.32;
+                    const jitter = (riverRng.next() - 0.5) * 2;
+                    const crossingDist = Math.abs(t - tCross);
+                    const crossNorm = Math.max(0, Math.min(1, crossingDist / crossingSuppressionBand));
+                    const crossSmooth = crossNorm * crossNorm * (3 - 2 * crossNorm);
+                    const perturbScale = Math.pow(crossSmooth, 2.6);
+
+                    const normalOffset = (wave + jitter * 0.2) * amp * envelope * perturbScale;
+                    const alongOffset = (
+                        Math.sin(phase2 * 0.63 + t * Math.PI * 2 * (freq1 * 0.6)) * 0.7
+                        + (riverRng.next() - 0.5) * 0.5
+                    ) * alongAmp * envelope * perturbScale;
+
+                    nodes.push({
+                        x: clampMapCoord(baseX + normal.x * normalOffset + axis.x * alongOffset, mapSize),
+                        y: clampMapCoord(baseY + normal.y * normalOffset + axis.y * alongOffset, mapSize),
+                    });
+                }
+
+                for (let pass = 0; pass < 8; pass++) {
+                    for (let ni = 1; ni < nodeCount - 1; ni++) {
+                        const prev = nodes[ni - 1];
+                        const cur = nodes[ni];
+                        const next = nodes[ni + 1];
+                        const t = ni / (nodeCount - 1);
+                        const crossingDelta = Math.abs(t - tCross);
+                        const crossingInfluence = Math.exp(-(crossingDelta * crossingDelta) / (2 * 0.035 * 0.035));
+
+                        const smoothX = (prev.x + next.x) * 0.5;
+                        const smoothY = (prev.y + next.y) * 0.5;
+
+                        const blendedX = cur.x * 0.58 + smoothX * 0.42;
+                        const blendedY = cur.y * 0.58 + smoothY * 0.42;
+
+                        nodes[ni].x = clampMapCoord(blendedX + (crossing.x - blendedX) * (0.12 * crossingInfluence), mapSize);
+                        nodes[ni].y = clampMapCoord(blendedY + (crossing.y - blendedY) * (0.12 * crossingInfluence), mapSize);
+                    }
+
+                    nodes[0] = { x: start.x, y: start.y };
+                    nodes[nodeCount - 1] = { x: end.x, y: end.y };
+                }
+
+                const finalNodes = resamplePolyline(nodes, 81);
+                if (finalNodes.length >= 2) {
+                    finalNodes[0] = { x: start.x, y: start.y };
+                    finalNodes[finalNodes.length - 1] = { x: end.x, y: end.y };
+                }
+
+                rivers.push(finalNodes);
+            }
+
+            return rivers;
+        }
+
+        function buildTrailMapData() {
+            if (!state.world || !Array.isArray(state.world.segments) || state.world.segments.length === 0) {
+                return null;
+            }
+
+            const size = 320;
+            const mapSeed = state.world.seed || Date.now();
+            const start = { x: size * 0.08, y: size * 0.91 };
+            const end = { x: size * 0.92, y: size * 0.1 };
+            const trailNodes = buildInitialTrailNodes(start, end, 27);
+            const initialHeightMap = createTrailHeightMap(mapSeed, size, []);
+            relaxTrailNodesByHeight(trailNodes, initialHeightMap, 44, 4);
+
+            const riverPolylines = buildRiverPolylines(trailNodes, size, mapSeed);
+            const heightMap = createTrailHeightMap(mapSeed, size, riverPolylines);
+
+            const contourSegments = buildContourSegments(heightMap, 16, 10);
+
+            return {
+                size: size,
+                startPoint: start,
+                endPoint: end,
+                heightMap: heightMap,
+                trailNodes: trailNodes,
+                contourSegments: contourSegments,
+                riverPolylines: riverPolylines,
+                svgBodyLight: '',
+                svgBodyDark: '',
+            };
+        }
+
+        function buildTrailMapStaticBody(mapData, isDark) {
+            const palette = getTrailMapPalette(isDark);
+            const size = mapData.size;
+            const heightTintSvg = buildHeightTintOverlaySvg(mapData, palette);
+            const hillshadeSvg = buildHillshadeOverlaySvg(mapData, palette);
+
+            const contourSvg = mapData.contourSegments.filter(function (seg) {
+                return Number.isFinite(seg.x1) && Number.isFinite(seg.y1) && Number.isFinite(seg.x2) && Number.isFinite(seg.y2);
+            }).map(function (seg) {
+                const contourColor = mixRgb(palette.contourLow, palette.contourHigh, seg.levelRatio || 0);
+                const contourOpacity = palette.contourOpacityBase + (seg.levelRatio || 0) * palette.contourOpacityRange;
+                return '<line x1="' + seg.x1.toFixed(2) + '" y1="' + seg.y1.toFixed(2) + '" x2="' + seg.x2.toFixed(2) + '" y2="' + seg.y2.toFixed(2) + '" stroke="' + rgbCss(contourColor, contourOpacity) + '" stroke-width="1" />';
+            }).join('');
+
+            const riverSvg = mapData.riverPolylines.map(function (nodes) {
+                const points = nodes.map(function (node) { return node.x.toFixed(2) + ',' + node.y.toFixed(2); }).join(' ');
+                return '<polyline points="' + points + '" fill="none" stroke="' + palette.river + '" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" opacity="' + (palette.riverOpacity != null ? palette.riverOpacity : 0.85) + '" />'
+                    + '<polyline points="' + points + '" fill="none" stroke="' + palette.riverHighlight + '" stroke-width="1.05" stroke-linecap="round" stroke-linejoin="round" opacity="' + (palette.riverHighlightOpacity != null ? palette.riverHighlightOpacity : 0.64) + '" />';
+            }).join('');
+
+            const trailPoints = mapData.trailNodes.map(function (node) { return node.x.toFixed(2) + ',' + node.y.toFixed(2); }).join(' ');
+            const trailSvg =
+                '<polyline points="' + trailPoints + '" fill="none" stroke="' + palette.trailDash + '" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="13 10" opacity="0.75" />';
+
+            const start = mapData.startPoint;
+            const end = mapData.endPoint;
+
+            const startMarker =
+                '<g transform="translate(' + start.x.toFixed(2) + ',' + start.y.toFixed(2) + ')">'
+                + '<circle cx="0" cy="0" r="6.5" fill="' + palette.startFill + '" stroke="#ffffff" stroke-width="2.1" />'
+                + '<path d="M0 -11 L6 -20 L-6 -20 Z" fill="' + palette.startFill + '" stroke="#ffffff" stroke-width="1.4" />'
+                + '<text x="9" y="-8" fill="' + palette.startText + '" font-size="9" font-weight="700">START</text>'
+                + '</g>';
+
+            const endMarker =
+                '<g transform="translate(' + end.x.toFixed(2) + ',' + end.y.toFixed(2) + ')">'
+                + '<line x1="0" y1="1" x2="0" y2="-18" stroke="#ffffff" stroke-width="2" />'
+                + '<path d="M0 -18 L11 -14 L0 -10 Z" fill="' + palette.endFill + '" stroke="#ffffff" stroke-width="1.4" />'
+                + '<circle cx="0" cy="0" r="5.8" fill="' + palette.endFill + '" stroke="#ffffff" stroke-width="2" />'
+                + '<text x="-28" y="-22" fill="' + palette.endText + '" font-size="9" font-weight="700">GOAL</text>'
+                + '</g>';
+
+            const frameSvg =
+                '<rect x="1.2" y="1.2" width="' + (size - 2.4).toFixed(1) + '" height="' + (size - 2.4).toFixed(1) + '" fill="none" stroke="' + palette.frame + '" stroke-opacity="0.66" stroke-width="1.2" rx="4" />';
+
+            return '<rect x="0" y="0" width="' + size + '" height="' + size + '" fill="' + palette.bg + '" />'
+                + heightTintSvg
+                + hillshadeSvg
+                + contourSvg
+                + riverSvg
+                + trailSvg
+                + startMarker
+                + endMarker
+                + frameSvg;
+        }
+
+        function buildTrailMapSvgMarkup(mapData) {
+            if (!mapData || !Array.isArray(mapData.trailNodes) || mapData.trailNodes.length === 0) return '';
+
+            const dark = isMapDarkTheme();
+            const bodyKey = dark ? 'svgBodyDark' : 'svgBodyLight';
+            if (!mapData[bodyKey]) {
+                mapData[bodyKey] = buildTrailMapStaticBody(mapData, dark);
+            }
+
+            const palette = getTrailMapPalette(dark);
+
+            const activeWorldX = state.player.onWagon ? state.wagon.x : state.player.x;
+            const totalDist = Math.max(1, state.destinationDistance || W);
+            const progress = Math.max(0, Math.min(1, activeWorldX / totalDist));
+            const marker = samplePolylinePoint(mapData.trailNodes, progress);
+
+            const markerSvg =
+                '<g transform="translate(' + marker.x.toFixed(2) + ',' + marker.y.toFixed(2) + ')">'
+                + '<circle cx="0" cy="0" r="8.5" fill="none" stroke="' + palette.markerRing + '" stroke-width="2.6" opacity="0.95" />'
+                + '<circle cx="0" cy="0" r="4.2" fill="' + palette.markerFill + '" stroke="' + palette.markerStroke + '" stroke-width="1.3" />'
+                + '</g>';
+
+            return '<svg class="trail-map-svg" viewBox="0 0 ' + mapData.size + ' ' + mapData.size + '" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Trail map">'
+                + mapData[bodyKey]
+                + markerSvg
+                + '</svg>';
+        }
+
+        function ensureTrailMapData() {
+            if (!state.trailMap || !Array.isArray(state.trailMap.trailNodes) || !Array.isArray(state.trailMap.contourSegments) || !Array.isArray(state.trailMap.riverPolylines)) {
+                state.trailMap = buildTrailMapData();
+            }
+            return state.trailMap;
         }
 
         function getStrayOxPosition(seg) {
@@ -3425,12 +4468,16 @@
             if (frameDt > 0.25) frameDt = 0.25;
 
             accumulator += frameDt;
+            renderAccumulator += frameDt;
             while (accumulator >= FIXED_DT) {
                 stepSimulation(FIXED_DT);
                 accumulator -= FIXED_DT;
             }
 
-            render();
+            if (renderAccumulator >= RENDER_DT) {
+                render();
+                renderAccumulator %= RENDER_DT;
+            }
             requestAnimationFrame(gameLoop);
         }
 
@@ -3633,6 +4680,13 @@
                 itemBuilder: 'buildStatusItems',
                 actions: [{ label: 'Back', behavior: 'back' }],
             },
+            map: {
+                isRoot: false,
+                title: 'TRAIL MAP',
+                overview: 'Contour route map with start, goal, rivers, and your current position.',
+                itemBuilder: 'buildMapItems',
+                actions: [{ label: 'Back', behavior: 'back' }],
+            },
             guestbook: {
                 isRoot: false,
                 title: 'GUESTBOOK',
@@ -3774,6 +4828,12 @@
                     type: 'action',
                     label: '📊 Status',
                     action: function () { openMenu('status'); },
+                    behavior: 'submenu',
+                });
+                items.push({
+                    type: 'action',
+                    label: '🗺️ Map',
+                    action: function () { openMenu('map'); },
                     behavior: 'submenu',
                 });
 
@@ -4170,6 +5230,24 @@
                 return items;
             },
 
+            buildMapItems: function () {
+                const mapData = ensureTrailMapData();
+                if (!mapData) {
+                    return [{ type: 'setting', label: 'Map', value: 'Unavailable', actions: [] }];
+                }
+
+                const activeWorldX = state.player.onWagon ? state.wagon.x : state.player.x;
+                const totalDist = Math.max(1, state.destinationDistance || W);
+                const progress = Math.max(0, Math.min(1, activeWorldX / totalDist));
+                const progressPct = Math.round(progress * 100);
+
+                return [
+                    { type: 'trail-map', svg: buildTrailMapSvgMarkup(mapData) },
+                    { type: 'setting', label: 'Route Progress', value: progressPct + '%', actions: [] },
+                    { type: 'setting', label: 'Position', value: Math.floor(activeWorldX) + ' / ' + Math.floor(totalDist), actions: [] },
+                ];
+            },
+
             buildGuestbookItems: function (options) {
                 options = options || {};
                 const house = options.house || { key: 'unknown-house', label: 'House' };
@@ -4313,6 +5391,13 @@
                     }
 
                     menuPanelItems.appendChild(row);
+                } else if (item.type === 'trail-map') {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'menu-map-item';
+                    wrapper.dataset.menuLabel = 'trail-map-view';
+                    wrapper.innerHTML = item.svg || '';
+                    wrapper.tabIndex = 0;
+                    menuPanelItems.appendChild(wrapper);
                 } else if (item.type === 'guestbook-editor') {
                     const wrapper = document.createElement('div');
                     wrapper.className = 'menu-setting-item';
@@ -5754,6 +6839,7 @@
                 timerRunning: !!loaded.timerRunning,
                 distanceTravelled: Number(loaded.distanceTravelled) || 0,
                 destinationDistance: Number(loaded.destinationDistance) || 0,
+                trailMap: null,
                 gameOver: !!loaded.gameOver,
                 won: !!loaded.won,
                 menuOpen: false,
@@ -5797,6 +6883,7 @@
             resultViewMode = payload.meta && payload.meta.resultViewMode ? payload.meta.resultViewMode : null;
             lastFrameTime = 0;
             accumulator = 0;
+            renderAccumulator = 0;
 
             W = deriveWorldWidthFromSegments(state.world.segments);
             if (!W || W <= 0) {
@@ -5806,6 +6893,7 @@
             state.destinationDistance = Math.max(state.destinationDistance || 0, W);
             const totalEl = document.getElementById('totalDistance');
             if (totalEl) totalEl.textContent = Math.floor(state.destinationDistance);
+            state.trailMap = null;
 
             fitCanvas();
             dynamicGroup = null;
@@ -5844,9 +6932,11 @@
             resultViewMode = null;
             lastFrameTime = 0;
             accumulator = 0;
+            renderAccumulator = 0;
 
             // Generate world
             generateWorld();
+            state.trailMap = null;
 
             // Starting supplies: Water Butt (2 slots) + wood + firewood
             state.wagon.slots[0] = 'water_butt';
@@ -6024,9 +7114,12 @@
         });
 
         // --- Initialize on load ---
-        // Use setTimeout to avoid Chrome's 'requestAnimationFrame handler took Xms' violation
-        // for the one-time expensive init (world generation + full SVG build).
-        setTimeout(init, 0);
+        // Prefer idle time for first boot to reduce main-thread jank warnings on load.
+        if (typeof window.requestIdleCallback === 'function') {
+            window.requestIdleCallback(function () { init(); }, { timeout: 500 });
+        } else {
+            requestAnimationFrame(init);
+        }
 
     </script>
     <script src="parental.js" defer></script>
