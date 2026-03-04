@@ -758,6 +758,7 @@
         const FIXED_DT = 1 / FIXED_FPS;
         const RENDER_FPS = 20;
         const RENDER_DT = 1 / RENDER_FPS;
+        const MAP_MENU_UI_INTERVAL_MS = 120;
         const BASE_FPS = 60;
         const SIDE_SCROLL_VIEW_W = 300;
         const RESULT_VIEW_PAN_SPEED = 220;
@@ -2454,6 +2455,8 @@
         let lastFrameTime = 0;
         let accumulator = 0;
         let renderAccumulator = 0;
+        let trailMapPrewarmScheduled = false;
+        let trailMapBuildInProgress = false;
 
         // ---------- helpers used by movement & interaction ----------
 
@@ -2654,6 +2657,13 @@
                     startText: '#d6ffea',
                     endFill: '#ff7f7f',
                     endText: '#ffdcdc',
+                    townMarkerFill: '#93b7ff',
+                    townMarkerStroke: '#102342',
+                    townMarkerDetail: '#e5efff',
+                    cityMarkerFill: '#ff8d8d',
+                    cityMarkerStroke: '#45121d',
+                    cityMarkerDetail: '#ffe6e6',
+                    cityLabel: '#ffe1e1',
                     markerRing: '#d7e4ff',
                     markerFill: '#8cb3ff',
                     markerStroke: '#060d1d',
@@ -2685,6 +2695,13 @@
                 startText: '#2d5b39',
                 endFill: '#cf4545',
                 endText: '#6f2222',
+                townMarkerFill: '#5f8f4a',
+                townMarkerStroke: '#355327',
+                townMarkerDetail: '#f3eedf',
+                cityMarkerFill: '#cf4545',
+                cityMarkerStroke: '#6f2222',
+                cityMarkerDetail: '#ffe5e5',
+                cityLabel: '#6f2222',
                 markerRing: '#fff4ce',
                 markerFill: '#f0bf3f',
                 markerStroke: '#5a3f22',
@@ -3395,18 +3412,34 @@
                 return null;
             }
 
-            const size = 320;
+            const size = 288;
             const mapSeed = state.world.seed || Date.now();
             const start = { x: size * 0.08, y: size * 0.91 };
             const end = { x: size * 0.92, y: size * 0.1 };
-            const trailNodes = buildInitialTrailNodes(start, end, 27);
+            const trailNodes = buildInitialTrailNodes(start, end, 23);
             const initialHeightMap = createTrailHeightMap(mapSeed, size, []);
             relaxTrailNodesByHeight(trailNodes, initialHeightMap, 44, 4);
 
             const riverPolylines = buildRiverPolylines(trailNodes, size, mapSeed);
             const heightMap = createTrailHeightMap(mapSeed, size, riverPolylines);
 
-            const contourSegments = buildContourSegments(heightMap, 16, 10);
+            const contourSegments = buildContourSegments(heightMap, 12, 12);
+            const totalDist = Math.max(1, state.destinationDistance || W);
+            const townMarkers = state.world.segments.filter(function (seg) {
+                return seg && seg.type === 'town';
+            }).map(function (seg) {
+                const worldX = (seg.startX || 0) + (seg.width || 0) * 0.5;
+                const progress = Math.max(0, Math.min(1, worldX / totalDist));
+                const point = samplePolylinePoint(trailNodes, progress);
+                return {
+                    x: point.x,
+                    y: point.y,
+                    name: seg.townName || 'Town',
+                    progress: progress,
+                };
+            }).sort(function (a, b) {
+                return a.progress - b.progress;
+            });
 
             return {
                 size: size,
@@ -3416,6 +3449,7 @@
                 trailNodes: trailNodes,
                 contourSegments: contourSegments,
                 riverPolylines: riverPolylines,
+                townMarkers: townMarkers,
                 svgBodyLight: '',
                 svgBodyDark: '',
             };
@@ -3448,6 +3482,15 @@
             const start = mapData.startPoint;
             const end = mapData.endPoint;
 
+            const townMarkersSvg = (mapData.townMarkers || []).map(function (town) {
+                return '<g transform="translate(' + town.x.toFixed(2) + ',' + town.y.toFixed(2) + ')">'
+                    + '<title>' + town.name + '</title>'
+                    + '<circle cx="0" cy="0" r="4.8" fill="' + palette.townMarkerFill + '" stroke="' + palette.townMarkerStroke + '" stroke-width="1.4" />'
+                    + '<rect x="-2.3" y="-1.2" width="4.6" height="3.5" rx="0.6" fill="' + palette.townMarkerDetail + '" opacity="0.95" />'
+                    + '<polygon points="-2.8,-1.2 0,-3.3 2.8,-1.2" fill="' + palette.townMarkerDetail + '" opacity="0.95" />'
+                    + '</g>';
+            }).join('');
+
             const startMarker =
                 '<g transform="translate(' + start.x.toFixed(2) + ',' + start.y.toFixed(2) + ')">'
                 + '<circle cx="0" cy="0" r="6.5" fill="' + palette.startFill + '" stroke="#ffffff" stroke-width="2.1" />'
@@ -3455,12 +3498,14 @@
                 + '<text x="9" y="-8" fill="' + palette.startText + '" font-size="9" font-weight="700">START</text>'
                 + '</g>';
 
-            const endMarker =
+            const cityMarker =
                 '<g transform="translate(' + end.x.toFixed(2) + ',' + end.y.toFixed(2) + ')">'
-                + '<line x1="0" y1="1" x2="0" y2="-18" stroke="#ffffff" stroke-width="2" />'
-                + '<path d="M0 -18 L11 -14 L0 -10 Z" fill="' + palette.endFill + '" stroke="#ffffff" stroke-width="1.4" />'
-                + '<circle cx="0" cy="0" r="5.8" fill="' + palette.endFill + '" stroke="#ffffff" stroke-width="2" />'
-                + '<text x="-28" y="-22" fill="' + palette.endText + '" font-size="9" font-weight="700">GOAL</text>'
+                + '<circle cx="0" cy="0" r="8.6" fill="' + palette.cityMarkerFill + '" stroke="' + palette.cityMarkerStroke + '" stroke-width="2.2" />'
+                + '<rect x="-4.7" y="-5.4" width="9.4" height="8.0" rx="1.1" fill="' + palette.cityMarkerDetail + '" opacity="0.95" />'
+                + '<rect x="-2.9" y="-7.2" width="2.2" height="2.0" rx="0.4" fill="' + palette.cityMarkerDetail + '" opacity="0.95" />'
+                + '<rect x="0.7" y="-8.4" width="2.2" height="3.2" rx="0.4" fill="' + palette.cityMarkerDetail + '" opacity="0.95" />'
+                + '<rect x="-1.0" y="-1.6" width="2.0" height="4.2" rx="0.4" fill="' + palette.cityMarkerStroke + '" opacity="0.8" />'
+                + '<text x="-30" y="-12" fill="' + palette.cityLabel + '" font-size="8.5" font-weight="700">CITY</text>'
                 + '</g>';
 
             const frameSvg =
@@ -3472,8 +3517,9 @@
                 + contourSvg
                 + riverSvg
                 + trailSvg
+                + townMarkersSvg
                 + startMarker
-                + endMarker
+                + cityMarker
                 + frameSvg;
         }
 
@@ -3494,7 +3540,7 @@
             const marker = samplePolylinePoint(mapData.trailNodes, progress);
 
             const markerSvg =
-                '<g transform="translate(' + marker.x.toFixed(2) + ',' + marker.y.toFixed(2) + ')">'
+                '<g id="trail-map-current-marker" transform="translate(' + marker.x.toFixed(2) + ',' + marker.y.toFixed(2) + ')">'
                 + '<circle cx="0" cy="0" r="8.5" fill="none" stroke="' + palette.markerRing + '" stroke-width="2.6" opacity="0.95" />'
                 + '<circle cx="0" cy="0" r="4.2" fill="' + palette.markerFill + '" stroke="' + palette.markerStroke + '" stroke-width="1.3" />'
                 + '</g>';
@@ -3506,10 +3552,54 @@
         }
 
         function ensureTrailMapData() {
-            if (!state.trailMap || !Array.isArray(state.trailMap.trailNodes) || !Array.isArray(state.trailMap.contourSegments) || !Array.isArray(state.trailMap.riverPolylines)) {
+            if (!hasTrailMapData(state.trailMap)) {
                 state.trailMap = buildTrailMapData();
             }
-            return state.trailMap;
+            return hasTrailMapData(state.trailMap) ? state.trailMap : null;
+        }
+
+        function hasTrailMapData(mapData) {
+            return !!(mapData
+                && Array.isArray(mapData.trailNodes)
+                && mapData.trailNodes.length > 1
+                && Array.isArray(mapData.contourSegments)
+                && Array.isArray(mapData.riverPolylines)
+                && Array.isArray(mapData.townMarkers));
+        }
+
+        function isMapMenuActive() {
+            if (!state.menuOpen || state.menuStack.length === 0) return false;
+            const current = state.menuStack[state.menuStack.length - 1];
+            return !!(current && current.id === 'map');
+        }
+
+        function scheduleTrailMapPrewarm() {
+            if (hasTrailMapData(state.trailMap) || trailMapPrewarmScheduled || trailMapBuildInProgress) return;
+            trailMapPrewarmScheduled = true;
+
+            const prewarm = function () {
+                trailMapPrewarmScheduled = false;
+                if (hasTrailMapData(state.trailMap) || trailMapBuildInProgress) return;
+                if (!state.world || !Array.isArray(state.world.segments) || state.world.segments.length === 0) return;
+                trailMapBuildInProgress = true;
+                setTimeout(function () {
+                    let built = null;
+                    try {
+                        built = buildTrailMapData();
+                    } finally {
+                        trailMapBuildInProgress = false;
+                    }
+                    if (!hasTrailMapData(built)) return;
+                    state.trailMap = built;
+                    const dark = isMapDarkTheme();
+                    const bodyKey = dark ? 'svgBodyDark' : 'svgBodyLight';
+                    if (!state.trailMap[bodyKey]) {
+                        state.trailMap[bodyKey] = buildTrailMapStaticBody(state.trailMap, dark);
+                    }
+                }, 0);
+            };
+
+            setTimeout(prewarm, 80);
         }
 
         function getStrayOxPosition(seg) {
@@ -4407,6 +4497,7 @@
                 updateActionLabel();
                 checkWinLose();
                 updateStats();
+                refreshOpenMapLive();
 
                 state.elapsed += dt;
                 maybeAutoSave();
@@ -4568,6 +4659,11 @@
         const menuPanelActions = document.getElementById('menuPanelActions');
         const nightOverlay = document.getElementById('nightOverlay');
         const weatherOverlay = document.getElementById('weatherOverlay');
+        let menuFocusableElements = [];
+        let liveTrailMapMarkerEl = null;
+        let liveTrailProgressValueEl = null;
+        let liveTrailPositionValueEl = null;
+        let lastMapMenuUiUpdateAt = 0;
 
         // --- MENUS data ---
         const MENUS = {
@@ -4683,7 +4779,7 @@
             map: {
                 isRoot: false,
                 title: 'TRAIL MAP',
-                overview: 'Contour route map with start, goal, rivers, and your current position.',
+                overview: 'Contour route map with start, city, towns, rivers, and your current position.',
                 itemBuilder: 'buildMapItems',
                 actions: [{ label: 'Back', behavior: 'back' }],
             },
@@ -5231,15 +5327,20 @@
             },
 
             buildMapItems: function () {
-                const mapData = ensureTrailMapData();
-                if (!mapData) {
-                    return [{ type: 'setting', label: 'Map', value: 'Unavailable', actions: [] }];
-                }
-
                 const activeWorldX = state.player.onWagon ? state.wagon.x : state.player.x;
                 const totalDist = Math.max(1, state.destinationDistance || W);
                 const progress = Math.max(0, Math.min(1, activeWorldX / totalDist));
                 const progressPct = Math.round(progress * 100);
+                const mapData = hasTrailMapData(state.trailMap) ? state.trailMap : null;
+
+                if (!mapData) {
+                    scheduleTrailMapPrewarm();
+                    return [
+                        { type: 'setting', label: 'Map', value: trailMapBuildInProgress ? 'Generating…' : 'Preparing…', actions: [] },
+                        { type: 'setting', label: 'Route Progress', value: progressPct + '%', actions: [] },
+                        { type: 'setting', label: 'Position', value: Math.floor(activeWorldX) + ' / ' + Math.floor(totalDist), actions: [] },
+                    ];
+                }
 
                 return [
                     { type: 'trail-map', svg: buildTrailMapSvgMarkup(mapData) },
@@ -5321,6 +5422,11 @@
         function closeMenu() {
             state.menuStack = [];
             state.menuOpen = false;
+            menuFocusableElements = [];
+            liveTrailMapMarkerEl = null;
+            liveTrailProgressValueEl = null;
+            liveTrailPositionValueEl = null;
+            lastMapMenuUiUpdateAt = 0;
             menuPanel.classList.remove('open');
             // Return focus to game canvas
             if (document.activeElement && document.activeElement !== document.body) {
@@ -5336,6 +5442,13 @@
             menuPanelOverview.textContent = menuDef.overview || '';
             menuPanelItems.innerHTML = '';
             menuPanelActions.innerHTML = '';
+            const focusables = [];
+            liveTrailMapMarkerEl = null;
+            liveTrailProgressValueEl = null;
+            liveTrailPositionValueEl = null;
+            if (menuDef && menuDef.itemBuilder === 'buildMapItems') {
+                lastMapMenuUiUpdateAt = 0;
+            }
 
             for (let i = 0; i < items.length; i++) {
                 const item = items[i];
@@ -5369,6 +5482,12 @@
                     val.textContent = item.value || '';
                     row.appendChild(val);
 
+                    if (item.label === 'Route Progress') {
+                        liveTrailProgressValueEl = val;
+                    } else if (item.label === 'Position') {
+                        liveTrailPositionValueEl = val;
+                    }
+
                     if (item.actions && item.actions.length > 0) {
                         const actBox = document.createElement('div');
                         actBox.className = 'menu-item-actions';
@@ -5380,6 +5499,7 @@
                             btn.dataset.menuLabel = item.label;
                             btn.dataset.actionLabel = act.label;
                             btn.tabIndex = 0;
+                            focusables.push(btn);
                             btn.addEventListener('click', function (ev) {
                                 ev.stopPropagation();
                                 if (typeof act.action === 'function') act.action();
@@ -5396,7 +5516,8 @@
                     wrapper.className = 'menu-map-item';
                     wrapper.dataset.menuLabel = 'trail-map-view';
                     wrapper.innerHTML = item.svg || '';
-                    wrapper.tabIndex = 0;
+                    wrapper.tabIndex = -1;
+                    liveTrailMapMarkerEl = wrapper.querySelector('#trail-map-current-marker');
                     menuPanelItems.appendChild(wrapper);
                 } else if (item.type === 'guestbook-editor') {
                     const wrapper = document.createElement('div');
@@ -5426,6 +5547,7 @@
                     ta.style.font = 'inherit';
                     ta.dataset.guestbookKey = item.key;
                     ta.tabIndex = 0;
+                    focusables.push(ta);
                     ta.addEventListener('input', function () {
                         if (!state.guestbooks) state.guestbooks = {};
                         state.guestbooks[item.key] = ta.value;
@@ -5446,6 +5568,7 @@
 
                     row.tabIndex = 0;
                     row.setAttribute('role', 'menuitem');
+                    focusables.push(row);
                     row.addEventListener('click', function () {
                         if (typeof item.action === 'function') item.action();
                         if (item.behavior) handleMenuBehavior(item.behavior);
@@ -5463,12 +5586,15 @@
                 btn.className = 'menu-action-btn';
                 btn.textContent = act.label;
                 btn.tabIndex = 0;
+                focusables.push(btn);
                 btn.addEventListener('click', function () {
                     if (typeof act.action === 'function') act.action();
                     if (act.behavior) handleMenuBehavior(act.behavior);
                 });
                 menuPanelActions.appendChild(btn);
             }
+
+            menuFocusableElements = focusables;
 
             menuPanel.classList.add('open');
             // Auto-focus first item by default, or restore focus/scroll for in-place rebuilds
@@ -5519,7 +5645,7 @@
                     if (restored) return;
                 }
 
-                const first = menuPanel.querySelector('[tabindex="0"]');
+                const first = menuFocusableElements.length > 0 ? menuFocusableElements[0] : null;
                 if (first) first.focus();
             });
         }
@@ -5539,6 +5665,100 @@
                     }
                 }
             }
+        }
+
+        function refreshOpenMapLive() {
+            if (!state.menuOpen || state.menuStack.length === 0) return;
+            const current = state.menuStack[state.menuStack.length - 1];
+            if (!current || !current.definition || current.definition.itemBuilder !== 'buildMapItems') return;
+
+            const activeWorldX = state.player.onWagon ? state.wagon.x : state.player.x;
+            const totalDist = Math.max(1, state.destinationDistance || W);
+            const progress = Math.max(0, Math.min(1, activeWorldX / totalDist));
+            const now = (typeof performance !== 'undefined' && performance.now)
+                ? performance.now()
+                : Date.now();
+
+            if (!liveTrailProgressValueEl && menuPanelItems) {
+                liveTrailProgressValueEl = menuPanelItems.querySelector('.menu-setting-item[data-menu-label="Route Progress"] .menu-setting-value');
+            }
+            if (!liveTrailPositionValueEl && menuPanelItems) {
+                liveTrailPositionValueEl = menuPanelItems.querySelector('.menu-setting-item[data-menu-label="Position"] .menu-setting-value');
+            }
+
+            const mapData = hasTrailMapData(state.trailMap) ? state.trailMap : null;
+            if (!mapData || !Array.isArray(mapData.trailNodes) || mapData.trailNodes.length === 0) {
+                scheduleTrailMapPrewarm();
+                if ((now - lastMapMenuUiUpdateAt) >= MAP_MENU_UI_INTERVAL_MS) {
+                    const mapStatusEl = menuPanelItems
+                        ? menuPanelItems.querySelector('.menu-setting-item[data-menu-label="Map"] .menu-setting-value')
+                        : null;
+                    const mapStatusText = trailMapBuildInProgress ? 'Generating…' : 'Preparing…';
+                    if (mapStatusEl && mapStatusEl.textContent !== mapStatusText) {
+                        mapStatusEl.textContent = mapStatusText;
+                    }
+
+                    const progressText = Math.round(progress * 100) + '%';
+                    if (liveTrailProgressValueEl && liveTrailProgressValueEl.textContent !== progressText) {
+                        liveTrailProgressValueEl.textContent = progressText;
+                    }
+
+                    const positionText = Math.floor(activeWorldX) + ' / ' + Math.floor(totalDist);
+                    if (liveTrailPositionValueEl && liveTrailPositionValueEl.textContent !== positionText) {
+                        liveTrailPositionValueEl.textContent = positionText;
+                    }
+
+                    lastMapMenuUiUpdateAt = now;
+                }
+                return;
+            }
+
+            if (!liveTrailMapMarkerEl && menuPanelItems) {
+                const mapItem = menuPanelItems.querySelector('.menu-map-item');
+                if (mapItem) {
+                    liveTrailMapMarkerEl = mapItem.querySelector('#trail-map-current-marker');
+                    if (!liveTrailMapMarkerEl) {
+                        mapItem.innerHTML = buildTrailMapSvgMarkup(mapData);
+                        liveTrailMapMarkerEl = mapItem.querySelector('#trail-map-current-marker');
+                    }
+                } else {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'menu-map-item';
+                    wrapper.dataset.menuLabel = 'trail-map-view';
+                    wrapper.innerHTML = buildTrailMapSvgMarkup(mapData);
+                    wrapper.tabIndex = -1;
+                    menuPanelItems.insertBefore(wrapper, menuPanelItems.firstChild);
+
+                    const mapStatusRow = menuPanelItems.querySelector('.menu-setting-item[data-menu-label="Map"]');
+                    if (mapStatusRow && mapStatusRow.parentNode === menuPanelItems) {
+                        menuPanelItems.removeChild(mapStatusRow);
+                    }
+
+                    liveTrailMapMarkerEl = wrapper.querySelector('#trail-map-current-marker');
+                }
+            }
+
+            if ((now - lastMapMenuUiUpdateAt) < MAP_MENU_UI_INTERVAL_MS) return;
+
+            const progressText = Math.round(progress * 100) + '%';
+            if (liveTrailProgressValueEl && liveTrailProgressValueEl.textContent !== progressText) {
+                liveTrailProgressValueEl.textContent = progressText;
+            }
+
+            const positionText = Math.floor(activeWorldX) + ' / ' + Math.floor(totalDist);
+            if (liveTrailPositionValueEl && liveTrailPositionValueEl.textContent !== positionText) {
+                liveTrailPositionValueEl.textContent = positionText;
+            }
+
+            if (liveTrailMapMarkerEl) {
+                const marker = samplePolylinePoint(mapData.trailNodes, progress);
+                const transform = 'translate(' + marker.x.toFixed(2) + ',' + marker.y.toFixed(2) + ')';
+                if (liveTrailMapMarkerEl.getAttribute('transform') !== transform) {
+                    liveTrailMapMarkerEl.setAttribute('transform', transform);
+                }
+            }
+
+            lastMapMenuUiUpdateAt = now;
         }
 
         function rebuildMenuInPlace() {
@@ -5609,7 +5829,15 @@
         // Menu key handler — full keyboard navigation
         // Collects all focusable elements in the menu panel and cycles through them.
         function getMenuFocusables() {
-            return Array.from(menuPanel.querySelectorAll('[tabindex="0"]'));
+            if (!Array.isArray(menuFocusableElements) || menuFocusableElements.length === 0) return [];
+            const focusables = [];
+            for (let i = 0; i < menuFocusableElements.length; i++) {
+                const el = menuFocusableElements[i];
+                if (el && el.isConnected && el.tabIndex === 0 && !el.disabled) {
+                    focusables.push(el);
+                }
+            }
+            return focusables;
         }
 
         function menuFocusMove(delta) {
@@ -6884,6 +7112,8 @@
             lastFrameTime = 0;
             accumulator = 0;
             renderAccumulator = 0;
+            trailMapPrewarmScheduled = false;
+            trailMapBuildInProgress = false;
 
             W = deriveWorldWidthFromSegments(state.world.segments);
             if (!W || W <= 0) {
@@ -6902,6 +7132,7 @@
             render();
             updateStats();
             updateActionLabel();
+            scheduleTrailMapPrewarm();
 
             if (!state.gameOver) startTimerIfNeeded();
 
@@ -6933,6 +7164,8 @@
             lastFrameTime = 0;
             accumulator = 0;
             renderAccumulator = 0;
+            trailMapPrewarmScheduled = false;
+            trailMapBuildInProgress = false;
 
             // Generate world
             generateWorld();
@@ -6953,6 +7186,7 @@
             drawScenery();
             render();
             updateStats();
+            scheduleTrailMapPrewarm();
 
             showHud('Your journey begins... use WASD to move, E to interact.');
             startTimerIfNeeded();
@@ -7114,12 +7348,7 @@
         });
 
         // --- Initialize on load ---
-        // Prefer idle time for first boot to reduce main-thread jank warnings on load.
-        if (typeof window.requestIdleCallback === 'function') {
-            window.requestIdleCallback(function () { init(); }, { timeout: 500 });
-        } else {
-            requestAnimationFrame(init);
-        }
+        requestAnimationFrame(init);
 
     </script>
     <script src="parental.js" defer></script>
