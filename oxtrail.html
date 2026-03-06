@@ -1137,43 +1137,212 @@
             return state.world.segments[getSegmentAt(state.player.x)] || state.world.segments[0];
         }
 
-        function createTownHotelFeature(seg) {
-            const worldSeed = (state && state.world && state.world.seed) ? state.world.seed : Date.now();
-            const rng = createPRNG(worldSeed + Math.floor(seg.startX || 0) + 431);
-            const existingBuildingXs = [];
-            if (Array.isArray(seg.features)) {
-                for (let i = 0; i < seg.features.length; i++) {
-                    const feature = seg.features[i];
-                    if (!feature || (feature.kind !== 'house' && feature.kind !== 'hotel')) continue;
-                    if (Number.isFinite(feature.x)) existingBuildingXs.push(feature.x);
+        const BUILDING_BASE_HALF_WIDTH = 30;
+        const BUILDING_OVERLAP_PADDING = 8;
+
+        function isTownBuildingFeature(feature) {
+            return !!feature && (feature.kind === 'house' || feature.kind === 'hotel');
+        }
+
+        function getBuildingScaleValue(scale, fallback) {
+            const s = Number(scale);
+            if (!Number.isFinite(s) || s <= 0) return fallback;
+            return s;
+        }
+
+        function getBuildingHalfWidth(scale) {
+            return BUILDING_BASE_HALF_WIDTH * getBuildingScaleValue(scale, 1);
+        }
+
+        function areBuildingsOverlappingAt(xA, scaleA, xB, scaleB) {
+            if (!Number.isFinite(xA) || !Number.isFinite(xB)) return false;
+            const minGap = getBuildingHalfWidth(scaleA) + getBuildingHalfWidth(scaleB) + BUILDING_OVERLAP_PADDING;
+            return Math.abs(xA - xB) < minGap;
+        }
+
+        function findBlockingBuildingAt(x, scale, options) {
+            options = options || {};
+            const includeHomes = options.includeHomes !== false;
+            const includeTownBuildings = options.includeTownBuildings !== false;
+            const targetSegment = options.segment || null;
+            const ignoreFeature = options.ignoreFeature || null;
+            const ignoreHomeId = Number(options.ignoreHomeId) || 0;
+
+            if (includeHomes && Array.isArray(state.homes)) {
+                for (let i = 0; i < state.homes.length; i++) {
+                    const home = state.homes[i];
+                    if (!home || !Number.isFinite(home.x)) continue;
+                    if (ignoreHomeId > 0 && Number(home.id) === ignoreHomeId) continue;
+                    if (areBuildingsOverlappingAt(x, scale, home.x, home.scale || 0.85)) {
+                        return { kind: 'home', entity: home };
+                    }
                 }
             }
 
-            const merchantX = (seg.startX || 0) + (seg.width || 0) * 0.5;
-            const candidateRatios = [0.18, 0.36, 0.58, 0.8];
-            let bestX = (seg.startX || 0) + (seg.width || 0) * 0.8;
-            let bestScore = Number.NEGATIVE_INFINITY;
+            if (!includeTownBuildings) return null;
 
-            for (let i = 0; i < candidateRatios.length; i++) {
-                const candidateX = (seg.startX || 0) + (seg.width || 0) * candidateRatios[i];
-                let nearestBuildingDist = 180;
-                for (let bi = 0; bi < existingBuildingXs.length; bi++) {
-                    nearestBuildingDist = Math.min(nearestBuildingDist, Math.abs(candidateX - existingBuildingXs[bi]));
+            const scanSegment = function (seg) {
+                if (!seg || !Array.isArray(seg.features)) return null;
+                for (let fi = 0; fi < seg.features.length; fi++) {
+                    const feature = seg.features[fi];
+                    if (!isTownBuildingFeature(feature)) continue;
+                    if (feature === ignoreFeature) continue;
+                    if (!Number.isFinite(feature.x)) continue;
+                    if (areBuildingsOverlappingAt(x, scale, feature.x, feature.scale || 1)) {
+                        return { kind: feature.kind, entity: feature, segment: seg };
+                    }
                 }
-                const merchantPenalty = Math.max(0, 95 - Math.abs(candidateX - merchantX));
-                const rightSideBias = candidateRatios[i] * 18;
-                const score = nearestBuildingDist + rightSideBias - merchantPenalty;
-                if (score > bestScore) {
-                    bestScore = score;
+                return null;
+            };
+
+            if (targetSegment) {
+                return scanSegment(targetSegment);
+            }
+
+            if (!state.world || !Array.isArray(state.world.segments)) return null;
+            for (let si = 0; si < state.world.segments.length; si++) {
+                const blocker = scanSegment(state.world.segments[si]);
+                if (blocker) return blocker;
+            }
+
+            return null;
+        }
+
+        function findTownBuildingPlacementX(seg, scale, rng, options) {
+            options = options || {};
+            const includeHomes = options.includeHomes !== false;
+            const ignoreFeature = options.ignoreFeature || null;
+            const width = Number(seg.width) || 0;
+            const startX = Number(seg.startX) || 0;
+            const half = getBuildingHalfWidth(scale);
+            const minX = startX + half + 10;
+            const maxX = startX + width - half - 10;
+            const clampedMin = Math.min(minX, maxX);
+            const clampedMax = Math.max(minX, maxX);
+
+            const clampX = function (value) {
+                return Math.max(clampedMin, Math.min(clampedMax, value));
+            };
+
+            const preferredRatios = Array.isArray(options.preferredRatios) && options.preferredRatios.length > 0
+                ? options.preferredRatios
+                : [0.2, 0.35, 0.5, 0.65, 0.8];
+
+            const candidates = [];
+            for (let i = 0; i < preferredRatios.length; i++) {
+                const ratio = Number(preferredRatios[i]);
+                if (!Number.isFinite(ratio)) continue;
+                const baseX = startX + width * ratio;
+                candidates.push(clampX(baseX));
+                candidates.push(clampX(baseX + (rng.next() * 16 - 8)));
+            }
+            for (let i = 0; i < 20; i++) {
+                candidates.push(clampX(startX + (half + 10) + rng.next() * Math.max(1, width - (half + 10) * 2)));
+            }
+
+            let bestX = null;
+            let bestClearance = Number.NEGATIVE_INFINITY;
+            for (let i = 0; i < candidates.length; i++) {
+                const candidateX = candidates[i];
+                const blocker = findBlockingBuildingAt(candidateX, scale, {
+                    segment: seg,
+                    includeHomes: includeHomes,
+                    includeTownBuildings: true,
+                    ignoreFeature: ignoreFeature,
+                });
+                if (blocker) continue;
+
+                let nearestDist = Number.POSITIVE_INFINITY;
+                if (Array.isArray(seg.features)) {
+                    for (let fi = 0; fi < seg.features.length; fi++) {
+                        const feature = seg.features[fi];
+                        if (!isTownBuildingFeature(feature) || feature === ignoreFeature || !Number.isFinite(feature.x)) continue;
+                        nearestDist = Math.min(nearestDist, Math.abs(candidateX - feature.x));
+                    }
+                }
+                if (includeHomes && Array.isArray(state.homes)) {
+                    for (let hi = 0; hi < state.homes.length; hi++) {
+                        const home = state.homes[hi];
+                        if (!home || !Number.isFinite(home.x)) continue;
+                        nearestDist = Math.min(nearestDist, Math.abs(candidateX - home.x));
+                    }
+                }
+                if (!Number.isFinite(nearestDist)) nearestDist = 9999;
+
+                if (nearestDist > bestClearance) {
+                    bestClearance = nearestDist;
                     bestX = candidateX;
                 }
             }
 
+            if (bestX !== null) return bestX;
+
+            const step = 8;
+            for (let x = clampedMin; x <= clampedMax; x += step) {
+                const blocker = findBlockingBuildingAt(x, scale, {
+                    segment: seg,
+                    includeHomes: includeHomes,
+                    includeTownBuildings: true,
+                    ignoreFeature: ignoreFeature,
+                });
+                if (!blocker) return x;
+            }
+
+            return clampX(startX + width * 0.5);
+        }
+
+        function ensureTownBuildingSeparation(seg) {
+            if (!seg || seg.type !== 'town' || !Array.isArray(seg.features)) return;
+
+            const worldSeed = (state && state.world && Number.isFinite(state.world.seed)) ? state.world.seed : Date.now();
+            const rng = createPRNG(worldSeed + Math.floor(seg.startX || 0) + 733);
+            const orderedBuildings = [];
+            for (let i = 0; i < seg.features.length; i++) {
+                const feature = seg.features[i];
+                if (isTownBuildingFeature(feature)) orderedBuildings.push(feature);
+            }
+            orderedBuildings.sort(function (a, b) {
+                if ((a.kind === 'hotel') !== (b.kind === 'hotel')) return a.kind === 'hotel' ? 1 : -1;
+                return (a.x || 0) - (b.x || 0);
+            });
+
+            for (let i = 0; i < orderedBuildings.length; i++) {
+                const feature = orderedBuildings[i];
+                const scale = getBuildingScaleValue(feature.scale, feature.kind === 'hotel' ? 1 : 0.9);
+                feature.scale = scale;
+                const blocker = findBlockingBuildingAt(feature.x, scale, {
+                    segment: seg,
+                    includeHomes: true,
+                    includeTownBuildings: true,
+                    ignoreFeature: feature,
+                });
+                if (!blocker) continue;
+
+                const preferredRatios = feature.kind === 'hotel'
+                    ? [0.82, 0.68, 0.54, 0.38, 0.22]
+                    : [0.22, 0.34, 0.46, 0.58, 0.72];
+                feature.x = findTownBuildingPlacementX(seg, scale, rng, {
+                    preferredRatios: preferredRatios,
+                    includeHomes: true,
+                    ignoreFeature: feature,
+                });
+            }
+        }
+
+        function createTownHotelFeature(seg) {
+            const worldSeed = (state && state.world && state.world.seed) ? state.world.seed : Date.now();
+            const rng = createPRNG(worldSeed + Math.floor(seg.startX || 0) + 431);
+            const scale = 0.96 + rng.next() * 0.12;
+            const bestX = findTownBuildingPlacementX(seg, scale, rng, {
+                preferredRatios: [0.82, 0.68, 0.54, 0.38, 0.22],
+                includeHomes: true,
+            });
+
             return {
                 kind: 'hotel',
-                x: bestX + (rng.next() * 12 - 6),
+                x: bestX,
                 y: GROUND_Y,
-                scale: 0.96 + rng.next() * 0.12,
+                scale: scale,
                 guestbookKey: 'town-hotel-' + Math.floor(seg.startX || 0),
                 stayCost: 2,
             };
@@ -1188,18 +1357,22 @@
                 if (!feature || feature.kind !== 'hotel') continue;
                 if (!feature.guestbookKey) feature.guestbookKey = 'town-hotel-' + Math.floor(seg.startX || 0);
                 if (!Number.isFinite(feature.stayCost)) feature.stayCost = 2;
+                ensureTownBuildingSeparation(seg);
                 return feature;
             }
 
             const hotel = createTownHotelFeature(seg);
             seg.features.push(hotel);
+            ensureTownBuildingSeparation(seg);
             return hotel;
         }
 
         function ensureTownHotels() {
             if (!state.world || !Array.isArray(state.world.segments)) return;
             for (let i = 0; i < state.world.segments.length; i++) {
-                ensureTownHotel(state.world.segments[i]);
+                const seg = state.world.segments[i];
+                ensureTownHotel(seg);
+                ensureTownBuildingSeparation(seg);
             }
         }
 
@@ -1369,11 +1542,20 @@
                     // Houses
                     const houses = rng.nextInt(2, 3);
                     for (let h = 0; h < houses; h++) {
+                        const houseScale = 0.8 + rng.next() * 0.4;
+                        const ratioSets = houses === 2
+                            ? [[0.22, 0.16, 0.28], [0.48, 0.42, 0.56]]
+                            : [[0.18, 0.12, 0.24], [0.36, 0.3, 0.42], [0.56, 0.5, 0.62]];
+                        const preferred = ratioSets[Math.min(h, ratioSets.length - 1)];
+                        const houseX = findTownBuildingPlacementX(seg, houseScale, rng, {
+                            preferredRatios: preferred,
+                            includeHomes: false,
+                        });
                         seg.features.push({
                             kind: 'house',
-                            x: curX + 80 + h * 140 + rng.next() * 40,
+                            x: houseX,
                             y: GROUND_Y,
-                            scale: 0.8 + rng.next() * 0.4,
+                            scale: houseScale,
                         });
                     }
                     ensureTownHotel(seg);
@@ -6412,9 +6594,13 @@
                 return;
             }
 
-            const existing = findNearbyHome(state.player.x, 90);
-            if (existing) {
-                showHud('There is already a home nearby.');
+            const homeScale = 0.85;
+            const overlappingBuilding = findBlockingBuildingAt(state.player.x, homeScale, {
+                includeHomes: true,
+                includeTownBuildings: true,
+            });
+            if (overlappingBuilding) {
+                showHud('Too close to another building. Move farther and try again.');
                 return;
             }
 
@@ -6427,7 +6613,7 @@
                 id: getNextHomeId(),
                 x: state.player.x,
                 y: GROUND_Y,
-                scale: 0.85,
+                scale: homeScale,
             });
             showHud('🏠 You built a home on the trail.');
         }
