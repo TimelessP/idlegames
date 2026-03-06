@@ -608,8 +608,9 @@
                     <li>Caught/chopped resources auto-stow in wagon when space is available</li>
                     <li>Oxen need water and grazing — unleash at rivers</li>
                     <li>Trade goods in towns for gold</li>
+                    <li>Each town has a <strong>hotel</strong>; stay overnight for <strong>2 gold</strong> to wake healed, fed, watered, and ready for morning</li>
                     <li>With <strong>6 wood</strong> (on foot, on land), build a permanent house; rest there to fully recover all and reset to morning + clear weather</li>
-                    <li>Any nearby house has a unique <strong>Guestbook</strong> note page that auto-saves as you type</li>
+                    <li>Any nearby house or hotel has a unique <strong>Guestbook</strong> note page that auto-saves as you type</li>
                 </ul>
                 <p><strong>Progress Save:</strong></p>
                 <ul style="margin-left:1.25rem; margin-bottom:1rem;">
@@ -1136,6 +1137,72 @@
             return state.world.segments[getSegmentAt(state.player.x)] || state.world.segments[0];
         }
 
+        function createTownHotelFeature(seg) {
+            const worldSeed = (state && state.world && state.world.seed) ? state.world.seed : Date.now();
+            const rng = createPRNG(worldSeed + Math.floor(seg.startX || 0) + 431);
+            const existingBuildingXs = [];
+            if (Array.isArray(seg.features)) {
+                for (let i = 0; i < seg.features.length; i++) {
+                    const feature = seg.features[i];
+                    if (!feature || (feature.kind !== 'house' && feature.kind !== 'hotel')) continue;
+                    if (Number.isFinite(feature.x)) existingBuildingXs.push(feature.x);
+                }
+            }
+
+            const merchantX = (seg.startX || 0) + (seg.width || 0) * 0.5;
+            const candidateRatios = [0.18, 0.36, 0.58, 0.8];
+            let bestX = (seg.startX || 0) + (seg.width || 0) * 0.8;
+            let bestScore = Number.NEGATIVE_INFINITY;
+
+            for (let i = 0; i < candidateRatios.length; i++) {
+                const candidateX = (seg.startX || 0) + (seg.width || 0) * candidateRatios[i];
+                let nearestBuildingDist = 180;
+                for (let bi = 0; bi < existingBuildingXs.length; bi++) {
+                    nearestBuildingDist = Math.min(nearestBuildingDist, Math.abs(candidateX - existingBuildingXs[bi]));
+                }
+                const merchantPenalty = Math.max(0, 95 - Math.abs(candidateX - merchantX));
+                const rightSideBias = candidateRatios[i] * 18;
+                const score = nearestBuildingDist + rightSideBias - merchantPenalty;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestX = candidateX;
+                }
+            }
+
+            return {
+                kind: 'hotel',
+                x: bestX + (rng.next() * 12 - 6),
+                y: GROUND_Y,
+                scale: 0.96 + rng.next() * 0.12,
+                guestbookKey: 'town-hotel-' + Math.floor(seg.startX || 0),
+                stayCost: 2,
+            };
+        }
+
+        function ensureTownHotel(seg) {
+            if (!seg || seg.type !== 'town') return null;
+            if (!Array.isArray(seg.features)) seg.features = [];
+
+            for (let i = 0; i < seg.features.length; i++) {
+                const feature = seg.features[i];
+                if (!feature || feature.kind !== 'hotel') continue;
+                if (!feature.guestbookKey) feature.guestbookKey = 'town-hotel-' + Math.floor(seg.startX || 0);
+                if (!Number.isFinite(feature.stayCost)) feature.stayCost = 2;
+                return feature;
+            }
+
+            const hotel = createTownHotelFeature(seg);
+            seg.features.push(hotel);
+            return hotel;
+        }
+
+        function ensureTownHotels() {
+            if (!state.world || !Array.isArray(state.world.segments)) return;
+            for (let i = 0; i < state.world.segments.length; i++) {
+                ensureTownHotel(state.world.segments[i]);
+            }
+        }
+
         // =====================================================================
         // SECTION_A: WORLD GENERATION + SCENERY RENDERING + ENTITY RENDERING
         // (This section is filled by sub-agent 1)
@@ -1309,6 +1376,7 @@
                             scale: 0.8 + rng.next() * 0.4,
                         });
                     }
+                    ensureTownHotel(seg);
                     // Sign
                     seg.features.push({
                         kind: 'sign',
@@ -1518,6 +1586,15 @@
             (parent || svg).appendChild(g);
         }
 
+        function drawHotel(x, y, scale, scene, parent) {
+            const g = svgEl('g', { transform: `translate(${x},${y}) scale(${scale})` });
+            drawHouse(0, 0, 1, scene, g);
+            g.appendChild(svgEl('rect', { x: -23, y: -54, width: 46, height: 11, fill: '#f0d58f', stroke: scene.houseDoor, 'stroke-width': '1', rx: 2 }));
+            g.appendChild(svgEl('text', { x: 0, y: -46, 'text-anchor': 'middle', 'font-size': '7.5', 'font-weight': '700', fill: '#5d3f14', 'font-family': 'Inter, sans-serif' })).textContent = 'HOTEL';
+            g.appendChild(svgEl('rect', { x: -10, y: -18, width: 20, height: 5, fill: '#f6e7bf', stroke: scene.houseDoor, 'stroke-width': '0.8', rx: 1.5 }));
+            (parent || svg).appendChild(g);
+        }
+
         // ---- drawSign ----
         function drawSign(x, y, text, scene, parent) {
             const g = svgEl('g', { transform: `translate(${x},${y})` });
@@ -1549,6 +1626,8 @@
                 parent.appendChild(gg);
             } else if (f.kind === 'house') {
                 drawHouse(f.x, f.y, f.scale || 1, scene, parent);
+            } else if (f.kind === 'hotel') {
+                drawHotel(f.x, f.y, f.scale || 1, scene, parent);
             } else if (f.kind === 'sign' && seg.townName) {
                 drawSign(f.x, f.y, seg.townName, scene, parent);
             } else if (f.kind === 'rock') {
@@ -3679,6 +3758,33 @@
             return nearest;
         }
 
+        function findNearbyHotel(px, range) {
+            let nearest = null;
+            let nearDist = range;
+
+            for (let si = 0; si < state.world.segments.length; si++) {
+                const seg = state.world.segments[si];
+                if (!seg || !Array.isArray(seg.features)) continue;
+                for (let fi = 0; fi < seg.features.length; fi++) {
+                    const f = seg.features[fi];
+                    if (!f || f.kind !== 'hotel') continue;
+                    const dist = Math.abs(f.x - px);
+                    if (dist < nearDist) {
+                        nearDist = dist;
+                        nearest = {
+                            key: f.guestbookKey || ('world-hotel-' + si + '-' + fi),
+                            label: seg.townName ? seg.townName + ' Hotel' : 'Hotel',
+                            x: f.x,
+                            y: f.y,
+                            cost: Number.isFinite(f.stayCost) ? f.stayCost : 2,
+                        };
+                    }
+                }
+            }
+
+            return nearest;
+        }
+
         function getNextHomeId() {
             let maxId = 0;
             for (let i = 0; i < state.homes.length; i++) {
@@ -3720,13 +3826,17 @@
                 if (!seg || !Array.isArray(seg.features)) continue;
                 for (let fi = 0; fi < seg.features.length; fi++) {
                     const f = seg.features[fi];
-                    if (!f || f.kind !== 'house') continue;
+                    if (!f || (f.kind !== 'house' && f.kind !== 'hotel')) continue;
                     const dist = Math.abs(f.x - px);
                     if (dist < nearDist) {
                         nearDist = dist;
                         nearest = {
-                            key: 'world-house-' + si + '-' + fi,
-                            label: seg.townName ? seg.townName + ' House' : 'House',
+                            key: f.kind === 'hotel'
+                                ? (f.guestbookKey || ('world-hotel-' + si + '-' + fi))
+                                : ('world-house-' + si + '-' + fi),
+                            label: f.kind === 'hotel'
+                                ? (seg.townName ? seg.townName + ' Hotel' : 'Hotel')
+                                : (seg.townName ? seg.townName + ' House' : 'House'),
                             x: f.x,
                             y: f.y,
                         };
@@ -4242,6 +4352,16 @@
                 });
             }
 
+            const nearHotel = findNearbyHotel(px, 60);
+            if (nearHotel) {
+                const hotelEntry = nearHotel;
+                actions.push({
+                    label: '🏨 Stay at Hotel (' + hotelEntry.cost + 'g)',
+                    keepOpen: true,
+                    run: function () { stayAtHotel(hotelEntry); },
+                });
+            }
+
             const nearGuestbookHouse = findNearbyHouseForGuestbook(px, 60);
             if (nearGuestbookHouse) {
                 const houseEntry = nearGuestbookHouse;
@@ -4278,6 +4398,18 @@
                         actions.push({
                             label: '🏠 Rest at Home',
                             run: function () { restAtHome(); },
+                        });
+                    }
+                }
+
+                if (!state.wagon.isRaft) {
+                    const nearHotelW = findNearbyHotel(px, 60);
+                    if (nearHotelW) {
+                        const hotelEntryW = nearHotelW;
+                        actions.push({
+                            label: '🏨 Stay at Hotel (' + hotelEntryW.cost + 'g)',
+                            keepOpen: true,
+                            run: function () { stayAtHotel(hotelEntryW); },
                         });
                     }
                 }
@@ -4788,7 +4920,7 @@
             guestbook: {
                 isRoot: false,
                 title: 'GUESTBOOK',
-                overview: 'Leave a note for this house',
+                overview: 'Leave a note for this place',
                 itemBuilder: 'buildGuestbookItems',
                 actions: [{ label: 'Close', behavior: 'close' }],
             },
@@ -4829,6 +4961,7 @@
                     else if (plainLabel.indexOf('Hitch ') === 0) score = 835;
                     else if (plainLabel.indexOf('Build ') >= 0 || plainLabel.indexOf('Plant ') >= 0) score = 810;
                     else if (plainLabel.indexOf('Rest at Home') >= 0) score = 805;
+                    else if (plainLabel.indexOf('Stay at Hotel') >= 0) score = 804;
                     else if (plainLabel.indexOf('Guestbook') >= 0) score = 800;
                     else if (plainLabel.indexOf('River') >= 0 || plainLabel.indexOf('Trade') >= 0 || plainLabel.indexOf('Camp') >= 0) score = 790;
 
@@ -5207,6 +5340,7 @@
                     const itemKey = key;
                     items.push({
                         type: 'setting',
+                        section: 'buy',
                         label: def.emoji + ' ' + def.name,
                         value: price + 'g',
                         actions: [{
@@ -5233,6 +5367,7 @@
                     const slotIdx = i;
                     items.push({
                         type: 'setting',
+                        section: 'sell',
                         label: def.emoji + ' ' + def.name,
                         value: sellPrice + 'g',
                         actions: [{
@@ -5363,15 +5498,15 @@
 
             buildGuestbookItems: function (options) {
                 options = options || {};
-                const house = options.house || { key: 'unknown-house', label: 'House' };
-                const currentText = state.guestbooks && typeof state.guestbooks[house.key] === 'string'
-                    ? state.guestbooks[house.key]
+                const place = options.house || options.place || { key: 'unknown-place', label: 'Place' };
+                const currentText = state.guestbooks && typeof state.guestbooks[place.key] === 'string'
+                    ? state.guestbooks[place.key]
                     : '';
                 return [
-                    { type: 'setting', label: 'House', value: house.label, actions: [] },
+                    { type: 'setting', label: 'Location', value: place.label, actions: [] },
                     {
                         type: 'guestbook-editor',
-                        key: house.key,
+                        key: place.key,
                         value: currentText,
                         placeholder: 'Write a note... (auto-saves as you type)',
                     },
@@ -5448,6 +5583,21 @@
             if (gc && gc.focus) gc.focus();
         }
 
+        function tryFocusMenuElement(el) {
+            if (!el || !el.isConnected || typeof el.focus !== 'function') return false;
+            el.focus();
+            return document.activeElement === el;
+        }
+
+        function focusFirstMenuItemButtonBySection(section) {
+            if (!section || !menuPanelItems) return false;
+            const buttons = menuPanelItems.querySelectorAll('.menu-item-btn[data-menu-section="' + section + '"]');
+            for (let i = 0; i < buttons.length; i++) {
+                if (tryFocusMenuElement(buttons[i])) return true;
+            }
+            return false;
+        }
+
         function renderMenu(menuDef, items, options, restoreState) {
             options = options || {};
             menuPanelHeader.textContent = menuDef.title || 'MENU';
@@ -5483,6 +5633,7 @@
                     const row = document.createElement('div');
                     row.className = 'menu-setting-item';
                     row.dataset.menuLabel = item.label;
+                    if (item.section) row.dataset.menuSection = item.section;
 
                     const lbl = document.createElement('div');
                     lbl.className = 'menu-setting-label';
@@ -5510,6 +5661,7 @@
                             btn.textContent = act.label;
                             btn.dataset.menuLabel = item.label;
                             btn.dataset.actionLabel = act.label;
+                            if (item.section || act.section) btn.dataset.menuSection = act.section || item.section;
                             btn.tabIndex = 0;
                             focusables.push(btn);
                             btn.addEventListener('click', function (ev) {
@@ -5620,19 +5772,28 @@
                         const itemBtns = menuPanel.querySelectorAll('.menu-item-btn');
                         for (let i = 0; i < itemBtns.length; i++) {
                             const btn = itemBtns[i];
-                            if (btn.dataset.menuLabel === restoreState.focusItemLabel && btn.dataset.actionLabel === restoreState.focusItemActionLabel) {
-                                btn.focus();
-                                restored = true;
+                            if (
+                                btn.dataset.menuLabel === restoreState.focusItemLabel &&
+                                btn.dataset.actionLabel === restoreState.focusItemActionLabel &&
+                                (restoreState.focusItemSection ? btn.dataset.menuSection === restoreState.focusItemSection : true)
+                            ) {
+                                restored = tryFocusMenuElement(btn);
                                 break;
                             }
                         }
                     }
-                    if (restoreState.focusLabel) {
-                        const nodes = menuPanel.querySelectorAll('[data-menu-label]');
+                    if (!restored && restoreState.focusItemActionLabel === 'Sell' && restoreState.focusItemSection === 'sell') {
+                        restored = focusFirstMenuItemButtonBySection('sell');
+                        if (!restored) restored = focusFirstMenuItemButtonBySection('buy');
+                    }
+                    if (!restored && restoreState.focusItemSection) {
+                        restored = focusFirstMenuItemButtonBySection(restoreState.focusItemSection);
+                    }
+                    if (!restored && restoreState.focusLabel) {
+                        const nodes = getMenuFocusables();
                         for (let i = 0; i < nodes.length; i++) {
-                            if (nodes[i].dataset.menuLabel === restoreState.focusLabel) {
-                                nodes[i].focus();
-                                restored = true;
+                            if (nodes[i].dataset && nodes[i].dataset.menuLabel === restoreState.focusLabel) {
+                                restored = tryFocusMenuElement(nodes[i]);
                                 break;
                             }
                         }
@@ -5641,24 +5802,20 @@
                         const actionBtns = menuPanelActions.querySelectorAll('.menu-action-btn');
                         for (let i = 0; i < actionBtns.length; i++) {
                             if (actionBtns[i].textContent === restoreState.focusActionLabel) {
-                                actionBtns[i].focus();
-                                restored = true;
+                                restored = tryFocusMenuElement(actionBtns[i]);
                                 break;
                             }
                         }
                     }
                     if (!restored && restoreState.guestbookKey) {
                         const guestbookTa = menuPanelItems.querySelector('textarea[data-guestbook-key="' + restoreState.guestbookKey + '"]');
-                        if (guestbookTa) {
-                            guestbookTa.focus();
-                            restored = true;
-                        }
+                        if (guestbookTa) restored = tryFocusMenuElement(guestbookTa);
                     }
                     if (restored) return;
                 }
 
-                const first = menuFocusableElements.length > 0 ? menuFocusableElements[0] : null;
-                if (first) first.focus();
+                const first = getMenuFocusables()[0] || null;
+                if (first) tryFocusMenuElement(first);
             });
         }
 
@@ -5784,6 +5941,7 @@
                 focusActionLabel: activeEl && activeEl.classList && activeEl.classList.contains('menu-action-btn') ? activeEl.textContent : null,
                 focusItemLabel: activeEl && activeEl.classList && activeEl.classList.contains('menu-item-btn') ? activeEl.dataset.menuLabel : null,
                 focusItemActionLabel: activeEl && activeEl.classList && activeEl.classList.contains('menu-item-btn') ? activeEl.dataset.actionLabel : null,
+                focusItemSection: activeEl && activeEl.classList && activeEl.classList.contains('menu-item-btn') ? activeEl.dataset.menuSection : null,
                 guestbookKey: activeEl && activeEl.tagName === 'TEXTAREA' ? activeEl.dataset.guestbookKey : null,
             };
 
@@ -6397,6 +6555,12 @@
         function restAtHome() {
             if (state.gameOver) return;
 
+            applyOvernightRest('🏠 Rested at home. Everyone is fully recovered.');
+        }
+
+        function applyOvernightRest(message) {
+            if (state.gameOver) return;
+
             state.player.health = 100;
             state.player.hunger = 0;
             state.player.thirst = 0;
@@ -6416,9 +6580,22 @@
             state.world.weather = 'clear';
             state.world.weatherTimer = 300;
 
+            updateStats();
             drawScenery();
-            showHud('🏠 Rested at home. Everyone is fully recovered.');
+            showHud(message);
             closeMenu();
+        }
+
+        function stayAtHotel(hotel) {
+            if (state.gameOver) return;
+            const cost = hotel && Number.isFinite(hotel.cost) ? hotel.cost : 2;
+            if (state.player.gold < cost) {
+                showHud('Need ' + cost + ' gold to stay at the hotel.');
+                return;
+            }
+
+            state.player.gold -= cost;
+            applyOvernightRest('🏨 Stayed at ' + (hotel && hotel.label ? hotel.label : 'the hotel') + ' for ' + cost + 'g.');
         }
 
         function countItemInWagon(itemType) {
@@ -7134,6 +7311,7 @@
 
             state = hydrated;
             ensureHomeIds();
+            ensureTownHotels();
             nextItemId = (payload.meta && Number(payload.meta.nextItemId)) || 1;
             lastCheckedSegment = (payload.meta && Number(payload.meta.lastCheckedSegment)) || -1;
             eventCooldownSegments = (payload.meta && Number(payload.meta.eventCooldownSegments));
