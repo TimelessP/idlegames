@@ -652,6 +652,15 @@
                     </span>
                     <span class="btn-label">Share</span>
                 </button>
+                <button class="primary-button" id="copyStoryPromptBtn" aria-label="Copy AI story prompt" title="Copy AI Story Prompt">
+                    <span class="btn-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                        </svg>
+                    </span>
+                    <span class="btn-label">AI Story Prompt</span>
+                </button>
                 <button class="primary-button" id="viewResultBtn" aria-label="View" title="View">
                     <span class="btn-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -925,6 +934,75 @@
             return emojis.join(' ');
         }
 
+        function createStoryLog() {
+            return [];
+        }
+
+        function normalizeStoryLog(value) {
+            if (!Array.isArray(value)) return createStoryLog();
+            const normalized = [];
+            for (let i = 0; i < value.length; i++) {
+                const entry = value[i];
+                const day = Math.max(1, Math.floor(Number(entry && entry.day) || 1));
+                const events = Array.isArray(entry && entry.events)
+                    ? entry.events
+                        .map(function (eventText) { return String(eventText || '').trim(); })
+                        .filter(function (eventText) { return eventText.length > 0; })
+                    : [];
+                normalized.push({ day: day, events: events });
+            }
+            normalized.sort(function (a, b) { return a.day - b.day; });
+            return normalized;
+        }
+
+        function getStoryDayEntry(day) {
+            const normalizedDay = Math.max(1, Math.floor(Number(day) || 1));
+            if (!Array.isArray(state.storyLog)) {
+                state.storyLog = createStoryLog();
+            }
+            for (let i = 0; i < state.storyLog.length; i++) {
+                const entry = state.storyLog[i];
+                if (entry && entry.day === normalizedDay) {
+                    if (!Array.isArray(entry.events)) entry.events = [];
+                    return entry;
+                }
+            }
+            const entry = { day: normalizedDay, events: [] };
+            state.storyLog.push(entry);
+            state.storyLog.sort(function (a, b) { return a.day - b.day; });
+            return entry;
+        }
+
+        function logStoryEvent(text, options) {
+            const storyText = String(text || '').trim();
+            if (!storyText) return;
+            const opts = options || {};
+            const day = Number.isFinite(opts.day) ? opts.day : ((state && state.world && Number.isFinite(state.world.day)) ? state.world.day : 1);
+            const entry = getStoryDayEntry(day);
+            const events = entry.events;
+            if (!opts.allowDuplicate && events.length > 0 && events[events.length - 1] === storyText) {
+                return;
+            }
+            events.push(storyText);
+        }
+
+        function buildStoryLogText() {
+            const entries = normalizeStoryLog(state.storyLog);
+            const lines = [];
+            for (let i = 0; i < entries.length; i++) {
+                const entry = entries[i];
+                if (!entry.events || entry.events.length === 0) continue;
+                lines.push('Day ' + entry.day + ':');
+                for (let j = 0; j < entry.events.length; j++) {
+                    lines.push('- ' + entry.events[j]);
+                }
+            }
+            if (lines.length === 0) {
+                lines.push('- No detailed trail log was captured. Use the run summary and emoji lines as your anchors.');
+            }
+            return lines.join('\n');
+        }
+
         function syncCurrentHardships() {
             if (!state || typeof state !== 'object') return;
             if (state.world && state.world.weather === 'rain') {
@@ -1016,6 +1094,7 @@
                 guestbooks: {}, // { [houseKey]: string }
                 achievements: createAchievementState(), // per-run achievement flags
                 hardships: createHardshipState(), // per-run hardship flags
+                storyLog: createStoryLog(), // per-run story log grouped by day
                 cornfields: [], // { x, y, growth:0..1, ready:boolean }
                 campfires: [], // { x, y, fuel: 0-1, segmentIdx }
                 groundItems: [], // { id, type, x, y }
@@ -4641,6 +4720,7 @@
                         unlockAchievement('ox');
                         strayList.splice(nearestStrayIndex, 1);
                         currentSeg.hasStrayOx = strayList.length > 0;
+                            logStoryEvent('hitched a stray ox named ' + name);
                         showHud('🐂 Hitched stray ox: ' + name + '!');
                     },
                 });
@@ -5431,6 +5511,7 @@
                                     state.wagon.hasCanopy = true;
                                     ensureWagonSlotCapacity();
                                     unlockAchievement('canopy');
+                                    logStoryEvent('installed a canopy on the wagon');
                                     showHud('Canopy installed!');
                                     rebuildMenuInPlace();
                                 },
@@ -5727,6 +5808,7 @@
                     type: 'action',
                     label: '😴 Sleep until dawn',
                     action: function () {
+                        logStoryEvent('slept by the campfire until dawn', { day: state.world.day });
                         state.player.health = Math.min(100, state.player.health + 20);
                         // Skip to dawn (0.3 = fully light)
                         state.world.dayTime = 0.3;
@@ -6016,11 +6098,16 @@
                     ta.dataset.guestbookKey = item.key;
                     ta.tabIndex = 0;
                     focusables.push(ta);
+                    let guestbookHasText = (ta.value || '').length > 0;
                     ta.addEventListener('input', function () {
                         if (!state.guestbooks) state.guestbooks = {};
                         state.guestbooks[item.key] = ta.value;
                         if (ta.value.length > 0) {
                             unlockAchievement('guestbook');
+                        }
+                        if (!guestbookHasText && ta.value.length > 0) {
+                            guestbookHasText = true;
+                            logStoryEvent('wrote in a guestbook');
                         }
                         maybeAutoSave(true);
                     });
@@ -6450,6 +6537,7 @@
         function updateWeather(dt) {
             state.world.weatherTimer -= dt;
             if (state.world.weatherTimer <= 0) {
+                    const previousWeather = state.world.weather;
                 const rng = createPRNG(Date.now());
                 state.world.weather = rng.pick(WEATHER_TYPES);
                 if (state.world.weather === 'rain') {
@@ -6457,6 +6545,15 @@
                 } else if (state.world.weather === 'storm') {
                     unlockHardship('storm');
                 }
+                    if (state.world.weather !== previousWeather) {
+                        if (state.world.weather === 'rain') {
+                            logStoryEvent('rode through steady rain');
+                        } else if (state.world.weather === 'storm') {
+                            logStoryEvent('endured a lightning storm on the trail');
+                        } else if (previousWeather === 'storm' || previousWeather === 'rain') {
+                            logStoryEvent('finally saw the sky clear again');
+                    }
+                    }
                 state.world.weatherTimer = 240 + Math.random() * 120;
 
                 // Weather overlay styling
@@ -6501,6 +6598,7 @@
                     ox.alive = false;
                     ox.hitched = false;
                     unlockHardship('ox_death');
+                        logStoryEvent('lost ' + ox.name + ' on the trail');
                     // Drop ox_meat and ox_pelt
                     state.groundItems.push({
                         id: nextItemId++,
@@ -6554,6 +6652,7 @@
                     unlockHardship('broken_wheel');
                     state.wagon.broken = true;
                     state.wagon.wheelHealth = 0;
+                    logStoryEvent('a wagon wheel broke');
                     showHud(event.msg);
                     break;
                 case 'stray_ox': {
@@ -6579,6 +6678,7 @@
 
                     if (targetSeg) {
                         addStrayOxToSegment(targetSeg, state.player.x + 40);
+                        logStoryEvent('spotted a stray ox wandering near the trail');
                         showHud(event.msg);
                     } else {
                         showHud('No safe ground nearby for a stray ox.');
@@ -6606,8 +6706,10 @@
                         const def = ITEM_DEFS[item];
                         const slotsUsed = def ? def.slots : 1;
                         for (let s = 0; s < slotsUsed; s++) state.wagon.slots[idx + s] = null;
+                        logStoryEvent('bandits stole our ' + (def ? def.name.toLowerCase() : 'supplies'));
                         showHud(event.msg + ' They stole your ' + (def ? def.name : 'item') + '!');
                     } else {
+                        logStoryEvent('bandits stopped us but found nothing worth stealing');
                         showHud(event.msg + ' But you had nothing for them to take.');
                     }
                     break;
@@ -6615,6 +6717,7 @@
                 case 'illness':
                     unlockHardship('illness');
                     state.player.health = Math.max(0, state.player.health - 20);
+                    logStoryEvent('fell sick on the trail');
                     showHud(event.msg);
                     break;
                 case 'snake': {
@@ -6623,6 +6726,7 @@
                         unlockHardship('snake');
                         const target = aliveOxen[Math.floor(Math.random() * aliveOxen.length)];
                         target.health = Math.max(0, target.health - 30);
+                        logStoryEvent('a snake bit ' + target.name);
                         showHud(event.msg + ' ' + target.name + ' was bitten!');
                     } else {
                         showHud(event.msg + ' No oxen to bite.');
@@ -6632,6 +6736,7 @@
                 case 'traveller': {
                     // Traveller gives a small gift
                     state.player.gold += 5;
+                    logStoryEvent('met a kindly traveller who handed over 5 gold');
                     showHud(event.msg + ' They give you 5 gold.');
                     break;
                 }
@@ -6710,6 +6815,7 @@
             });
             unlockAchievement('fire');
             state.world.camped = true;
+            logStoryEvent('made camp and lit a fire');
             showHud('🔥 Campfire lit! Rest by the fire.');
         }
 
@@ -6752,6 +6858,7 @@
                 scale: homeScale,
             });
             unlockAchievement('house');
+            logStoryEvent('built a house along the trail');
             showHud('🏠 You built a home on the trail.');
         }
 
@@ -6808,6 +6915,7 @@
                 growth: 0,
                 ready: false,
             });
+            logStoryEvent('planted a cornfield beside the trail');
             if (clearedDecorations > 0) {
                 showHud('🌱 Cornfield planted. Cleared nearby bushes/flowers.');
             } else {
@@ -6833,8 +6941,10 @@
             if (field.growth >= 1) {
                 field.growth = 1;
                 field.ready = true;
+                logStoryEvent('watered the cornfield until it finally came ready');
                 showHud('🌽 Cornfield is now ready to harvest!');
             } else {
+                logStoryEvent('watered the cornfield');
                 showHud('💧 Watered cornfield. Growth boosted.');
             }
         }
@@ -6868,6 +6978,7 @@
             field.growth = 0;
             field.ready = false;
             unlockAchievement('corn');
+            logStoryEvent('reaped the cornfield and gathered corn');
 
             if (dropped > 0) {
                 showHud('🌽 Reaped 4 corn (' + stored + ' stowed, ' + dropped + ' dropped).');
@@ -6879,6 +6990,7 @@
         function restAtHome() {
             if (state.gameOver) return;
 
+            logStoryEvent('slept at home until dawn');
             applyOvernightRest('🏠 Rested at home. Everyone is fully recovered.');
         }
 
@@ -6920,6 +7032,7 @@
 
             state.player.gold -= cost;
             unlockAchievement('hotel');
+            logStoryEvent('spent the night at ' + (hotel && hotel.label ? hotel.label : 'a trail hotel') + ' for ' + cost + ' gold');
             applyOvernightRest('🏨 Stayed at ' + (hotel && hotel.label ? hotel.label : 'the hotel') + ' for ' + cost + 'g.');
         }
 
@@ -6986,6 +7099,13 @@
                     unlockAchievement('fish');
                 }
                 if (storeItemInWagon(catchType)) {
+                    if (catchType === 'wagon_wheel') {
+                        logStoryEvent('fished a wagon wheel out of the river');
+                    } else if (catchType === 'wood') {
+                        logStoryEvent('pulled driftwood from the river');
+                    } else {
+                        logStoryEvent('caught a fish from the river');
+                    }
                     showHud(catchLabel + ' Stowed in wagon.');
                 } else {
                     const dropX = getNearestShoreDropX(state.player.x + 15);
@@ -6995,9 +7115,17 @@
                         x: dropX,
                         y: PATH_CENTER_Y + 5,
                     });
+                    if (catchType === 'wagon_wheel') {
+                        logStoryEvent('fished up a wagon wheel but had no room in the wagon');
+                    } else if (catchType === 'wood') {
+                        logStoryEvent('pulled driftwood from the river but had no room in the wagon');
+                    } else {
+                        logStoryEvent('caught a fish but had no room in the wagon');
+                    }
                     showHud(catchLabel + ' Wagon is full (dropped on ground).');
                 }
             } else {
+                logStoryEvent('tried fishing but caught nothing');
                 showHud('🎣 Nothing biting today...');
             }
             // Small time cost
@@ -7009,12 +7137,14 @@
             const found = Math.random() < 0.2;
             if (found) {
                 unlockAchievement('gold_nugget');
+                logStoryEvent('worked the pan until gold nuggets flashed in the silt');
                 if (storeItemInWagon('gold_nuggets')) {
                     showHud('🥣✨ You found gold nuggets! Stowed in wagon.');
                 } else {
                     showHud('🥣✨ You found gold nuggets, but the wagon is full.');
                 }
             } else {
+                logStoryEvent('panned the river and came up empty');
                 showHud('🥣 Swirled the pan... no gold this time.');
             }
             // Small time cost
@@ -7040,6 +7170,7 @@
                 }
             }
             if (placed) {
+                logStoryEvent('filled a water butt at the river');
                 showHud('🪣 Filled a Water Butt!');
             } else {
                 // Drop as ground item instead
@@ -7050,6 +7181,7 @@
                     x: dropX,
                     y: PATH_CENTER_Y + 5,
                 });
+                logStoryEvent('filled a water butt at the river but had to leave it on the ground');
                 showHud('🪣 Filled Water Butt (no room in wagon, dropped on ground)');
             }
         }
@@ -7074,6 +7206,7 @@
             segment.features.splice(featureIndex, 1);
             drawScenery();
             unlockAchievement('tree');
+            logStoryEvent('chopped down a tree for wood and seed');
 
             const drops = ['wood', 'wood', 'wood', 'seed'];
             let stored = 0;
@@ -7124,6 +7257,7 @@
             });
             drawScenery();
             unlockAchievement('tree');
+            logStoryEvent('planted a tree seed');
             showHud('🌱 Seed planted. This tree will grow over time.');
         }
 
@@ -7151,6 +7285,7 @@
             segment.features.splice(featureIndex, 1);
             drawScenery();
             unlockAchievement('flower');
+            logStoryEvent('picked a wildflower and stowed it in the wagon');
             showHud('🌸 Picked flower and stowed in wagon.');
         }
 
@@ -7180,6 +7315,7 @@
             });
             drawScenery();
             unlockAchievement('flower');
+            logStoryEvent('planted a flower along the trail');
             showHud('🌸 Flower planted.');
         }
 
@@ -7187,6 +7323,7 @@
             state.wagon.isRaft = true;
             // Lower wagon so raft bottom aligns with PATH_CENTER_Y instead of wheel bottom
             state.wagon.y += (WAGON_WHEEL_BOTTOM_Y - RAFT_BOTTOM_Y);
+            logStoryEvent('turned the wagon into a raft to cross a river');
             showHud('🚣 Wagon converts to raft — crossing river!');
         }
 
@@ -7201,6 +7338,7 @@
                     state.oxen[oi].hitched = true;
                 }
             }
+            logStoryEvent('made it across the river and rehitched the oxen');
             showHud('Reached the other side! Oxen rehitched.');
         }
 
@@ -7324,6 +7462,7 @@
                 return;
             }
             state.player.gold -= price;
+            logStoryEvent('bought ' + def.name.toLowerCase() + ' for ' + price + ' gold');
             showHud('Bought ' + def.name + ' for ' + price + 'g');
             rebuildMenuInPlace();
         }
@@ -7341,6 +7480,7 @@
             for (let s = 0; s < slotsUsed; s++) state.wagon.slots[slotIdx + s] = null;
             state.player.gold += sellPrice;
             unlockAchievement('trade');
+            logStoryEvent('sold ' + def.name.toLowerCase() + ' for ' + sellPrice + ' gold');
             showHud('Sold ' + def.name + ' for ' + sellPrice + 'g');
             rebuildMenuInPlace();
         }
@@ -7377,6 +7517,7 @@
             state.gameOver = true;
             state.won = true;
             stopTimer();
+              logStoryEvent('rolled into the frontier town at last');
             const score = calculateScore();
             const survivingOxen = state.oxen.filter(function (o) { return o.alive; }).length;
             const finalScoreEl = document.getElementById('finalScore');
@@ -7430,6 +7571,47 @@
             text += hardshipLine + '\n';
             text += 'https://timelessp.github.io/idlegames/oxtrail.html';
             return text;
+        }
+
+        function buildStoryPrompt() {
+            syncCurrentHardships();
+            const score = calculateScore();
+            const survivingOxen = state.oxen.filter(function (o) { return o.alive; }).length;
+            const achievementLine = getAchievementEmojiLine() || '(none recorded)';
+            const hardshipLine = getHardshipEmojiLine() || '(none recorded)';
+            const storyLogText = buildStoryLogText();
+
+            return [
+                'You are a creative writing assistant. Use the game-run data below to write a fictional frontier adventure story inspired by the player\'s journey in Ox Trail.',
+                '',
+                'Story requirements:',
+                '- Write in first-person active voice from the pioneer\'s perspective.',
+                '- Use show, don\'t tell: emphasize concrete actions, sensations, sights, sounds, smells, and lived-in physical details instead of flat summary.',
+                '- Treat the run log as factual anchor points, but invent plausible connective tissue, inner thoughts, motives, reactions, small bits of dialogue, and transitions between scenes.',
+                '- Invent what was going through the character\'s mind that led to the logged actions, even if those thoughts are completely made up.',
+                '- Keep the story faithful to the logged facts, but feel free to compress repetitive stretches. For example, if the log suggests multiple hotel stays across several days, consolidate them into one smooth passage instead of repeating yourself mechanically.',
+                '- Break the final story into exactly four titled chapters, and let those chapters naturally cover departure, rising trouble, the hardest middle stretch, and the final arrival.',
+                '- Keep the tone adventurous and human, with a little frontier humor. Leave some humorous outcomes to the reader\'s imagination instead of explaining the joke outright.',
+                '- Make the oxen, wagon, weather, trail towns, rivers, mud, smoke, hunger, thirst, luck, and setbacks feel physical and immediate.',
+                '- End with the arrival at the frontier town and a satisfying closing image.',
+                '- After the story, if the platform supports image generation, ask the user whether they want a cartoon image of one of the main events from the story.',
+                '- Do not mention that you are following instructions or that the story came from structured game data unless the user asks.',
+                '',
+                'Run summary:',
+                '- Outcome: Victory',
+                '- Score: ' + score,
+                '- Days on trail: ' + state.world.day,
+                '- Final gold: ' + state.player.gold,
+                '- Final health: ' + Math.floor(state.player.health) + '%',
+                '- Surviving oxen: ' + survivingOxen + '/' + state.oxen.length,
+                '- Achievement emojis: ' + achievementLine,
+                '- Hardship emojis: ' + hardshipLine,
+                '',
+                'Trail log by day:',
+                storyLogText,
+                '',
+                'Write the full adventure story now.'
+            ].join('\n');
         }
 
         // ===================== 5. THEME SYSTEM =====================
@@ -7503,6 +7685,7 @@
                 guestbooks: state.guestbooks,
                 achievements: state.achievements,
                 hardships: state.hardships,
+                storyLog: state.storyLog,
                 cornfields: state.cornfields,
                 campfires: state.campfires,
                 groundItems: state.groundItems,
@@ -7604,6 +7787,7 @@
                 guestbooks: loaded.guestbooks && typeof loaded.guestbooks === 'object' ? loaded.guestbooks : {},
                 achievements: normalizeAchievementState(loaded.achievements),
                 hardships: normalizeHardshipState(loaded.hardships),
+                storyLog: normalizeStoryLog(loaded.storyLog),
                 cornfields: Array.isArray(loaded.cornfields) ? loaded.cornfields : [],
                 campfires: Array.isArray(loaded.campfires) ? loaded.campfires : [],
                 groundItems: Array.isArray(loaded.groundItems) ? loaded.groundItems : [],
@@ -7729,6 +7913,7 @@
             state.wagon.slots[1] = 'water_butt';
             state.wagon.slots[2] = 'wood';
             state.wagon.slots[3] = 'firewood';
+            logStoryEvent('set out on the trail with a wagon, two oxen, and a little starting gold');
 
             // Measure viewport before any SVG mutations to avoid forced reflow
             fitCanvas();
@@ -7827,6 +8012,20 @@
                     if (shareStatus) shareStatus.textContent = 'Could not copy.';
                 });
             }
+        });
+
+        document.getElementById('copyStoryPromptBtn').addEventListener('click', function () {
+            const prompt = buildStoryPrompt();
+            const shareStatus = document.getElementById('shareStatus');
+            if (!navigator.clipboard || !navigator.clipboard.writeText) {
+                if (shareStatus) shareStatus.textContent = 'Could not copy story prompt.';
+                return;
+            }
+            navigator.clipboard.writeText(prompt).then(function () {
+                if (shareStatus) shareStatus.textContent = 'AI story prompt copied!';
+            }).catch(function () {
+                if (shareStatus) shareStatus.textContent = 'Could not copy story prompt.';
+            });
         });
 
         // --- Modal backdrop clicks ---
