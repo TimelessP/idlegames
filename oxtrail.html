@@ -181,7 +181,8 @@
             border-radius: 0.75rem;
             font-size: 0.85rem;
             text-align: center;
-            pointer-events: none;
+            pointer-events: auto;
+            cursor: default;
             max-width: 90%;
             backdrop-filter: blur(4px);
             z-index: 5;
@@ -765,6 +766,10 @@
         const TREE_GROW_TIME = 240; // seconds from planted seed to mature tree
         const PLAYER_FEET_OFFSET = 17;
         const OX_FEET_OFFSET = 17;
+        const DOG_FEET_OFFSET = 10;
+        const DOG_LEAD_DISTANCE = 40;
+        const DOG_RUN_SPEED = WALK_SPEED * 1.6;
+        const DOG_PRICE = 4;
 
         // Timing
         const FIXED_FPS = 20;
@@ -1103,6 +1108,7 @@
                 groundItems: [], // { id, type, x, y }
                 events: { active: null, queue: [] },
                 npcs: [],
+                dog: null, // { hunger:0, thirst:0, x, y, facing:1, walkCycle:0 }
                 walkCycle: 0,
                 animFrame: 0,
                 bobPhase: Math.random() * Math.PI * 2,
@@ -3359,6 +3365,60 @@
             dynamicGroup.appendChild(g);
         }
 
+        // ---- drawDogSprite ----
+        function drawDogSprite(x, y, facing, walkFrame, onWagon) {
+            const g = svgEl('g', { transform: `translate(${x},${y}) scale(${facing},1)` });
+            const bob = onWagon ? 0 : Math.abs(Math.sin(walkFrame * 0.4)) * 1.5;
+            appendGroundShadow(g, 0, onWagon ? 0 : 10, 10, 2.2, 0.7, facing);
+
+            // Legs (4 short brown legs)
+            const legSwing = onWagon ? 0 : Math.sin(walkFrame * 0.4) * 5;
+            g.appendChild(svgEl('line', { x1: -5, y1: -bob, x2: -5 - legSwing, y2: 8, stroke: '#8B6914', 'stroke-width': '2.5', 'stroke-linecap': 'round' }));
+            g.appendChild(svgEl('line', { x1: -2, y1: -bob, x2: -2 + legSwing, y2: 8, stroke: '#8B6914', 'stroke-width': '2.5', 'stroke-linecap': 'round' }));
+            g.appendChild(svgEl('line', { x1: 5, y1: -bob, x2: 5 - legSwing, y2: 8, stroke: '#a07a1e', 'stroke-width': '2.5', 'stroke-linecap': 'round' }));
+            g.appendChild(svgEl('line', { x1: 8, y1: -bob, x2: 8 + legSwing, y2: 8, stroke: '#a07a1e', 'stroke-width': '2.5', 'stroke-linecap': 'round' }));
+
+            // Body (golden-brown ellipse)
+            g.appendChild(svgEl('ellipse', { cx: 2, cy: -5 - bob, rx: 12, ry: 6, fill: '#c4941e' }));
+            // Belly lighter patch
+            g.appendChild(svgEl('ellipse', { cx: 2, cy: -2 - bob, rx: 8, ry: 3, fill: '#ddb84a', opacity: '0.6' }));
+
+            // Neck
+            g.appendChild(svgEl('ellipse', { cx: 12, cy: -8 - bob, rx: 4, ry: 5, fill: '#c4941e' }));
+
+            // Head
+            g.appendChild(svgEl('circle', { cx: 16, cy: -13 - bob, r: 5.5, fill: '#d4a42e' }));
+            // Snout
+            g.appendChild(svgEl('ellipse', { cx: 20, cy: -12 - bob, rx: 4, ry: 3, fill: '#ddb84a' }));
+            // Nose
+            g.appendChild(svgEl('circle', { cx: 23, cy: -12 - bob, r: 1.8, fill: '#333' }));
+            // Eye
+            g.appendChild(svgEl('circle', { cx: 17, cy: -14 - bob, r: 1.5, fill: '#333' }));
+            g.appendChild(svgEl('circle', { cx: 17.5, cy: -14.5 - bob, r: 0.5, fill: '#fff' }));
+
+            // Ears (floppy)
+            g.appendChild(svgEl('ellipse', { cx: 13, cy: -17 - bob, rx: 3, ry: 4, fill: '#a07a1e', transform: `rotate(-20 13 ${-17 - bob})` }));
+
+            // Mouth (happy panting)
+            g.appendChild(svgEl('path', { d: `M19,${-10 - bob} Q21,${-8 - bob} 23,${-10 - bob}`, fill: 'none', stroke: '#a06848', 'stroke-width': '1', 'stroke-linecap': 'round' }));
+            // Tongue
+            g.appendChild(svgEl('ellipse', { cx: 21, cy: -8.5 - bob, rx: 1.2, ry: 2, fill: '#e06060' }));
+
+            // Collar (angled 20° down in front)
+            const collarG = svgEl('g', { transform: `translate(12.5,${-8.75 - bob}) rotate(20)` });
+            collarG.appendChild(svgEl('rect', { x: -3.5, y: -1.25, width: 7, height: 2.5, fill: '#c04040', rx: 1 }));
+            g.appendChild(collarG);
+
+            // Tail (wagging)
+            const tailWag = Math.sin(walkFrame * 0.5) * 15;
+            g.appendChild(svgEl('path', {
+                d: `M-10,${-7 - bob} Q${-16},${-14 - bob + tailWag * 0.3} ${-14},${-18 - bob + tailWag * 0.2}`,
+                fill: 'none', stroke: '#c4941e', 'stroke-width': '3', 'stroke-linecap': 'round',
+            }));
+
+            dynamicGroup.appendChild(g);
+        }
+
         // ---- drawGroundItem ----
         function drawGroundItem(x, y, itemType) {
             const g = svgEl('g', { transform: `translate(${x},${y})` });
@@ -5318,6 +5378,47 @@
             }
         }
 
+        // ---------- dog movement ----------
+
+        function updateDog(dt) {
+            if (!state.dog) return;
+            const dog = state.dog;
+            const speedScale = dt * BASE_FPS;
+
+            if (state.player.onWagon) {
+                // Dog rides on the back of the wagon
+                dog.x = state.wagon.x - state.wagon.facing * 35;
+                dog.y = state.wagon.y - 18;
+                dog.facing = state.wagon.facing;
+                // Gentle walk cycle while on wagon (tail wag only)
+                dog.walkCycle += speedScale * 0.3;
+            } else {
+                // Dog runs ahead of the player
+                let targetX = state.player.x + state.player.facing * DOG_LEAD_DISTANCE;
+
+                // Keep the dog on shore — don't follow into rivers
+                if (isPositionInRiver(targetX)) {
+                    targetX = getNearestShoreDropX(targetX);
+                }
+
+                const dx = targetX - dog.x;
+                const dist = Math.abs(dx);
+
+                if (dist > 0.5) {
+                    // Smooth follow: run when far, ease in when close
+                    const t = Math.min(1, DOG_RUN_SPEED * speedScale / Math.max(1, dist));
+                    dog.x += dx * t;
+                    dog.facing = dx > 0 ? 1 : -1;
+                    dog.walkCycle += speedScale * Math.min(1.4, dist * 0.1);
+                } else {
+                    // Close enough — match player walk cycle
+                    dog.facing = state.player.facing;
+                    dog.walkCycle += speedScale * 0.5;
+                }
+                dog.y = PATH_CENTER_Y - DOG_FEET_OFFSET;
+            }
+        }
+
         // ---------- context-sensitive interaction ----------
 
         // Collect position-dependent context actions (nearby interactions only)
@@ -5847,6 +5948,19 @@
                 },
             });
 
+            // Dog
+            if (state.dog) {
+                const dog = state.dog;
+                if (dog.x >= cullLeft && dog.x <= cullRight) {
+                    entities.push({
+                        y: dog.y + DOG_FEET_OFFSET,
+                        draw: function () {
+                            drawDogSprite(dog.x, dog.y, dog.facing, dog.walkCycle, state.player.onWagon);
+                        },
+                    });
+                }
+            }
+
             // Sort by base y (lower y drawn first = behind)
             entities.sort(function (a, b) { return a.y - b.y; });
 
@@ -5880,6 +5994,7 @@
                 }
 
                 updateOxPositions();
+                updateDog(dt);
                 updateDayNight(dt);
                 updateWeather(dt);
                 updateStatDecay(dt);
@@ -6037,6 +6152,7 @@
         // ===================== 1. HUD =====================
 
         let hudTimer = null;
+        const HUD_DURATION = 6000;
 
         function showHud(msg) {
             const hud = document.getElementById('hud');
@@ -6046,8 +6162,27 @@
             if (hudTimer) clearTimeout(hudTimer);
             hudTimer = setTimeout(function () {
                 hud.classList.add('hidden');
-            }, 3000);
+            }, HUD_DURATION);
         }
+
+        (function initHudHover() {
+            const hud = document.getElementById('hud');
+            if (!hud) return;
+            hud.addEventListener('mouseenter', function () {
+                if (hudTimer) { clearTimeout(hudTimer); hudTimer = null; }
+            });
+            hud.addEventListener('mouseleave', function () {
+                hudTimer = setTimeout(function () {
+                    hud.classList.add('hidden');
+                }, HUD_DURATION);
+            });
+            hud.addEventListener('touchstart', function () {
+                if (hudTimer) { clearTimeout(hudTimer); hudTimer = null; }
+                hudTimer = setTimeout(function () {
+                    hud.classList.add('hidden');
+                }, HUD_DURATION * 4);
+            }, { passive: true });
+        })();
 
         // ===================== 2. MENU SYSTEM =====================
 
@@ -6074,6 +6209,7 @@
                 items: [
                     { type: 'action', label: '🧺 Wagon Inventory', action: function () { openMenu('wagonInventory'); }, behavior: 'submenu' },
                     { type: 'action', label: '🐂 Ox Management', action: function () { openMenu('oxManagement'); }, behavior: 'submenu' },
+                    { type: 'action', label: '🐕 Dog Care', action: function () { if (!state.dog) { showHud('You don\'t have a dog yet. Buy one at a trading post!'); return; } openMenu('dogCare'); }, behavior: 'submenu' },
                     {
                         type: 'action',
                         label: '🔥 Make Camp',
@@ -6139,6 +6275,13 @@
                 title: 'OX MANAGEMENT',
                 overview: 'Manage your oxen',
                 itemBuilder: 'buildOxManagementItems',
+                actions: [{ label: 'Back', behavior: 'back' }],
+            },
+            dogCare: {
+                isRoot: false,
+                title: 'DOG CARE',
+                overview: 'Look after your trail dog',
+                itemBuilder: 'buildDogCareItems',
                 actions: [{ label: 'Back', behavior: 'back' }],
             },
             river: {
@@ -6313,6 +6456,14 @@
                     action: function () { openMenu('oxManagement'); },
                     behavior: 'submenu',
                 });
+                if (state.dog) {
+                    items.push({
+                        type: 'action',
+                        label: '🐕 Dog Care',
+                        action: function () { openMenu('dogCare'); },
+                        behavior: 'submenu',
+                    });
+                }
                 if (!state.player.onWagon && !state.wagon.isRaft) {
                     items.push({
                         type: 'action',
@@ -6522,6 +6673,79 @@
                 return items;
             },
 
+            buildDogCareItems: function () {
+                const items = [];
+                if (!state.dog) {
+                    items.push({ type: 'setting', label: 'No dog yet', value: 'Buy one at a trading post!', actions: [] });
+                    return items;
+                }
+                const dog = state.dog;
+
+                // Status
+                items.push({
+                    type: 'setting',
+                    label: '🐕 Trail Dog',
+                    value: 'HP:' + Math.floor(dog.health) + ' 🍖' + Math.floor(100 - dog.hunger) + '% 💧' + Math.floor(100 - dog.thirst) + '%',
+                    actions: [],
+                });
+
+                items.push({ type: 'divider', label: '── CARE ──' });
+
+                // Water the dog (needs water butt in wagon)
+                const waterButtSlots = ITEM_DEFS.water_butt && ITEM_DEFS.water_butt.slots ? ITEM_DEFS.water_butt.slots : 2;
+                if (countItemInWagon('water_butt') >= waterButtSlots) {
+                    items.push({
+                        type: 'action',
+                        label: '💧 Give Water (1 Water Butt)',
+                        action: function () {
+                            if (!consumeItemFromWagon('water_butt', waterButtSlots)) {
+                                showHud('Need a Water Butt in wagon.');
+                                return;
+                            }
+                            state.dog.thirst = 0;
+                            showHud('🐕 The dog lapped up the water happily!');
+                            rebuildMenuInPlace();
+                        },
+                        behavior: 'keep-open',
+                    });
+                }
+
+                // Feed the dog (fish or corn from wagon)
+                const dogFoodTypes = ['fish', 'corn'];
+                for (let f = 0; f < dogFoodTypes.length; f++) {
+                    const foodType = dogFoodTypes[f];
+                    const foodIdx = state.wagon.slots.indexOf(foodType);
+                    if (foodIdx >= 0) {
+                        const def = ITEM_DEFS[foodType];
+                        items.push({
+                            type: 'action',
+                            label: def.emoji + ' Feed ' + def.name,
+                            action: function () {
+                                const idx = state.wagon.slots.indexOf(foodType);
+                                if (idx < 0) { showHud('No ' + def.name + ' in wagon.'); return; }
+                                const slotsUsed = def.slots || 1;
+                                for (let s = 0; s < slotsUsed; s++) state.wagon.slots[idx + s] = null;
+                                state.dog.hunger = Math.max(0, state.dog.hunger - (def.hungerRestore || 20));
+                                showHud('🐕 Fed the dog ' + def.name.toLowerCase() + '! Tail wagging intensifies.');
+                                rebuildMenuInPlace();
+                            },
+                            behavior: 'keep-open',
+                        });
+                    }
+                }
+
+                items.push({ type: 'divider', label: '── BONDING ──' });
+
+                // Pet the dog
+                items.push({
+                    type: 'action',
+                    label: '🤗 Pet the Dog',
+                    action: function () { closeMenu(); petTheDog(); },
+                });
+
+                return items;
+            },
+
             buildRiverActionItems: function () {
                 const items = [];
                 items.push({
@@ -6601,6 +6825,20 @@
                 const prices = seg.merchantPrices || {};
                 const items = [];
                 items.push({ type: 'divider', label: '── BUY ──' });
+                // Dog purchase (one-time, not an inventory item)
+                if (!state.dog) {
+                    items.push({
+                        type: 'setting',
+                        section: 'buy',
+                        label: '🐕 Trail Dog',
+                        value: DOG_PRICE + 'g',
+                        actions: [{
+                            label: 'Buy',
+                            behavior: 'keep-open',
+                            action: function () { buyDog(seg); },
+                        }],
+                    });
+                }
                 for (const key of Object.keys(ITEM_DEFS)) {
                     const def = ITEM_DEFS[key];
                     if (def.buyValue <= 0) continue;
@@ -7481,6 +7719,22 @@
                 state.player.health -= 0.01 * dt;
                 state.player.health = Math.max(0, state.player.health);
             }
+
+            // Dog
+            if (state.dog) {
+                state.dog.hunger = Math.min(100, state.dog.hunger + OX_HUNGER_RATE * 0.8 * dt);
+                state.dog.thirst = Math.min(100, state.dog.thirst + OX_THIRST_RATE * 0.8 * dt);
+
+                if (state.dog.hunger >= 90 || state.dog.thirst >= 90) {
+                    state.dog.health -= HEALTH_DECAY_RATE * dt;
+                }
+                if (state.dog.health <= 0) {
+                    state.dog.health = 0;
+                    logStoryEvent('the trail dog has died');
+                    showHud('💀 Your trail dog has died!');
+                    state.dog = null;
+                }
+            }
         }
 
         // --- Events ---
@@ -7546,31 +7800,47 @@
                     break;
                 }
                 case 'bandit': {
-                    unlockHardship('bandit');
-                    // Lose a random wagon item
-                    const filledSlots = [];
-                    const seen = new Set();
-                    const wagonCapacity = getWagonSlotCapacity();
-                    for (let i = 0; i < wagonCapacity; i++) {
-                        if (seen.has(i)) continue;
-                        if (state.wagon.slots[i] !== null) {
-                            const def = ITEM_DEFS[state.wagon.slots[i]];
-                            const slotsUsed = def ? def.slots : 1;
-                            filledSlots.push(i);
-                            for (let s = 1; s < slotsUsed; s++) seen.add(i + s);
-                        }
-                    }
-                    if (filledSlots.length > 0) {
-                        const idx = filledSlots[Math.floor(Math.random() * filledSlots.length)];
-                        const item = state.wagon.slots[idx];
-                        const def = ITEM_DEFS[item];
-                        const slotsUsed = def ? def.slots : 1;
-                        for (let s = 0; s < slotsUsed; s++) state.wagon.slots[idx + s] = null;
-                        logStoryEvent('bandits stole our ' + (def ? def.name.toLowerCase() : 'supplies'));
-                        showHud(event.msg + ' They stole your ' + (def ? def.name : 'item') + '!');
+                    if (state.dog) {
+                        // Dog scares away bandits!
+                        const dogBanditMessages = [
+                            'Your dog bared its teeth and growled — the bandits thought better of it!',
+                            'Your dog charged at the bandits, barking ferociously — they scattered!',
+                            'Your dog stood between you and the bandits, hackles raised. They backed off!',
+                            'A deep, threatening growl from your dog made the bandits reconsider their plan!',
+                            'Your dog lunged and snapped at the nearest bandit — they all turned and ran!',
+                        ];
+                        const msg = dogBanditMessages[Math.floor(Math.random() * dogBanditMessages.length)];
+                        event.name = 'Dog Alert';
+                        event.msg = '🐕 ' + msg;
+                        logStoryEvent('the dog scared off bandits');
+                        showHud('🐕 ' + msg);
                     } else {
-                        logStoryEvent('bandits stopped us but found nothing worth stealing');
-                        showHud(event.msg + ' But you had nothing for them to take.');
+                        unlockHardship('bandit');
+                        // Lose a random wagon item
+                        const filledSlots = [];
+                        const seen = new Set();
+                        const wagonCapacity = getWagonSlotCapacity();
+                        for (let i = 0; i < wagonCapacity; i++) {
+                            if (seen.has(i)) continue;
+                            if (state.wagon.slots[i] !== null) {
+                                const def = ITEM_DEFS[state.wagon.slots[i]];
+                                const slotsUsed = def ? def.slots : 1;
+                                filledSlots.push(i);
+                                for (let s = 1; s < slotsUsed; s++) seen.add(i + s);
+                            }
+                        }
+                        if (filledSlots.length > 0) {
+                            const idx = filledSlots[Math.floor(Math.random() * filledSlots.length)];
+                            const item = state.wagon.slots[idx];
+                            const def = ITEM_DEFS[item];
+                            const slotsUsed = def ? def.slots : 1;
+                            for (let s = 0; s < slotsUsed; s++) state.wagon.slots[idx + s] = null;
+                            logStoryEvent('bandits stole our ' + (def ? def.name.toLowerCase() : 'supplies'));
+                            showHud(event.msg + ' They stole your ' + (def ? def.name : 'item') + '!');
+                        } else {
+                            logStoryEvent('bandits stopped us but found nothing worth stealing');
+                            showHud(event.msg + ' But you had nothing for them to take.');
+                        }
                     }
                     break;
                 }
@@ -7581,15 +7851,31 @@
                     showHud(event.msg);
                     break;
                 case 'snake': {
-                    const aliveOxen = state.oxen.filter(function (o) { return o.alive; });
-                    if (aliveOxen.length > 0) {
-                        unlockHardship('snake');
-                        const target = aliveOxen[Math.floor(Math.random() * aliveOxen.length)];
-                        target.health = Math.max(0, target.health - 30);
-                        logStoryEvent('a snake bit ' + target.name);
-                        showHud(event.msg + ' ' + target.name + ' was bitten!');
+                    if (state.dog) {
+                        // Dog protects from snake bite!
+                        const dogSnakeMessages = [
+                            'Your dog barked furiously and scared the snake away!',
+                            'Your dog spotted the snake and stood its ground, growling until it slithered off!',
+                            'Your dog lunged at the rattlesnake, chasing it into the brush!',
+                            'Sharp barking from your dog alerted everyone — the snake retreated!',
+                            'Your dog circled the snake, barking and snapping, until it fled!',
+                        ];
+                        const msg = dogSnakeMessages[Math.floor(Math.random() * dogSnakeMessages.length)];
+                        event.name = 'Dog Alert';
+                        event.msg = '🐕 ' + msg;
+                        logStoryEvent('the dog scared off a snake');
+                        showHud('🐕 ' + msg);
                     } else {
-                        showHud(event.msg + ' No oxen to bite.');
+                        const aliveOxen = state.oxen.filter(function (o) { return o.alive; });
+                        if (aliveOxen.length > 0) {
+                            unlockHardship('snake');
+                            const target = aliveOxen[Math.floor(Math.random() * aliveOxen.length)];
+                            target.health = Math.max(0, target.health - 30);
+                            logStoryEvent('a snake bit ' + target.name);
+                            showHud(event.msg + ' ' + target.name + ' was bitten!');
+                        } else {
+                            showHud(event.msg + ' No oxen to bite.');
+                        }
                     }
                     break;
                 }
@@ -7874,6 +8160,12 @@
                 ox.health = 100;
                 ox.hunger = 0;
                 ox.thirst = 0;
+            }
+
+            if (state.dog) {
+                state.dog.health = 100;
+                state.dog.hunger = 0;
+                state.dog.thirst = 0;
             }
 
             // Match camp sleep behavior
@@ -8305,6 +8597,49 @@
             openMenu('townTrade', { segment: segment });
         }
 
+        function buyDog(segment) {
+            if (state.dog) { showHud('You already have a dog!'); return; }
+            if (state.player.gold < DOG_PRICE) {
+                showHud('Not enough gold! Need ' + DOG_PRICE + 'g.');
+                return;
+            }
+            state.player.gold -= DOG_PRICE;
+            state.dog = {
+                health: 100, hunger: 0, thirst: 0,
+                x: state.player.x + state.player.facing * DOG_LEAD_DISTANCE,
+                y: PATH_CENTER_Y - DOG_FEET_OFFSET,
+                facing: state.player.facing,
+                walkCycle: 0,
+            };
+            logStoryEvent('bought a loyal trail dog for ' + DOG_PRICE + ' gold');
+            showHud('🐕 You bought a trail dog! It bounds ahead of you, tail wagging.');
+            rebuildMenuInPlace();
+        }
+
+        const DOG_PET_MESSAGES = [
+            'The dog rolls onto its back, legs in the air, begging for belly rubs!',
+            'The dog licks your hand and spins in a circle, tail going wild!',
+            'The dog nudges your hand with its nose and lets out a contented sigh.',
+            'The dog does a full body wiggle, clearly thrilled by the attention!',
+            'The dog brings you a stick it found somewhere and drops it at your feet.',
+            'The dog tilts its head and gives you the biggest puppy eyes you\'ve ever seen.',
+            'The dog barks once, then sits perfectly still — clearly very proud of itself.',
+            'The dog flops against your leg and lets out the happiest sigh on the trail.',
+            'The dog chases its own tail three times, then looks at you like nothing happened.',
+            'The dog sneezes, startling itself, then wags its tail even harder.',
+            'The dog tries to climb into your lap, despite being far too big for that.',
+            'The dog puts one paw on your boot and gazes up at you adoringly.',
+            'The dog yawns dramatically, showing every tooth, then nuzzles into your palm.',
+            'The dog perks its ears up, pretends to hear something, then boops your hand for more pets.',
+            'The dog does a play-bow, butt in the air, tail wagging at maximum speed!',
+        ];
+
+        function petTheDog() {
+            if (!state.dog) return;
+            const msg = DOG_PET_MESSAGES[Math.floor(Math.random() * DOG_PET_MESSAGES.length)];
+            showHud('🐕 ' + msg);
+        }
+
         function buyItem(itemType, segment) {
             const def = ITEM_DEFS[itemType];
             if (!def) return;
@@ -8467,6 +8802,7 @@
                 '- Break the final story into exactly four titled chapters, and let those chapters naturally cover departure, rising trouble, the hardest middle stretch, and the final arrival.',
                 '- Keep the tone adventurous and human, with a little frontier humor. Leave some humorous outcomes to the reader\'s imagination instead of explaining the joke outright.',
                 '- Make the oxen, wagon, weather, trail towns, rivers, mud, smoke, hunger, thirst, luck, and setbacks feel physical and immediate.',
+                '- If the player had a trail dog, weave the dog into the narrative as a loyal companion — show it running ahead on the trail, scaring off snakes or bandits, riding on the wagon, and being cared for at camp.',
                 '- End with the arrival at the frontier town and a satisfying closing image.',
                 '- After the story, if the platform supports image generation, ask the user whether they want a cartoon image of one of the main events from the story.',
                 '- Do not mention that you are following instructions or that the story came from structured game data unless the user asks.',
@@ -8478,6 +8814,7 @@
                 '- Final gold: ' + state.player.gold,
                 '- Final health: ' + Math.floor(state.player.health) + '%',
                 '- Surviving oxen: ' + survivingOxen + '/' + state.oxen.length,
+                '- Trail dog: ' + (state.dog ? 'alive (HP:' + Math.floor(state.dog.health) + ')' : 'none'),
                 '- Achievement emojis: ' + achievementLine,
                 '- Hardship emojis: ' + hardshipLine,
                 '',
@@ -8565,6 +8902,7 @@
                 groundItems: state.groundItems,
                 events: state.events,
                 npcs: state.npcs,
+                dog: state.dog,
                 walkCycle: state.walkCycle,
                 animFrame: state.animFrame,
                 bobPhase: state.bobPhase,
@@ -8667,6 +9005,7 @@
                 groundItems: Array.isArray(loaded.groundItems) ? loaded.groundItems : [],
                 events: Object.assign({}, base.events, loaded.events || {}),
                 npcs: Array.isArray(loaded.npcs) ? loaded.npcs : [],
+                dog: loaded.dog ? Object.assign({ health: 100, hunger: 0, thirst: 0, x: 0, y: PATH_CENTER_Y - DOG_FEET_OFFSET, facing: 1, walkCycle: 0 }, loaded.dog) : null,
                 walkCycle: Number(loaded.walkCycle) || 0,
                 animFrame: Number(loaded.animFrame) || 0,
                 bobPhase: Number.isFinite(loaded.bobPhase) ? loaded.bobPhase : base.bobPhase,
