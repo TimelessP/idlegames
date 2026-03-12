@@ -41,6 +41,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:#141414;font-family:
 }
 .tool-btn:hover,.tool-btn:focus-visible{border-color:var(--neon-cyan);color:#fff;box-shadow:0 0 12px rgba(0,245,255,.25)}
 .tool-btn svg{width:18px;height:18px;fill:currentColor}
+.tool-btn.icon-btn{padding:8px;width:38px;height:38px;justify-content:center;flex:0 0 auto}
+.tool-btn.icon-btn svg{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+#debug-status{color:rgba(255,255,255,.45);font-size:12px;min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#debug-status.ok{color:var(--neon-green)}
+#debug-status.error{color:var(--lava-red)}
 
 /* Board container */
 #board-wrap{position:relative;z-index:5;display:inline-block;flex-shrink:0}
@@ -175,6 +180,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:#141414;font-family:
   .popup-num{font-size:16px}
   .popup-num.locked{font-size:24px}
   .tool-btn{padding:6px 10px;font-size:12px}
+  .tool-btn.icon-btn{width:34px;height:34px;padding:6px}
+  #debug-status{font-size:11px;max-width:72px}
 }
 
 @media(prefers-reduced-motion:reduce){
@@ -260,9 +267,16 @@ html,body{width:100%;height:100%;overflow:hidden;background:#141414;font-family:
       <svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0012 4a8 8 0 108 8h-2a6 6 0 11-1.76-4.24l-2.12 2.12H20V4l-2.35 2.35z"/></svg>
       New Game
     </button>
+    <button class="tool-btn icon-btn" id="btn-copy-debug" aria-label="Copy debug JSON" title="Copy debug JSON">
+      <svg viewBox="0 0 24 24"><rect x="9" y="9" width="10" height="10" rx="2"/><path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1"/></svg>
+    </button>
+    <button class="tool-btn icon-btn" id="btn-paste-debug" aria-label="Paste debug JSON" title="Paste debug JSON">
+      <svg viewBox="0 0 24 24"><path d="M9 4h6"/><path d="M10 2h4a1 1 0 0 1 1 1v2H9V3a1 1 0 0 1 1-1z"/><path d="M8 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h8"/><path d="M14 12h6"/><path d="M17 9l3 3-3 3"/></svg>
+    </button>
     <button class="tool-btn" id="btn-fs" aria-label="Full Screen">
       <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
     </button>
+    <span id="debug-status" aria-live="polite"></span>
     <span id="timer">00:00</span>
   </div>
 
@@ -472,8 +486,160 @@ const S = {
 let puzzle, solution, grid, candidates, givens;
 let selectedCell = -1;
 let timerStart = 0, timerInterval = null, elapsed = 0, won = false;
+let debugStatusTimer = 0;
 
 const SAVE_KEY = 'idlegames-sudoku';
+
+function debugSnapshot(){
+  return {
+    type: 'neon-sudoku-debug',
+    version: 1,
+    puzzle: Array.from(puzzle || []),
+    solution: Array.from(solution || []),
+    grid: Array.from(grid || []),
+    candidates: (candidates || []).map(s=>[...s]),
+    givens: givens ? [...givens] : [],
+    elapsed,
+    won,
+    selectedCell
+  };
+}
+
+function setDebugStatus(message, tone=''){
+  const el = document.getElementById('debug-status');
+  if(!el) return;
+  el.textContent = message;
+  el.classList.remove('ok','error');
+  if(tone) el.classList.add(tone);
+  clearTimeout(debugStatusTimer);
+  if(message){
+    debugStatusTimer = setTimeout(()=>{
+      el.textContent = '';
+      el.classList.remove('ok','error');
+    }, 2400);
+  }
+}
+
+function normalizeDebugState(data){
+  if(!data || typeof data !== 'object') throw new Error('Debug JSON must be an object.');
+
+  const toBoard = (value, name)=>{
+    if(!Array.isArray(value) || value.length !== 81) throw new Error(`${name} must be an array of 81 numbers.`);
+    const out = new Uint8Array(81);
+    for(let i=0;i<81;i++){
+      const n = Number(value[i]);
+      if(!Number.isInteger(n) || n < 0 || n > 9) throw new Error(`${name} contains an invalid value at cell ${i+1}.`);
+      out[i] = n;
+    }
+    return out;
+  };
+
+  const nextPuzzle = toBoard(data.puzzle, 'puzzle');
+  const nextSolution = toBoard(data.solution, 'solution');
+  const nextGrid = toBoard(data.grid, 'grid');
+
+  if(!Array.isArray(data.candidates) || data.candidates.length !== 81){
+    throw new Error('candidates must be an array of 81 arrays.');
+  }
+  const nextCandidates = data.candidates.map((entry, idx)=>{
+    if(!Array.isArray(entry)) throw new Error(`candidates[${idx}] must be an array.`);
+    const set = new Set();
+    for(const raw of entry){
+      const n = Number(raw);
+      if(!Number.isInteger(n) || n < 1 || n > 9) throw new Error(`candidates[${idx}] contains an invalid digit.`);
+      set.add(n);
+    }
+    return set;
+  });
+
+  if(!Array.isArray(data.givens)) throw new Error('givens must be an array of cell indexes.');
+  const nextGivens = new Set();
+  for(const raw of data.givens){
+    const idx = Number(raw);
+    if(!Number.isInteger(idx) || idx < 0 || idx >= 81) throw new Error('givens contains an invalid cell index.');
+    nextGivens.add(idx);
+  }
+
+  const nextElapsed = Number(data.elapsed ?? 0);
+  if(!Number.isFinite(nextElapsed) || nextElapsed < 0) throw new Error('elapsed must be a non-negative number.');
+
+  const nextSelectedCell = data.selectedCell == null ? -1 : Number(data.selectedCell);
+  if(!Number.isInteger(nextSelectedCell) || nextSelectedCell < -1 || nextSelectedCell >= 81){
+    throw new Error('selectedCell must be between -1 and 80.');
+  }
+
+  for(const idx of nextGivens){
+    if(!nextPuzzle[idx]) throw new Error('givens includes a cell that is empty in puzzle.');
+  }
+
+  for(let i=0;i<81;i++){
+    if(nextPuzzle[i] && nextGrid[i] !== nextPuzzle[i]){
+      throw new Error(`grid changes given cell ${i+1}.`);
+    }
+    if(nextGrid[i] && nextCandidates[i].size){
+      throw new Error(`cell ${i+1} has both a placed value and candidates.`);
+    }
+  }
+
+  return {
+    puzzle: nextPuzzle,
+    solution: nextSolution,
+    grid: nextGrid,
+    candidates: nextCandidates,
+    givens: nextGivens,
+    elapsed: Math.floor(nextElapsed),
+    won: !!data.won,
+    selectedCell: nextSelectedCell
+  };
+}
+
+function applyDebugState(data){
+  const next = normalizeDebugState(data);
+  puzzle = next.puzzle;
+  solution = next.solution;
+  grid = next.grid;
+  candidates = next.candidates;
+  givens = next.givens;
+  elapsed = next.elapsed;
+  won = next.won;
+  selectedCell = next.selectedCell;
+  saveGame();
+  resumeGame();
+  if(selectedCell >= 0 && !won){
+    boardEl.children[selectedCell]?.focus();
+    openPopup(selectedCell);
+  }
+}
+
+async function copyDebugState(){
+  const text = JSON.stringify(debugSnapshot(), null, 2);
+  try{
+    await navigator.clipboard.writeText(text);
+    setDebugStatus('Debug JSON copied', 'ok');
+  } catch(_){
+    window.prompt('Copy debug JSON', text);
+    setDebugStatus('Clipboard blocked; JSON opened', 'ok');
+  }
+}
+
+async function pasteDebugState(){
+  let text = '';
+  try{
+    text = await navigator.clipboard.readText();
+  } catch(_){
+    text = window.prompt('Paste debug JSON') || '';
+  }
+  if(!text.trim()){
+    setDebugStatus('No debug JSON found', 'error');
+    return;
+  }
+  try{
+    applyDebugState(JSON.parse(text));
+    setDebugStatus('Debug JSON loaded', 'ok');
+  } catch(err){
+    setDebugStatus(err?.message || 'Invalid debug JSON', 'error');
+  }
+}
 
 function saveGame(){
   try{
@@ -946,6 +1112,8 @@ document.addEventListener('keydown', e=>{
 /* ===== TOOLBAR ===== */
 document.getElementById('btn-new').addEventListener('click', newGame);
 document.getElementById('btn-win-new').addEventListener('click', newGame);
+document.getElementById('btn-copy-debug').addEventListener('click', copyDebugState);
+document.getElementById('btn-paste-debug').addEventListener('click', pasteDebugState);
 document.getElementById('btn-fs').addEventListener('click', ()=>{
   if(!document.fullscreenElement){
     document.documentElement.requestFullscreen().catch(()=>{});
