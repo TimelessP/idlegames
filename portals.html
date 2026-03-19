@@ -410,7 +410,7 @@
     <div id="hud">
       <h1>Portals</h1>
       <p id="seedLabel">Generating chamber...</p>
-      <p id="goalLabel">Find the exit beacon somewhere deep in the facility.</p>
+      <p id="goalLabel">Find the exit beacon somewhere in the stacked maze cube.</p>
 
       <div id="portalStatus">
         <div class="portal-chip blue">
@@ -427,7 +427,7 @@
         <div><kbd>WASD</kbd> move, <kbd>Shift</kbd> sprint, <kbd>Space</kbd> jump</div>
         <div><kbd>Mouse</kbd> aim, <kbd>LMB</kbd> blue, <kbd>RMB</kbd> orange</div>
         <div><kbd>Q</kbd> blue, <kbd>E</kbd> orange, <kbd>R</kbd> new chamber</div>
-        <div>Only the white wall panels accept portals.</div>
+        <div>White wall panels and marked floor and ceiling tiles accept portals.</div>
       </div>
     </div>
 
@@ -448,12 +448,12 @@
 
     <div id="startOverlay">
       <div id="startCard">
-        <h2>Procedural Test Chamber</h2>
+        <h2>Procedural Maze Cube</h2>
         <p>
-          Fire two linked portals onto the chamber walls and walk through them.
-          The blue and orange pairs conserve your lateral offset and momentum using the
-          portal transform math from the original portal demo, but now inside a fully
-          generated, sealed facility.
+          Fire blue and orange portals across a stacked test maze with vertical shafts,
+          layered rooms, and portal-ready wall, floor, and ceiling surfaces. The chamber
+          stays procedurally generated, but now the route to the beacon can weave through
+          multiple levels instead of a single flat floorplan.
         </p>
         <div class="cta">Click To Enter The Chamber</div>
       </div>
@@ -491,17 +491,21 @@
 
     const UP = new THREE.Vector3(0, 1, 0);
     const Y_AXIS = new THREE.Vector3(0, 1, 0);
+    const X_AXIS = new THREE.Vector3(1, 0, 0);
+    const LOOK_BASE = new THREE.Vector3(0, 0, -1);
     const FLOOR_Y = 0;
 
     const ROOM = {
-      cols: 9,
-      rows: 9,
+      cols: 5,
+      rows: 5,
+      levels: 5,
       cellSize: 6,
       wallHeight: 5.4,
       wallThickness: 0.42,
       floorThickness: 0.22,
       ceilingThickness: 0.22,
     };
+    ROOM.levelStride = ROOM.wallHeight + ROOM.floorThickness + ROOM.ceilingThickness;
 
     const PLAYER = {
       radius: 0.38,
@@ -515,6 +519,7 @@
       jumpVelocity: 6.2,
       gravity: 18.5,
       maxFallSpeed: 23,
+      maxSpeed: 23,
       bobAmount: 0.05,
       bobSpeed: 14,
     };
@@ -523,6 +528,7 @@
       width: 1.9,
       height: 3.45,
       cooldown: 0.18,
+      renderOffset: 0.03,
     };
 
     const PANEL_SURFACE = {
@@ -530,6 +536,12 @@
       halfHeight: ROOM.wallHeight * 0.5 - 0.46,
       textureSize: 384,
       portalInset: 0.1,
+    };
+
+    const TILE_SURFACE = {
+      halfWidth: ROOM.cellSize * 0.5 - 0.7,
+      halfHeight: ROOM.cellSize * 0.5 - 0.7,
+      portalInset: 0.16,
     };
 
     const FIXED_STEP = 1 / 60;
@@ -572,7 +584,6 @@
       wall: new THREE.MeshStandardMaterial({ color: 0x263240, roughness: 0.86, metalness: 0.08 }),
       beaconBase: new THREE.MeshStandardMaterial({ color: 0x33485c, roughness: 0.55, metalness: 0.2 }),
       beaconGlow: new THREE.MeshStandardMaterial({ color: 0x81f6ff, emissive: 0x4fd8ff, emissiveIntensity: 1.1, roughness: 0.3, metalness: 0.15 }),
-      lightStrip: new THREE.MeshStandardMaterial({ color: 0xdbeeff, emissive: 0xbad8ff, emissiveIntensity: 0.8, roughness: 0.28, metalness: 0.1 }),
       playerSkin: new THREE.MeshStandardMaterial({ color: 0xf0bf9a, roughness: 0.82, metalness: 0.02 }),
       playerSuit: new THREE.MeshStandardMaterial({ color: 0xe8ecef, roughness: 0.54, metalness: 0.08 }),
       playerUndersuit: new THREE.MeshStandardMaterial({ color: 0x3b4653, roughness: 0.7, metalness: 0.08 }),
@@ -609,7 +620,7 @@
         pitch: 0,
         onGround: true,
         bobTime: 0,
-        teleportCooldown: 0,
+        portalTraversalLatch: null,
       },
       portals: {},
       linkedPortals: false,
@@ -625,12 +636,19 @@
       lastHudText: '',
     };
 
-    const DIRS = [
-      { key: 'n', dc: 0, dr: -1, opposite: 's' },
-      { key: 'e', dc: 1, dr: 0, opposite: 'w' },
-      { key: 's', dc: 0, dr: 1, opposite: 'n' },
-      { key: 'w', dc: -1, dr: 0, opposite: 'e' },
+    const CARDINAL_DIRS = [
+      { key: 'n', dc: 0, dr: -1, dl: 0, opposite: 's' },
+      { key: 'e', dc: 1, dr: 0, dl: 0, opposite: 'w' },
+      { key: 's', dc: 0, dr: 1, dl: 0, opposite: 'n' },
+      { key: 'w', dc: -1, dr: 0, dl: 0, opposite: 'e' },
     ];
+
+    const VERTICAL_DIRS = [
+      { key: 'u', dc: 0, dr: 0, dl: 1, opposite: 'd' },
+      { key: 'd', dc: 0, dr: 0, dl: -1, opposite: 'u' },
+    ];
+
+    const DIRS = [...CARDINAL_DIRS, ...VERTICAL_DIRS];
 
     function clamp(value, min, max) {
       return Math.max(min, Math.min(max, value));
@@ -689,6 +707,87 @@
 
     function yawToRight(yaw) {
       return new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+    }
+
+    function lookDirectionFromAngles(yaw, pitch) {
+      return LOOK_BASE.clone().applyEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ')).normalize();
+    }
+
+    function anglesFromLookDirection(direction) {
+      const normalized = direction.clone().normalize();
+      return {
+        yaw: Math.atan2(-normalized.x, -normalized.z),
+        pitch: clamp(Math.asin(clamp(normalized.y, -1, 1)), -Math.PI * 0.48, Math.PI * 0.48),
+      };
+    }
+
+    function getTeleportedViewAngles(source, destination, yaw, pitch, portalRotation) {
+      const transformedLook = lookDirectionFromAngles(yaw, pitch)
+        .applyQuaternion(portalRotation)
+        .normalize();
+      return anglesFromLookDirection(transformedLook);
+    }
+
+    function projectOntoPlane(vector, normal) {
+      return vector.clone().addScaledVector(normal, -vector.dot(normal));
+    }
+
+    function getCameraForwardVector() {
+      return LOOK_BASE.clone().applyQuaternion(camera.quaternion).normalize();
+    }
+
+    function getPerspectiveSurfaceUp(surfacePoint, surfaceNormal) {
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(surfaceNormal.clone().normalize(), surfacePoint);
+      const topProbe = new THREE.Vector3(0, 0.35, 0.5).unproject(camera);
+      const bottomProbe = new THREE.Vector3(0, -0.35, 0.5).unproject(camera);
+      const topDirection = topProbe.sub(camera.position).normalize();
+      const bottomDirection = bottomProbe.sub(camera.position).normalize();
+      const topHit = new THREE.Ray(camera.position.clone(), topDirection).intersectPlane(plane, new THREE.Vector3());
+      const bottomHit = new THREE.Ray(camera.position.clone(), bottomDirection).intersectPlane(plane, new THREE.Vector3());
+
+      if (topHit) {
+        const up = topHit.sub(surfacePoint);
+        if (up.lengthSq() > 1e-6) {
+          return up.normalize();
+        }
+      }
+
+      if (bottomHit) {
+        const up = surfacePoint.clone().sub(bottomHit);
+        if (up.lengthSq() > 1e-6) {
+          return up.normalize();
+        }
+      }
+
+      return null;
+    }
+
+    function getPortalBasis(normal, preferredUp = null, fallbackForward = null) {
+      const basisNormal = normal.clone().normalize();
+      let up = preferredUp ? projectOntoPlane(preferredUp, basisNormal) : new THREE.Vector3();
+
+      if (up.lengthSq() < 1e-6 && fallbackForward) {
+        const projectedForward = projectOntoPlane(fallbackForward, basisNormal);
+        if (projectedForward.lengthSq() > 1e-6) {
+          up = basisNormal.clone().cross(projectedForward).normalize();
+        }
+      }
+
+      if (up.lengthSq() < 1e-6) {
+        up = projectOntoPlane(UP, basisNormal);
+      }
+
+      if (up.lengthSq() < 1e-6) {
+        up = projectOntoPlane(X_AXIS, basisNormal);
+      }
+
+      up.normalize();
+      const right = up.clone().cross(basisNormal).normalize();
+      up = basisNormal.clone().cross(right).normalize();
+      const quaternion = new THREE.Quaternion().setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(right, up, basisNormal)
+      );
+      return { normal: basisNormal, right, up, quaternion };
     }
 
     function colorToVec3(hex) {
@@ -875,6 +974,73 @@
         map: createCeilingTileTexture(seed),
         roughness: 0.84,
         metalness: 0.04,
+      });
+    }
+
+    function createPortalTileTexture(seed, surfaceKey, variant) {
+      const rng = mulberry32(seed ^ hashString(`${variant}:${surfaceKey}:portal-tile`));
+      const canvas = document.createElement('canvas');
+      const size = PANEL_SURFACE.textureSize;
+      canvas.width = size;
+      canvas.height = size;
+      const context = canvas.getContext('2d');
+
+      const bgGradient = context.createLinearGradient(0, 0, size, size);
+      bgGradient.addColorStop(0, variant === 'floor' ? 'hsl(204, 18%, 28%)' : 'hsl(204, 12%, 70%)');
+      bgGradient.addColorStop(1, variant === 'floor' ? 'hsl(212, 20%, 14%)' : 'hsl(208, 10%, 58%)');
+      context.fillStyle = bgGradient;
+      context.fillRect(0, 0, size, size);
+
+      const frameInset = size * 0.1;
+      const tileX = frameInset;
+      const tileY = frameInset;
+      const tileSize = size - frameInset * 2;
+      roundedRectPath(context, tileX, tileY, tileSize, tileSize, 26);
+      const tileGradient = context.createLinearGradient(0, tileY, 0, tileY + tileSize);
+      tileGradient.addColorStop(0, variant === 'floor' ? 'hsl(52, 18%, 88%)' : 'hsl(196, 10%, 92%)');
+      tileGradient.addColorStop(1, variant === 'floor' ? 'hsl(48, 12%, 76%)' : 'hsl(206, 8%, 84%)');
+      context.fillStyle = tileGradient;
+      context.fill();
+
+      context.lineWidth = 5;
+      context.strokeStyle = 'rgba(56, 68, 82, 0.72)';
+      context.stroke();
+
+      context.lineWidth = 2;
+      context.strokeStyle = 'rgba(255, 255, 255, 0.26)';
+      roundedRectPath(context, tileX + 8, tileY + 8, tileSize - 16, tileSize - 16, 18);
+      context.stroke();
+
+      const stripeHue = variant === 'floor' ? 38 : 198;
+      context.fillStyle = `hsla(${stripeHue}, 82%, 66%, 0.22)`;
+      context.fillRect(tileX + 22, tileY + 20, tileSize * 0.34, 10);
+      context.fillRect(tileX + 22, tileY + tileSize - 30, tileSize * 0.3, 7);
+
+      for (let seam = 1; seam <= 2; seam += 1) {
+        const seamOffset = tileY + (tileSize / 3) * seam + (rng() - 0.5) * 6;
+        context.strokeStyle = `rgba(96, 108, 120, ${0.18 + rng() * 0.08})`;
+        context.lineWidth = 2;
+        context.beginPath();
+        context.moveTo(tileX + 16, seamOffset);
+        context.lineTo(tileX + tileSize - 16, seamOffset);
+        context.stroke();
+      }
+
+      for (let index = 0; index < 700; index += 1) {
+        const alpha = 0.015 + rng() * 0.035;
+        const shade = variant === 'floor' ? 120 + Math.floor(rng() * 45) : 162 + Math.floor(rng() * 26);
+        context.fillStyle = `rgba(${shade}, ${shade + 6}, ${shade + 10}, ${alpha})`;
+        context.fillRect(rng() * size, rng() * size, 1 + rng() * 2, 1 + rng() * 2);
+      }
+
+      return createCanvasTexture(canvas);
+    }
+
+    function createPortalTileMaterial(seed, surfaceKey, variant) {
+      return new THREE.MeshStandardMaterial({
+        map: createPortalTileTexture(seed, surfaceKey, variant),
+        roughness: variant === 'floor' ? 0.64 : 0.78,
+        metalness: 0.06,
       });
     }
 
@@ -1098,6 +1264,9 @@
       if (Math.abs(normal.x) > 0.9) {
         return normal.x > 0 ? 0 : 1;
       }
+      if (Math.abs(normal.y) > 0.9) {
+        return normal.y > 0 ? 2 : 3;
+      }
       if (Math.abs(normal.z) > 0.9) {
         return normal.z > 0 ? 4 : 5;
       }
@@ -1107,12 +1276,14 @@
     function faceIndexToLabel(index) {
       if (index === 0) return 'px';
       if (index === 1) return 'nx';
+      if (index === 2) return 'py';
+      if (index === 3) return 'ny';
       if (index === 4) return 'pz';
       if (index === 5) return 'nz';
       return 'wall';
     }
 
-    function createPortalCutoutAlphaTexture(offsetX, offsetY) {
+    function createPortalCutoutAlphaTexture(offsetX, offsetY, surfaceWidth, surfaceHeight) {
       const canvas = document.createElement('canvas');
       const size = 512;
       canvas.width = size;
@@ -1122,10 +1293,10 @@
       context.fillStyle = '#ffffff';
       context.fillRect(0, 0, size, size);
 
-      const centerX = size * (0.5 + offsetX / ROOM.cellSize);
-      const centerY = size * (0.5 - offsetY / ROOM.wallHeight);
-      const radiusX = size * (PORTAL.width * 0.5 / ROOM.cellSize);
-      const radiusY = size * (PORTAL.height * 0.5 / ROOM.wallHeight);
+      const centerX = size * (0.5 + offsetX / surfaceWidth);
+      const centerY = size * (0.5 - offsetY / surfaceHeight);
+      const radiusX = size * (PORTAL.width * 0.5 / surfaceWidth);
+      const radiusY = size * (PORTAL.height * 0.5 / surfaceHeight);
 
       context.save();
       context.globalCompositeOperation = 'destination-out';
@@ -1150,6 +1321,22 @@
         }
       });
       return wallMaterials;
+    }
+
+    function createTileMaterialSet(baseMaterial, portalMaterial, portalFaceIndex) {
+      const tileMaterials = [materials.wall, materials.wall, materials.wall, materials.wall, materials.wall, materials.wall];
+      tileMaterials[0] = materials.wall;
+      tileMaterials[1] = materials.wall;
+      tileMaterials[4] = materials.wall;
+      tileMaterials[5] = materials.wall;
+      if (portalFaceIndex === 2) {
+        tileMaterials[2] = portalMaterial ?? baseMaterial;
+        tileMaterials[3] = materials.wall;
+      } else {
+        tileMaterials[2] = materials.wall;
+        tileMaterials[3] = portalMaterial ?? baseMaterial;
+      }
+      return tileMaterials;
     }
 
     function showMessage(text, kind = '', duration = 1.8) {
@@ -1290,9 +1477,15 @@
         this.wallKey = null;
         this.wallFaceIndex = -1;
         this.position = new THREE.Vector3();
+        this.renderPosition = new THREE.Vector3();
         this.forward = new THREE.Vector3();
         this.right = new THREE.Vector3();
+        this.up = new THREE.Vector3();
+        this.quaternion = new THREE.Quaternion();
         this.yaw = 0;
+        this.surfaceWidth = ROOM.cellSize;
+        this.surfaceHeight = ROOM.wallHeight;
+        this.surfaceThickness = ROOM.wallThickness;
         this.occluder = null;
         this.occluderMaterial = null;
         this.occluderAlphaMap = null;
@@ -1326,18 +1519,24 @@
         scene.add(this.group);
       }
 
-      place(surface, center, openingOffset) {
+      place(surface, logicalCenter, renderCenter, openingOffset) {
         this.active = true;
         this.wallKey = surface.wallKey;
         this.wallFaceIndex = surface.wallFaceIndex;
-        this.position.copy(center);
-        this.yaw = surface.yaw;
-        this.forward.copy(yawToForward(this.yaw));
-        this.right.copy(yawToRight(this.yaw));
+        this.position.copy(logicalCenter);
+        this.renderPosition.copy(renderCenter);
+        this.forward.copy(surface.normal);
+        this.right.copy(surface.right);
+        this.up.copy(surface.up);
+        this.quaternion.copy(surface.quaternion);
+        this.yaw = Math.atan2(this.forward.x, this.forward.z);
+        this.surfaceWidth = surface.planeWidth;
+        this.surfaceHeight = surface.planeHeight;
+        this.surfaceThickness = surface.thickness;
 
         this.group.visible = true;
-        this.group.position.copy(center);
-        this.group.rotation.set(0, this.yaw, 0);
+  this.group.position.copy(renderCenter);
+        this.group.quaternion.copy(surface.quaternion);
 
         this.updateOccluder(surface, openingOffset);
       }
@@ -1395,17 +1594,30 @@
           scene.add(this.occluder);
         }
 
+        if (
+          this.occluder.geometry.parameters.width !== surface.planeWidth
+          || this.occluder.geometry.parameters.height !== surface.planeHeight
+        ) {
+          this.occluder.geometry.dispose();
+          this.occluder.geometry = new THREE.PlaneGeometry(surface.planeWidth, surface.planeHeight);
+        }
+
         this.occluderMaterial.map = baseMap;
         this.occluderMaterial.needsUpdate = true;
 
         if (this.occluderAlphaMap) {
           this.occluderAlphaMap.dispose();
         }
-        this.occluderAlphaMap = createPortalCutoutAlphaTexture(openingOffset.x, openingOffset.y);
+        this.occluderAlphaMap = createPortalCutoutAlphaTexture(
+          openingOffset.x,
+          openingOffset.y,
+          surface.planeWidth,
+          surface.planeHeight
+        );
         this.occluderMaterial.alphaMap = this.occluderAlphaMap;
 
-        this.occluder.position.copy(surface.center).addScaledVector(surface.normal, ROOM.wallThickness * 0.5 + 0.001);
-        this.occluder.rotation.set(0, surface.yaw, 0);
+        this.occluder.position.copy(surface.center).addScaledVector(surface.normal, surface.thickness * 0.5 + 0.001);
+        this.occluder.quaternion.copy(surface.quaternion);
       }
     }
 
@@ -1651,41 +1863,44 @@
     const playerAvatar = new PlayerAvatar();
 
     function createCells() {
-      return Array.from({ length: ROOM.rows }, (_, row) =>
-        Array.from({ length: ROOM.cols }, (_, col) => ({
-          col,
-          row,
-          walls: { n: true, e: true, s: true, w: true },
-        }))
+      return Array.from({ length: ROOM.levels }, (_, level) =>
+        Array.from({ length: ROOM.rows }, (_, row) =>
+          Array.from({ length: ROOM.cols }, (_, col) => ({
+            col,
+            row,
+            level,
+            walls: { n: true, e: true, s: true, w: true, u: true, d: true },
+          }))
+        )
       );
     }
 
-    function getCell(cells, col, row) {
-      return cells[row]?.[col] ?? null;
+    function getCell(cells, col, row, level) {
+      return cells[level]?.[row]?.[col] ?? null;
     }
 
-    function removeWall(cells, col, row, dirKey) {
+    function removeWall(cells, col, row, level, dirKey) {
       const dir = DIRS.find((candidate) => candidate.key === dirKey);
       if (!dir) return;
-      const current = getCell(cells, col, row);
-      const other = getCell(cells, col + dir.dc, row + dir.dr);
+      const current = getCell(cells, col, row, level);
+      const other = getCell(cells, col + dir.dc, row + dir.dr, level + dir.dl);
       if (!current || !other) return;
       current.walls[dir.key] = false;
       other.walls[dir.opposite] = false;
     }
 
-    function worldFromCell(col, row) {
+    function worldFromCell(col, row, level) {
       const width = ROOM.cols * ROOM.cellSize;
       const depth = ROOM.rows * ROOM.cellSize;
       return new THREE.Vector3(
         -width * 0.5 + ROOM.cellSize * 0.5 + col * ROOM.cellSize,
-        FLOOR_Y,
+        FLOOR_Y + level * ROOM.levelStride,
         -depth * 0.5 + ROOM.cellSize * 0.5 + row * ROOM.cellSize
       );
     }
 
-    function makeWallKey(prefix, col, row) {
-      return `${prefix}:${col}:${row}`;
+    function makeWallKey(prefix, col, row, level) {
+      return `${prefix}:${level}:${col}:${row}`;
     }
 
     function buildLevel(seed) {
@@ -1693,14 +1908,14 @@
       const cells = createCells();
 
       const corners = [
-        { col: 0, row: 0 },
-        { col: ROOM.cols - 1, row: 0 },
-        { col: 0, row: ROOM.rows - 1 },
-        { col: ROOM.cols - 1, row: ROOM.rows - 1 },
+        { col: 0, row: 0, level: 0 },
+        { col: ROOM.cols - 1, row: 0, level: 0 },
+        { col: 0, row: ROOM.rows - 1, level: 0 },
+        { col: ROOM.cols - 1, row: ROOM.rows - 1, level: 0 },
       ];
       const start = corners[Math.floor(rng() * corners.length)];
 
-      const visited = new Set([`${start.col},${start.row}`]);
+      const visited = new Set([`${start.level},${start.row},${start.col}`]);
       const stack = [start];
       while (stack.length) {
         const current = stack[stack.length - 1];
@@ -1709,8 +1924,9 @@
             dir,
             col: current.col + dir.dc,
             row: current.row + dir.dr,
+            level: current.level + dir.dl,
           }))
-          .filter(({ col, row }) => getCell(cells, col, row) && !visited.has(`${col},${row}`));
+          .filter(({ col, row, level }) => getCell(cells, col, row, level) && !visited.has(`${level},${row},${col}`));
 
         if (!nextChoices.length) {
           stack.pop();
@@ -1718,20 +1934,24 @@
         }
 
         const choice = nextChoices[Math.floor(rng() * nextChoices.length)];
-        removeWall(cells, current.col, current.row, choice.dir.key);
-        visited.add(`${choice.col},${choice.row}`);
-        stack.push({ col: choice.col, row: choice.row });
+        removeWall(cells, current.col, current.row, current.level, choice.dir.key);
+        visited.add(`${choice.level},${choice.row},${choice.col}`);
+        stack.push({ col: choice.col, row: choice.row, level: choice.level });
       }
 
-      for (let row = 0; row < ROOM.rows; row += 1) {
-        for (let col = 0; col < ROOM.cols; col += 1) {
-          if (col < ROOM.cols - 1 && rng() < 0.18) removeWall(cells, col, row, 'e');
-          if (row < ROOM.rows - 1 && rng() < 0.14) removeWall(cells, col, row, 's');
+      for (let level = 0; level < ROOM.levels; level += 1) {
+        for (let row = 0; row < ROOM.rows; row += 1) {
+          for (let col = 0; col < ROOM.cols; col += 1) {
+            if (col < ROOM.cols - 1 && rng() < 0.16) removeWall(cells, col, row, level, 'e');
+            if (row < ROOM.rows - 1 && rng() < 0.14) removeWall(cells, col, row, level, 's');
+            if (level < ROOM.levels - 1 && rng() < 0.19) removeWall(cells, col, row, level, 'u');
+          }
         }
       }
 
-      const roomCount = 2 + Math.floor(rng() * 3);
+      const roomCount = ROOM.levels + 1;
       for (let roomIndex = 0; roomIndex < roomCount; roomIndex += 1) {
+        const level = Math.floor(rng() * ROOM.levels);
         const roomWidth = 2 + Math.floor(rng() * 2);
         const roomHeight = 2 + Math.floor(rng() * 2);
         const originCol = Math.floor(rng() * (ROOM.cols - roomWidth));
@@ -1739,40 +1959,61 @@
 
         for (let row = originRow; row < originRow + roomHeight; row += 1) {
           for (let col = originCol; col < originCol + roomWidth; col += 1) {
-            if (col < originCol + roomWidth - 1) removeWall(cells, col, row, 'e');
-            if (row < originRow + roomHeight - 1) removeWall(cells, col, row, 's');
+            if (col < originCol + roomWidth - 1) removeWall(cells, col, row, level, 'e');
+            if (row < originRow + roomHeight - 1) removeWall(cells, col, row, level, 's');
           }
         }
 
         for (let opening = 0; opening < 2; opening += 1) {
           const edgeCol = originCol + Math.floor(rng() * roomWidth);
           const edgeRow = originRow + Math.floor(rng() * roomHeight);
-          const dir = DIRS[Math.floor(rng() * DIRS.length)];
-          removeWall(cells, edgeCol, edgeRow, dir.key);
+          const dir = CARDINAL_DIRS[Math.floor(rng() * CARDINAL_DIRS.length)];
+          removeWall(cells, edgeCol, edgeRow, level, dir.key);
+        }
+
+        if (level < ROOM.levels - 1 && rng() < 0.72) {
+          const shaftCol = originCol + Math.floor(rng() * roomWidth);
+          const shaftRow = originRow + Math.floor(rng() * roomHeight);
+          const shaftDepth = 1 + Math.floor(rng() * Math.min(2, ROOM.levels - level - 1));
+          for (let shaftLevel = level; shaftLevel < level + shaftDepth; shaftLevel += 1) {
+            removeWall(cells, shaftCol, shaftRow, shaftLevel, 'u');
+          }
+        }
+      }
+
+      const shaftCount = 2 + Math.floor(rng() * 3);
+      for (let shaftIndex = 0; shaftIndex < shaftCount; shaftIndex += 1) {
+        const shaftCol = Math.floor(rng() * ROOM.cols);
+        const shaftRow = Math.floor(rng() * ROOM.rows);
+        const startLevel = Math.floor(rng() * Math.max(1, ROOM.levels - 1));
+        const shaftDepth = 1 + Math.floor(rng() * Math.min(ROOM.levels - startLevel - 1, 2));
+        for (let shaftLevel = startLevel; shaftLevel < startLevel + shaftDepth; shaftLevel += 1) {
+          removeWall(cells, shaftCol, shaftRow, shaftLevel, 'u');
         }
       }
 
       const distanceMap = new Map();
       const queue = [{ ...start, dist: 0 }];
-      distanceMap.set(`${start.col},${start.row}`, 0);
+      distanceMap.set(`${start.level},${start.row},${start.col}`, 0);
       let goal = { ...start, dist: 0 };
 
       while (queue.length) {
         const current = queue.shift();
-        if (current.dist > goal.dist) goal = current;
-        const cell = getCell(cells, current.col, current.row);
+        const cell = getCell(cells, current.col, current.row, current.level);
+        if ((current.level === 0 || cell.walls.d) && current.dist > goal.dist) goal = current;
         for (const dir of DIRS) {
           if (cell.walls[dir.key]) continue;
           const nextCol = current.col + dir.dc;
           const nextRow = current.row + dir.dr;
-          const key = `${nextCol},${nextRow}`;
-          if (!getCell(cells, nextCol, nextRow) || distanceMap.has(key)) continue;
+          const nextLevel = current.level + dir.dl;
+          const key = `${nextLevel},${nextRow},${nextCol}`;
+          if (!getCell(cells, nextCol, nextRow, nextLevel) || distanceMap.has(key)) continue;
           distanceMap.set(key, current.dist + 1);
-          queue.push({ col: nextCol, row: nextRow, dist: current.dist + 1 });
+          queue.push({ col: nextCol, row: nextRow, level: nextLevel, dist: current.dist + 1 });
         }
       }
 
-      return { cells, start, goal };
+      return { cells, start, goal, goalDistance: goal.dist };
     }
 
     function disposeGroup(group) {
@@ -1817,10 +2058,11 @@
         disposeGroup(state.level.group);
       }
 
-      const { cells, start, goal } = buildLevel(seed);
+      const { cells, start, goal, goalDistance } = buildLevel(seed);
       const group = new THREE.Group();
       const wallMeshes = [];
       const wallColliders = [];
+      const slabColliders = [];
       const floorMaterial = createWalkPlateMaterial(seed);
       const ceilingMaterial = createCeilingTileMaterial(seed);
 
@@ -1828,20 +2070,42 @@
       const ceilingGeometry = new THREE.BoxGeometry(ROOM.cellSize, ROOM.ceilingThickness, ROOM.cellSize);
       const horizontalWallGeometry = new THREE.BoxGeometry(ROOM.cellSize, ROOM.wallHeight, ROOM.wallThickness);
       const verticalWallGeometry = new THREE.BoxGeometry(ROOM.wallThickness, ROOM.wallHeight, ROOM.cellSize);
-      const lightGeometry = new THREE.BoxGeometry(ROOM.cellSize * 0.34, 0.08, 0.34);
+
+      function isPortalTile(surfaceKey, threshold) {
+        return mulberry32(seed ^ hashString(surfaceKey))() < threshold;
+      }
+
+      function registerSurface(mesh, key, normals, portalNormals, planeWidth, planeHeight, halfWidth, halfHeight, thickness) {
+        mesh.userData.wallSurface = {
+          key,
+          normals: normals.map((normal) => normal.clone()),
+          portalNormals: portalNormals.map((normal) => normal.clone()),
+          portalable: portalNormals.length > 0,
+          planeWidth,
+          planeHeight,
+          halfWidth,
+          halfHeight,
+          thickness,
+        };
+        group.add(mesh);
+        wallMeshes.push(mesh);
+      }
 
       function addWall(center, size, geometry, key, normals) {
         const portalNormals = normals.length > 1 ? normals : [];
         const wall = new THREE.Mesh(geometry, createWallMaterialSet(seed, key, normals, portalNormals));
         wall.position.copy(center);
-        wall.userData.wallSurface = {
+        registerSurface(
+          wall,
           key,
-          normals: normals.map((normal) => normal.clone()),
-          portalNormals: portalNormals.map((normal) => normal.clone()),
-          portalable: portalNormals.length > 0,
-        };
-        group.add(wall);
-        wallMeshes.push(wall);
+          normals,
+          portalNormals,
+          ROOM.cellSize,
+          ROOM.wallHeight,
+          PANEL_SURFACE.halfWidth,
+          PANEL_SURFACE.halfHeight,
+          ROOM.wallThickness
+        );
 
         wallColliders.push({
           key,
@@ -1849,68 +2113,110 @@
         });
       }
 
-      for (let row = 0; row < ROOM.rows; row += 1) {
-        for (let col = 0; col < ROOM.cols; col += 1) {
-          const center = worldFromCell(col, row);
+      function addSlab(center, geometry, key, normal, thickness, baseMaterial, variant, portalable) {
+        const faceIndex = normalToFaceIndex(normal);
+        const portalMaterial = portalable ? createPortalTileMaterial(seed, key, variant) : null;
+        const slab = new THREE.Mesh(geometry, createTileMaterialSet(baseMaterial, portalMaterial, faceIndex));
+        slab.position.copy(center);
+        registerSurface(
+          slab,
+          key,
+          [normal],
+          portalable ? [normal] : [],
+          ROOM.cellSize,
+          ROOM.cellSize,
+          TILE_SURFACE.halfWidth,
+          TILE_SURFACE.halfHeight,
+          thickness
+        );
+        slabColliders.push({
+          key,
+          box: new THREE.Box3().setFromCenterAndSize(
+            center.clone(),
+            new THREE.Vector3(ROOM.cellSize, thickness, ROOM.cellSize)
+          ),
+        });
+      }
 
-          const floor = new THREE.Mesh(floorGeometry, floorMaterial);
-          floor.position.set(center.x, FLOOR_Y - ROOM.floorThickness * 0.5, center.z);
-          group.add(floor);
+      for (let level = 0; level < ROOM.levels; level += 1) {
+        for (let row = 0; row < ROOM.rows; row += 1) {
+          for (let col = 0; col < ROOM.cols; col += 1) {
+            const center = worldFromCell(col, row, level);
+            const cell = cells[level][row][col];
 
-          const ceiling = new THREE.Mesh(ceilingGeometry, ceilingMaterial);
-          ceiling.position.set(center.x, ROOM.wallHeight + ROOM.ceilingThickness * 0.5, center.z);
-          group.add(ceiling);
+            if (cell.walls.d) {
+              const floorKey = makeWallKey('floor', col, row, level);
+              addSlab(
+                new THREE.Vector3(center.x, center.y - ROOM.floorThickness * 0.5, center.z),
+                floorGeometry,
+                floorKey,
+                new THREE.Vector3(0, 1, 0),
+                ROOM.floorThickness,
+                floorMaterial,
+                'floor',
+                isPortalTile(floorKey, 0.34)
+              );
+            }
 
-          const lightStrip = new THREE.Mesh(lightGeometry, materials.lightStrip);
-          lightStrip.position.set(center.x, ROOM.wallHeight - 0.22, center.z);
-          group.add(lightStrip);
+            if (cell.walls.u) {
+              const ceilingKey = makeWallKey('ceiling', col, row, level);
+              addSlab(
+                new THREE.Vector3(center.x, center.y + ROOM.wallHeight + ROOM.ceilingThickness * 0.5, center.z),
+                ceilingGeometry,
+                ceilingKey,
+                new THREE.Vector3(0, -1, 0),
+                ROOM.ceilingThickness,
+                ceilingMaterial,
+                'ceiling',
+                isPortalTile(ceilingKey, 0.28)
+              );
+            }
 
-          const cell = cells[row][col];
+            if (cell.walls.n) {
+              addWall(
+                new THREE.Vector3(center.x, center.y + ROOM.wallHeight * 0.5, center.z - ROOM.cellSize * 0.5),
+                new THREE.Vector3(ROOM.cellSize, ROOM.wallHeight, ROOM.wallThickness),
+                horizontalWallGeometry,
+                makeWallKey('n', col, row, level),
+                row === 0 ? [new THREE.Vector3(0, 0, 1)] : [new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1)]
+              );
+            }
 
-          if (cell.walls.n) {
-            addWall(
-              new THREE.Vector3(center.x, ROOM.wallHeight * 0.5, center.z - ROOM.cellSize * 0.5),
-              new THREE.Vector3(ROOM.cellSize, ROOM.wallHeight, ROOM.wallThickness),
-              horizontalWallGeometry,
-              makeWallKey('n', col, row),
-              row === 0 ? [new THREE.Vector3(0, 0, 1)] : [new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1)]
-            );
-          }
+            if (cell.walls.w) {
+              addWall(
+                new THREE.Vector3(center.x - ROOM.cellSize * 0.5, center.y + ROOM.wallHeight * 0.5, center.z),
+                new THREE.Vector3(ROOM.wallThickness, ROOM.wallHeight, ROOM.cellSize),
+                verticalWallGeometry,
+                makeWallKey('w', col, row, level),
+                col === 0 ? [new THREE.Vector3(1, 0, 0)] : [new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0)]
+              );
+            }
 
-          if (cell.walls.w) {
-            addWall(
-              new THREE.Vector3(center.x - ROOM.cellSize * 0.5, ROOM.wallHeight * 0.5, center.z),
-              new THREE.Vector3(ROOM.wallThickness, ROOM.wallHeight, ROOM.cellSize),
-              verticalWallGeometry,
-              makeWallKey('w', col, row),
-              col === 0 ? [new THREE.Vector3(1, 0, 0)] : [new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0)]
-            );
-          }
+            if (row === ROOM.rows - 1 && cell.walls.s) {
+              addWall(
+                new THREE.Vector3(center.x, center.y + ROOM.wallHeight * 0.5, center.z + ROOM.cellSize * 0.5),
+                new THREE.Vector3(ROOM.cellSize, ROOM.wallHeight, ROOM.wallThickness),
+                horizontalWallGeometry,
+                makeWallKey('s', col, row, level),
+                [new THREE.Vector3(0, 0, -1)]
+              );
+            }
 
-          if (row === ROOM.rows - 1 && cell.walls.s) {
-            addWall(
-              new THREE.Vector3(center.x, ROOM.wallHeight * 0.5, center.z + ROOM.cellSize * 0.5),
-              new THREE.Vector3(ROOM.cellSize, ROOM.wallHeight, ROOM.wallThickness),
-              horizontalWallGeometry,
-              makeWallKey('s', col, row),
-              [new THREE.Vector3(0, 0, -1)]
-            );
-          }
-
-          if (col === ROOM.cols - 1 && cell.walls.e) {
-            addWall(
-              new THREE.Vector3(center.x + ROOM.cellSize * 0.5, ROOM.wallHeight * 0.5, center.z),
-              new THREE.Vector3(ROOM.wallThickness, ROOM.wallHeight, ROOM.cellSize),
-              verticalWallGeometry,
-              makeWallKey('e', col, row),
-              [new THREE.Vector3(-1, 0, 0)]
-            );
+            if (col === ROOM.cols - 1 && cell.walls.e) {
+              addWall(
+                new THREE.Vector3(center.x + ROOM.cellSize * 0.5, center.y + ROOM.wallHeight * 0.5, center.z),
+                new THREE.Vector3(ROOM.wallThickness, ROOM.wallHeight, ROOM.cellSize),
+                verticalWallGeometry,
+                makeWallKey('e', col, row, level),
+                [new THREE.Vector3(-1, 0, 0)]
+              );
+            }
           }
         }
       }
 
-      const startPos = worldFromCell(start.col, start.row);
-      const goalPos = worldFromCell(goal.col, goal.row);
+      const startPos = worldFromCell(start.col, start.row, start.level);
+      const goalPos = worldFromCell(goal.col, goal.row, goal.level);
 
       const beacon = new THREE.Group();
       const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.65, 0.78, 1.1, 8), materials.beaconBase);
@@ -1944,26 +2250,29 @@
         group,
         wallMeshes,
         wallColliders,
+        slabColliders,
         startPos,
         goalPos,
+        start,
+        goal,
         beacon,
         beaconCore: core,
         beaconRing: ring,
       };
 
       resetPortals();
-      resetPlayer(startPos, cells[start.row][start.col]);
+      resetPlayer(startPos, cells[start.level][start.row][start.col]);
       updateHash(seed);
-      seedLabel.textContent = `Seed ${seed.toString(36).toUpperCase()} · Reach the beacon ${Math.round(goalPos.distanceTo(startPos) / ROOM.cellSize)} rooms away.`;
-      goalLabel.textContent = 'Only the seeded interior white wall sections accept portals. Walk through once both are linked.';
+      seedLabel.textContent = `Seed ${seed.toString(36).toUpperCase()} · Reach the beacon ${goalDistance} links away through the maze cube.`;
+      goalLabel.textContent = 'White wall panels plus marked floor and ceiling tiles accept portals.';
       updatePortalHud();
     }
 
     function resetPlayer(startPos, startCell) {
-      state.player.position.set(startPos.x, FLOOR_Y, startPos.z);
+      state.player.position.set(startPos.x, startPos.y, startPos.z);
       state.player.velocity.set(0, 0, 0);
       state.player.pitch = 0;
-      state.player.teleportCooldown = 0;
+      state.player.portalTraversalLatch = null;
       state.goalReached = false;
       state.player.bobTime = 0;
       state.player.onGround = true;
@@ -1996,6 +2305,7 @@
       if (!state.level) return null;
       raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
       const hits = raycaster.intersectObjects(state.level.wallMeshes, false);
+      const viewForward = getCameraForwardVector();
 
       for (const hit of hits) {
         if (!hit.face || !hit.object?.userData?.wallSurface) continue;
@@ -2007,13 +2317,13 @@
         const matchedNormal = wallSurface.portalNormals.find((normal) => normal.dot(worldNormal) > 0.98);
         if (!matchedNormal) continue;
 
-        const yaw = Math.atan2(matchedNormal.x, matchedNormal.z);
-        const right = yawToRight(yaw);
+        const perspectiveUp = getPerspectiveSurfaceUp(hit.point, matchedNormal);
+        const basis = getPortalBasis(matchedNormal, perspectiveUp, viewForward);
         const localOffset = hit.point.clone().sub(hit.object.position);
-        const localRight = localOffset.dot(right);
-        const localUp = localOffset.y;
+        const localRight = localOffset.dot(basis.right);
+        const localUp = localOffset.dot(basis.up);
 
-        if (Math.abs(localRight) > PANEL_SURFACE.halfWidth || Math.abs(localUp) > PANEL_SURFACE.halfHeight) {
+        if (Math.abs(localRight) > wallSurface.halfWidth || Math.abs(localUp) > wallSurface.halfHeight) {
           continue;
         }
 
@@ -2022,10 +2332,16 @@
           surface: {
             wallKey: wallSurface.key,
             wallFaceIndex: normalToFaceIndex(matchedNormal),
-            yaw,
-            normal: matchedNormal.clone(),
-            right,
+            normal: basis.normal,
+            right: basis.right,
+            up: basis.up,
+            quaternion: basis.quaternion,
             center: hit.object.position.clone(),
+            planeWidth: wallSurface.planeWidth,
+            planeHeight: wallSurface.planeHeight,
+            halfWidth: wallSurface.halfWidth,
+            halfHeight: wallSurface.halfHeight,
+            thickness: wallSurface.thickness,
             localRight,
             localUp,
           },
@@ -2040,7 +2356,7 @@
       if (!hit || !hit.surface) {
         crosshair.classList.add('invalid');
         triggerGunFlash('invalid');
-        showMessage('Aim at an interior white wall section.', 'error', 1.2);
+        showMessage('Aim at a white wall panel or marked floor or ceiling tile.', 'error', 1.2);
         return;
       }
 
@@ -2053,16 +2369,18 @@
       }
 
       const surface = hit.surface;
-      const maxRight = Math.max(0, PANEL_SURFACE.halfWidth - PORTAL.width * 0.5 - PANEL_SURFACE.portalInset);
-      const maxUp = Math.max(0, PANEL_SURFACE.halfHeight - PORTAL.height * 0.5 - PANEL_SURFACE.portalInset);
+      const portalInset = surface.planeHeight === ROOM.wallHeight ? PANEL_SURFACE.portalInset : TILE_SURFACE.portalInset;
+      const maxRight = Math.max(0, surface.halfWidth - PORTAL.width * 0.5 - portalInset);
+      const maxUp = Math.max(0, surface.halfHeight - PORTAL.height * 0.5 - portalInset);
       const clampedRight = clamp(surface.localRight, -maxRight, maxRight);
       const clampedUp = clamp(surface.localUp, -maxUp, maxUp);
-      const center = surface.center.clone()
+      const logicalCenter = surface.center.clone()
         .addScaledVector(surface.right, clampedRight)
-        .addScaledVector(surface.normal, ROOM.wallThickness * 0.5 + 0.03);
-      center.y += clampedUp;
+        .addScaledVector(surface.up, clampedUp)
+        .addScaledVector(surface.normal, surface.thickness * 0.5);
+      const renderCenter = logicalCenter.clone().addScaledVector(surface.normal, PORTAL.renderOffset);
 
-      state.portals[type].place(surface, center, { x: clampedRight, y: clampedUp });
+      state.portals[type].place(surface, logicalCenter, renderCenter, { x: clampedRight, y: clampedUp });
       state.portals[type].setLinked(state.portals.blue.active && state.portals.orange.active, portalRenderTargets[type]);
       state.portals[type === 'blue' ? 'orange' : 'blue'].setLinked(state.portals.blue.active && state.portals.orange.active, portalRenderTargets[type === 'blue' ? 'orange' : 'blue']);
       updatePortalHud();
@@ -2078,27 +2396,127 @@
       crosshair.classList.toggle('invalid', !state.pointer.validSurface && state.controlsLocked);
     }
 
-    function portalOpeningAllowsPass(portal) {
+    function portalOpeningAllowsPass(portal, samplePoint = null) {
       if (!state.linkedPortals || !portal.active) return false;
-      const chest = new THREE.Vector3(
+      const point = samplePoint ?? new THREE.Vector3(
         state.player.position.x,
-        state.player.position.y + PLAYER.eyeHeight,
+        state.player.position.y + PLAYER.height * 0.5,
         state.player.position.z
       );
-      const relative = chest.sub(portal.position);
+      const relative = point.sub(portal.position);
       const localForward = relative.dot(portal.forward);
       const localRight = relative.dot(portal.right);
-      const localUp = relative.y;
+      const localUp = relative.dot(portal.up);
 
       return (
-        Math.abs(localForward) < ROOM.wallThickness * 0.5 + PLAYER.radius + 0.06 &&
+        Math.abs(localForward) < portal.surfaceThickness * 0.5 + PLAYER.radius + 0.06 &&
         Math.abs(localRight) < PORTAL.width * 0.5 - 0.1 &&
         Math.abs(localUp) < PORTAL.height * 0.5 - 0.08
       );
     }
 
+    function portalBodyIntersectsOpening(portal) {
+      if (!state.linkedPortals || !portal.active) return false;
+
+      const footPoint = new THREE.Vector3(
+        state.player.position.x,
+        state.player.position.y,
+        state.player.position.z
+      );
+      const headPoint = new THREE.Vector3(
+        state.player.position.x,
+        state.player.position.y + PLAYER.height,
+        state.player.position.z
+      );
+      const bodyCenter = new THREE.Vector3(
+        state.player.position.x,
+        state.player.position.y + PLAYER.height * 0.5,
+        state.player.position.z
+      );
+
+      const centerRelative = bodyCenter.clone().sub(portal.position);
+      const localRight = centerRelative.dot(portal.right);
+      const localUp = centerRelative.dot(portal.up);
+      if (
+        Math.abs(localRight) >= PORTAL.width * 0.5 - 0.1
+        || Math.abs(localUp) >= PORTAL.height * 0.5 - 0.08
+      ) {
+        return false;
+      }
+
+      const threshold = portal.surfaceThickness * 0.5 + PLAYER.radius + 0.06;
+      if (Math.abs(portal.forward.y) > 0.9) {
+        const footForward = footPoint.sub(portal.position).dot(portal.forward);
+        const headForward = headPoint.sub(portal.position).dot(portal.forward);
+        const minForward = Math.min(footForward, headForward);
+        const maxForward = Math.max(footForward, headForward);
+        return minForward <= threshold && maxForward >= -threshold;
+      }
+
+      return portalOpeningAllowsPass(portal, bodyCenter);
+    }
+
+    function getPortalAdjacentSlabKey(portal) {
+      if (!portal?.wallKey) return null;
+
+      const [surfaceType, levelText, colText, rowText] = portal.wallKey.split(':');
+      const level = Number.parseInt(levelText, 10);
+      const col = Number.parseInt(colText, 10);
+      const row = Number.parseInt(rowText, 10);
+      if (!Number.isFinite(level) || !Number.isFinite(col) || !Number.isFinite(row)) return null;
+
+      if (surfaceType === 'floor' && level > 0) {
+        return makeWallKey('ceiling', col, row, level - 1);
+      }
+
+      if (surfaceType === 'ceiling' && level < ROOM.levels - 1) {
+        return makeWallKey('floor', col, row, level + 1);
+      }
+
+      return null;
+    }
+
+    function getPortalTraversalSample(position, portal) {
+      const sampleHeight = PLAYER.eyeHeight;
+
+      return {
+        point: new THREE.Vector3(position.x, position.y + sampleHeight, position.z),
+        sampleHeight,
+      };
+    }
+
+    function updatePortalTraversalLatch(samplePosition) {
+      const latch = state.player.portalTraversalLatch;
+      if (!latch) return;
+
+      const portal = state.portals[latch.type];
+      if (!portal?.active || portal.wallKey !== latch.wallKey) {
+        state.player.portalTraversalLatch = null;
+        return;
+      }
+
+      const sample = getPortalTraversalSample(samplePosition, portal);
+      const relative = sample.point.sub(portal.position);
+      const localForward = relative.dot(portal.forward);
+      const localRight = relative.dot(portal.right);
+      const localUp = relative.dot(portal.up);
+      const clearDistance = Math.max(0.22, portal.surfaceThickness * 0.5 + 0.08);
+      const outsideOpening =
+        Math.abs(localRight) > PORTAL.width * 0.5 - 0.04
+        || Math.abs(localUp) > PORTAL.height * 0.5 - 0.04;
+
+      if (localForward > clearDistance || outsideOpening) {
+        state.player.portalTraversalLatch = null;
+      }
+    }
+
     function colliderHasPortalGap(collider) {
-      return Object.values(state.portals).some((portal) => portal.active && portal.wallKey === collider.key && portalOpeningAllowsPass(portal));
+      return Object.values(state.portals).some((portal) => {
+        if (!portal.active) return false;
+        const adjacentKey = getPortalAdjacentSlabKey(portal);
+        if (portal.wallKey !== collider.key && adjacentKey !== collider.key) return false;
+        return portalBodyIntersectsOpening(portal);
+      });
     }
 
     function movePlayerAxis(axis, delta) {
@@ -2134,63 +2552,142 @@
       }
     }
 
-    function teleportPlayer(source, destination, entryOffset) {
-      state.player.teleportCooldown = PORTAL.cooldown;
+    function resolveVerticalMovement(delta) {
+      if (!delta) return;
 
-      const newYaw = destination.yaw + (state.player.yaw - source.yaw) + Math.PI;
-      const yawDelta = newYaw - state.player.yaw;
-      const cos = Math.cos(yawDelta);
-      const sin = Math.sin(yawDelta);
+      const previousFoot = state.player.position.y;
+      const previousHead = previousFoot + PLAYER.height;
+      state.player.position.y += delta;
+
+      const foot = state.player.position.y;
+      const head = foot + PLAYER.height;
+      const supportRadius = PLAYER.radius * 0.78;
+      let landingY = -Infinity;
+      let ceilingY = Infinity;
+
+      for (const collider of state.level.slabColliders) {
+        if (colliderHasPortalGap(collider)) continue;
+
+        const box = collider.box;
+        if (
+          state.player.position.x + supportRadius <= box.min.x
+          || state.player.position.x - supportRadius >= box.max.x
+          || state.player.position.z + supportRadius <= box.min.z
+          || state.player.position.z - supportRadius >= box.max.z
+        ) {
+          continue;
+        }
+
+        if (delta < 0) {
+          if (previousFoot >= box.max.y - 0.02 && foot <= box.max.y && head > box.max.y + 0.02) {
+            landingY = Math.max(landingY, box.max.y);
+          }
+        } else if (delta > 0) {
+          if (previousHead <= box.min.y + 0.02 && head >= box.min.y && foot < box.min.y - 0.02) {
+            ceilingY = Math.min(ceilingY, box.min.y);
+          }
+        }
+      }
+
+      if (landingY > -Infinity) {
+        state.player.position.y = landingY;
+        state.player.velocity.y = 0;
+        state.player.onGround = true;
+        return;
+      }
+
+      if (ceilingY < Infinity) {
+        state.player.position.y = ceilingY - PLAYER.height;
+        if (state.player.velocity.y > 0) state.player.velocity.y = 0;
+      }
+
+      state.player.onGround = false;
+    }
+
+    function teleportPlayer(source, destination, entryOffset) {
+      state.player.portalTraversalLatch = {
+        type: destination.type,
+        wallKey: destination.wallKey,
+      };
+      const sourceInverse = source.group.quaternion.clone().invert();
+      const halfTurn = new THREE.Quaternion().setFromAxisAngle(Y_AXIS, Math.PI);
+      const portalRotation = destination.group.quaternion.clone()
+        .multiply(halfTurn)
+        .multiply(sourceInverse);
 
       const exitDistance = Math.max(0.015, entryOffset.depth);
       const exitEye = destination.position.clone()
         .addScaledVector(destination.forward, exitDistance)
-        .addScaledVector(destination.right, -entryOffset.x);
-      exitEye.y += entryOffset.y;
+        .addScaledVector(destination.right, -entryOffset.x)
+        .addScaledVector(destination.up, entryOffset.y);
 
-      const nextBaseY = clamp(exitEye.y - PLAYER.eyeHeight, FLOOR_Y, ROOM.wallHeight - PLAYER.height - 0.05);
-
-      const vx = state.player.velocity.x * cos + state.player.velocity.z * sin;
-      const vz = -state.player.velocity.x * sin + state.player.velocity.z * cos;
+      const nextBaseY = exitEye.y - entryOffset.sampleHeight;
+      const nextVelocity = state.player.velocity.clone().applyQuaternion(portalRotation);
+      const nextAngles = getTeleportedViewAngles(
+        source,
+        destination,
+        state.player.yaw,
+        state.player.pitch,
+        portalRotation
+      );
 
       state.player.position.set(exitEye.x, nextBaseY, exitEye.z);
-      state.player.velocity.x = vx;
-      state.player.velocity.z = vz;
-      state.player.yaw = newYaw;
+      state.player.velocity.copy(nextVelocity);
+      state.player.yaw = nextAngles.yaw;
+      state.player.pitch = nextAngles.pitch;
       state.player.onGround = false;
     }
 
-    function checkPortalTraversal(previousPosition) {
-      if (!state.linkedPortals || state.player.teleportCooldown > 0) return;
+    function checkPortalTraversal(previousPosition, nextPosition) {
+      if (!state.linkedPortals) return false;
 
-      const previousViewPoint = new THREE.Vector3(
-        previousPosition.x,
-        previousPosition.y + PLAYER.eyeHeight,
-        previousPosition.z
-      );
-      const viewPoint = new THREE.Vector3(
-        state.player.position.x,
-        state.player.position.y + PLAYER.eyeHeight,
-        state.player.position.z
-      );
+      updatePortalTraversalLatch(previousPosition);
+
+      const planeEntryEpsilon = 0.015;
 
       for (const portal of Object.values(state.portals)) {
         if (!portal.active) continue;
+        if (state.player.portalTraversalLatch?.type === portal.type && state.player.portalTraversalLatch?.wallKey === portal.wallKey) {
+          continue;
+        }
         const destination = portal.type === 'blue' ? state.portals.orange : state.portals.blue;
         if (!destination.active) continue;
 
-        const previousRelative = previousViewPoint.clone().sub(portal.position);
-        const relative = viewPoint.clone().sub(portal.position);
+        const previousSample = getPortalTraversalSample(previousPosition, portal);
+        const currentSample = getPortalTraversalSample(nextPosition, portal);
+
+        const previousRelative = previousSample.point.clone().sub(portal.position);
+        const relative = currentSample.point.clone().sub(portal.position);
         const previousLocalForward = previousRelative.dot(portal.forward);
         const previousLocalRight = previousRelative.dot(portal.right);
-        const previousLocalUp = previousRelative.y;
+        const previousLocalUp = previousRelative.dot(portal.up);
         const localForward = relative.dot(portal.forward);
         const localRight = relative.dot(portal.right);
-        const localUp = relative.y;
-        const forwardVelocity = state.player.velocity.x * portal.forward.x + state.player.velocity.z * portal.forward.z;
+        const localUp = relative.dot(portal.up);
+        const forwardVelocity = state.player.velocity.dot(portal.forward);
 
-        const crossedPlane = previousLocalForward > 0 && localForward <= 0;
-        if (!crossedPlane || forwardVelocity >= -0.02) {
+        const crossedPlane = previousLocalForward >= 0 && localForward < 0;
+        const enteredFromPlane = previousLocalForward >= -planeEntryEpsilon && previousLocalForward <= planeEntryEpsilon && localForward < 0;
+        if ((!crossedPlane && !enteredFromPlane) || forwardVelocity >= -0.02) {
+          continue;
+        }
+
+        if (enteredFromPlane) {
+          const withinPortalNow = (
+            Math.abs(localRight) < PORTAL.width * 0.5 - 0.08 &&
+            Math.abs(localUp) < PORTAL.height * 0.5 - 0.08
+          );
+
+          if (withinPortalNow) {
+            teleportPlayer(portal, destination, {
+              x: localRight,
+              y: localUp,
+              depth: Math.max(0.015, -localForward),
+              sampleHeight: currentSample.sampleHeight,
+            });
+            return true;
+          }
+
           continue;
         }
 
@@ -2213,10 +2710,13 @@
             x: crossingRight,
             y: crossingUp,
             depth: -localForward,
+            sampleHeight: currentSample.sampleHeight,
           });
-          break;
+          return true;
         }
       }
+
+      return false;
     }
 
     function updateGoal(time) {
@@ -2276,30 +2776,25 @@
 
       player.velocity.y = Math.max(player.velocity.y - PLAYER.gravity * dt, -PLAYER.maxFallSpeed);
 
-      movePlayerAxis('x', player.velocity.x * dt);
-      movePlayerAxis('z', player.velocity.z * dt);
-
-      player.position.y += player.velocity.y * dt;
-      if (player.position.y <= FLOOR_Y) {
-        player.position.y = FLOOR_Y;
-        player.velocity.y = 0;
-        player.onGround = true;
-      } else {
-        player.onGround = false;
+      const totalSpeed = player.velocity.length();
+      if (totalSpeed > PLAYER.maxSpeed) {
+        player.velocity.multiplyScalar(PLAYER.maxSpeed / totalSpeed);
       }
 
-      const ceilingLimit = ROOM.wallHeight - PLAYER.height - 0.05;
-      if (player.position.y > ceilingLimit) {
-        player.position.y = ceilingLimit;
-        if (player.velocity.y > 0) player.velocity.y = 0;
+      const intendedPosition = previousPosition.clone().addScaledVector(player.velocity, dt);
+      const teleported = checkPortalTraversal(previousPosition, intendedPosition);
+
+      if (!teleported) {
+        movePlayerAxis('x', player.velocity.x * dt);
+        movePlayerAxis('z', player.velocity.z * dt);
+
+        resolveVerticalMovement(player.velocity.y * dt);
       }
 
-      player.teleportCooldown = Math.max(0, player.teleportCooldown - dt);
       if (desired.lengthSq() > 0 && player.onGround) {
         player.bobTime += dt * PLAYER.bobSpeed * (state.keys.shift ? 1.14 : 1);
       }
 
-      checkPortalTraversal(previousPosition);
       playerAvatar.update(dt, player);
     }
 
@@ -2335,10 +2830,10 @@
       const relative = eyePoint.sub(portal.position);
       const localForward = relative.dot(portal.forward);
       const localRight = relative.dot(portal.right);
-      const localUp = relative.y;
+      const localUp = relative.dot(portal.up);
 
       return (
-        Math.abs(localForward) < 0.22 &&
+        Math.abs(localForward) < Math.max(0.22, portal.surfaceThickness * 0.5 + 0.03) &&
         Math.abs(localRight) < PORTAL.width * 0.5 - 0.12 &&
         Math.abs(localUp) < PORTAL.height * 0.5 - 0.12
       );
