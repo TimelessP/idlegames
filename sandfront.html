@@ -500,9 +500,12 @@ html{
   const TEAM_AI = 1;
   const MAX_GROUPS = 10;
   const SAVE_KEY = 'idlegames-sandfront-save';
-  const SAVE_VERSION = 1;
+  const SAVE_VERSION = 2;
   const SAVE_INTERVAL_MS = 1000;
   const RESOURCE_NODE_AMOUNT_MULTIPLIER = 5;
+  const OIL_NODE_PAIR_COUNT = 3;
+  const OIL_TRICKLE_INTERVAL = 1.5;
+  const OIL_TRICKLE_AMOUNT = 9;
   const SETTINGS_KEY = 'idlegames-sandfront-settings';
   const DEFAULT_SETTINGS = {
     fpsCap: 60,
@@ -598,6 +601,7 @@ html{
     pendingRallyBuildingId: null,
     pendingActionLabel: '',
     toastTimer: 0,
+    storageFullToastAt: -Infinity,
     drag: null,
     menuStack: [],
     tiles: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
@@ -620,6 +624,7 @@ html{
     effects: [],
     audio: { ctx: null, unlocked: false },
     aiClock: 0,
+    resourceSprites: {},
     resourceUiSignature: '',
     sortedBuildings: [],
     sortedBuildingsDirty: true,
@@ -639,6 +644,8 @@ html{
   const BUILDING_TYPES = {
     hq: { label: 'Command Hub', size: [3, 3], hp: 720, sight: 11, cost: 0, queue: ['engineer'], storage: 380, sprite: 'hq', geometry: { spriteOffset: { x: -20, y: -20 } } },
     refinery: { label: 'Refinery', size: [3, 3], hp: 460, sight: 10, cost: 180, queue: ['harvester'], storage: 500, sprite: 'refinery', buildRequires: ['hq'], geometry: { spriteOffset: { x: -20, y: -20 } } },
+    silo: { label: 'Spice Silo', size: [2, 2], hp: 300, sight: 8, cost: 120, storage: 1400, sprite: 'silo', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
+    oilDerrick: { label: 'Oil Derrick', size: [2, 2], hp: 320, sight: 9, cost: 140, incomeRate: OIL_TRICKLE_AMOUNT / OIL_TRICKLE_INTERVAL, sprite: 'oilDerrick', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     barracks: { label: 'Dust Barracks', size: [3, 3], hp: 400, sight: 9, cost: 160, queue: ['scout', 'engineer'], sprite: 'barracks', buildRequires: ['hq'], geometry: { spriteOffset: { x: -20, y: -20 } } },
     lab: { label: 'Signal Lab', size: [3, 3], hp: 340, sight: 9, cost: 210, research: ['rangefinding', 'composite-armor'], sprite: 'lab', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -20, y: -20 } } },
     factory: { label: 'War Factory', size: [4, 3], hp: 540, sight: 10, cost: 260, queue: ['tank'], sprite: 'factory', buildRequires: ['lab', 'rangefinding'], geometry: { spriteOffset: { x: -16, y: -20 } } },
@@ -650,14 +657,15 @@ html{
     'composite-armor': { label: 'Composite Armor', cost: 220, time: 18, requires: ['lab', 'rangefinding'], desc: 'Unlocks siege tanks and slightly toughens combat units.' }
   };
 
-  const BUILDABLE_BY_ENGINEER = ['refinery', 'barracks', 'lab', 'factory', 'turret'];
+  const BUILDABLE_BY_ENGINEER = ['refinery', 'silo', 'oilDerrick', 'barracks', 'lab', 'factory', 'turret'];
   const TILE = { SAND: 0, ROCK: 1, RIDGE: 2 };
   const MANUAL_ORDER_LOCK = {
     move: 6,
     attackMove: 6,
     attack: 7,
     gather: 9,
-    repair: 9
+    repair: 9,
+    build: 12
   };
 
   const SUPPORT_BUILDING_BY_ROLE = {
@@ -873,6 +881,7 @@ html{
     state.commandMode = 'context';
     state.touchMode = 'select';
     state.resourceUiSignature = '';
+    state.storageFullToastAt = -Infinity;
     state.sortedBuildings.length = 0;
     state.sortedBuildingsDirty = true;
     state.unitClaims.clear();
@@ -931,30 +940,59 @@ html{
         if (dist(cellX, cellY, enemySpawn.x, enemySpawn.y) < 16) continue;
         if (state.tiles[worldToKey(cellX, cellY)] === TILE.RIDGE) continue;
         if (state.resources.some((node) => dist(node.cellX, node.cellY, cellX, cellY) < 10)) continue;
-        spawnResourceNode(cellX, cellY, (620 + Math.floor(random() * 380)) * RESOURCE_NODE_AMOUNT_MULTIPLIER);
+        spawnResourceNode(cellX, cellY, (620 + Math.floor(random() * 380)) * RESOURCE_NODE_AMOUNT_MULTIPLIER, 'spice');
         break;
       }
     }
+
+    let oilPairs = 0;
+    while (oilPairs < OIL_NODE_PAIR_COUNT) {
+      let placed = false;
+      let attempts = 0;
+      while (attempts++ < 300 && !placed) {
+        const cellX = 10 + Math.floor(random() * (Math.floor(WORLD_CELLS_X * 0.5) - 20));
+        const cellY = 10 + Math.floor(random() * (Math.floor(WORLD_CELLS_Y * 0.5) - 20));
+        const mirrorX = WORLD_CELLS_X - 1 - cellX;
+        const mirrorY = WORLD_CELLS_Y - 1 - cellY;
+        if (dist(cellX, cellY, playerSpawn.x, playerSpawn.y) < 18) continue;
+        if (dist(mirrorX, mirrorY, enemySpawn.x, enemySpawn.y) < 18) continue;
+        if (state.tiles[worldToKey(cellX, cellY)] === TILE.RIDGE || state.tiles[worldToKey(mirrorX, mirrorY)] === TILE.RIDGE) continue;
+        if (state.resources.some((node) => dist(node.cellX, node.cellY, cellX, cellY) < 12 || dist(node.cellX, node.cellY, mirrorX, mirrorY) < 12)) continue;
+        spawnResourceNode(cellX, cellY, 1, 'oil');
+        spawnResourceNode(mirrorX, mirrorY, 1, 'oil');
+        placed = true;
+        oilPairs++;
+      }
+      if (!placed) break;
+    }
   }
 
-  function spawnResourceNode(cellX, cellY, amount) {
+  function isDepletedResource(resource) {
+    return resource.resourceType === 'spice' && resource.amount <= 0;
+  }
+
+  function spawnResourceNode(cellX, cellY, amount, resourceType = 'spice') {
     const node = {
       id: makeId('resource'),
       kind: 'resource',
+      resourceType,
       cellX,
       cellY,
       x: cellX * CELL + CELL * 0.5,
       y: cellY * CELL + CELL * 0.5,
       amount,
       radius: 12,
+      claimedBy: null,
       harvesters: new Set()
     };
     state.resources.push(node);
-    for (let oy = -1; oy <= 1; oy++) {
-      for (let ox = -1; ox <= 1; ox++) {
-        const nx = clamp(cellX + ox, 0, WORLD_CELLS_X - 1);
-        const ny = clamp(cellY + oy, 0, WORLD_CELLS_Y - 1);
-        state.spiceHeat[worldToKey(nx, ny)] = 1;
+    if (resourceType === 'spice') {
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const nx = clamp(cellX + ox, 0, WORLD_CELLS_X - 1);
+          const ny = clamp(cellY + oy, 0, WORLD_CELLS_Y - 1);
+          state.spiceHeat[worldToKey(nx, ny)] = 1;
+        }
       }
     }
   }
@@ -985,10 +1023,19 @@ html{
     ai.research.add('barracks');
   }
 
-  function placeBuilding(teamId, typeKey, cellX, cellY, free = false) {
+  function getResourcesInFootprint(cellX, cellY, def) {
+    return state.resources.filter((resource) => resource.cellX >= cellX && resource.cellX < cellX + def.size[0] && resource.cellY >= cellY && resource.cellY < cellY + def.size[1]);
+  }
+
+  function getOilResourceForPlacement(cellX, cellY, def) {
+    return getResourcesInFootprint(cellX, cellY, def).find((resource) => resource.resourceType === 'oil' && !resource.claimedBy) || null;
+  }
+
+  function placeBuilding(teamId, typeKey, cellX, cellY, free = false, autoQueueFreeHarvester = false) {
     const def = BUILDING_TYPES[typeKey];
     if (!def) return null;
     if (!canPlaceBuilding(typeKey, cellX, cellY)) return null;
+    const oilResource = typeKey === 'oilDerrick' ? getOilResourceForPlacement(cellX, cellY, def) : null;
     const building = {
       id: makeId('building'),
       kind: 'building',
@@ -1005,6 +1052,8 @@ html{
       sight: def.sight,
       queue: null,
       reload: 0,
+      incomeTimer: 0,
+      resourceId: oilResource ? oilResource.id : null,
       spawnedAt: state.time,
       rally: { x: (cellX + def.size[0] + 1) * CELL, y: (cellY + def.size[1] * 0.5) * CELL }
     };
@@ -1014,6 +1063,8 @@ html{
     const team = teamById(teamId);
     if (team) team.research.add(typeKey);
     if (!free && team) team.spice -= def.cost;
+    if (oilResource) oilResource.claimedBy = building.id;
+    if (typeKey === 'refinery' && autoQueueFreeHarvester) enqueueProduction(building, 'unit', 'harvester', true);
     return building;
   }
 
@@ -1031,6 +1082,13 @@ html{
     const def = BUILDING_TYPES[typeKey];
     if (!def) return false;
     if (cellX < 1 || cellY < 1 || cellX + def.size[0] >= WORLD_CELLS_X - 1 || cellY + def.size[1] >= WORLD_CELLS_Y - 1) return false;
+    const overlappingResources = getResourcesInFootprint(cellX, cellY, def);
+    if (typeKey === 'oilDerrick') {
+      if (!overlappingResources.some((resource) => resource.resourceType === 'oil' && !resource.claimedBy)) return false;
+      if (overlappingResources.some((resource) => resource.resourceType !== 'oil')) return false;
+    } else if (overlappingResources.length) {
+      return false;
+    }
     for (let oy = 0; oy < def.size[1]; oy++) {
       for (let ox = 0; ox < def.size[0]; ox++) {
         const nx = cellX + ox;
@@ -1188,7 +1246,7 @@ html{
     let best = null;
     let bestDist = Infinity;
     for (const node of state.resources) {
-      if (node.amount <= 0) continue;
+      if (node.resourceType !== 'spice' || isDepletedResource(node)) continue;
       const distance = dist(fromX, fromY, node.x, node.y);
       if (distance < bestDist) {
         bestDist = distance;
@@ -1234,6 +1292,17 @@ html{
       state.unitClaims.delete(unit.claimKey);
       unit.claimKey = null;
     }
+  }
+
+  function clearPendingConstruction(unit, refund = true) {
+    if (!unit || unit.order?.type !== 'build') return false;
+    if (refund && unit.order.paidCost) {
+      const team = teamById(unit.teamId);
+      if (team) team.spice = clamp(team.spice + unit.order.paidCost, 0, getTeamSpiceCapacity(team.id));
+    }
+    unit.targetId = null;
+    if (unit.teamId === TEAM_PLAYER) updateResourceUI();
+    return true;
   }
 
   function findNearestFreeCell(cellX, cellY, maxRadius, ignoreUnitId, ignoreUnits = false) {
@@ -1288,6 +1357,67 @@ html{
       if (best) return best;
     }
     return null;
+  }
+
+  function getBuildApproachCell(typeKey, cellX, cellY, fromX, fromY, ignoreUnitId = null) {
+    const def = BUILDING_TYPES[typeKey];
+    if (!def) return null;
+    const footprint = {
+      left: cellX,
+      top: cellY,
+      right: cellX + def.size[0] - 1,
+      bottom: cellY + def.size[1] - 1
+    };
+    const fromCell = { x: pxToCell(fromX), y: pxToCell(fromY) };
+    let best = null;
+    let bestScore = Infinity;
+    for (let x = footprint.left - 1; x <= footprint.right + 1; x++) {
+      for (const y of [footprint.top - 1, footprint.bottom + 1]) {
+        if (!isCellWalkable(x, y, ignoreUnitId, false)) continue;
+        const score = Math.abs(x - fromCell.x) + Math.abs(y - fromCell.y);
+        if (score < bestScore) {
+          best = { x, y };
+          bestScore = score;
+        }
+      }
+    }
+    for (let y = footprint.top; y <= footprint.bottom; y++) {
+      for (const x of [footprint.left - 1, footprint.right + 1]) {
+        if (!isCellWalkable(x, y, ignoreUnitId, false)) continue;
+        const score = Math.abs(x - fromCell.x) + Math.abs(y - fromCell.y);
+        if (score < bestScore) {
+          best = { x, y };
+          bestScore = score;
+        }
+      }
+    }
+    return best;
+  }
+
+  function issueBuildOrder(unit, typeKey, cellX, cellY, autoQueueFreeHarvester = false) {
+    const def = BUILDING_TYPES[typeKey];
+    const team = teamById(unit.teamId);
+    if (!unit || unit.hp <= 0 || unit.type !== 'engineer' || !def || !team) return false;
+    if (!canPlaceBuilding(typeKey, cellX, cellY)) return false;
+    const approachCell = getBuildApproachCell(typeKey, cellX, cellY, unit.x, unit.y, unit.id);
+    if (!approachCell || team.spice < def.cost) return false;
+    clearPendingConstruction(unit, true);
+    releaseClaim(unit);
+    team.spice -= def.cost;
+    unit.order = {
+      type: 'build',
+      buildType: typeKey,
+      cellX,
+      cellY,
+      approachCell,
+      paidCost: def.cost,
+      autoQueueFreeHarvester
+    };
+    unit.path.length = 0;
+    unit.targetId = null;
+    unit.manualOrderTimer = MANUAL_ORDER_LOCK.build;
+    if (unit.teamId === TEAM_PLAYER) updateResourceUI();
+    return true;
   }
 
   function isCellWalkable(cellX, cellY, ignoreUnitId = null, ignoreUnits = false) {
@@ -1436,13 +1566,18 @@ html{
       team.sprites.buildings = {
         hq: buildBuildingSprite(team.color, team.accent, 'hq'),
         refinery: buildBuildingSprite(team.color, team.accent, 'refinery'),
+        silo: buildBuildingSprite(team.color, team.accent, 'silo'),
+        oilDerrick: buildBuildingSprite(team.color, team.accent, 'oilDerrick'),
         barracks: buildBuildingSprite(team.color, team.accent, 'barracks'),
         lab: buildBuildingSprite(team.color, team.accent, 'lab'),
         factory: buildBuildingSprite(team.color, team.accent, 'factory'),
         turret: buildBuildingSprite(team.color, team.accent, 'turret')
       };
     }
-    state.resourceSprite = buildResourceSprite();
+    state.resourceSprites = {
+      spice: buildResourceSprite('spice'),
+      oil: buildResourceSprite('oil')
+    };
   }
 
   function buildUnitAtlas(teamColor, accentColor, type) {
@@ -1578,6 +1713,33 @@ html{
     } else if (type === 'refinery') {
       ctx.fillRect(20, 8, 10, 14);
       ctx.fillRect(35, 10, 6, 20);
+    } else if (type === 'silo') {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.fillRect(16, 40, 32, 5);
+      ctx.fillStyle = '#6f5238';
+      ctx.fillRect(18, 18, 28, 22);
+      ctx.fillStyle = '#9b744f';
+      ctx.fillRect(16, 14, 32, 6);
+      ctx.fillStyle = accentColor;
+      ctx.fillRect(22, 20, 20, 4);
+      ctx.fillStyle = '#d9c5a4';
+      ctx.fillRect(23, 26, 18, 10);
+      ctx.fillStyle = '#8b5f3a';
+      ctx.fillRect(28, 10, 8, 4);
+    } else if (type === 'oilDerrick') {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.fillRect(16, 40, 32, 6);
+      ctx.fillStyle = '#6a4b32';
+      ctx.fillRect(20, 30, 24, 10);
+      ctx.fillStyle = '#8d6a47';
+      ctx.fillRect(28, 12, 8, 20);
+      ctx.fillRect(22, 18, 20, 4);
+      ctx.fillStyle = accentColor;
+      ctx.fillRect(30, 8, 4, 24);
+      ctx.fillStyle = '#7cc0c8';
+      ctx.fillRect(24, 24, 16, 3);
     } else if (type === 'barracks') {
       ctx.fillRect(18, 26, 28, 12);
       ctx.fillRect(21, 12, 22, 6);
@@ -1603,23 +1765,37 @@ html{
     return { canvas, width: canvas.width, height: canvas.height, bounds: measureSpriteBounds(canvas) };
   }
 
-  function buildResourceSprite() {
+  function buildResourceSprite(resourceType = 'spice') {
     const canvas = document.createElement('canvas');
     canvas.width = 24;
     canvas.height = 24;
     const ctx = canvas.getContext('2d');
     ctx.imageSmoothingEnabled = false;
-    ctx.fillStyle = 'rgba(0,0,0,0.2)';
-    ctx.fillRect(5, 18, 14, 3);
-    ctx.fillStyle = '#a45728';
-    ctx.fillRect(8, 10, 8, 8);
-    ctx.fillStyle = '#ffbe55';
-    ctx.fillRect(7, 8, 4, 7);
-    ctx.fillRect(12, 7, 4, 9);
-    ctx.fillRect(10, 12, 6, 5);
-    ctx.fillStyle = '#ffe4a1';
-    ctx.fillRect(8, 9, 1, 2);
-    ctx.fillRect(13, 8, 1, 2);
+    if (resourceType === 'oil') {
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fillRect(5, 18, 14, 3);
+      ctx.fillStyle = '#29343b';
+      ctx.fillRect(9, 6, 6, 10);
+      ctx.fillRect(7, 10, 10, 6);
+      ctx.fillStyle = '#5d7f8f';
+      ctx.fillRect(10, 7, 4, 3);
+      ctx.fillRect(8, 12, 8, 2);
+      ctx.fillStyle = '#aee7ff';
+      ctx.fillRect(11, 8, 1, 1);
+      ctx.fillRect(13, 11, 1, 1);
+    } else {
+      ctx.fillStyle = 'rgba(0,0,0,0.2)';
+      ctx.fillRect(5, 18, 14, 3);
+      ctx.fillStyle = '#a45728';
+      ctx.fillRect(8, 10, 8, 8);
+      ctx.fillStyle = '#ffbe55';
+      ctx.fillRect(7, 8, 4, 7);
+      ctx.fillRect(12, 7, 4, 9);
+      ctx.fillRect(10, 12, 6, 5);
+      ctx.fillStyle = '#ffe4a1';
+      ctx.fillRect(8, 9, 1, 2);
+      ctx.fillRect(13, 8, 1, 2);
+    }
     return canvas;
   }
 
@@ -1696,12 +1872,14 @@ html{
       resources: state.resources.map((resource) => ({
         id: resource.id,
         kind: resource.kind,
+        resourceType: resource.resourceType,
         cellX: resource.cellX,
         cellY: resource.cellY,
         x: resource.x,
         y: resource.y,
         amount: resource.amount,
-        radius: resource.radius
+        radius: resource.radius,
+        claimedBy: resource.claimedBy || null
       })),
       projectiles: state.projectiles.map((projectile) => ({ ...projectile })),
       effects: state.effects.map((effect) => ({ ...effect }))
@@ -1763,11 +1941,16 @@ html{
     const resourceScale = missingMultiplier && resourceMultiplier > 0
       ? RESOURCE_NODE_AMOUNT_MULTIPLIER / resourceMultiplier
       : 1;
-    state.resources = (snapshot.resources || []).map((resource) => ({
-      ...resource,
-      amount: Math.max(0, Math.round((resource.amount || 0) * resourceScale)),
-      harvesters: new Set()
-    }));
+    state.resources = (snapshot.resources || []).map((resource) => {
+      const resourceType = resource.resourceType || 'spice';
+      return {
+        ...resource,
+        resourceType,
+        amount: resourceType === 'spice' ? Math.max(0, Math.round((resource.amount || 0) * resourceScale)) : (resource.amount || 1),
+        claimedBy: resource.claimedBy || null,
+        harvesters: new Set()
+      };
+    });
     state.projectiles = (snapshot.projectiles || []).map((projectile) => ({ ...projectile }));
     state.effects = (snapshot.effects || []).map((effect) => ({ ...effect }));
     state.tiles.fill(0);
@@ -1953,6 +2136,7 @@ html{
     updateKeyboardCursor(dt);
     updateCameraFromInput(dt);
     updateProduction(dt);
+    updateOilDerricks(dt);
     rebuildSpatialBuckets();
     updateUnits(dt);
     updateTurrets(dt);
@@ -2005,6 +2189,84 @@ html{
     }
   }
 
+  function updateOilDerricks(dt) {
+    let playerIncomeChanged = false;
+    for (const building of state.buildings) {
+      if (building.hp <= 0 || building.type !== 'oilDerrick') continue;
+      const team = teamById(building.teamId);
+      if (!team) continue;
+      building.incomeTimer = (building.incomeTimer || 0) + dt;
+      while (building.incomeTimer >= OIL_TRICKLE_INTERVAL) {
+        const before = team.spice;
+        if (!hasTeamSpiceCapacity(team.id, OIL_TRICKLE_AMOUNT)) {
+          building.incomeTimer = OIL_TRICKLE_INTERVAL;
+          break;
+        }
+        building.incomeTimer -= OIL_TRICKLE_INTERVAL;
+        team.spice += OIL_TRICKLE_AMOUNT;
+        if (team.id === TEAM_PLAYER && team.spice !== before) playerIncomeChanged = true;
+        if (team.spice !== before) {
+          const geometry = getBuildingGeometry(building);
+          addEffect(geometry.visualCenter.x, geometry.visualCenter.y - 6, '#7cc0c8');
+        }
+      }
+    }
+    if (playerIncomeChanged) updateResourceUI();
+  }
+
+  function updateBuildOrder(unit, dt) {
+    const order = unit.order;
+    const def = BUILDING_TYPES[order.buildType];
+    if (!def || unit.type !== 'engineer') {
+      clearPendingConstruction(unit, true);
+      unit.order = { type: 'idle' };
+      return;
+    }
+    if (!canPlaceBuilding(order.buildType, order.cellX, order.cellY)) {
+      clearPendingConstruction(unit, true);
+      unit.order = { type: 'idle' };
+      unit.path.length = 0;
+      if (unit.teamId === TEAM_PLAYER) toast('Construction canceled. Site unavailable.');
+      return;
+    }
+    const approachCell = getBuildApproachCell(order.buildType, order.cellX, order.cellY, unit.x, unit.y, unit.id);
+    if (!approachCell) {
+      clearPendingConstruction(unit, true);
+      unit.order = { type: 'idle' };
+      unit.path.length = 0;
+      if (unit.teamId === TEAM_PLAYER) toast('Construction canceled. No route to site.');
+      return;
+    }
+    order.approachCell = approachCell;
+    const targetX = approachCell.x * CELL + CELL * 0.5;
+    const targetY = approachCell.y * CELL + CELL * 0.5;
+    if (dist(unit.x, unit.y, targetX, targetY) > 6) {
+      moveUnitAlongOrder(unit, dt, targetX, targetY);
+      return;
+    }
+    const built = placeBuilding(unit.teamId, order.buildType, order.cellX, order.cellY, true, !!order.autoQueueFreeHarvester);
+    if (!built) {
+      clearPendingConstruction(unit, true);
+      unit.order = { type: 'idle' };
+      unit.path.length = 0;
+      if (unit.teamId === TEAM_PLAYER) toast('Construction canceled. Site unavailable.');
+      return;
+    }
+    unit.order = { type: 'idle' };
+    unit.targetId = null;
+    unit.path.length = 0;
+    settleUnit(unit);
+    recomputeDynamicBlocked();
+    updateResourceUI();
+    updateSelectionUI();
+    if (unit.teamId === TEAM_PLAYER) {
+      playSynth('ui', 520, 0.06, 0.03);
+      toast(def.label + ' constructed.');
+    } else {
+      toastOnceForAi(order.buildType);
+    }
+  }
+
   function updateUnits(dt) {
     for (const unit of state.units) {
       if (unit.hp <= 0) continue;
@@ -2033,6 +2295,8 @@ html{
         updateRepairOrder(unit, def, dt);
       } else if (unit.order.type === 'service') {
         updateServiceOrder(unit, def, dt);
+      } else if (unit.order.type === 'build') {
+        updateBuildOrder(unit, dt);
       } else if (unit.order.type === 'move') {
         moveUnitAlongOrder(unit, dt, unit.order.x, unit.order.y);
       } else if (unit.order.type === 'attack-move') {
@@ -2190,7 +2454,16 @@ html{
       return;
     }
     const team = teamById(unit.teamId);
-    team.spice = clamp(team.spice + unit.carrying, 0, team.storage + computeStorageBonus(team.id));
+    if (!hasTeamSpiceCapacity(team.id, unit.carrying)) {
+      releaseClaim(unit);
+      unit.path.length = 0;
+      if (unit.teamId === TEAM_PLAYER && state.time - state.storageFullToastAt > 4) {
+        state.storageFullToastAt = state.time;
+        toast('Storage full. Build silos before unloading more spice.');
+      }
+      return;
+    }
+    team.spice += unit.carrying;
     unit.carrying = 0;
     const nextNode = nearestResource(unit.x, unit.y);
     if (nextNode) unit.order = { type: 'gather', targetId: nextNode.id };
@@ -2557,6 +2830,12 @@ html{
   }
 
   function removeBuildingEntity(building) {
+    if (building.resourceId) {
+      const resource = getEntityById(building.resourceId);
+      if (resource && resource.kind === 'resource' && resource.resourceType === 'oil' && resource.claimedBy === building.id) {
+        resource.claimedBy = null;
+      }
+    }
     occupyBuildingCells(building, false);
     const index = state.buildings.findIndex((entry) => entry.id === building.id);
     if (index !== -1) state.buildings.splice(index, 1);
@@ -2575,7 +2854,7 @@ html{
     if (!def || !team) return;
     const refund = Math.floor(def.cost * 0.6);
     removeBuildingEntity(building);
-    team.spice = clamp(team.spice + refund, 0, team.storage + computeStorageBonus(team.id));
+    team.spice = clamp(team.spice + refund, 0, getTeamSpiceCapacity(team.id));
     updateResourceUI();
     updateSelectionUI();
     updateCommandReadout();
@@ -2592,6 +2871,7 @@ html{
     if (target.hp > 0) return;
     target.hp = 0;
     if (target.kind === 'unit') {
+      clearPendingConstruction(target, true);
       releaseClaim(target);
       state.selectedIds.delete(target.id);
       target.lastAttackerId = null;
@@ -2612,6 +2892,21 @@ html{
       .reduce((sum, building) => sum + (BUILDING_TYPES[building.type].storage || 0), 0);
   }
 
+  function getTeamSpiceCapacity(teamId) {
+    const team = teamById(teamId);
+    return team ? team.storage + computeStorageBonus(teamId) : 0;
+  }
+
+  function getTeamSpiceSpace(teamId) {
+    const team = teamById(teamId);
+    if (!team) return 0;
+    return Math.max(0, getTeamSpiceCapacity(teamId) - team.spice);
+  }
+
+  function hasTeamSpiceCapacity(teamId, amount = 1) {
+    return getTeamSpiceSpace(teamId) >= amount;
+  }
+
   function updateAI(dt) {
     const ai = enemyTeam();
     ai.ai.thinkTimer -= dt;
@@ -2629,8 +2924,17 @@ html{
   function runAiEconomy(team) {
     const engineer = state.units.find((unit) => unit.teamId === team.id && unit.type === 'engineer' && unit.hp > 0);
     const counts = countTeamAssets(team.id);
+    const hq = nearestBuilding(team.id, 'hq', WORLD_WIDTH, WORLD_HEIGHT);
+    const barracks = nearestBuilding(team.id, 'barracks', WORLD_WIDTH, WORLD_HEIGHT);
+    const spiceCapacity = getTeamSpiceCapacity(team.id);
+    if (!counts.engineer) {
+      const engineerProducer = barracks || hq;
+      if (engineerProducer && !engineerProducer.queue && canAfford(team.id, 'engineer')) enqueueProduction(engineerProducer, 'unit', 'engineer');
+    }
     if (engineer && engineer.order.type === 'idle') {
       if (!counts.refinery && canAfford(team.id, 'refinery')) placeAiStructure(team, engineer, 'refinery');
+      else if (((counts.oilDerrick >= 2 && team.spice >= spiceCapacity * 0.68) || team.spice >= spiceCapacity * 0.82) && counts.silo < Math.max(1, counts.refinery + counts.oilDerrick) && canAfford(team.id, 'silo')) placeAiStructure(team, engineer, 'silo');
+      else if (counts.refinery && counts.oilDerrick < 2 && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer);
       else if (!counts.barracks && canAfford(team.id, 'barracks')) placeAiStructure(team, engineer, 'barracks');
       else if (!counts.lab && canAfford(team.id, 'lab')) placeAiStructure(team, engineer, 'lab');
       else if (!counts.factory && team.research.has('rangefinding') && canAfford(team.id, 'factory')) placeAiStructure(team, engineer, 'factory');
@@ -2638,7 +2942,6 @@ html{
     }
 
     const refinery = nearestBuilding(team.id, 'refinery', WORLD_WIDTH, WORLD_HEIGHT);
-    const barracks = nearestBuilding(team.id, 'barracks', WORLD_WIDTH, WORLD_HEIGHT);
     const lab = nearestBuilding(team.id, 'lab', WORLD_WIDTH, WORLD_HEIGHT);
     const factory = nearestBuilding(team.id, 'factory', WORLD_WIDTH, WORLD_HEIGHT);
     if (refinery && !refinery.queue && counts.harvester < 2 && canAfford(team.id, 'harvester')) enqueueProduction(refinery, 'unit', 'harvester');
@@ -2665,17 +2968,29 @@ html{
           const cellX = anchorX + ox;
           const cellY = anchorY + oy;
           if (!canPlaceBuilding(type, cellX, cellY)) continue;
-          engineer.order = { type: 'build', buildType: type, cellX, cellY };
-          if (placeBuilding(team.id, type, cellX, cellY, false)) {
-            engineer.order = { type: 'idle' };
-            team.spice -= 0;
-            toastOnceForAi(type);
-            updateResourceUI();
-            return;
-          }
+          if (issueBuildOrder(engineer, type, cellX, cellY, type === 'refinery')) return true;
         }
       }
     }
+    return false;
+  }
+
+  function placeAiOilDerrick(team, engineer) {
+    const def = BUILDING_TYPES.oilDerrick;
+    const candidates = state.resources
+      .filter((resource) => resource.resourceType === 'oil' && !resource.claimedBy && team.fogExplored[worldToKey(resource.cellX, resource.cellY)])
+      .sort((a, b) => dist(engineer.x, engineer.y, a.x, a.y) - dist(engineer.x, engineer.y, b.x, b.y));
+    for (const resource of candidates) {
+      for (let oy = 0; oy < def.size[1]; oy++) {
+        for (let ox = 0; ox < def.size[0]; ox++) {
+          const cellX = resource.cellX - ox;
+          const cellY = resource.cellY - oy;
+          if (!canPlaceBuilding('oilDerrick', cellX, cellY)) continue;
+          if (issueBuildOrder(engineer, 'oilDerrick', cellX, cellY, false)) return true;
+        }
+      }
+    }
+    return false;
   }
 
   function toastOnceForAi(type) {
@@ -2699,7 +3014,7 @@ html{
   }
 
   function countTeamAssets(teamId) {
-    const counts = { hq: 0, refinery: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, harvester: 0, engineer: 0 };
+    const counts = { hq: 0, refinery: 0, silo: 0, oilDerrick: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, harvester: 0, engineer: 0 };
     for (const building of state.buildings) {
       if (building.teamId === teamId && building.hp > 0 && counts.hasOwnProperty(building.type)) counts[building.type]++;
     }
@@ -2714,7 +3029,7 @@ html{
   }
 
   function totalRemainingStructures(counts) {
-    return ['hq', 'refinery', 'barracks', 'lab', 'factory', 'turret'].reduce((total, key) => total + (counts[key] || 0), 0);
+    return ['hq', 'refinery', 'silo', 'oilDerrick', 'barracks', 'lab', 'factory', 'turret'].reduce((total, key) => total + (counts[key] || 0), 0);
   }
 
   function canAfford(teamId, key) {
@@ -2730,17 +3045,17 @@ html{
     return team.spice >= RESEARCH[key].cost;
   }
 
-  function enqueueProduction(building, kind, key) {
+  function enqueueProduction(building, kind, key, free = false) {
     const team = teamById(building.teamId);
     if (kind === 'unit') {
       const def = UNIT_TYPES[key];
-      if (!def || team.spice < def.cost) return false;
-      team.spice -= def.cost;
+      if (!def || (!free && team.spice < def.cost)) return false;
+      if (!free) team.spice -= def.cost;
       building.queue = { kind, item: key, progress: 0, duration: def.buildTime };
     } else {
       const def = RESEARCH[key];
-      if (!def || team.spice < def.cost || team.research.has(key)) return false;
-      team.spice -= def.cost;
+      if (!def || (!free && team.spice < def.cost) || team.research.has(key)) return false;
+      if (!free) team.spice -= def.cost;
       building.queue = { kind, item: key, progress: 0, duration: def.time };
     }
     updateResourceUI();
@@ -2892,11 +3207,12 @@ html{
 
   function drawResources() {
     for (const node of state.resources) {
-      if (node.amount <= 0) continue;
+      if (isDepletedResource(node)) continue;
       if (!isVisibleToPlayer(node.x, node.y)) continue;
       const screen = worldToScreen(node.x - 12, node.y - 12);
       const size = Math.round(24 * state.camera.zoom * 0.8);
-      backCtx.drawImage(state.resourceSprite, screen.x, screen.y, size, size);
+      const sprite = state.resourceSprites[node.resourceType || 'spice'];
+      if (sprite) backCtx.drawImage(sprite, screen.x, screen.y, size, size);
     }
   }
 
@@ -3125,8 +3441,8 @@ html{
     const scaleY = minimap.height / WORLD_CELLS_Y;
     const fog = playerTeam();
     for (const resource of state.resources) {
-      if (resource.amount <= 0 || !fog.fogExplored[worldToKey(resource.cellX, resource.cellY)]) continue;
-      minimapCtx.fillStyle = '#ffc55b';
+      if (isDepletedResource(resource) || !fog.fogExplored[worldToKey(resource.cellX, resource.cellY)]) continue;
+      minimapCtx.fillStyle = resource.resourceType === 'oil' ? '#8dd7df' : '#ffc55b';
       minimapCtx.fillRect(resource.cellX * scaleX - 1, resource.cellY * scaleY - 1, 3, 3);
     }
     for (const building of state.buildings) {
@@ -3484,6 +3800,8 @@ html{
       { type: 'grid', label: 'Tech Tree', cards: [
         { label: 'Command Hub', description: 'Produces engineers and anchors the base.' },
         { label: 'Refinery', description: 'Adds storage and builds harvesters.' },
+        { label: 'Spice Silo', description: 'Massively expands storage so harvesters and oil sales do not stall.' },
+        { label: 'Oil Derrick', description: 'Built on oil deposits and trickles spice income over time.' },
         { label: 'Dust Barracks', description: 'Produces scouts and engineers.' },
         { label: 'Signal Lab', description: 'Unlocks research.' },
         { label: 'Rangefinding', description: 'Needed before the War Factory and improves sight lines.' },
@@ -3500,7 +3818,11 @@ html{
     return BUILDABLE_BY_ENGINEER.map((key) => ({
       type: 'action',
       label: BUILDING_TYPES[key].label,
-      description: 'Cost ' + BUILDING_TYPES[key].cost + ' spice',
+      description: key === 'oilDerrick'
+        ? ('Cost ' + BUILDING_TYPES[key].cost + ' spice. Must cover an oil deposit.')
+        : key === 'silo'
+          ? ('Cost ' + BUILDING_TYPES[key].cost + ' spice. Adds ' + BUILDING_TYPES[key].storage + ' storage.')
+          : ('Cost ' + BUILDING_TYPES[key].cost + ' spice'),
       action: () => setPendingBuild(key),
       behavior: 'close'
     }));
@@ -3512,7 +3834,11 @@ html{
     state.pendingActionLabel = BUILDING_TYPES[type].label;
     updateCommandReadout();
     closeMenu();
-    contextHelp.textContent = 'Build preview: mouse move to preview, right-click to place, left-click to cancel. Touch drag to preview, release to place.';
+    contextHelp.textContent = type === 'oilDerrick'
+      ? 'Build preview: place the Oil Derrick so its footprint covers an oil deposit. Right-click places, left-click cancels. Touch drag previews, release places.'
+      : type === 'silo'
+        ? 'Build preview: place the Spice Silo on free ground to expand storage. Harvesters and oil income pause when storage is full.'
+      : 'Build preview: mouse move to preview, right-click to place, left-click to cancel. Touch drag to preview, release to place.';
     playUiCue('mode');
     toast('Placing ' + BUILDING_TYPES[type].label + '.');
   }
@@ -3531,11 +3857,11 @@ html{
   function updateResourceUI() {
     const team = playerTeam();
     if (!team) return;
-    const storage = team.storage + computeStorageBonus(team.id);
+    const storage = getTeamSpiceCapacity(team.id);
     const selected = getSelectedEntities();
     const counts = countTeamAssets(team.id);
     const resourceUnits = selected.length ? selected.length : state.units.filter((unit) => unit.teamId === team.id && unit.hp > 0).length;
-    const resourceBuildings = counts.factory + counts.lab + counts.barracks + counts.refinery + counts.turret + counts.hq;
+    const resourceBuildings = counts.factory + counts.lab + counts.barracks + counts.refinery + counts.silo + counts.oilDerrick + counts.turret + counts.hq;
     const signature = [
       Math.floor(team.spice),
       storage,
@@ -3581,13 +3907,22 @@ html{
 
     if (selected.length === 1 && selected[0].kind === 'resource') {
       const resource = selected[0];
-      selectionTitle.textContent = 'Spice Seam';
-      selectionSubtitle.textContent = 'A harvestable field of ore-rich spice.';
-      addMeta('Remaining', String(Math.floor(resource.amount)));
+      if (resource.resourceType === 'oil') {
+        selectionTitle.textContent = 'Oil Deposit';
+        selectionSubtitle.textContent = resource.claimedBy ? 'A tapped well feeding an Oil Derrick.' : 'A deep crude pocket waiting for an Oil Derrick.';
+        addMeta('Yield', OIL_TRICKLE_AMOUNT + ' / ' + OIL_TRICKLE_INTERVAL.toFixed(1) + 's');
+        addMeta('Status', resource.claimedBy ? 'Tapped' : 'Untapped');
+      } else {
+        selectionTitle.textContent = 'Spice Seam';
+        selectionSubtitle.textContent = 'A harvestable field of ore-rich spice.';
+        addMeta('Remaining', String(Math.floor(resource.amount)));
+        addMeta('Status', resource.amount > 0 ? 'Rich' : 'Dry');
+      }
       addMeta('Cell', resource.cellX + ', ' + resource.cellY);
-      addMeta('Status', resource.amount > 0 ? 'Rich' : 'Dry');
       makeAction('Center', () => centerOnEntities([resource]));
-      contextHelp.textContent = 'Harvesters can be sent onto this seam to gather spice until it runs dry.';
+      contextHelp.textContent = resource.resourceType === 'oil'
+        ? 'Oil deposits are infinite, but only Oil Derricks can exploit them. Engineers must place the derrick directly over the deposit.'
+        : 'Harvesters can be sent onto this seam to gather spice until it runs dry.';
       updateCommandReadout();
       return;
     }
@@ -3651,10 +3986,15 @@ html{
       } else {
         const def = BUILDING_TYPES[entity.type];
         selectionTitle.textContent = def.label;
-        selectionSubtitle.textContent = entity.queue ? formatQueue(entity.queue) : 'Ready';
+        selectionSubtitle.textContent = entity.type === 'oilDerrick'
+          ? 'Converts crude trickle into spice income.'
+          : entity.type === 'silo'
+            ? 'Dedicated storage keeps harvesters and oil sales flowing.'
+            : (entity.queue ? formatQueue(entity.queue) : 'Ready');
         addMeta('HP', entity.hp + ' / ' + entity.maxHp);
         addMeta('Sight', String(entity.sight));
-        addMeta('Queue', entity.queue ? Math.ceil(entity.queue.duration - entity.queue.progress) + 's' : 'Idle');
+        addMeta(entity.type === 'oilDerrick' ? 'Income' : 'Queue', entity.type === 'oilDerrick' ? (OIL_TRICKLE_AMOUNT + ' / ' + OIL_TRICKLE_INTERVAL.toFixed(1) + 's') : (entity.queue ? Math.ceil(entity.queue.duration - entity.queue.progress) + 's' : 'Idle'));
+        if (entity.type === 'silo') addMeta('Capacity', '+' + (def.storage || 0) + ' spice');
         makeBuildingActions(entity);
       }
     } else if (units.length) {
@@ -3719,7 +4059,10 @@ html{
     if (units.some((unit) => unit.type === 'engineer')) makeAction('Repair', () => setCommandMode('repair'), state.commandMode === 'repair');
     makeAction('Context', () => setCommandMode('context'), state.commandMode === 'context');
     makeAction('Stop', () => {
-      for (const unit of units) unit.order = { type: 'idle' };
+      for (const unit of units) {
+        clearPendingConstruction(unit, true);
+        unit.order = { type: 'idle' };
+      }
       updateSelectionUI();
       toast('Units holding position.');
     });
@@ -3766,7 +4109,7 @@ html{
 
   function helpTextForSelection(selected) {
     const units = selected.filter((entity) => entity.kind === 'unit');
-    if (units.some((unit) => unit.type === 'engineer')) return 'Engineers can open Build Orders or Repair from this panel. Repair mode targets damaged friendly structures, while building placement still requires free sand or rock.';
+    if (units.some((unit) => unit.type === 'engineer')) return 'Engineers can open Build Orders or Repair from this panel. Oil Derricks must be placed over an oil deposit, while other structures still require free sand or rock.';
     if (units.some((unit) => unit.type === 'harvester')) return 'Harvesters can be sent directly onto spice seams or use Auto Gather to self-route between the nearest seam and refinery.';
     if (units.some((unit) => UNIT_TYPES[unit.type]?.infantry || UNIT_TYPES[unit.type]?.vehicle)) return 'Infantry can recover at barracks and vehicles at the factory by moving onto the matching support structure.';
     if (units.length) return 'Combat units understand context commands: move on empty terrain, attack on enemies, gather on spice if a harvester is selected.';
@@ -3777,6 +4120,7 @@ html{
     const supportUnits = units.filter((unit) => canUnitUseSupportBuilding(unit, building) && unit.hp > 0);
     const eligible = supportUnits.filter((unit) => unit.hp < unit.maxHp);
     for (const unit of eligible) {
+      clearPendingConstruction(unit, true);
       releaseClaim(unit);
       unit.order = { type: 'service', targetId: building.id, resumeOrder: getServiceResumeOrder(unit) };
       unit.path.length = 0;
@@ -3786,11 +4130,11 @@ html{
     if (eligible.length) {
       playSynth('ui', 390, 0.05, 0.03);
       toast('Service order acknowledged.');
-    } else if (supportUnits.length) {
+      } else if (supportUnits.length === units.length) {
       playUiCue('error');
       toast('No damaged units need service.');
     }
-    return { supportCount: supportUnits.length, eligibleCount: eligible.length };
+      return { supportCount: supportUnits.length, eligibleCount: eligible.length, eligibleUnits: eligible };
   }
 
   function updateCommandReadout() {
@@ -3990,12 +4334,34 @@ html{
         return;
       }
     }
-    const selected = getSelectedEntities().filter((entity) => entity.kind === 'unit' && entity.teamId === TEAM_PLAYER);
+    let selected = getSelectedEntities().filter((entity) => entity.kind === 'unit' && entity.teamId === TEAM_PLAYER);
     if (!selected.length) return;
     const target = findEntityAt(worldX, worldY);
     if (target && target.kind === 'building' && target.teamId === TEAM_PLAYER) {
       const supportOrder = issueSupportServiceOrder(selected, target);
-      if (supportOrder.supportCount) return;
+      if (supportOrder.eligibleCount) {
+        const servicedIds = new Set(supportOrder.eligibleUnits.map((unit) => unit.id));
+        selected = selected.filter((unit) => !servicedIds.has(unit.id));
+      } else if (supportOrder.supportCount && supportOrder.supportCount === selected.length) {
+        return;
+      }
+      const returnOrder = issuedReturnOrder(selected, target);
+      if (returnOrder.returnCount) {
+        const returningIds = new Set(returnOrder.harvesters.map((unit) => unit.id));
+        selected = selected.filter((unit) => !returningIds.has(unit.id));
+      } else if (returnOrder.harvesterCount && returnOrder.harvesterCount === selected.length) {
+        return;
+      }
+      if (target.hp > 0 && target.hp < target.maxHp) {
+        const repairOrder = issuedRepairOrder(selected, target);
+        if (repairOrder.repairCount) {
+          const repairingIds = new Set(repairOrder.engineers.map((unit) => unit.id));
+          selected = selected.filter((unit) => !repairingIds.has(unit.id));
+        } else if (repairOrder.engineerCount && repairOrder.engineerCount === selected.length) {
+          return;
+        }
+      }
+      if (!selected.length) return;
     }
     if (state.commandMode === 'attack') {
       if (target && target.teamId !== TEAM_PLAYER) issuedAttackOrder(selected, target);
@@ -4031,6 +4397,7 @@ html{
 
   function issuedMoveOrder(units, worldX, worldY, attackMove, manualLock = attackMove ? MANUAL_ORDER_LOCK.attackMove : MANUAL_ORDER_LOCK.move) {
     for (const unit of units) {
+      clearPendingConstruction(unit, true);
       releaseClaim(unit);
       unit.order = { type: attackMove ? 'attack-move' : 'move', x: worldX, y: worldY };
       unit.path.length = 0;
@@ -4070,9 +4437,33 @@ html{
     }
   }
 
+  function issuedReturnOrder(units, building, manualLock = MANUAL_ORDER_LOCK.gather) {
+    if (!building || building.kind !== 'building' || (building.type !== 'hq' && building.type !== 'refinery')) {
+      return { returnCount: 0, harvesterCount: 0, harvesters: [] };
+    }
+    const harvesters = units.filter((unit) => unit.type === 'harvester');
+    for (const unit of harvesters) {
+      releaseClaim(unit);
+      unit.order = { type: 'return', targetId: building.id };
+      unit.path.length = 0;
+      unit.targetId = building.id;
+      unit.manualOrderTimer = manualLock;
+    }
+    if (harvesters.length) {
+      playSynth('ui', 340, 0.05, 0.025);
+      toast('Return order acknowledged.');
+      return { returnCount: harvesters.length, harvesterCount: harvesters.length, harvesters };
+    }
+    return { returnCount: 0, harvesterCount: 0, harvesters: [] };
+  }
+
   function issuedRepairOrder(units, building, manualLock = MANUAL_ORDER_LOCK.repair) {
+    if (!building || building.kind !== 'building' || building.teamId !== TEAM_PLAYER || building.hp <= 0 || building.hp >= building.maxHp) {
+      return { repairCount: 0, engineerCount: 0, engineers: [] };
+    }
     const engineers = units.filter((unit) => unit.type === 'engineer');
     for (const unit of engineers) {
+      clearPendingConstruction(unit, true);
       releaseClaim(unit);
       unit.order = { type: 'repair', targetId: building.id };
       unit.path.length = 0;
@@ -4082,7 +4473,9 @@ html{
     if (engineers.length) {
       playSynth('ui', 360, 0.05, 0.03);
       toast('Repair order acknowledged.');
+      return { repairCount: engineers.length, engineerCount: engineers.length, engineers };
     }
+    return { repairCount: 0, engineerCount: 0, engineers: [] };
   }
 
   function tryPlacePendingBuild(worldX, worldY) {
@@ -4090,7 +4483,8 @@ html{
     const ghost = getPlacementGhostAtWorld(worldX, worldY);
     const cellX = ghost.cellX;
     const cellY = ghost.cellY;
-    if (!getSelectedEntities().some((entity) => entity.kind === 'unit' && entity.type === 'engineer' && entity.teamId === TEAM_PLAYER)) {
+    const engineers = getSelectedEntities().filter((entity) => entity.kind === 'unit' && entity.type === 'engineer' && entity.teamId === TEAM_PLAYER && entity.hp > 0);
+    if (!engineers.length) {
       clearPendingBuildPlacement();
       playUiCue('error');
       toast('Select an engineer first.');
@@ -4107,15 +4501,22 @@ html{
     if (!canPlaceBuilding(state.pendingBuild, cellX, cellY)) {
       clearPendingBuildPlacement();
       playUiCue('error');
-      toast('That ground is blocked.');
+      toast(state.pendingBuild === 'oilDerrick' ? 'Oil Derrick must cover an untapped oil deposit.' : 'That ground is blocked.');
       return;
     }
-    placeBuilding(TEAM_PLAYER, state.pendingBuild, cellX, cellY, false);
-    recomputeDynamicBlocked();
-    updateResourceUI();
+    const engineer = engineers.reduce((best, candidate) => {
+      if (!best) return candidate;
+      return dist(candidate.x, candidate.y, worldX, worldY) < dist(best.x, best.y, worldX, worldY) ? candidate : best;
+    }, null);
+    if (!issueBuildOrder(engineer, state.pendingBuild, cellX, cellY, state.pendingBuild === 'refinery')) {
+      clearPendingBuildPlacement();
+      playUiCue('error');
+      toast('Engineer cannot reach that construction site.');
+      return;
+    }
     clearPendingBuildPlacement();
-    playSynth('ui', 520, 0.06, 0.03);
-    toast('Construction deployed.');
+    playSynth('ui', 460, 0.05, 0.03);
+    toast('Engineer dispatched to construction site.');
   }
 
   function getPlacementGhostAtCursor() {
@@ -4145,7 +4546,7 @@ html{
     }
     for (let i = state.resources.length - 1; i >= 0; i--) {
       const node = state.resources[i];
-      if (node.amount <= 0) continue;
+      if (isDepletedResource(node)) continue;
       if (dist(worldX, worldY, node.x, node.y) <= 12) return node;
     }
     return null;
