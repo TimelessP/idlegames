@@ -453,7 +453,7 @@ html{
       </div>
       <div class="selection-meta" id="selectionMeta"></div>
       <div class="action-grid" id="actionGrid"></div>
-      <div class="context-help" id="contextHelp">Mouse: drag to marquee, right-click to command. Keyboard: IJKL cursor, digits for groups. Touch: use the command strip and pinch to zoom.</div>
+      <div class="context-help" id="contextHelp">Mouse: drag to marquee, or right-drag an empty view to pan. Keyboard: IJKL cursor, digits for groups. Touch: use the command strip and pinch to zoom.</div>
     </div>
 
     <div class="hud-panel touch-strip" id="touchStrip">
@@ -2201,40 +2201,42 @@ html{
     return null;
   }
 
-  function resumeHarvesterAfterService(unit, serviceOrder) {
+  function getHarvesterPostServiceOrder(unit, serviceOrder) {
     const resumeOrder = serviceOrder?.resumeOrder;
     if (!resumeOrder || unit.type !== 'harvester') {
-      unit.order = { type: 'idle' };
-      unit.targetId = null;
-      return;
+      return null;
     }
     if (resumeOrder.type === 'return') {
       const dropoff = getEntityById(resumeOrder.targetId) || nearestBuilding(unit.teamId, ['hq', 'refinery'], unit.x, unit.y);
       if (dropoff && dropoff.kind === 'building' && dropoff.hp > 0) {
-        unit.order = { type: 'return', targetId: dropoff.id };
-        unit.targetId = dropoff.id;
-        unit.path.length = 0;
-        return;
+        return { type: 'return', targetId: dropoff.id };
       }
     }
     const node = getEntityById(resumeOrder.targetId) || nearestResource(unit.x, unit.y);
     if (node && node.kind === 'resource' && node.amount > 0 && unit.carrying < unit.capacity) {
-      unit.order = { type: 'gather', targetId: node.id };
-      unit.targetId = node.id;
-      unit.path.length = 0;
-      return;
+      return { type: 'gather', targetId: node.id };
     }
     if (unit.carrying > 0) {
       const dropoff = nearestBuilding(unit.teamId, ['hq', 'refinery'], unit.x, unit.y);
       if (dropoff) {
-        unit.order = { type: 'return', targetId: dropoff.id };
-        unit.targetId = dropoff.id;
-        unit.path.length = 0;
-        return;
+        return { type: 'return', targetId: dropoff.id };
       }
     }
-    unit.order = { type: 'idle' };
-    unit.targetId = null;
+    return null;
+  }
+
+  function finishServiceOrder(unit, serviceBuilding, serviceOrder) {
+    const nextOrder = getHarvesterPostServiceOrder(unit, serviceOrder);
+    if (serviceBuilding && serviceBuilding.kind === 'building' && serviceBuilding.hp > 0 && serviceBuilding.rally) {
+      releaseClaim(unit);
+      unit.order = { type: 'move', x: serviceBuilding.rally.x, y: serviceBuilding.rally.y, nextOrder };
+      unit.targetId = null;
+      unit.path.length = 0;
+      return;
+    }
+    unit.order = nextOrder || { type: 'idle' };
+    unit.targetId = nextOrder?.targetId || null;
+    unit.path.length = 0;
   }
 
   function updateServiceOrder(unit, def, dt) {
@@ -2246,7 +2248,7 @@ html{
     }
     if (unit.hp >= unit.maxHp) {
       unit.hp = unit.maxHp;
-      resumeHarvesterAfterService(unit, unit.order);
+      finishServiceOrder(unit, target, unit.order);
       updateSelectionUI();
       return;
     }
@@ -2267,7 +2269,7 @@ html{
       updateSelectionUI();
       if (unit.hp >= unit.maxHp) {
         unit.hp = unit.maxHp;
-        resumeHarvesterAfterService(unit, unit.order);
+        finishServiceOrder(unit, target, unit.order);
       }
     }
   }
@@ -2399,7 +2401,11 @@ html{
     if (distance < 1.5) {
       if (unit.path.length) unit.path.shift();
       if (!unit.path.length && dist(unit.x, unit.y, targetX, targetY) < 8) {
-        if (unit.order.type === 'move' || unit.order.type === 'attack-move') unit.order = { type: 'idle' };
+        if (unit.order.type === 'move' || unit.order.type === 'attack-move') {
+          const nextOrder = unit.order.type === 'move' ? unit.order.nextOrder || null : null;
+          unit.order = nextOrder || { type: 'idle' };
+          unit.targetId = nextOrder?.targetId || null;
+        }
         settleUnit(unit);
       }
       return;
@@ -3247,8 +3253,8 @@ html{
 
   function buildControlMenuItems() {
     return [
-      { type: 'text', label: 'Mouse', description: 'Drag left button for marquee. Shift-drag adds. Right-click issues context commands. Wheel zooms. Hover screen edges to scroll.' },
-      { type: 'text', label: 'Keyboard', description: 'Arrow keys pan. IJKL moves the command cursor. Space selects under the cursor. X sets a marquee anchor. Enter issues the current command. Ctrl+A selects all units. Ctrl+0-9 stores groups; Shift+Ctrl+0-9 clears; 0-9 recalls; Shift+digit adds.' },
+      { type: 'text', label: 'Mouse', description: 'Drag left button for marquee. Shift-drag adds. Right-click issues context commands, or right-drag empty ground to pan. Wheel zooms. Hover screen edges to scroll.' },
+      { type: 'text', label: 'Keyboard', description: 'Arrow keys pan. IJKL moves the command cursor. Space selects under the cursor. X sets a marquee anchor. Enter issues the current command. Ctrl+A selects all visible friendly units. Ctrl+0-9 stores groups; Shift+Ctrl+0-9 clears; 0-9 recalls; Shift+digit adds.' },
       { type: 'text', label: 'Touch', description: 'Select, Pan, Move, Attack, and Gather are available in the touch strip. One-finger drag in Select mode draws a marquee. Two-finger pinch pans and zooms. Tap the minimap to jump.' }
     ];
   }
@@ -3378,11 +3384,15 @@ html{
   }
 
   function isSelectableEntity(entity) {
-    return !!entity && (entity.kind === 'resource' || (entity.teamId === TEAM_PLAYER && entity.kind !== 'resource'));
+    return !!entity && (entity.kind === 'resource' || entity.kind === 'unit' || entity.kind === 'building');
+  }
+
+  function isInspectableEntity(entity) {
+    return !!entity && (entity.kind === 'resource' || entity.hp > 0);
   }
 
   function updateSelectionUI() {
-    const selected = getSelectedEntities().filter((entity) => entity.kind === 'resource' ? entity.amount > 0 : entity.hp > 0);
+    const selected = getSelectedEntities().filter((entity) => isInspectableEntity(entity) && (entity.kind === 'resource' ? entity.amount > 0 : true));
     selectionMeta.innerHTML = '';
     actionGrid.innerHTML = '';
     if (!selected.length) {
@@ -3412,10 +3422,45 @@ html{
       return;
     }
 
+    if (selected.length === 1 && selected[0].teamId !== TEAM_PLAYER) {
+      const entity = selected[0];
+      const team = teamById(entity.teamId);
+      if (entity.kind === 'unit') {
+        const def = UNIT_TYPES[entity.type];
+        selectionTitle.textContent = def.label;
+        selectionSubtitle.textContent = (team ? team.faction : 'Unknown faction') + ' field unit.';
+        addMeta('Faction', team ? team.faction : 'Unknown');
+        addMeta('HP', entity.hp + ' / ' + entity.maxHp);
+        addMeta('Sight', String(entity.sight));
+        addMeta('Speed', String(def.speed));
+      } else {
+        const def = BUILDING_TYPES[entity.type];
+        selectionTitle.textContent = def.label;
+        selectionSubtitle.textContent = (team ? team.faction : 'Unknown faction') + ' structure.';
+        addMeta('Faction', team ? team.faction : 'Unknown');
+        addMeta('HP', entity.hp + ' / ' + entity.maxHp);
+        addMeta('Sight', String(entity.sight));
+        addMeta('Footprint', entity.widthCells + 'x' + entity.heightCells);
+      }
+      makeAction('Center', () => centerOnEntities([entity]));
+      contextHelp.textContent = 'Enemy units and structures can be inspected, but orders still require a friendly selection.';
+      updateCommandReadout();
+      return;
+    }
+
     const friendly = selected.filter((entity) => entity.teamId === TEAM_PLAYER);
     if (!friendly.length) {
       state.selectedIds.clear();
-      updateSelectionUI();
+      selectionTitle.textContent = 'Awaiting orders';
+      selectionSubtitle.textContent = 'Select a unit or structure. The action panel mirrors what the current selection can do.';
+      addMeta('Groups', '0-9');
+      addMeta('Fog', 'Live');
+      addMeta('Camera', Math.round(state.camera.zoom * 100) + '%');
+      makeAction('Center Base', () => centerCameraOnPlayerBase());
+      makeAction('Next Unit', () => cyclePlayerUnit(false));
+      makeAction('Pause', () => openMenu('pause'));
+      contextHelp.textContent = 'Mouse drag, keyboard cursor, or touch strip all lead into the same command systems.';
+      updateCommandReadout();
       return;
     }
 
@@ -3659,8 +3704,14 @@ html{
   }
 
   function selectAllPlayerUnits() {
+    const halfWidth = state.render.width * 0.5 / state.camera.zoom;
+    const halfHeight = state.render.height * 0.5 / state.camera.zoom;
+    const minX = state.camera.x - halfWidth;
+    const maxX = state.camera.x + halfWidth;
+    const minY = state.camera.y - halfHeight;
+    const maxY = state.camera.y + halfHeight;
     const ids = state.units
-      .filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0)
+      .filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0 && unit.x >= minX && unit.x <= maxX && unit.y >= minY && unit.y <= maxY)
       .map((unit) => unit.id);
     selectEntities(ids, false);
   }
@@ -4080,7 +4131,7 @@ html{
       event.preventDefault();
       state.keyboardCursor.visible = true;
       const entity = findEntityAt(state.keyboardCursor.x, state.keyboardCursor.y);
-      if (isSelectableEntity(entity)) selectEntities([entity.id], entity.kind === 'resource' ? false : event.shiftKey);
+      if (isSelectableEntity(entity)) selectEntities([entity.id], entity.kind === 'resource' || entity.teamId !== TEAM_PLAYER ? false : event.shiftKey);
       return;
     }
     if (event.code === 'Enter' || event.code === 'NumpadEnter') {
@@ -4152,14 +4203,25 @@ html{
     }
     const world = screenToWorld(event.clientX, event.clientY);
     if (state.pendingBuild) getPlacementGhostAtWorld(world.x, world.y);
-    if (event.button === 2) {
-      issueContextCommand(world.x, world.y);
-      return;
-    }
-
     const entity = findEntityAt(world.x, world.y);
     if (state.touchMode === 'pan' && event.pointerType === 'touch') {
       state.drag = { mode: 'pan', startClientX: event.clientX, startClientY: event.clientY, cameraX: state.camera.x, cameraY: state.camera.y };
+      return;
+    }
+    if (event.button === 2) {
+      const hasFriendlySelection = getSelectedEntities().some((selected) => selected.teamId === TEAM_PLAYER && selected.kind !== 'resource' && selected.hp > 0);
+      if (!hasFriendlySelection && !entity) {
+        state.drag = { mode: 'pan', startClientX: event.clientX, startClientY: event.clientY, cameraX: state.camera.x, cameraY: state.camera.y };
+        return;
+      }
+      state.drag = {
+        mode: 'command',
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startWorld: world,
+        additive: event.shiftKey,
+        entity
+      };
       return;
     }
     const shouldCommandTouch = event.pointerType === 'touch' && (state.pendingBuild || state.pendingRallyBuildingId || state.touchMode !== 'select');
@@ -4172,7 +4234,7 @@ html{
       entity
     };
     if (event.pointerType !== 'touch' && isSelectableEntity(entity)) {
-      selectEntities([entity.id], entity.kind === 'resource' ? false : event.shiftKey);
+      selectEntities([entity.id], entity.kind === 'resource' || entity.teamId !== TEAM_PLAYER ? false : event.shiftKey);
     }
   }
 
@@ -4220,7 +4282,7 @@ html{
       if (event.pointerType === 'touch' && state.touchMode !== 'select') {
         issueContextCommand(endWorld.x, endWorld.y);
       } else if (isSelectableEntity(entity)) {
-        selectEntities([entity.id], entity.kind === 'resource' ? false : state.drag.additive);
+        selectEntities([entity.id], entity.kind === 'resource' || entity.teamId !== TEAM_PLAYER ? false : state.drag.additive);
       } else if (!state.drag.additive) {
         state.selectedIds.clear();
         updateSelectionUI();
