@@ -493,6 +493,9 @@ html{
   const WORLD_WIDTH = WORLD_CELLS_X * CELL;
   const WORLD_HEIGHT = WORLD_CELLS_Y * CELL;
   const BASE_VIEW = 320;
+  const SPATIAL_BUCKET_SIZE = 64;
+  const SPATIAL_BUCKET_COLS = Math.ceil(WORLD_WIDTH / SPATIAL_BUCKET_SIZE);
+  const SPATIAL_BUCKET_ROWS = Math.ceil(WORLD_HEIGHT / SPATIAL_BUCKET_SIZE);
   const TEAM_PLAYER = 0;
   const TEAM_AI = 1;
   const MAX_GROUPS = 10;
@@ -524,6 +527,16 @@ html{
   const minimap = document.getElementById('minimap');
   const minimapCtx = minimap.getContext('2d', { alpha: false });
   minimapCtx.imageSmoothingEnabled = false;
+  const minimapTerrain = document.createElement('canvas');
+  minimapTerrain.width = minimap.width;
+  minimapTerrain.height = minimap.height;
+  const minimapTerrainCtx = minimapTerrain.getContext('2d', { alpha: false });
+  minimapTerrainCtx.imageSmoothingEnabled = false;
+  const minimapFog = document.createElement('canvas');
+  minimapFog.width = minimap.width;
+  minimapFog.height = minimap.height;
+  const minimapFogCtx = minimapFog.getContext('2d', { alpha: true });
+  minimapFogCtx.imageSmoothingEnabled = false;
 
   const stageShell = document.getElementById('stageShell');
   const selectionBox = document.getElementById('selectionBox');
@@ -606,7 +619,14 @@ html{
     projectiles: [],
     effects: [],
     audio: { ctx: null, unlocked: false },
-    aiClock: 0
+    aiClock: 0,
+    resourceUiSignature: '',
+    sortedBuildings: [],
+    sortedBuildingsDirty: true,
+    spatial: {
+      unitBuckets: Array.from({ length: SPATIAL_BUCKET_COLS * SPATIAL_BUCKET_ROWS }, () => []),
+      buildingBuckets: Array.from({ length: SPATIAL_BUCKET_COLS * SPATIAL_BUCKET_ROWS }, () => [])
+    }
   };
 
   const UNIT_TYPES = {
@@ -852,6 +872,9 @@ html{
     state.keyboardCursor.visible = false;
     state.commandMode = 'context';
     state.touchMode = 'select';
+    state.resourceUiSignature = '';
+    state.sortedBuildings.length = 0;
+    state.sortedBuildingsDirty = true;
     state.unitClaims.clear();
     state.buildingCells.clear();
     state.staticBlocked.fill(0);
@@ -860,6 +883,7 @@ html{
     state.spiceHeat.fill(0);
     initTeams();
     generateWorld();
+    rebuildMinimapTerrainLayer();
     createStartingBases();
     recomputeDynamicBlocked();
     refreshFog();
@@ -985,6 +1009,7 @@ html{
       rally: { x: (cellX + def.size[0] + 1) * CELL, y: (cellY + def.size[1] * 0.5) * CELL }
     };
     state.buildings.push(building);
+    state.sortedBuildingsDirty = true;
     occupyBuildingCells(building, true);
     const team = teamById(teamId);
     if (team) team.research.add(typeKey);
@@ -1080,10 +1105,25 @@ html{
   }
 
   function nearestDamagedBuilding(teamId, fromX, fromY, maxDistance = Infinity) {
+    if (!Number.isFinite(maxDistance)) {
+      let best = null;
+      let bestDist = Infinity;
+      for (const building of state.buildings) {
+        if (building.hp <= 0 || building.teamId !== teamId || building.hp >= building.maxHp) continue;
+        const bx = building.x + building.widthCells * CELL * 0.5;
+        const by = building.y + building.heightCells * CELL * 0.5;
+        const distance = dist(fromX, fromY, bx, by);
+        if (distance < bestDist) {
+          bestDist = distance;
+          best = building;
+        }
+      }
+      return best;
+    }
     let best = null;
     let bestDist = maxDistance;
-    for (const building of state.buildings) {
-      if (building.hp <= 0 || building.teamId !== teamId || building.hp >= building.maxHp) continue;
+    forEachNearbyBuilding(fromX, fromY, maxDistance, (building) => {
+      if (building.hp <= 0 || building.teamId !== teamId || building.hp >= building.maxHp) return;
       const bx = building.x + building.widthCells * CELL * 0.5;
       const by = building.y + building.heightCells * CELL * 0.5;
       const distance = dist(fromX, fromY, bx, by);
@@ -1091,8 +1131,57 @@ html{
         bestDist = distance;
         best = building;
       }
-    }
+    });
     return best;
+  }
+
+  function getSpatialBucketIndexForWorld(worldX, worldY) {
+    const bucketX = clamp(Math.floor(worldX / SPATIAL_BUCKET_SIZE), 0, SPATIAL_BUCKET_COLS - 1);
+    const bucketY = clamp(Math.floor(worldY / SPATIAL_BUCKET_SIZE), 0, SPATIAL_BUCKET_ROWS - 1);
+    return bucketY * SPATIAL_BUCKET_COLS + bucketX;
+  }
+
+  function clearSpatialBuckets(bucketList) {
+    for (const bucket of bucketList) bucket.length = 0;
+  }
+
+  function rebuildSpatialBuckets() {
+    clearSpatialBuckets(state.spatial.unitBuckets);
+    clearSpatialBuckets(state.spatial.buildingBuckets);
+    for (const unit of state.units) {
+      if (unit.hp <= 0) continue;
+      state.spatial.unitBuckets[getSpatialBucketIndexForWorld(unit.x, unit.y)].push(unit);
+    }
+    for (const building of state.buildings) {
+      if (building.hp <= 0) continue;
+      const centerX = building.x + building.widthCells * CELL * 0.5;
+      const centerY = building.y + building.heightCells * CELL * 0.5;
+      state.spatial.buildingBuckets[getSpatialBucketIndexForWorld(centerX, centerY)].push(building);
+    }
+  }
+
+  function forEachBucketCandidate(bucketList, worldX, worldY, radius, callback) {
+    const minBucketX = clamp(Math.floor((worldX - radius) / SPATIAL_BUCKET_SIZE), 0, SPATIAL_BUCKET_COLS - 1);
+    const maxBucketX = clamp(Math.floor((worldX + radius) / SPATIAL_BUCKET_SIZE), 0, SPATIAL_BUCKET_COLS - 1);
+    const minBucketY = clamp(Math.floor((worldY - radius) / SPATIAL_BUCKET_SIZE), 0, SPATIAL_BUCKET_ROWS - 1);
+    const maxBucketY = clamp(Math.floor((worldY + radius) / SPATIAL_BUCKET_SIZE), 0, SPATIAL_BUCKET_ROWS - 1);
+    for (let bucketY = minBucketY; bucketY <= maxBucketY; bucketY++) {
+      for (let bucketX = minBucketX; bucketX <= maxBucketX; bucketX++) {
+        const bucket = bucketList[bucketY * SPATIAL_BUCKET_COLS + bucketX];
+        for (const entity of bucket) {
+          if (callback(entity) === true) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function forEachNearbyUnit(worldX, worldY, radius, callback) {
+    return forEachBucketCandidate(state.spatial.unitBuckets, worldX, worldY, radius, callback);
+  }
+
+  function forEachNearbyBuilding(worldX, worldY, radius, callback) {
+    return forEachBucketCandidate(state.spatial.buildingBuckets, worldX, worldY, radius, callback);
   }
 
   function nearestResource(fromX, fromY) {
@@ -1332,7 +1421,8 @@ html{
           mark(building.x + building.widthCells * CELL * 0.5, building.y + building.heightCells * CELL * 0.5, building.sight);
         }
       }
-    }
+      }
+      rebuildMinimapFogLayer();
   }
 
   function buildAllSpriteSheets() {
@@ -1703,6 +1793,10 @@ html{
       state.spiceHeat[i] = savedSpiceHeat[i] ?? 0;
       if (state.tiles[i] === TILE.RIDGE) state.staticBlocked[i] = 1;
     }
+    state.resourceUiSignature = '';
+    state.sortedBuildings.length = 0;
+    state.sortedBuildingsDirty = true;
+    rebuildMinimapTerrainLayer();
     for (const building of state.buildings) occupyBuildingCells(building, true);
     for (const unit of state.units) {
       if (unit.claimKey !== null && unit.claimKey !== undefined) state.unitClaims.set(unit.claimKey, unit.id);
@@ -1859,6 +1953,7 @@ html{
     updateKeyboardCursor(dt);
     updateCameraFromInput(dt);
     updateProduction(dt);
+    rebuildSpatialBuckets();
     updateUnits(dt);
     updateTurrets(dt);
     updateProjectiles(dt);
@@ -2025,16 +2120,16 @@ html{
   function findEnemyInfantry(unit, range) {
     let best = null;
     let bestDist = Infinity;
-    for (const enemy of state.units) {
-      if (enemy.hp <= 0 || enemy.teamId === unit.teamId) continue;
+    forEachNearbyUnit(unit.x, unit.y, range, (enemy) => {
+      if (enemy.hp <= 0 || enemy.teamId === unit.teamId) return;
       const enemyDef = UNIT_TYPES[enemy.type];
-      if (!enemyDef || !enemyDef.infantry) continue;
+      if (!enemyDef || !enemyDef.infantry) return;
       const distance = dist(unit.x, unit.y, enemy.x, enemy.y);
       if (distance < range && distance < bestDist) {
         best = enemy;
         bestDist = distance;
       }
-    }
+    });
     return best;
   }
 
@@ -2369,30 +2464,30 @@ html{
     const by = geometry.fire.y;
     let best = null;
     let bestDist = Infinity;
-    for (const unit of state.units) {
-      if (unit.hp <= 0 || unit.teamId === building.teamId) continue;
+    forEachNearbyUnit(bx, by, def.range, (unit) => {
+      if (unit.hp <= 0 || unit.teamId === building.teamId) return;
       const distance = dist(unit.x, unit.y, bx, by);
       if (distance <= def.range && distance < bestDist) {
         best = unit;
         bestDist = distance;
       }
-    }
+    });
     return best;
   }
 
   function findEnemyInRange(unit, range) {
     let best = null;
     let bestDist = Infinity;
-    for (const enemy of state.units) {
-      if (enemy.hp <= 0 || enemy.teamId === unit.teamId) continue;
+    forEachNearbyUnit(unit.x, unit.y, range, (enemy) => {
+      if (enemy.hp <= 0 || enemy.teamId === unit.teamId) return;
       const distance = dist(unit.x, unit.y, enemy.x, enemy.y);
       if (distance < range && distance < bestDist) {
         best = enemy;
         bestDist = distance;
       }
-    }
-    for (const building of state.buildings) {
-      if (building.hp <= 0 || building.teamId === unit.teamId) continue;
+    });
+    forEachNearbyBuilding(unit.x, unit.y, range, (building) => {
+      if (building.hp <= 0 || building.teamId === unit.teamId) return;
       const bx = building.x + building.widthCells * CELL * 0.5;
       const by = building.y + building.heightCells * CELL * 0.5;
       const distance = dist(unit.x, unit.y, bx, by);
@@ -2400,7 +2495,7 @@ html{
         best = building;
         bestDist = distance;
       }
-    }
+    });
     return best;
   }
 
@@ -2439,11 +2534,11 @@ html{
   function tryVehicleCrush(unit, def) {
     if (!def || !def.crushDamage || unit.crushTimer > 0) return;
     const crushRadius = def.crushRadius || 7;
-    for (const enemy of state.units) {
-      if (enemy.hp <= 0 || enemy.teamId === unit.teamId) continue;
+    forEachNearbyUnit(unit.x, unit.y, crushRadius, (enemy) => {
+      if (enemy.hp <= 0 || enemy.teamId === unit.teamId) return;
       const enemyDef = UNIT_TYPES[enemy.type];
-      if (!enemyDef || !enemyDef.infantry) continue;
-      if (dist(unit.x, unit.y, enemy.x, enemy.y) > crushRadius) continue;
+      if (!enemyDef || !enemyDef.infantry) return;
+      if (dist(unit.x, unit.y, enemy.x, enemy.y) > crushRadius) return;
       applyDamage(enemy, def.crushDamage, unit.teamId, unit.id);
       unit.crushTimer = 0.18;
       addEffect(enemy.x, enemy.y, '#ffb46c');
@@ -2452,8 +2547,8 @@ html{
         unit.order = { type: 'idle' };
         unit.targetId = null;
       }
-      return;
-    }
+      return true;
+    });
   }
 
   function canSetRally(building) {
@@ -2465,6 +2560,7 @@ html{
     occupyBuildingCells(building, false);
     const index = state.buildings.findIndex((entry) => entry.id === building.id);
     if (index !== -1) state.buildings.splice(index, 1);
+    state.sortedBuildingsDirty = true;
     if (state.pendingRallyBuildingId === building.id) {
       state.pendingRallyBuildingId = null;
       state.pendingActionLabel = '';
@@ -2603,7 +2699,7 @@ html{
   }
 
   function countTeamAssets(teamId) {
-    const counts = { hq: 0, refinery: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, harvester: 0 };
+    const counts = { hq: 0, refinery: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, harvester: 0, engineer: 0 };
     for (const building of state.buildings) {
       if (building.teamId === teamId && building.hp > 0 && counts.hasOwnProperty(building.type)) counts[building.type]++;
     }
@@ -2611,6 +2707,14 @@ html{
       if (unit.teamId === teamId && unit.hp > 0 && counts.hasOwnProperty(unit.type)) counts[unit.type]++;
     }
     return counts;
+  }
+
+  function totalRemainingUnits(counts) {
+    return ['scout', 'tank', 'harvester', 'engineer'].reduce((total, key) => total + (counts[key] || 0), 0);
+  }
+
+  function totalRemainingStructures(counts) {
+    return ['hq', 'refinery', 'barracks', 'lab', 'factory', 'turret'].reduce((total, key) => total + (counts[key] || 0), 0);
   }
 
   function canAfford(teamId, key) {
@@ -2707,17 +2811,19 @@ html{
     viewportCtx.clearRect(0, 0, viewport.width, viewport.height);
     viewportCtx.drawImage(backbuffer, 0, 0, viewport.width, viewport.height);
     drawMinimap();
-    updateResourceUI();
     updateKeyboardCursorUi();
   }
 
   function syncRenderSize() {
     const rect = stageShell.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
-    viewport.width = Math.max(1, Math.floor(rect.width * window.devicePixelRatio));
-    viewport.height = Math.max(1, Math.floor(rect.height * window.devicePixelRatio));
-    viewportCtx.imageSmoothingEnabled = false;
-
+    const viewportWidth = Math.max(1, Math.floor(rect.width * window.devicePixelRatio));
+    const viewportHeight = Math.max(1, Math.floor(rect.height * window.devicePixelRatio));
+    if (viewport.width !== viewportWidth || viewport.height !== viewportHeight) {
+      viewport.width = viewportWidth;
+      viewport.height = viewportHeight;
+      viewportCtx.imageSmoothingEnabled = false;
+    }
     const aspect = rect.width / rect.height;
     let renderWidth = BASE_VIEW;
     let renderHeight = BASE_VIEW;
@@ -2754,27 +2860,31 @@ html{
 
   function drawTerrain() {
     const tileSize = CELL * state.camera.zoom;
+    const tileSpan = Math.ceil(tileSize) + 1;
+    const halfRenderWidth = state.render.width * 0.5;
+    const halfRenderHeight = state.render.height * 0.5;
     const startX = clamp(Math.floor((state.camera.x - state.render.width / (2 * state.camera.zoom)) / CELL) - 1, 0, WORLD_CELLS_X - 1);
     const endX = clamp(Math.ceil((state.camera.x + state.render.width / (2 * state.camera.zoom)) / CELL) + 1, 0, WORLD_CELLS_X - 1);
     const startY = clamp(Math.floor((state.camera.y - state.render.height / (2 * state.camera.zoom)) / CELL) - 1, 0, WORLD_CELLS_Y - 1);
     const endY = clamp(Math.ceil((state.camera.y + state.render.height / (2 * state.camera.zoom)) / CELL) + 1, 0, WORLD_CELLS_Y - 1);
 
     for (let y = startY; y <= endY; y++) {
+      const screenY = Math.round((y * CELL - state.camera.y) * state.camera.zoom + halfRenderHeight);
       for (let x = startX; x <= endX; x++) {
         const key = worldToKey(x, y);
         const tile = state.tiles[key];
-        const screen = worldToScreen(x * CELL, y * CELL);
+        const screenX = Math.round((x * CELL - state.camera.x) * state.camera.zoom + halfRenderWidth);
         const spice = state.spiceHeat[key];
         if (tile === TILE.SAND) backCtx.fillStyle = spice ? '#c88431' : '#aa7b47';
         else if (tile === TILE.ROCK) backCtx.fillStyle = spice ? '#b06f38' : '#7e6244';
         else backCtx.fillStyle = '#57402e';
-        backCtx.fillRect(screen.x, screen.y, Math.ceil(tileSize) + 1, Math.ceil(tileSize) + 1);
+        backCtx.fillRect(screenX, screenY, tileSpan, tileSpan);
         if (tile === TILE.SAND) {
           backCtx.fillStyle = 'rgba(255,232,186,0.06)';
-          backCtx.fillRect(screen.x + ((x + y) % 2), screen.y + (y % 3), Math.max(1, tileSize * 0.5), 1);
+          backCtx.fillRect(screenX + ((x + y) % 2), screenY + (y % 3), Math.max(1, tileSize * 0.5), 1);
         } else if (tile === TILE.RIDGE) {
           backCtx.fillStyle = 'rgba(255,255,255,0.05)';
-          backCtx.fillRect(screen.x + 1, screen.y + 1, Math.max(1, tileSize - 2), 1);
+          backCtx.fillRect(screenX + 1, screenY + 1, Math.max(1, tileSize - 2), 1);
         }
       }
     }
@@ -2790,9 +2900,16 @@ html{
     }
   }
 
+  function rebuildSortedBuildings() {
+    state.sortedBuildings = state.buildings
+      .filter((building) => building.hp > 0)
+      .sort((a, b) => (a.y + a.heightCells * CELL) - (b.y + b.heightCells * CELL));
+    state.sortedBuildingsDirty = false;
+  }
+
   function drawBuildings() {
-    const sorted = [...state.buildings].filter((building) => building.hp > 0).sort((a, b) => (a.y + a.heightCells * CELL) - (b.y + b.heightCells * CELL));
-    for (const building of sorted) {
+    if (state.sortedBuildingsDirty) rebuildSortedBuildings();
+    for (const building of state.sortedBuildings) {
       if (!isVisibleToPlayer(building.x + building.widthCells * CELL * 0.5, building.y + building.heightCells * CELL * 0.5) && building.teamId !== TEAM_PLAYER) continue;
       const team = teamById(building.teamId);
       const sprite = team.sprites.buildings[building.type];
@@ -2919,20 +3036,24 @@ html{
   function drawFog() {
     const team = playerTeam();
     const tileSize = CELL * state.camera.zoom;
+    const tileSpan = Math.ceil(tileSize) + 1;
+    const halfRenderWidth = state.render.width * 0.5;
+    const halfRenderHeight = state.render.height * 0.5;
     const startX = clamp(Math.floor((state.camera.x - state.render.width / (2 * state.camera.zoom)) / CELL) - 1, 0, WORLD_CELLS_X - 1);
     const endX = clamp(Math.ceil((state.camera.x + state.render.width / (2 * state.camera.zoom)) / CELL) + 1, 0, WORLD_CELLS_X - 1);
     const startY = clamp(Math.floor((state.camera.y - state.render.height / (2 * state.camera.zoom)) / CELL) - 1, 0, WORLD_CELLS_Y - 1);
     const endY = clamp(Math.ceil((state.camera.y + state.render.height / (2 * state.camera.zoom)) / CELL) + 1, 0, WORLD_CELLS_Y - 1);
     for (let y = startY; y <= endY; y++) {
+      const screenY = Math.round((y * CELL - state.camera.y) * state.camera.zoom + halfRenderHeight);
       for (let x = startX; x <= endX; x++) {
         const key = worldToKey(x, y);
-        const screen = worldToScreen(x * CELL, y * CELL);
+        const screenX = Math.round((x * CELL - state.camera.x) * state.camera.zoom + halfRenderWidth);
         if (!team.fogExplored[key]) {
           backCtx.fillStyle = 'rgba(6,5,4,0.92)';
-          backCtx.fillRect(screen.x, screen.y, Math.ceil(tileSize) + 1, Math.ceil(tileSize) + 1);
+          backCtx.fillRect(screenX, screenY, tileSpan, tileSpan);
         } else if (!team.fogVisible[key]) {
           backCtx.fillStyle = 'rgba(18,12,8,0.54)';
-          backCtx.fillRect(screen.x, screen.y, Math.ceil(tileSize) + 1, Math.ceil(tileSize) + 1);
+          backCtx.fillRect(screenX, screenY, tileSpan, tileSpan);
         }
       }
     }
@@ -2998,25 +3119,11 @@ html{
   }
 
   function drawMinimap() {
-    minimapCtx.fillStyle = '#180f0a';
-    minimapCtx.fillRect(0, 0, minimap.width, minimap.height);
+    minimapCtx.drawImage(minimapTerrain, 0, 0);
+    minimapCtx.drawImage(minimapFog, 0, 0);
     const scaleX = minimap.width / WORLD_CELLS_X;
     const scaleY = minimap.height / WORLD_CELLS_Y;
-    for (let y = 0; y < WORLD_CELLS_Y; y++) {
-      for (let x = 0; x < WORLD_CELLS_X; x++) {
-        const key = worldToKey(x, y);
-        minimapCtx.fillStyle = state.tiles[key] === TILE.RIDGE ? '#4c3a2a' : state.tiles[key] === TILE.ROCK ? '#70573e' : state.spiceHeat[key] ? '#ba6e2f' : '#966d41';
-        minimapCtx.fillRect(Math.floor(x * scaleX), Math.floor(y * scaleY), Math.ceil(scaleX), Math.ceil(scaleY));
-      }
-    }
     const fog = playerTeam();
-    minimapCtx.fillStyle = 'rgba(10,7,5,0.75)';
-    for (let y = 0; y < WORLD_CELLS_Y; y++) {
-      for (let x = 0; x < WORLD_CELLS_X; x++) {
-        const key = worldToKey(x, y);
-        if (!fog.fogExplored[key]) minimapCtx.fillRect(Math.floor(x * scaleX), Math.floor(y * scaleY), Math.ceil(scaleX), Math.ceil(scaleY));
-      }
-    }
     for (const resource of state.resources) {
       if (resource.amount <= 0 || !fog.fogExplored[worldToKey(resource.cellX, resource.cellY)]) continue;
       minimapCtx.fillStyle = '#ffc55b';
@@ -3041,6 +3148,37 @@ html{
     const centerY = (state.camera.y / CELL) * scaleY;
     minimapCtx.strokeStyle = '#fff1bc';
     minimapCtx.strokeRect(centerX - halfWidth, centerY - halfHeight, halfWidth * 2, halfHeight * 2);
+  }
+
+  function rebuildMinimapTerrainLayer() {
+    minimapTerrainCtx.fillStyle = '#180f0a';
+    minimapTerrainCtx.fillRect(0, 0, minimapTerrain.width, minimapTerrain.height);
+    const scaleX = minimap.width / WORLD_CELLS_X;
+    const scaleY = minimap.height / WORLD_CELLS_Y;
+    for (let y = 0; y < WORLD_CELLS_Y; y++) {
+      for (let x = 0; x < WORLD_CELLS_X; x++) {
+        const key = worldToKey(x, y);
+        minimapTerrainCtx.fillStyle = state.tiles[key] === TILE.RIDGE ? '#4c3a2a' : state.tiles[key] === TILE.ROCK ? '#70573e' : state.spiceHeat[key] ? '#ba6e2f' : '#966d41';
+        minimapTerrainCtx.fillRect(Math.floor(x * scaleX), Math.floor(y * scaleY), Math.ceil(scaleX), Math.ceil(scaleY));
+      }
+    }
+  }
+
+  function rebuildMinimapFogLayer() {
+    const fog = playerTeam();
+    if (!fog) return;
+    minimapFogCtx.clearRect(0, 0, minimapFog.width, minimapFog.height);
+    minimapFogCtx.fillStyle = 'rgba(10,7,5,0.75)';
+    const scaleX = minimap.width / WORLD_CELLS_X;
+    const scaleY = minimap.height / WORLD_CELLS_Y;
+    for (let y = 0; y < WORLD_CELLS_Y; y++) {
+      for (let x = 0; x < WORLD_CELLS_X; x++) {
+        const key = worldToKey(x, y);
+        if (!fog.fogExplored[key]) {
+          minimapFogCtx.fillRect(Math.floor(x * scaleX), Math.floor(y * scaleY), Math.ceil(scaleX), Math.ceil(scaleY));
+        }
+      }
+    }
   }
 
   function toast(message) {
@@ -3234,13 +3372,15 @@ html{
   function buildVictoryMenuItems() {
     const team = playerTeam();
     const counts = countTeamAssets(TEAM_PLAYER);
+    const remainingUnits = totalRemainingUnits(counts);
+    const remainingStructures = totalRemainingStructures(counts);
     const elapsed = Math.max(0, Math.floor(state.time));
     const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
     const seconds = String(elapsed % 60).padStart(2, '0');
     return [
       { type: 'text', label: 'Outcome', description: 'Sun Nomads victorious. The rival command hub is smoking on the horizon.' },
       { type: 'text', label: 'Battle Time', description: minutes + ':' + seconds },
-      { type: 'text', label: 'Forces Remaining', description: (counts.scout + counts.tank + counts.harvester + counts.engineer) + ' units and ' + (counts.hq + counts.refinery + counts.barracks + counts.lab + counts.factory + counts.turret) + ' structures still standing.' },
+      { type: 'text', label: 'Forces Remaining', description: remainingUnits + ' units and ' + remainingStructures + ' structures still standing.' },
       { type: 'text', label: 'Spice Reserve', description: String(Math.floor(team?.spice || 0)) + ' spice banked.' },
       { type: 'action', label: 'Play Again', description: 'Start a fresh skirmish on a new procedural map.', action: restartMatch, behavior: 'close' },
       { type: 'action', label: 'Main Menu', description: 'Return to the title overlay and keep this victory state available.', action: stopToMainMenu, behavior: 'close' },
@@ -3252,13 +3392,15 @@ html{
   function buildDefeatMenuItems() {
     const team = playerTeam();
     const counts = countTeamAssets(TEAM_PLAYER);
+    const remainingUnits = totalRemainingUnits(counts);
+    const remainingStructures = totalRemainingStructures(counts);
     const elapsed = Math.max(0, Math.floor(state.time));
     const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
     const seconds = String(elapsed % 60).padStart(2, '0');
     return [
       { type: 'text', label: 'Outcome', description: 'Defeat. The Dust Cartel shattered the command hub and overran the dunes.' },
       { type: 'text', label: 'Battle Time', description: minutes + ':' + seconds },
-      { type: 'text', label: 'Forces Left', description: (counts.scout + counts.tank + counts.harvester + counts.engineer) + ' units and ' + (counts.hq + counts.refinery + counts.barracks + counts.lab + counts.factory + counts.turret) + ' structures survived the collapse.' },
+      { type: 'text', label: 'Forces Left', description: remainingUnits + ' units and ' + remainingStructures + ' structures survived the collapse.' },
       { type: 'text', label: 'Spice Reserve', description: String(Math.floor(team?.spice || 0)) + ' spice remained in reserve.' },
       { type: 'action', label: 'Play Again', description: 'Retry on a fresh procedural map with the same rules.', action: restartMatch, behavior: 'close' },
       { type: 'action', label: 'Main Menu', description: 'Return to the title overlay and keep this defeat state available.', action: stopToMainMenu, behavior: 'close' },
@@ -3392,10 +3534,21 @@ html{
     const storage = team.storage + computeStorageBonus(team.id);
     const selected = getSelectedEntities();
     const counts = countTeamAssets(team.id);
+    const resourceUnits = selected.length ? selected.length : state.units.filter((unit) => unit.teamId === team.id && unit.hp > 0).length;
+    const resourceBuildings = counts.factory + counts.lab + counts.barracks + counts.refinery + counts.turret + counts.hq;
+    const signature = [
+      Math.floor(team.spice),
+      storage,
+      resourceUnits,
+      selected.length ? 'sel' : 'act',
+      resourceBuildings
+    ].join('|');
+    if (signature === state.resourceUiSignature) return;
+    state.resourceUiSignature = signature;
     resourceBar.innerHTML = [
       ['spice', 'Spice', team.spice, '/' + storage],
-      ['units', 'Units', selected.length ? selected.length : state.units.filter((unit) => unit.teamId === team.id && unit.hp > 0).length, selected.length ? 'sel' : 'act'],
-      ['build', 'Build', counts.factory + counts.lab + counts.barracks + counts.refinery + counts.turret + counts.hq, 'str']
+      ['units', 'Units', resourceUnits, selected.length ? 'sel' : 'act'],
+      ['build', 'Build', resourceBuildings, 'str']
     ].map(([icon, label, value, suffix]) => '<div class="resource-pill">' + iconMarkup(icon, '') + '<span class="resource-label">' + label + '</span><span class="resource-value">' + String(Math.floor(value)).padStart(4, '0') + '</span><span class="resource-suffix">' + suffix + '</span></div>').join('');
   }
 
@@ -3409,6 +3562,7 @@ html{
 
   function updateSelectionUI() {
     const selected = getSelectedEntities().filter((entity) => isInspectableEntity(entity) && (entity.kind === 'resource' ? entity.amount > 0 : true));
+    updateResourceUI();
     selectionMeta.innerHTML = '';
     actionGrid.innerHTML = '';
     if (!selected.length) {
