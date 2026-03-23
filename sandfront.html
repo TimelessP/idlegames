@@ -604,10 +604,19 @@ html{
     'Build': { icon: 'hammer', short: 'Build' },
     'Auto Gather': { icon: 'route', short: 'Auto' },
     'Set Rally': { icon: 'rally', short: 'Rally' },
-    'Sell': { icon: 'stop', short: 'Sell' }
+    'Sell': { icon: 'stop', short: 'Sell' },
+    'Optics': { icon: 'tech', short: 'Optics' },
+    'Armour': { icon: 'tech', short: 'Armour' },
+    'Scanner': { icon: 'tech', short: 'Scan' },
+    'Scan': { icon: 'tech', short: 'Scan' }
   };
 
   const KEYBOARD_CURSOR_IDLE_HIDE = 2.5;
+  const SCAN_DURATION = 10;
+  const SCAN_COOLDOWN = 45;
+  const AI_SCAN_THREAT_RADIUS = CELL * 16;
+  const AI_MEMORY_SCAN_STALE_AFTER = 18;
+  const AI_SCOUT_GRID_STEP = 10;
 
   const state = {
     seed: 0,
@@ -634,6 +643,7 @@ html{
     pendingActionLabel: '',
     toastTimer: 0,
     storageFullToastAt: -Infinity,
+    selectionUiRefreshTimer: 0,
     drag: null,
     menuStack: [],
     tiles: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
@@ -654,6 +664,7 @@ html{
     teams: [],
     projectiles: [],
     effects: [],
+    minimapAlerts: [],
     audio: { ctx: null, unlocked: false },
     aiClock: 0,
     resourceSprites: {},
@@ -679,14 +690,15 @@ html{
     silo: { label: 'Spice Silo', size: [2, 2], hp: 300, sight: 8, cost: 120, storage: 28000, sprite: 'silo', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     oilDerrick: { label: 'Oil Derrick', size: [2, 2], hp: 320, sight: 9, cost: 140, incomeRate: OIL_TRICKLE_AMOUNT / OIL_TRICKLE_INTERVAL, sprite: 'oilDerrick', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     barracks: { label: 'Dust Barracks', size: [3, 3], hp: 400, sight: 9, cost: 160, queue: ['scout', 'engineer'], sprite: 'barracks', buildRequires: ['hq'], geometry: { spriteOffset: { x: -20, y: -20 } } },
-    lab: { label: 'Signal Lab', size: [3, 3], hp: 340, sight: 9, cost: 210, research: ['rangefinding', 'composite-armor'], sprite: 'lab', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -20, y: -20 } } },
+    lab: { label: 'Signal Lab', size: [3, 3], hp: 340, sight: 9, cost: 210, research: ['rangefinding', 'composite-armor', 'scanner'], sprite: 'lab', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -20, y: -20 } } },
     factory: { label: 'War Factory', size: [4, 3], hp: 540, sight: 10, cost: 260, queue: ['tank'], sprite: 'factory', buildRequires: ['lab', 'rangefinding'], geometry: { spriteOffset: { x: -16, y: -20 } } },
     turret: { label: 'Turret', size: [2, 2], hp: 260, sight: 9, cost: 110, turret: true, range: 72, damage: 11, reload: 0.7, sprite: 'turret', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -24, y: -20 }, fireOrigin: { x: 8, y: 6 } } }
   };
 
   const RESEARCH = {
-    rangefinding: { label: 'Rangefinding', cost: 160, time: 12, requires: ['lab'], desc: 'Improves line of sight and tank unlock chain.' },
-    'composite-armor': { label: 'Composite Armor', cost: 220, time: 18, requires: ['lab', 'rangefinding'], desc: 'Unlocks siege tanks and slightly toughens combat units.' }
+    rangefinding: { label: 'Optics', cost: 160, time: 12, requires: ['lab'], desc: 'Improves line of sight and the factory unlock chain.' },
+    'composite-armor': { label: 'Armour', cost: 220, time: 18, requires: ['lab', 'rangefinding'], desc: 'Unlocks siege tanks and slightly toughens combat units.' },
+    scanner: { label: 'Scanner', cost: 260, time: 20, requires: ['lab', 'rangefinding'], desc: 'Unlocks the Command Hub satellite scan action.' }
   };
 
   const BUILDABLE_BY_ENGINEER = ['refinery', 'silo', 'oilDerrick', 'barracks', 'lab', 'factory', 'turret'];
@@ -915,7 +927,10 @@ html{
       storage: 700,
       research: new Set(['hq']),
       sprites: { units: {}, buildings: {} },
-      ai: { thinkTimer: 0, attackTimer: 10 + random() * 5, waveBias: 0 },
+      ai: { thinkTimer: 0, attackTimer: 10 + random() * 5, waveBias: 0, scoutCursor: 0 },
+      scanRevealUntil: 0,
+      scanCooldownUntil: 0,
+      enemyMemory: { units: {}, buildings: {} },
       fogVisible: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
       fogExplored: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y)
     };
@@ -939,6 +954,7 @@ html{
     state.resources = [];
     state.projectiles = [];
     state.effects = [];
+    state.minimapAlerts = [];
     state.selectedIds.clear();
     state.groups = Array.from({ length: MAX_GROUPS }, () => []);
     state.lastGroupRecall = { index: null, time: 0 };
@@ -953,6 +969,7 @@ html{
     state.touchMode = 'select';
     state.resourceUiSignature = '';
     state.storageFullToastAt = -Infinity;
+    state.selectionUiRefreshTimer = 0;
     state.sortedBuildings.length = 0;
     state.sortedBuildingsDirty = true;
     state.unitClaims.clear();
@@ -1622,6 +1639,9 @@ html{
   function refreshFog() {
     for (const team of state.teams) {
       team.fogVisible.fill(0);
+      if (team.scanRevealUntil > state.time) {
+        team.fogVisible.fill(1);
+      }
       const mark = (x, y, radius) => {
         const cx = pxToCell(x);
         const cy = pxToCell(y);
@@ -1648,6 +1668,158 @@ html{
       }
       }
       rebuildMinimapFogLayer();
+  }
+
+  function isVisibleToTeam(team, worldX, worldY) {
+    const key = worldToKey(pxToCell(worldX), pxToCell(worldY));
+    return !!team.fogVisible[key];
+  }
+
+  function makeEnemyMemoryRecord(entity) {
+    if (entity.kind === 'building') {
+      return {
+        id: entity.id,
+        kind: 'building',
+        type: entity.type,
+        x: entity.x + entity.widthCells * CELL * 0.5,
+        y: entity.y + entity.heightCells * CELL * 0.5,
+        cellX: entity.cellX,
+        cellY: entity.cellY,
+        widthCells: entity.widthCells,
+        heightCells: entity.heightCells,
+        hp: entity.hp,
+        maxHp: entity.maxHp,
+        lastSeen: state.time
+      };
+    }
+    return {
+      id: entity.id,
+      kind: 'unit',
+      type: entity.type,
+      x: entity.x,
+      y: entity.y,
+      hp: entity.hp,
+      maxHp: entity.maxHp,
+      lastSeen: state.time
+    };
+  }
+
+  function rememberVisibleEnemies(team) {
+    for (const unit of state.units) {
+      if (unit.hp <= 0 || unit.teamId === team.id) continue;
+      if (!isVisibleToTeam(team, unit.x, unit.y)) continue;
+      team.enemyMemory.units[unit.id] = makeEnemyMemoryRecord(unit);
+    }
+    for (const building of state.buildings) {
+      if (building.hp <= 0 || building.teamId === team.id) continue;
+      const x = building.x + building.widthCells * CELL * 0.5;
+      const y = building.y + building.heightCells * CELL * 0.5;
+      if (!isVisibleToTeam(team, x, y)) continue;
+      team.enemyMemory.buildings[building.id] = makeEnemyMemoryRecord(building);
+    }
+  }
+
+  function reconcileEnemyMemory(team) {
+    for (const memory of Object.values(team.enemyMemory.units)) {
+      if (!isVisibleToTeam(team, memory.x, memory.y)) continue;
+      const unit = state.units.find((entry) => entry.id === memory.id && entry.hp > 0 && entry.teamId !== team.id);
+      if (!unit) delete team.enemyMemory.units[memory.id];
+    }
+    for (const memory of Object.values(team.enemyMemory.buildings)) {
+      if (!isVisibleToTeam(team, memory.x, memory.y)) continue;
+      const building = state.buildings.find((entry) => entry.id === memory.id && entry.hp > 0 && entry.teamId !== team.id);
+      if (!building) delete team.enemyMemory.buildings[memory.id];
+    }
+  }
+
+  function updateEnemyMemory() {
+    for (const team of state.teams) {
+      if (!team.enemyMemory) team.enemyMemory = { units: {}, buildings: {} };
+      rememberVisibleEnemies(team);
+      reconcileEnemyMemory(team);
+    }
+  }
+
+  function getKnownEnemyMemories(team, kind) {
+    return Object.values(team.enemyMemory?.[kind] || {});
+  }
+
+  function getBestAiAttackMemory(team) {
+    const buildingPriority = { hq: 100, factory: 70, lab: 60, refinery: 50, barracks: 45, turret: 35, silo: 20, oilDerrick: 15 };
+    const buildingTarget = getKnownEnemyMemories(team, 'buildings')
+      .sort((a, b) => {
+        const priorityDelta = (buildingPriority[b.type] || 0) - (buildingPriority[a.type] || 0);
+        if (priorityDelta) return priorityDelta;
+        return b.lastSeen - a.lastSeen;
+      })[0];
+    if (buildingTarget) return buildingTarget;
+    return getKnownEnemyMemories(team, 'units').sort((a, b) => b.lastSeen - a.lastSeen)[0] || null;
+  }
+
+  function getNextAiScoutDestination(team, fromX, fromY) {
+    const gridCols = Math.max(1, Math.ceil(WORLD_CELLS_X / AI_SCOUT_GRID_STEP));
+    const gridRows = Math.max(1, Math.ceil(WORLD_CELLS_Y / AI_SCOUT_GRID_STEP));
+    const total = gridCols * gridRows;
+    const startIndex = team.ai.scoutCursor || 0;
+    let fallback = null;
+    let fallbackDist = Infinity;
+    for (let offset = 0; offset < total; offset++) {
+      const index = (startIndex + offset) % total;
+      const row = Math.floor(index / gridCols);
+      const columnInRow = index % gridCols;
+      const col = row % 2 === 0 ? columnInRow : (gridCols - 1 - columnInRow);
+      const cellX = clamp(col * AI_SCOUT_GRID_STEP + Math.floor(AI_SCOUT_GRID_STEP * 0.5), 1, WORLD_CELLS_X - 2);
+      const cellY = clamp(row * AI_SCOUT_GRID_STEP + Math.floor(AI_SCOUT_GRID_STEP * 0.5), 1, WORLD_CELLS_Y - 2);
+      const key = worldToKey(cellX, cellY);
+      const worldX = cellX * CELL + CELL * 0.5;
+      const worldY = cellY * CELL + CELL * 0.5;
+      const distance = dist(fromX, fromY, worldX, worldY);
+      if (!team.fogExplored[key]) {
+        team.ai.scoutCursor = (index + 1) % total;
+        return { x: worldX, y: worldY, cellX, cellY };
+      }
+      if (distance < fallbackDist) {
+        fallback = { x: worldX, y: worldY, cellX, cellY };
+        fallbackDist = distance;
+      }
+    }
+    return fallback;
+  }
+
+  function assignAiScoutOrders(team) {
+    const scouts = state.units.filter((unit) => unit.teamId === team.id && unit.type === 'scout' && unit.hp > 0);
+    if (!scouts.length) return;
+    const knownTarget = getBestAiAttackMemory(team);
+    for (const scout of scouts) {
+      const order = scout.order || { type: 'idle' };
+      const scoutingOrder = (order.type === 'move' || order.type === 'attack-move') && order.aiScout;
+      const targetCellX = order.aiScoutCellX ?? pxToCell(scout.x);
+      const targetCellY = order.aiScoutCellY ?? pxToCell(scout.y);
+      const scoutingCellExplored = scoutingOrder ? !!team.fogExplored[worldToKey(targetCellX, targetCellY)] : false;
+      const shouldRetaskForRecon = !knownTarget && (order.type === 'idle' || (scoutingOrder && scoutingCellExplored));
+      const shouldRetaskForTarget = !!knownTarget && (order.type === 'idle' || scoutingOrder);
+      if (shouldRetaskForTarget) {
+        releaseClaim(scout);
+        scout.order = { type: 'attack-move', x: knownTarget.x, y: knownTarget.y, aiScout: false };
+        scout.targetId = null;
+        scout.path.length = 0;
+        continue;
+      }
+      if (!shouldRetaskForRecon) continue;
+      const destination = getNextAiScoutDestination(team, scout.x, scout.y);
+      if (!destination) continue;
+      releaseClaim(scout);
+      scout.order = {
+        type: 'attack-move',
+        x: destination.x,
+        y: destination.y,
+        aiScout: true,
+        aiScoutCellX: destination.cellX,
+        aiScoutCellY: destination.cellY
+      };
+      scout.targetId = null;
+      scout.path.length = 0;
+    }
   }
 
   function buildAllSpriteSheets() {
@@ -1952,7 +2124,13 @@ html{
         spice: team.spice,
         storage: team.storage,
         research: [...team.research],
-        ai: { ...team.ai }
+        ai: { ...team.ai },
+        scanRevealUntil: team.scanRevealUntil || 0,
+        scanCooldownUntil: team.scanCooldownUntil || 0,
+        enemyMemory: {
+          units: Object.values(team.enemyMemory?.units || {}),
+          buildings: Object.values(team.enemyMemory?.buildings || {})
+        }
       })),
       tiles: Array.from(state.tiles),
       spiceHeat: Array.from(state.spiceHeat),
@@ -2065,6 +2243,12 @@ html{
       team.storage = saved.storage;
       team.research = new Set(saved.research || []);
       team.ai = { ...team.ai, ...(saved.ai || {}) };
+      team.scanRevealUntil = saved.scanRevealUntil || 0;
+      team.scanCooldownUntil = saved.scanCooldownUntil || 0;
+      team.enemyMemory = {
+        units: Object.fromEntries(((saved.enemyMemory && saved.enemyMemory.units) || []).map((entry) => [entry.id, { ...entry }])),
+        buildings: Object.fromEntries(((saved.enemyMemory && saved.enemyMemory.buildings) || []).map((entry) => [entry.id, { ...entry }]))
+      };
       team.fogVisible.fill(0);
       team.fogExplored.fill(0);
     }
@@ -2257,9 +2441,10 @@ html{
     updateUnits(dt);
     updateTurrets(dt);
     updateProjectiles(dt);
+    refreshFog();
+    updateEnemyMemory();
     updateAI(dt);
     updateEffects(dt);
-    refreshFog();
     checkVictory();
     updateTransientUi(dt);
   }
@@ -2269,6 +2454,80 @@ html{
       state.toastTimer -= dt;
       if (state.toastTimer <= 0) toastEl.classList.remove('show');
     }
+    for (let i = state.minimapAlerts.length - 1; i >= 0; i--) {
+      state.minimapAlerts[i].life -= dt;
+      if (state.minimapAlerts[i].life <= 0) state.minimapAlerts.splice(i, 1);
+    }
+    if (state.selectionUiRefreshTimer > 0) {
+      state.selectionUiRefreshTimer -= dt;
+    }
+    if (state.selectionUiRefreshTimer <= 0 && shouldRefreshSelectionUiForTimers()) {
+      state.selectionUiRefreshTimer = 0.25;
+      updateSelectionUI();
+    }
+  }
+
+  function shouldRefreshSelectionUiForTimers() {
+    const selected = getSelectedEntities();
+    if (!selected.length) return false;
+    return selected.some((entity) => {
+      if (entity.kind !== 'building' || entity.teamId !== TEAM_PLAYER) return false;
+      if (entity.queue && entity.queue.kind === 'research') return true;
+      if (entity.type !== 'hq') return false;
+      const team = teamById(entity.teamId);
+      return !!team && (team.scanRevealUntil > state.time || team.scanCooldownUntil > state.time);
+    });
+  }
+
+  function getScanAvailability(teamId) {
+    const team = teamById(teamId);
+    if (!team) return { enabled: false, active: false, reason: 'Scan unavailable.' };
+    if (!team.research.has('scanner')) return { enabled: false, active: false, reason: 'Research Scanner at the Signal Lab first.' };
+    if (team.scanRevealUntil > state.time) {
+      return { enabled: false, active: true, reason: 'Scan active for ' + Math.ceil(team.scanRevealUntil - state.time) + 's.' };
+    }
+    if (team.scanCooldownUntil > state.time) {
+      return { enabled: false, active: false, reason: 'Scan recharging for ' + Math.ceil(team.scanCooldownUntil - state.time) + 's.' };
+    }
+    return { enabled: true, active: false, reason: 'Reveal the whole battlefield for ' + SCAN_DURATION + ' seconds. Cooldown ' + SCAN_COOLDOWN + ' seconds.' };
+  }
+
+  function queueMinimapScanAlert(teamId) {
+    const team = teamById(teamId);
+    if (!team) return;
+    state.minimapAlerts.push({
+      teamId,
+      color: team.color,
+      life: 0.9,
+      maxLife: 0.9
+    });
+  }
+
+  function activateSatelliteScan(teamId) {
+    const availability = getScanAvailability(teamId);
+    if (!availability.enabled) {
+      if (teamId === TEAM_PLAYER) {
+        playUiCue('error');
+        toast(availability.reason);
+      }
+      return false;
+    }
+    const team = teamById(teamId);
+    team.scanRevealUntil = state.time + SCAN_DURATION;
+    team.scanCooldownUntil = state.time + SCAN_COOLDOWN;
+    queueMinimapScanAlert(teamId);
+    refreshFog();
+    updateEnemyMemory();
+    rebuildMinimapFogLayer();
+    state.selectionUiRefreshTimer = 0.25;
+    updateSelectionUI();
+    if (teamId === TEAM_PLAYER) {
+      playUiCue('ready');
+      toast('Satellite scan online. Battlefield revealed.');
+    } else {
+      toast('Enemy satellite scan sweeping the battlefield.');
+    }
+    return true;
   }
 
   function updateProduction(dt) {
@@ -3068,7 +3327,10 @@ html{
     if (barracks && !barracks.queue && counts.scout < 5 && canAfford(team.id, 'scout')) enqueueProduction(barracks, 'unit', 'scout');
     if (lab && !lab.queue && !team.research.has('rangefinding') && canAffordResearch(team.id, 'rangefinding')) enqueueProduction(lab, 'research', 'rangefinding');
     else if (lab && !lab.queue && team.research.has('rangefinding') && !team.research.has('composite-armor') && canAffordResearch(team.id, 'composite-armor')) enqueueProduction(lab, 'research', 'composite-armor');
+    else if (lab && !lab.queue && team.research.has('composite-armor') && !team.research.has('scanner') && canAffordResearch(team.id, 'scanner')) enqueueProduction(lab, 'research', 'scanner');
     if (factory && !factory.queue && canAfford(team.id, 'tank')) enqueueProduction(factory, 'unit', 'tank');
+    if (hq) tryActivateAiScan(team, counts, hq);
+    assignAiScoutOrders(team);
 
     for (const harvester of state.units.filter((unit) => unit.teamId === team.id && unit.type === 'harvester' && unit.hp > 0)) {
       if (harvester.order.type === 'idle') {
@@ -3098,7 +3360,7 @@ html{
   function placeAiOilDerrick(team, engineer) {
     const def = BUILDING_TYPES.oilDerrick;
     const candidates = state.resources
-      .filter((resource) => resource.resourceType === 'oil' && !resource.claimedBy && team.fogExplored[worldToKey(resource.cellX, resource.cellY)])
+      .filter((resource) => resource.resourceType === 'oil' && !resource.claimedBy && (team.fogExplored[worldToKey(resource.cellX, resource.cellY)] || team.fogVisible[worldToKey(resource.cellX, resource.cellY)]))
       .sort((a, b) => dist(engineer.x, engineer.y, a.x, a.y) - dist(engineer.x, engineer.y, b.x, b.y));
     for (const resource of candidates) {
       for (let oy = 0; oy < def.size[1]; oy++) {
@@ -3113,6 +3375,20 @@ html{
     return false;
   }
 
+  function tryActivateAiScan(team, counts, hq = nearestBuilding(team.id, 'hq', WORLD_WIDTH, WORLD_HEIGHT)) {
+    if (!hq || !team.research.has('scanner')) return false;
+    if (team.scanRevealUntil > state.time || team.scanCooldownUntil > state.time) return false;
+    const hqCenterX = hq.x + hq.widthCells * CELL * 0.5;
+    const hqCenterY = hq.y + hq.heightCells * CELL * 0.5;
+    const enemyThreatNearBase = getKnownEnemyMemories(team, 'units').some((memory) => state.time - memory.lastSeen <= 10 && dist(memory.x, memory.y, hqCenterX, hqCenterY) <= AI_SCAN_THREAT_RADIUS);
+    const hiddenOilTarget = state.resources.some((resource) => resource.resourceType === 'oil' && !resource.claimedBy && !team.fogExplored[worldToKey(resource.cellX, resource.cellY)]);
+    const knownTarget = getBestAiAttackMemory(team);
+    const assaultReady = ((counts.tank || 0) + (counts.scout || 0) >= 5);
+    const needsTargetRefresh = !knownTarget || state.time - knownTarget.lastSeen > AI_MEMORY_SCAN_STALE_AFTER;
+    if (!enemyThreatNearBase && !hiddenOilTarget && !(assaultReady && needsTargetRefresh)) return false;
+    return activateSatelliteScan(team.id);
+  }
+
   function toastOnceForAi(type) {
     if (type === 'lab' && !state.aiLabAnnounced) {
       state.aiLabAnnounced = true;
@@ -3121,13 +3397,13 @@ html{
   }
 
   function runAiAttack(team) {
-    const playerBase = nearestBuilding(TEAM_PLAYER, 'hq', 0, 0);
-    if (!playerBase) return;
+    const target = getBestAiAttackMemory(team);
+    if (!target) return;
     const attackers = state.units.filter((unit) => unit.teamId === team.id && unit.hp > 0 && (unit.type === 'scout' || unit.type === 'tank'));
     if (attackers.length < 3) return;
     const wave = attackers.slice(0, Math.min(attackers.length, 6));
     for (const unit of wave) {
-      unit.order = { type: 'attack-move', x: playerBase.x + playerBase.widthCells * CELL * 0.5, y: playerBase.y + playerBase.heightCells * CELL * 0.5 };
+      unit.order = { type: 'attack-move', x: target.x, y: target.y };
       unit.path.length = 0;
     }
     toast('Enemy raiders pushing through the open dunes.');
@@ -3583,6 +3859,20 @@ html{
     const halfHeight = state.render.height / (2 * state.camera.zoom * CELL) * scaleY;
     const centerX = (state.camera.x / CELL) * scaleX;
     const centerY = (state.camera.y / CELL) * scaleY;
+    for (const alert of state.minimapAlerts) {
+      const t = alert.life / alert.maxLife;
+      const pulse = 0.45 + (1 - t) * 0.55;
+      minimapCtx.save();
+      minimapCtx.globalAlpha = 0.1 + t * 0.16;
+      minimapCtx.fillStyle = alert.color;
+      minimapCtx.fillRect(0, 0, minimap.width, minimap.height);
+      minimapCtx.globalAlpha = 0.35 + t * 0.45;
+      minimapCtx.strokeStyle = alert.color;
+      minimapCtx.lineWidth = 2;
+      const inset = 1 + Math.round(pulse * 2);
+      minimapCtx.strokeRect(inset, inset, minimap.width - inset * 2, minimap.height - inset * 2);
+      minimapCtx.restore();
+    }
     minimapCtx.strokeStyle = '#fff1bc';
     minimapCtx.strokeRect(centerX - halfWidth, centerY - halfHeight, halfWidth * 2, halfHeight * 2);
   }
@@ -4092,7 +4382,6 @@ html{
   function actionVisual(label) {
     if (ACTION_VISUALS[label]) return ACTION_VISUALS[label];
     if (label.startsWith('Build ')) return { icon: 'factory', short: label.replace('Build ', '').split(' ')[0] };
-    if (Object.values(RESEARCH).some((item) => item.label === label)) return { icon: 'tech', short: 'Tech' };
     return { icon: 'context', short: label.length > 6 ? label.slice(0, 6) : label };
   }
 
@@ -4447,6 +4736,10 @@ html{
           }
         }, false, false, availability.disabled, RESEARCH[researchKey].label + '. ' + availability.reason);
       }
+    }
+    if (building.type === 'hq') {
+      const scanAvailability = getScanAvailability(building.teamId);
+      makeAction('Scan', () => activateSatelliteScan(building.teamId), scanAvailability.active, false, !scanAvailability.enabled, 'Scan. ' + scanAvailability.reason);
     }
     if (canSetRally(building)) makeAction('Set Rally', () => setPendingRally(building), state.pendingRallyBuildingId === building.id);
     makeAction('Sell', () => sellBuilding(building), false, true);
