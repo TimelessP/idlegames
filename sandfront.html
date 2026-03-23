@@ -277,13 +277,16 @@ html{
 }
 
 #keyboardCursor{
+  --cursor-size:24px;
+  --cursor-pixel:1px;
+  --cursor-line:34px;
   position:absolute;
-  width:24px;
-  height:24px;
-  margin-left:-12px;
-  margin-top:-12px;
-  border:1px solid #9fd7ff;
-  box-shadow:0 0 0 1px rgba(22,14,10,.75) inset;
+  width:var(--cursor-size);
+  height:var(--cursor-size);
+  margin-left:calc(var(--cursor-size) * -0.5);
+  margin-top:calc(var(--cursor-size) * -0.5);
+  border:var(--cursor-pixel) solid #9fd7ff;
+  box-shadow:0 0 0 var(--cursor-pixel) rgba(22,14,10,.75) inset;
   display:none;
   pointer-events:none;
 }
@@ -294,8 +297,8 @@ html{
   background:#9fd7ff;
 }
 
-#keyboardCursor::before{left:50%;top:-6px;width:1px;height:34px;transform:translateX(-50%)}
-#keyboardCursor::after{top:50%;left:-6px;height:1px;width:34px;transform:translateY(-50%)}
+#keyboardCursor::before{left:50%;top:50%;width:var(--cursor-pixel);height:var(--cursor-line);transform:translate(-50%,-50%)}
+#keyboardCursor::after{top:50%;left:50%;height:var(--cursor-pixel);width:var(--cursor-line);transform:translate(-50%,-50%)}
 
 .toast{
   position:absolute;
@@ -453,7 +456,7 @@ html{
       </div>
       <div class="selection-meta" id="selectionMeta"></div>
       <div class="action-grid" id="actionGrid"></div>
-      <div class="context-help" id="contextHelp">Mouse: drag to marquee, or right-drag an empty view to pan. Keyboard: IJKL cursor, digits for groups. Touch: use the command strip and pinch to zoom.</div>
+      <div class="context-help" id="contextHelp">Mouse: drag to marquee, or right-drag an empty view to pan. Trackpad: two-finger slide pans, pinch zooms. Keyboard: IJKL cursor, digits for groups. Touch: use the command strip and pinch to pan and zoom.</div>
     </div>
 
     <div class="hud-panel touch-strip" id="touchStrip">
@@ -553,6 +556,7 @@ html{
   const actionGrid = document.getElementById('actionGrid');
   const contextHelp = document.getElementById('contextHelp');
   const menuOverlay = document.getElementById('menuOverlay');
+  const menuCard = menuOverlay.querySelector('.menu-card');
   const menuTitle = document.getElementById('menuTitle');
   const menuOverview = document.getElementById('menuOverview');
   const menuItems = document.getElementById('menuItems');
@@ -579,6 +583,8 @@ html{
     'Sell': { icon: 'stop', short: 'Sell' }
   };
 
+  const KEYBOARD_CURSOR_IDLE_HIDE = 2.5;
+
   const state = {
     seed: 0,
     nextId: 1,
@@ -592,13 +598,15 @@ html{
     fpsFrames: 0,
     render: { width: BASE_VIEW, height: BASE_VIEW, lastDraw: 0 },
     camera: { x: WORLD_WIDTH * 0.25, y: WORLD_HEIGHT * 0.25, zoom: 1.8, minZoom: 0.85, maxZoom: 3.25 },
-    keyboardCursor: { x: 0, y: 0, visible: false, anchor: null },
+    keyboardCursor: { x: 0, y: 0, visible: false, anchor: null, idleTimer: 0 },
     settings: { ...DEFAULT_SETTINGS },
     commandMode: 'context',
     touchMode: 'select',
     pendingBuild: null,
+    pendingBuildInputSource: 'pointer',
     placementGhost: null,
     pendingRallyBuildingId: null,
+    pendingRallyInputSource: 'pointer',
     pendingActionLabel: '',
     toastTimer: 0,
     storageFullToastAt: -Infinity,
@@ -693,14 +701,14 @@ html{
       title: 'Victory',
       overview: 'The Dust Cartel command hub is down. Consolidate the field, review the outcome, or launch another skirmish.',
       itemBuilder: 'buildVictoryMenuItems',
-      actions: []
+      actions: [{ label: 'Close', behavior: 'close' }]
     },
     defeat: {
       isRoot: true,
       title: 'Defeated',
       overview: 'The command hub has fallen. Review the collapse, adjust your approach, and launch another skirmish.',
       itemBuilder: 'buildDefeatMenuItems',
-      actions: []
+      actions: [{ label: 'Close', behavior: 'close' }]
     },
     settings: {
       title: 'Settings',
@@ -739,9 +747,9 @@ html{
     },
     buildMenu: {
       title: 'Build Orders',
-      overview: 'Choose a structure, then place it on the map using the current cursor or pointer.',
+      overview: 'Choose a structure, then place it on the map using the current cursor or pointer. Press the bracketed hotkey to build immediately.',
       itemBuilder: 'buildStructureMenuItems',
-      actions: [{ label: 'Back', behavior: 'back' }]
+      actions: [{ label: 'Close', behavior: 'close' }]
     }
   };
 
@@ -756,6 +764,18 @@ html{
     buildAboutMenuItems,
     buildStructureMenuItems
   };
+
+  const BUILD_MENU_HOTKEYS = {
+    refinery: 'R',
+    silo: 'S',
+    oilDerrick: 'O',
+    barracks: 'B',
+    lab: 'L',
+    factory: 'F',
+    turret: 'T'
+  };
+
+  let menuFocusRestoreTarget = null;
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -1261,8 +1281,7 @@ html{
     if (!base) return;
     state.camera.x = base.x + base.widthCells * CELL * 0.5;
     state.camera.y = base.y + base.heightCells * CELL * 0.5;
-    state.keyboardCursor.x = state.camera.x;
-    state.keyboardCursor.y = state.camera.y;
+    setKeyboardCursorWorld(state.camera.x, state.camera.y, state.keyboardCursor.visible);
     clampCamera();
   }
 
@@ -1846,7 +1865,9 @@ html{
       commandMode: state.commandMode,
       touchMode: state.touchMode,
       pendingBuild: state.pendingBuild,
+      pendingBuildInputSource: state.pendingBuildInputSource,
       pendingRallyBuildingId: state.pendingRallyBuildingId,
+      pendingRallyInputSource: state.pendingRallyInputSource,
       pendingActionLabel: state.pendingActionLabel,
       groups: state.groups.map((group) => [...group]),
       selectedIds: [...state.selectedIds],
@@ -1919,7 +1940,9 @@ html{
     state.commandMode = snapshot.commandMode || 'context';
     state.touchMode = snapshot.touchMode || 'select';
     state.pendingBuild = snapshot.pendingBuild || null;
+    state.pendingBuildInputSource = snapshot.pendingBuildInputSource || 'pointer';
     state.pendingRallyBuildingId = snapshot.pendingRallyBuildingId || null;
+    state.pendingRallyInputSource = snapshot.pendingRallyInputSource || 'pointer';
     state.pendingActionLabel = snapshot.pendingActionLabel || '';
     state.groups = Array.isArray(snapshot.groups) ? snapshot.groups.map((group) => [...group]) : Array.from({ length: MAX_GROUPS }, () => []);
     state.selectedIds = new Set(snapshot.selectedIds || []);
@@ -2124,6 +2147,20 @@ html{
     state.paused = true;
     persistGame(true);
     openMenu('main');
+  }
+
+  function hasSelectedEngineer() {
+    return getSelectedEntities().some((entity) => entity.kind === 'unit' && entity.teamId === TEAM_PLAYER && entity.type === 'engineer' && entity.hp > 0);
+  }
+
+  function openBuildMenu() {
+    if (!hasSelectedEngineer()) {
+      playUiCue('error');
+      toast('Select an engineer first.');
+      return false;
+    }
+    openMenu('buildMenu');
+    return true;
   }
 
   function update(dt) {
@@ -3287,7 +3324,8 @@ html{
     for (const building of selectedBuildings) {
       const geometry = getBuildingGeometry(building);
       const start = worldToScreen(geometry.visualCenter.x, geometry.visualCenter.y);
-      const end = worldToScreen(building.rally.x, building.rally.y);
+      const rallyWorld = state.pendingRallyBuildingId === building.id ? getPendingRallyWorld() : building.rally;
+      const end = worldToScreen(rallyWorld.x, rallyWorld.y);
       drawPixelDashedLine(start.x, start.y, end.x, end.y, '#fff1b2');
       drawHollowMarker(end.x, end.y, Math.max(5, Math.round(5 * state.camera.zoom * 0.6)), '#fff1b2');
     }
@@ -3509,9 +3547,97 @@ html{
     return state.matchStarted ? 'pause' : 'main';
   }
 
+  function getCurrentMenuEntry() {
+    return state.menuStack[state.menuStack.length - 1] || null;
+  }
+
+  function getMenuItemsForDefinition(def) {
+    return def.itemBuilder ? MENU_HANDLERS[def.itemBuilder]() : (def.items || []);
+  }
+
+  function getMenuButtonLabel(item) {
+    return item.hotkey ? item.label + ' [' + item.hotkey + ']' : item.label;
+  }
+
+  function getMenuFocusableElements() {
+    return [...menuOverlay.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+      .filter((element) => element.offsetParent !== null);
+  }
+
+  function focusMenuEntryPoint() {
+    const focusables = getMenuFocusableElements();
+    if (focusables.length) {
+      focusables[0].focus();
+      return;
+    }
+    menuCard.setAttribute('tabindex', '-1');
+    menuCard.focus();
+  }
+
+  function focusMenuBoundary(reverse) {
+    const focusables = getMenuFocusableElements();
+    if (!focusables.length) {
+      menuCard.setAttribute('tabindex', '-1');
+      menuCard.focus();
+      return;
+    }
+    const current = document.activeElement;
+    const index = focusables.indexOf(current);
+    if (index === -1) {
+      focusables[reverse ? focusables.length - 1 : 0].focus();
+      return;
+    }
+    const nextIndex = (index + (reverse ? focusables.length - 1 : 1)) % focusables.length;
+    focusables[nextIndex].focus();
+  }
+
+  function runMenuItem(item) {
+    if (item.action) item.action();
+    handleMenuBehavior(item.behavior || 'keep-open', item.target || null);
+  }
+
+  function runMenuAction(action) {
+    if (action.action) action.action();
+    handleMenuBehavior(action.behavior, action.target || null);
+  }
+
+  function handleMenuEscape() {
+    const entry = getCurrentMenuEntry();
+    if (!entry) {
+      openMenu(getRootMenuId());
+      return;
+    }
+    const actions = entry.def.actions || [];
+    const closeAction = actions.find((action) => action.behavior === 'close');
+    if (closeAction) {
+      runMenuAction(closeAction);
+      return;
+    }
+    const backAction = actions.find((action) => action.behavior === 'back');
+    if (backAction) {
+      runMenuAction(backAction);
+      return;
+    }
+    if (entry.def.isRoot) closeMenu();
+    else handleMenuBehavior('back');
+  }
+
+  function handleMenuHotkey(event) {
+    const entry = getCurrentMenuEntry();
+    if (!entry || event.altKey || event.ctrlKey || event.metaKey) return false;
+    const key = event.key && event.key.length === 1 ? event.key.toUpperCase() : '';
+    if (!key) return false;
+    const match = getMenuItemsForDefinition(entry.def).find((item) => item.type === 'action' && item.hotkey === key);
+    if (!match) return false;
+    event.preventDefault();
+    runMenuItem(match);
+    return true;
+  }
+
   function openMenu(id) {
     const def = MENUS[id];
     if (!def) return;
+    if (!menuOverlay.classList.contains('open')) menuFocusRestoreTarget = document.activeElement;
     if (def.isRoot) state.menuStack = [{ id, def }];
     else state.menuStack.push({ id, def });
     state.paused = state.matchStarted || !!state.winner;
@@ -3525,16 +3651,18 @@ html{
     menuOverlay.classList.remove('open');
     if (state.matchStarted && !state.winner) state.paused = false;
     playUiCue('menu-close');
+    if (menuFocusRestoreTarget && typeof menuFocusRestoreTarget.focus === 'function') menuFocusRestoreTarget.focus();
+    menuFocusRestoreTarget = null;
   }
 
   function renderMenu() {
-    const entry = state.menuStack[state.menuStack.length - 1];
+    const entry = getCurrentMenuEntry();
     if (!entry) return;
     const def = entry.def;
     menuTitle.textContent = def.title;
     menuOverview.textContent = def.overview;
     menuStack.innerHTML = state.menuStack.map((item) => '<span class="menu-crumb">' + item.def.title + '</span>').join('');
-    const items = def.itemBuilder ? MENU_HANDLERS[def.itemBuilder]() : (def.items || []);
+    const items = getMenuItemsForDefinition(def);
     menuItems.innerHTML = '';
     for (const item of items) {
       menuItems.appendChild(renderMenuItem(item));
@@ -3545,9 +3673,10 @@ html{
       button.type = 'button';
       button.className = 'menu-button';
       button.textContent = action.label;
-      button.addEventListener('click', () => handleMenuBehavior(action.behavior, action.target || null));
+      button.addEventListener('click', () => runMenuAction(action));
       menuActions.appendChild(button);
     }
+    requestAnimationFrame(() => focusMenuEntryPoint());
   }
 
   function renderMenuItem(item) {
@@ -3557,11 +3686,9 @@ html{
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'menu-button';
-      button.textContent = item.label;
-      button.addEventListener('click', () => {
-        if (item.action) item.action();
-        handleMenuBehavior(item.behavior || 'keep-open', item.target || null);
-      });
+      button.textContent = getMenuButtonLabel(item);
+      if (item.hotkey) button.setAttribute('aria-keyshortcuts', item.hotkey);
+      button.addEventListener('click', () => runMenuItem(item));
       row.appendChild(button);
       if (item.description) {
         const p = document.createElement('p');
@@ -3677,11 +3804,8 @@ html{
 
   function buildPauseMenuItems() {
     return [
-      { type: 'action', label: state.winner ? 'Play Again' : 'Resume', description: state.winner ? 'Restart the scenario after the last outcome.' : 'Return to command immediately.', action: () => state.winner ? restartMatch() : closeMenu(), behavior: 'close' },
       { type: 'action', label: 'Settings', description: 'Graphics, controls, and audio.', target: 'settings', behavior: 'submenu' },
-      { type: 'action', label: 'Build Orders', description: 'If an engineer is selected, choose a structure to place.', target: 'buildMenu', behavior: 'submenu' },
-      { type: 'action', label: 'Restart Skirmish', description: 'Keep the same game rules and generate a fresh map.', action: restartMatch, behavior: 'close' },
-      { type: 'action', label: 'Main Menu', description: 'Return to the title overlay without discarding the current battle.', action: stopToMainMenu, behavior: 'close' }
+      { type: 'action', label: 'Restart Skirmish', description: 'Keep the same game rules and generate a fresh map.', action: restartMatch, behavior: 'close' }
     ];
   }
 
@@ -3699,7 +3823,6 @@ html{
       { type: 'text', label: 'Forces Remaining', description: remainingUnits + ' units and ' + remainingStructures + ' structures still standing.' },
       { type: 'text', label: 'Spice Reserve', description: String(Math.floor(team?.spice || 0)) + ' spice banked.' },
       { type: 'action', label: 'Play Again', description: 'Start a fresh skirmish on a new procedural map.', action: restartMatch, behavior: 'close' },
-      { type: 'action', label: 'Main Menu', description: 'Return to the title overlay and keep this victory state available.', action: stopToMainMenu, behavior: 'close' },
       { type: 'action', label: 'Settings', description: 'Adjust controls, graphics, and audio before the next battle.', target: 'settings', behavior: 'submenu' },
       { type: 'action', label: 'About', description: 'Review the tech tree, controls, and simulation notes.', target: 'about', behavior: 'submenu' }
     ];
@@ -3719,7 +3842,6 @@ html{
       { type: 'text', label: 'Forces Left', description: remainingUnits + ' units and ' + remainingStructures + ' structures survived the collapse.' },
       { type: 'text', label: 'Spice Reserve', description: String(Math.floor(team?.spice || 0)) + ' spice remained in reserve.' },
       { type: 'action', label: 'Play Again', description: 'Retry on a fresh procedural map with the same rules.', action: restartMatch, behavior: 'close' },
-      { type: 'action', label: 'Main Menu', description: 'Return to the title overlay and keep this defeat state available.', action: stopToMainMenu, behavior: 'close' },
       { type: 'action', label: 'Settings', description: 'Adjust controls, graphics, and audio before the next attempt.', target: 'settings', behavior: 'submenu' },
       { type: 'action', label: 'About', description: 'Review the tech tree, controls, and simulation notes.', target: 'about', behavior: 'submenu' }
     ];
@@ -3727,9 +3849,11 @@ html{
 
   function buildControlMenuItems() {
     return [
-      { type: 'text', label: 'Mouse', description: 'Drag left button for marquee. Shift-drag adds. Right-click issues context commands, or right-drag empty ground to pan. Wheel zooms. Hover screen edges to scroll.' },
-      { type: 'text', label: 'Keyboard', description: 'Arrow keys pan. IJKL moves the command cursor. Space selects under the cursor. X sets a marquee anchor. Enter issues the current command. Ctrl+A selects all visible friendly units. Ctrl+0-9 stores groups; Shift+Ctrl+0-9 clears; 0-9 recalls; Shift+digit adds.' },
-      { type: 'text', label: 'Touch', description: 'Select, Pan, Move, Attack, and Gather are available in the touch strip. One-finger drag in Select mode draws a marquee. Two-finger pinch pans and zooms. Tap the minimap to jump.' }
+      { type: 'text', label: 'Mouse', description: 'Left-drag draws a marquee and Shift adds to it. Left-clicking empty ground clears selection. Right-click issues the current context command, and right-drag on empty ground pans. Mouse wheel zooms. Hovering the screen edges also pans the camera.' },
+      { type: 'text', label: 'Trackpad', description: 'Single-finger click behaves like mouse left-click, so clicking empty ground deselects. Two-finger slide pans. Ctrl plus a two-finger gesture zooms when the browser exposes pinch that way. During building placement, a single click places the green ghost if valid.' },
+      { type: 'text', label: 'Touch', description: 'Use the touch strip to switch between Select, Pan, Move, Attack, and Gather. In Select mode, dragging one finger draws a marquee and tapping empty ground clears selection. In Move, Attack, Gather, or Build placement, a tap issues that command instead of deselecting. Two-finger pinch pans and zooms together. Tap the minimap to jump.' },
+      { type: 'text', label: 'Keyboard', description: 'Arrow keys pan the camera. IJKL moves the keyboard command cursor, which fades after a short idle pause. Space selects under that cursor. X sets or completes a keyboard marquee. Enter issues the current command, and during building placement it places the current ghost location. Tab and Shift+Tab cycle visible friendly units only. [ and ] cycle visible friendly buildings. Ctrl+A selects all visible friendly units. Ctrl+0-9 stores groups; Shift+Ctrl+0-9 clears; 0-9 recalls; Shift+digit adds.' },
+      { type: 'text', label: 'Modes And Menus', description: 'M, A, G, R, and C switch Move, Attack, Gather, Repair, and Context. B opens Build Orders when an engineer is selected, and the bracketed letters inside that menu choose structures immediately. Esc cancels a pending build placement, closes menus with Close, and goes Back in menus that expose Back.' }
     ];
   }
 
@@ -3818,11 +3942,12 @@ html{
     return BUILDABLE_BY_ENGINEER.map((key) => ({
       type: 'action',
       label: BUILDING_TYPES[key].label,
+      hotkey: BUILD_MENU_HOTKEYS[key],
       description: key === 'oilDerrick'
-        ? ('Cost ' + BUILDING_TYPES[key].cost + ' spice. Must cover an oil deposit.')
+        ? ('Hotkey ' + BUILD_MENU_HOTKEYS[key] + '. Cost ' + BUILDING_TYPES[key].cost + ' spice. Must cover an oil deposit.')
         : key === 'silo'
-          ? ('Cost ' + BUILDING_TYPES[key].cost + ' spice. Adds ' + BUILDING_TYPES[key].storage + ' storage.')
-          : ('Cost ' + BUILDING_TYPES[key].cost + ' spice'),
+          ? ('Hotkey ' + BUILD_MENU_HOTKEYS[key] + '. Cost ' + BUILDING_TYPES[key].cost + ' spice. Adds ' + BUILDING_TYPES[key].storage + ' storage.')
+          : ('Hotkey ' + BUILD_MENU_HOTKEYS[key] + '. Cost ' + BUILDING_TYPES[key].cost + ' spice'),
       action: () => setPendingBuild(key),
       behavior: 'close'
     }));
@@ -3830,6 +3955,7 @@ html{
 
   function setPendingBuild(type) {
     state.pendingBuild = type;
+    state.pendingBuildInputSource = state.pointer.inside ? 'pointer' : 'keyboard';
     state.commandMode = 'build';
     state.pendingActionLabel = BUILDING_TYPES[type].label;
     updateCommandReadout();
@@ -3981,7 +4107,7 @@ html{
         addMeta('Sight', String(entity.sight));
         addMeta('Speed', String(def.speed));
         makeCommonUnitActions(units);
-        if (def.builder) makeAction('Build', () => openMenu('buildMenu'));
+        if (def.builder) makeAction('Build', () => openBuildMenu());
         if (entity.type === 'harvester') makeAction('Auto Gather', () => autoAssignHarvesters(units));
       } else {
         const def = BUILDING_TYPES[entity.type];
@@ -4146,7 +4272,9 @@ html{
 
   function setCommandMode(mode) {
     state.pendingBuild = null;
+    state.pendingBuildInputSource = 'pointer';
     state.pendingRallyBuildingId = null;
+    state.pendingRallyInputSource = 'pointer';
     state.commandMode = mode;
     state.pendingActionLabel = '';
     updateTouchButtons();
@@ -4158,7 +4286,9 @@ html{
 
   function setPendingRally(building) {
     state.pendingBuild = null;
+    state.pendingBuildInputSource = 'pointer';
     state.pendingRallyBuildingId = building.id;
+    state.pendingRallyInputSource = state.pointer.inside ? 'pointer' : 'keyboard';
     state.commandMode = 'context';
     state.pendingActionLabel = 'Rally';
     updateTouchButtons();
@@ -4170,12 +4300,94 @@ html{
 
   function clearPendingBuildPlacement(clearSelection = false) {
     state.pendingBuild = null;
+    state.pendingBuildInputSource = 'pointer';
     state.placementGhost = null;
     state.commandMode = 'context';
     state.pendingActionLabel = '';
     if (clearSelection) state.selectedIds.clear();
     updateCommandReadout();
     updateSelectionUI();
+  }
+
+  function setKeyboardCursorWorld(worldX, worldY, visible = true) {
+    state.keyboardCursor.x = clamp(worldX, 0, WORLD_WIDTH);
+    state.keyboardCursor.y = clamp(worldY, 0, WORLD_HEIGHT);
+    state.keyboardCursor.idleTimer = 0;
+    if (visible) state.keyboardCursor.visible = true;
+    clampKeyboardCursorToViewport();
+  }
+
+  function getViewportWorldBounds() {
+    const halfWidth = state.render.width / (2 * state.camera.zoom);
+    const halfHeight = state.render.height / (2 * state.camera.zoom);
+    return {
+      minX: clamp(state.camera.x - halfWidth, 0, WORLD_WIDTH),
+      maxX: clamp(state.camera.x + halfWidth, 0, WORLD_WIDTH),
+      minY: clamp(state.camera.y - halfHeight, 0, WORLD_HEIGHT),
+      maxY: clamp(state.camera.y + halfHeight, 0, WORLD_HEIGHT)
+    };
+  }
+
+  function clampKeyboardCursorToViewport() {
+    const bounds = getViewportWorldBounds();
+    state.keyboardCursor.x = clamp(state.keyboardCursor.x, bounds.minX, bounds.maxX);
+    state.keyboardCursor.y = clamp(state.keyboardCursor.y, bounds.minY, bounds.maxY);
+  }
+
+  function getPlacementGhostCenterWorld(ghost) {
+    return {
+      x: (ghost.cellX + 0.5) * CELL,
+      y: (ghost.cellY + 0.5) * CELL
+    };
+  }
+
+  function setPendingBuildInputSource(source) {
+    state.pendingBuildInputSource = source;
+  }
+
+  function setPendingRallyInputSource(source) {
+    state.pendingRallyInputSource = source;
+  }
+
+  function primeKeyboardCursorFromPlacementGhost() {
+    const ghost = getPlacementGhostAtCursor();
+    const world = getPlacementGhostCenterWorld(ghost);
+    setKeyboardCursorWorld(world.x, world.y, false);
+  }
+
+  function getPendingRallyWorld() {
+    if (state.pendingRallyInputSource === 'keyboard') {
+      return { x: state.keyboardCursor.x, y: state.keyboardCursor.y };
+    }
+    if (state.pointer.inside) {
+      return screenToWorld(state.pointer.x, state.pointer.y);
+    }
+    const building = getEntityById(state.pendingRallyBuildingId);
+    if (building && building.kind === 'building') {
+      return { x: building.rally.x, y: building.rally.y };
+    }
+    return { x: state.keyboardCursor.x, y: state.keyboardCursor.y };
+  }
+
+  function primeKeyboardCursorFromPendingRally() {
+    const world = getPendingRallyWorld();
+    setKeyboardCursorWorld(world.x, world.y, false);
+  }
+
+  function focusKeyboardCursorOnSelectionOrCamera(force = false) {
+    if (state.keyboardCursor.visible && !force) return;
+    const selected = getSelectedEntities();
+    if (selected.length) {
+      const xs = selected.map((entity) => entity.kind === 'building' ? entity.x + entity.widthCells * CELL * 0.5 : entity.x);
+      const ys = selected.map((entity) => entity.kind === 'building' ? entity.y + entity.heightCells * CELL * 0.5 : entity.y);
+      setKeyboardCursorWorld(
+        xs.reduce((sum, value) => sum + value, 0) / xs.length,
+        ys.reduce((sum, value) => sum + value, 0) / ys.length,
+        true
+      );
+      return;
+    }
+    setKeyboardCursorWorld(state.camera.x, state.camera.y, true);
   }
 
   function updateTouchButtons() {
@@ -4185,12 +4397,16 @@ html{
   }
 
   function updateKeyboardCursorUi() {
-    if (!state.keyboardCursor.visible) {
+    if (!state.keyboardCursor.visible || state.pendingBuild || state.pendingRallyBuildingId) {
       keyboardCursorEl.style.display = 'none';
       return;
     }
     const rect = stageShell.getBoundingClientRect();
     const screen = worldToScreen(state.keyboardCursor.x, state.keyboardCursor.y);
+    const pixelSize = Math.max(1, Math.round(Math.min(rect.width / state.render.width, rect.height / state.render.height) * Math.max(1, state.camera.zoom)));
+    keyboardCursorEl.style.setProperty('--cursor-pixel', pixelSize + 'px');
+    keyboardCursorEl.style.setProperty('--cursor-size', Math.max(pixelSize * 8, 12) + 'px');
+    keyboardCursorEl.style.setProperty('--cursor-line', Math.max(pixelSize * 12, 18) + 'px');
     keyboardCursorEl.style.display = 'block';
     keyboardCursorEl.style.left = (screen.x / state.render.width * rect.width) + 'px';
     keyboardCursorEl.style.top = (screen.y / state.render.height * rect.height) + 'px';
@@ -4205,8 +4421,32 @@ html{
     clampCamera();
   }
 
+  function getViewportSelectionBounds() {
+    const halfWidth = state.render.width * 0.5 / state.camera.zoom;
+    const halfHeight = state.render.height * 0.5 / state.camera.zoom;
+    return {
+      minX: state.camera.x - halfWidth,
+      maxX: state.camera.x + halfWidth,
+      minY: state.camera.y - halfHeight,
+      maxY: state.camera.y + halfHeight
+    };
+  }
+
+  function isWorldPointInViewport(worldX, worldY) {
+    const bounds = getViewportSelectionBounds();
+    return worldX >= bounds.minX && worldX <= bounds.maxX && worldY >= bounds.minY && worldY <= bounds.maxY;
+  }
+
+  function getVisiblePlayerUnits() {
+    return state.units.filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0 && isWorldPointInViewport(unit.x, unit.y));
+  }
+
+  function getVisiblePlayerBuildings() {
+    return state.buildings.filter((building) => building.teamId === TEAM_PLAYER && building.hp > 0 && isWorldPointInViewport(building.x + building.widthCells * CELL * 0.5, building.y + building.heightCells * CELL * 0.5));
+  }
+
   function cyclePlayerUnit(reverse) {
-    const list = state.units.filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0);
+    const list = getVisiblePlayerUnits();
     if (!list.length) return;
     const selected = getSelectedEntities().find((entity) => entity.kind === 'unit');
     const index = selected ? list.findIndex((unit) => unit.id === selected.id) : -1;
@@ -4217,16 +4457,20 @@ html{
     updateSelectionUI();
   }
 
+  function cyclePlayerBuilding(reverse) {
+    const list = getVisiblePlayerBuildings();
+    if (!list.length) return;
+    const selected = getSelectedEntities().find((entity) => entity.kind === 'building');
+    const index = selected ? list.findIndex((building) => building.id === selected.id) : -1;
+    const next = list[(index + (reverse ? list.length - 1 : 1)) % list.length];
+    state.selectedIds = new Set([next.id]);
+    centerOnEntities([next]);
+    playUiCue('select');
+    updateSelectionUI();
+  }
+
   function selectAllPlayerUnits() {
-    const halfWidth = state.render.width * 0.5 / state.camera.zoom;
-    const halfHeight = state.render.height * 0.5 / state.camera.zoom;
-    const minX = state.camera.x - halfWidth;
-    const maxX = state.camera.x + halfWidth;
-    const minY = state.camera.y - halfHeight;
-    const maxY = state.camera.y + halfHeight;
-    const ids = state.units
-      .filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0 && unit.x >= minX && unit.x <= maxX && unit.y >= minY && unit.y <= maxY)
-      .map((unit) => unit.id);
+    const ids = getVisiblePlayerUnits().map((unit) => unit.id);
     selectEntities(ids, false);
   }
 
@@ -4520,7 +4764,11 @@ html{
   }
 
   function getPlacementGhostAtCursor() {
-    const world = state.pointer.inside ? screenToWorld(state.pointer.x, state.pointer.y) : { x: state.keyboardCursor.x, y: state.keyboardCursor.y };
+    const world = state.pendingBuildInputSource === 'keyboard'
+      ? { x: state.keyboardCursor.x, y: state.keyboardCursor.y }
+      : state.pointer.inside
+        ? screenToWorld(state.pointer.x, state.pointer.y)
+        : { x: state.keyboardCursor.x, y: state.keyboardCursor.y };
     return getPlacementGhostAtWorld(world.x, world.y);
   }
 
@@ -4637,14 +4885,34 @@ html{
   function updateKeyboardCursor(dt) {
     const speed = 220;
     let moved = false;
+    if (pressed('KeyI') || pressed('KeyK') || pressed('KeyJ') || pressed('KeyL')) {
+      if (state.pendingBuild) {
+        if (state.pendingBuildInputSource !== 'keyboard') {
+          primeKeyboardCursorFromPlacementGhost();
+          setPendingBuildInputSource('keyboard');
+        }
+      } else if (state.pendingRallyBuildingId) {
+        if (state.pendingRallyInputSource !== 'keyboard') {
+          primeKeyboardCursorFromPendingRally();
+          setPendingRallyInputSource('keyboard');
+        }
+      } else if (!state.keyboardCursor.visible) {
+        focusKeyboardCursorOnSelectionOrCamera(true);
+      }
+    }
     if (pressed('KeyI')) { state.keyboardCursor.y -= speed * dt; moved = true; }
     if (pressed('KeyK')) { state.keyboardCursor.y += speed * dt; moved = true; }
     if (pressed('KeyJ')) { state.keyboardCursor.x -= speed * dt; moved = true; }
     if (pressed('KeyL')) { state.keyboardCursor.x += speed * dt; moved = true; }
     if (moved) {
-      state.keyboardCursor.visible = true;
+      state.keyboardCursor.idleTimer = 0;
       state.keyboardCursor.x = clamp(state.keyboardCursor.x, 0, WORLD_WIDTH);
       state.keyboardCursor.y = clamp(state.keyboardCursor.y, 0, WORLD_HEIGHT);
+      clampKeyboardCursorToViewport();
+      state.keyboardCursor.visible = !(state.pendingBuild || state.pendingRallyBuildingId);
+    } else if (state.keyboardCursor.visible && !state.keyboardCursor.anchor && !state.pendingBuild && !state.pendingRallyBuildingId) {
+      state.keyboardCursor.idleTimer += dt;
+      if (state.keyboardCursor.idleTimer >= KEYBOARD_CURSOR_IDLE_HIDE) state.keyboardCursor.visible = false;
     }
   }
 
@@ -4663,6 +4931,7 @@ html{
       if (rect.bottom - state.pointer.y < edge) state.camera.y += panSpeed * dt;
     }
     clampCamera();
+    clampKeyboardCursorToViewport();
   }
 
   const keyState = new Set();
@@ -4671,43 +4940,86 @@ html{
   }
 
   function handleKeyDown(event) {
+    if (menuOverlay.classList.contains('open')) {
+      if (event.code === 'Escape') {
+        event.preventDefault();
+        if (state.pendingBuild) {
+          clearPendingBuildPlacement();
+          playUiCue('cancel');
+          toast('Construction cancelled.');
+        } else {
+          handleMenuEscape();
+        }
+        return;
+      }
+      if (event.code === 'Tab') {
+        event.preventDefault();
+        focusMenuBoundary(event.shiftKey);
+        return;
+      }
+      if (handleMenuHotkey(event)) return;
+      if (isFormElement(event.target)) return;
+      return;
+    }
     if (isFormElement(event.target)) return;
-    keyState.add(event.code);
     if (event.ctrlKey && event.code === 'KeyA') {
+      keyState.add(event.code);
       event.preventDefault();
       selectAllPlayerUnits();
       return;
     }
     if (event.code === 'Escape') {
       event.preventDefault();
-      if (menuOverlay.classList.contains('open') && state.menuStack[state.menuStack.length - 1]?.id === 'main') closeMenu();
-      else if (menuOverlay.classList.contains('open')) openMenu(getRootMenuId());
-      else openMenu(getRootMenuId());
+      if (state.pendingBuild) {
+        clearPendingBuildPlacement();
+        playUiCue('cancel');
+        toast('Construction cancelled.');
+      } else openMenu(getRootMenuId());
       return;
     }
+    keyState.add(event.code);
     if (event.code === 'Tab') {
       event.preventDefault();
       cyclePlayerUnit(event.shiftKey);
       return;
     }
-    if (event.code === 'KeyM') { event.preventDefault(); setCommandMode('move'); return; }
-    if (event.code === 'KeyA') { event.preventDefault(); setCommandMode('attack'); return; }
-    if (event.code === 'KeyG') { event.preventDefault(); setCommandMode('gather'); return; }
-    if (event.code === 'KeyR') { event.preventDefault(); setCommandMode('repair'); return; }
-    if (event.code === 'KeyC') { event.preventDefault(); setCommandMode('context'); return; }
-    if (event.code === 'KeyB') { event.preventDefault(); openMenu('buildMenu'); return; }
+    if (event.code === 'BracketLeft') {
+      event.preventDefault();
+      cyclePlayerBuilding(true);
+      return;
+    }
+    if (event.code === 'BracketRight') {
+      event.preventDefault();
+      cyclePlayerBuilding(false);
+      return;
+    }
+    if (event.code === 'KeyM') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('move'); return; }
+    if (event.code === 'KeyA') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('attack'); return; }
+    if (event.code === 'KeyG') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('gather'); return; }
+    if (event.code === 'KeyR') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('repair'); return; }
+    if (event.code === 'KeyC') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('context'); return; }
+    if (event.code === 'KeyB') { event.preventDefault(); openBuildMenu(); return; }
     if (event.code === 'Equal' || event.code === 'NumpadAdd') { event.preventDefault(); zoomAt(1.12, state.keyboardCursor.x, state.keyboardCursor.y); return; }
     if (event.code === 'Minus' || event.code === 'NumpadSubtract') { event.preventDefault(); zoomAt(0.89, state.keyboardCursor.x, state.keyboardCursor.y); return; }
     if (event.code === 'Space') {
       event.preventDefault();
-      state.keyboardCursor.visible = true;
+      focusKeyboardCursorOnSelectionOrCamera();
       const entity = findEntityAt(state.keyboardCursor.x, state.keyboardCursor.y);
       if (isSelectableEntity(entity)) selectEntities([entity.id], entity.kind === 'resource' || entity.teamId !== TEAM_PLAYER ? false : event.shiftKey);
       return;
     }
     if (event.code === 'Enter' || event.code === 'NumpadEnter') {
       event.preventDefault();
-      issueContextCommand(state.keyboardCursor.x, state.keyboardCursor.y);
+      if (state.pendingBuild) {
+        const ghost = getPlacementGhostAtCursor();
+        issueContextCommand((ghost.cellX + 0.5) * CELL, (ghost.cellY + 0.5) * CELL);
+      } else if (state.pendingRallyBuildingId) {
+        const world = getPendingRallyWorld();
+        issueContextCommand(world.x, world.y);
+      } else {
+        focusKeyboardCursorOnSelectionOrCamera();
+        issueContextCommand(state.keyboardCursor.x, state.keyboardCursor.y);
+      }
       return;
     }
     if (event.code === 'KeyX') {
@@ -4760,12 +5072,6 @@ html{
     state.pointer = { x: event.clientX, y: event.clientY, inside: true, type: event.pointerType || 'mouse' };
     if (menuOverlay.classList.contains('open')) return;
     if (event.target.closest('.hud-panel')) return;
-    if (state.pendingBuild && event.pointerType !== 'touch' && event.button === 0) {
-      clearPendingBuildPlacement(true);
-      playUiCue('cancel');
-      toast('Construction cancelled.');
-      return;
-    }
     stageShell.setPointerCapture(event.pointerId);
     state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY, type: event.pointerType });
     if (event.pointerType === 'touch' && state.pointers.size >= 2) {
@@ -4773,7 +5079,11 @@ html{
       return;
     }
     const world = screenToWorld(event.clientX, event.clientY);
-    if (state.pendingBuild) getPlacementGhostAtWorld(world.x, world.y);
+    if (state.pendingBuild) {
+      setPendingBuildInputSource('pointer');
+      getPlacementGhostAtWorld(world.x, world.y);
+    }
+    if (state.pendingRallyBuildingId) setPendingRallyInputSource('pointer');
     const entity = findEntityAt(world.x, world.y);
     if (state.touchMode === 'pan' && event.pointerType === 'touch') {
       state.drag = { mode: 'pan', startClientX: event.clientX, startClientY: event.clientY, cameraX: state.camera.x, cameraY: state.camera.y };
@@ -4795,16 +5105,16 @@ html{
       };
       return;
     }
-    const shouldCommandTouch = event.pointerType === 'touch' && (state.pendingBuild || state.pendingRallyBuildingId || state.touchMode !== 'select');
+    const shouldCommandPointer = !!state.pendingBuild || !!state.pendingRallyBuildingId || (event.pointerType === 'touch' && state.touchMode !== 'select');
     state.drag = {
-      mode: shouldCommandTouch ? 'command' : 'select',
+      mode: shouldCommandPointer ? 'command' : 'select',
       startClientX: event.clientX,
       startClientY: event.clientY,
       startWorld: world,
       additive: event.shiftKey,
       entity
     };
-    if (event.pointerType !== 'touch' && isSelectableEntity(entity)) {
+    if (!shouldCommandPointer && event.pointerType !== 'touch' && isSelectableEntity(entity)) {
       selectEntities([entity.id], entity.kind === 'resource' || entity.teamId !== TEAM_PLAYER ? false : event.shiftKey);
     }
   }
@@ -4812,6 +5122,8 @@ html{
   function handlePointerMove(event) {
     state.pointer = { x: event.clientX, y: event.clientY, inside: true, type: event.pointerType || 'mouse' };
     if (state.pointers.has(event.pointerId)) state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY, type: event.pointerType });
+    if (state.pendingBuild) setPendingBuildInputSource('pointer');
+    if (state.pendingRallyBuildingId) setPendingRallyInputSource('pointer');
     if (state.pinch && state.pointers.size >= 2) {
       updatePinch();
       return;
@@ -4920,9 +5232,44 @@ html{
     updateSelectionUI();
   }
 
+  function normalizeWheelDelta(event) {
+    if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) return { x: event.deltaX * 16, y: event.deltaY * 16 };
+    if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) return { x: event.deltaX * stageShell.clientWidth, y: event.deltaY * stageShell.clientHeight };
+    return { x: event.deltaX, y: event.deltaY };
+  }
+
+  function isLikelyTrackpadWheel(event) {
+    if (event.ctrlKey) return false;
+    if (event.deltaMode !== WheelEvent.DOM_DELTA_PIXEL) return false;
+    const absX = Math.abs(event.deltaX);
+    const absY = Math.abs(event.deltaY);
+    if (absX > 0.01) return true;
+    if (absY < 0.01) return false;
+    if (!Number.isInteger(event.deltaX) || !Number.isInteger(event.deltaY)) return true;
+    return absY < 80;
+  }
+
+  function panCameraByScreenDelta(deltaX, deltaY) {
+    state.camera.x += deltaX / state.camera.zoom;
+    state.camera.y += deltaY / state.camera.zoom;
+    clampCamera();
+  }
+
   function handleWheel(event) {
     if (menuOverlay.classList.contains('open')) return;
     event.preventDefault();
+    const delta = normalizeWheelDelta(event);
+    if (event.ctrlKey) {
+      const zoomDirection = Math.abs(delta.y) >= Math.abs(delta.x) ? delta.y : delta.x;
+      if (Math.abs(zoomDirection) < 0.01) return;
+      const world = screenToWorld(event.clientX, event.clientY);
+      zoomAt(zoomDirection < 0 ? 1.05 : 0.95, world.x, world.y);
+      return;
+    }
+    if (isLikelyTrackpadWheel(event)) {
+      panCameraByScreenDelta(delta.x, delta.y);
+      return;
+    }
     const world = screenToWorld(event.clientX, event.clientY);
     zoomAt(event.deltaY < 0 ? 1.08 : 0.92, world.x, world.y);
   }
