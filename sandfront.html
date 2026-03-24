@@ -183,6 +183,26 @@ html{
   padding:1px 3px;
 }
 
+.action-progress{
+  position:absolute;
+  left:4px;
+  right:4px;
+  bottom:4px;
+  height:4px;
+  border-radius:999px;
+  background:rgba(24,14,10,.55);
+  border:1px solid rgba(255,224,176,.14);
+  overflow:hidden;
+  pointer-events:none;
+}
+
+.action-progress-fill{
+  height:100%;
+  border-radius:999px;
+  background:linear-gradient(90deg,#ffe4a1,#c58b33);
+  box-shadow:0 0 5px rgba(255,224,176,.25);
+}
+
 .button-icon{
   width:15px;
   height:15px;
@@ -685,7 +705,7 @@ html{
   };
 
   const BUILDING_TYPES = {
-    hq: { label: 'Command Hub', size: [3, 3], hp: 720, sight: 11, cost: 0, queue: ['engineer'], storage: 380, sprite: 'hq', geometry: { spriteOffset: { x: -20, y: -20 } } },
+    hq: { label: 'Command Hub', size: [3, 3], hp: 720, sight: 11, cost: 420, queue: ['engineer'], storage: 380, sprite: 'hq', geometry: { spriteOffset: { x: -20, y: -20 } } },
     refinery: { label: 'Refinery', size: [3, 3], hp: 460, sight: 10, cost: 180, queue: ['harvester'], storage: 500, sprite: 'refinery', buildRequires: ['hq'], geometry: { spriteOffset: { x: -20, y: -20 } } },
     silo: { label: 'Spice Silo', size: [2, 2], hp: 300, sight: 8, cost: 120, storage: 28000, sprite: 'silo', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     oilDerrick: { label: 'Oil Derrick', size: [2, 2], hp: 320, sight: 9, cost: 140, incomeRate: OIL_TRICKLE_AMOUNT / OIL_TRICKLE_INTERVAL, sprite: 'oilDerrick', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
@@ -701,7 +721,7 @@ html{
     scanner: { label: 'Scanner', cost: 260, time: 20, requires: ['lab', 'rangefinding'], desc: 'Unlocks the Command Hub satellite scan action.' }
   };
 
-  const BUILDABLE_BY_ENGINEER = ['refinery', 'silo', 'oilDerrick', 'barracks', 'lab', 'factory', 'turret'];
+  const BUILDABLE_BY_ENGINEER = ['hq', 'refinery', 'silo', 'oilDerrick', 'barracks', 'lab', 'factory', 'turret'];
   const TILE = { SAND: 0, ROCK: 1, RIDGE: 2 };
   const MANUAL_ORDER_LOCK = {
     move: 6,
@@ -735,14 +755,14 @@ html{
     victory: {
       isRoot: true,
       title: 'Victory',
-      overview: 'The Dust Cartel command hub is down. Consolidate the field, review the outcome, or launch another skirmish.',
+      overview: 'All Dust Cartel command hubs are down. Consolidate the field, review the outcome, or launch another skirmish.',
       itemBuilder: 'buildVictoryMenuItems',
       actions: [{ label: 'Close', behavior: 'close' }]
     },
     defeat: {
       isRoot: true,
       title: 'Defeated',
-      overview: 'The command hub has fallen. Review the collapse, adjust your approach, and launch another skirmish.',
+      overview: 'All command hubs have fallen. Review the collapse, adjust your approach, and launch another skirmish.',
       itemBuilder: 'buildDefeatMenuItems',
       actions: [{ label: 'Close', behavior: 'close' }]
     },
@@ -802,6 +822,7 @@ html{
   };
 
   const BUILD_MENU_HOTKEYS = {
+    hq: 'H',
     refinery: 'R',
     silo: 'S',
     oilDerrick: 'O',
@@ -928,8 +949,6 @@ html{
       research: new Set(['hq']),
       sprites: { units: {}, buildings: {} },
       ai: { thinkTimer: 0, attackTimer: 10 + random() * 5, waveBias: 0, scoutCursor: 0 },
-      scanRevealUntil: 0,
-      scanCooldownUntil: 0,
       enemyMemory: { units: {}, buildings: {} },
       fogVisible: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
       fogExplored: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y)
@@ -988,7 +1007,7 @@ html{
     updateTouchButtons();
     updateSelectionUI();
     updateResourceUI();
-    hudObjective.textContent = 'Harvest spice, build out your tech tree, and destroy the Dust Cartel command hub.';
+    hudObjective.textContent = 'Harvest spice, build out your tech tree, and destroy every Dust Cartel command hub.';
   }
 
   function generateWorld() {
@@ -1143,6 +1162,8 @@ html{
       incomeTimer: 0,
       resourceId: oilResource ? oilResource.id : null,
       spawnedAt: state.time,
+      scanRevealUntil: 0,
+      scanCooldownUntil: 0,
       rally: { x: (cellX + def.size[0] + 1) * CELL, y: (cellY + def.size[1] * 0.5) * CELL }
     };
     state.buildings.push(building);
@@ -1389,7 +1410,7 @@ html{
     releaseClaim(unit);
     const startCellX = pxToCell(unit.x);
     const startCellY = pxToCell(unit.y);
-    const found = findNearestFreeCell(startCellX, startCellY, 3, unit.id, false);
+    const found = findNearestFreeCell(startCellX, startCellY, 3, unit.id, false, unit);
     if (!found) return;
     unit.x = found.x * CELL + CELL * 0.5;
     unit.y = found.y * CELL + CELL * 0.5;
@@ -1417,13 +1438,38 @@ html{
     return true;
   }
 
-  function findNearestFreeCell(cellX, cellY, maxRadius, ignoreUnitId, ignoreUnits = false) {
+  function getMoverDefinition(mover = null) {
+    if (!mover) return null;
+    if (typeof mover === 'string') return UNIT_TYPES[mover] || null;
+    if (mover.type) return UNIT_TYPES[mover.type] || null;
+    return null;
+  }
+
+  function canMoverTraverseTile(mover, tile) {
+    const def = getMoverDefinition(mover);
+    if (tile !== TILE.RIDGE) return true;
+    return !(def && def.vehicle);
+  }
+
+  function getTerrainTraversalPenalty(mover, tile) {
+    if (tile === TILE.ROCK) return 0.25;
+    if (tile === TILE.RIDGE) return 0.55;
+    return 0;
+  }
+
+  function getTerrainSpeedMultiplier(mover, tile) {
+    if (tile === TILE.ROCK) return 0.84;
+    if (tile === TILE.RIDGE) return 0.68;
+    return 1;
+  }
+
+  function findNearestFreeCell(cellX, cellY, maxRadius, ignoreUnitId, ignoreUnits = false, mover = null) {
     for (let radius = 0; radius <= maxRadius; radius++) {
       for (let oy = -radius; oy <= radius; oy++) {
         for (let ox = -radius; ox <= radius; ox++) {
           const nx = cellX + ox;
           const ny = cellY + oy;
-          if (!isCellWalkable(nx, ny, ignoreUnitId, ignoreUnits)) continue;
+          if (!isCellWalkable(nx, ny, ignoreUnitId, ignoreUnits, mover)) continue;
           return { x: nx, y: ny };
         }
       }
@@ -1431,7 +1477,7 @@ html{
     return null;
   }
 
-  function findBuildingSpawnCell(building, maxRadius = 5, ignoreUnits = false) {
+  function findBuildingSpawnCell(building, maxRadius = 5, ignoreUnits = false, mover = null) {
     const footprint = {
       left: building.cellX,
       top: building.cellY,
@@ -1459,7 +1505,7 @@ html{
         candidates.push({ x: right, y });
       }
       for (const candidate of candidates) {
-        if (!isCellWalkable(candidate.x, candidate.y, null, ignoreUnits)) continue;
+        if (!isCellWalkable(candidate.x, candidate.y, null, ignoreUnits, mover)) continue;
         const score = Math.abs(candidate.x - rallyCell.x) + Math.abs(candidate.y - rallyCell.y);
         if (score < bestScore) {
           best = candidate;
@@ -1485,7 +1531,7 @@ html{
     let bestScore = Infinity;
     for (let x = footprint.left - 1; x <= footprint.right + 1; x++) {
       for (const y of [footprint.top - 1, footprint.bottom + 1]) {
-        if (!isCellWalkable(x, y, ignoreUnitId, false)) continue;
+        if (!isCellWalkable(x, y, ignoreUnitId, false, 'engineer')) continue;
         const score = Math.abs(x - fromCell.x) + Math.abs(y - fromCell.y);
         if (score < bestScore) {
           best = { x, y };
@@ -1495,7 +1541,7 @@ html{
     }
     for (let y = footprint.top; y <= footprint.bottom; y++) {
       for (const x of [footprint.left - 1, footprint.right + 1]) {
-        if (!isCellWalkable(x, y, ignoreUnitId, false)) continue;
+        if (!isCellWalkable(x, y, ignoreUnitId, false, 'engineer')) continue;
         const score = Math.abs(x - fromCell.x) + Math.abs(y - fromCell.y);
         if (score < bestScore) {
           best = { x, y };
@@ -1532,10 +1578,10 @@ html{
     return true;
   }
 
-  function isCellWalkable(cellX, cellY, ignoreUnitId = null, ignoreUnits = false) {
+  function isCellWalkable(cellX, cellY, ignoreUnitId = null, ignoreUnits = false, mover = null) {
     if (cellX < 0 || cellY < 0 || cellX >= WORLD_CELLS_X || cellY >= WORLD_CELLS_Y) return false;
     const key = worldToKey(cellX, cellY);
-    if (state.staticBlocked[key]) return false;
+    if (!canMoverTraverseTile(mover, state.tiles[key])) return false;
     if (state.buildingCells.has(key)) return false;
     if (!ignoreUnits) {
       const claim = state.unitClaims.get(key);
@@ -1556,14 +1602,14 @@ html{
     }
   }
 
-  function findPath(startX, startY, goalX, goalY, ignoreUnitId = null) {
+  function findPath(startX, startY, goalX, goalY, ignoreUnitId = null, mover = null) {
     const startCellX = clamp(pxToCell(startX), 0, WORLD_CELLS_X - 1);
     const startCellY = clamp(pxToCell(startY), 0, WORLD_CELLS_Y - 1);
     let goalCellX = clamp(pxToCell(goalX), 0, WORLD_CELLS_X - 1);
     let goalCellY = clamp(pxToCell(goalY), 0, WORLD_CELLS_Y - 1);
 
-    if (!isCellWalkable(goalCellX, goalCellY, ignoreUnitId, true)) {
-      const alt = findNearestFreeCell(goalCellX, goalCellY, 4, ignoreUnitId, true);
+    if (!isCellWalkable(goalCellX, goalCellY, ignoreUnitId, true, mover)) {
+      const alt = findNearestFreeCell(goalCellX, goalCellY, 4, ignoreUnitId, true, mover);
       if (!alt) return [];
       goalCellX = alt.x;
       goalCellY = alt.y;
@@ -1601,11 +1647,11 @@ html{
         const ny = cellY + dy;
         const neighbor = worldToKey(nx, ny);
         if (closed.has(neighbor)) continue;
-        if (!isCellWalkable(nx, ny, ignoreUnitId, true) && neighbor !== goalKey) continue;
+        if (!isCellWalkable(nx, ny, ignoreUnitId, true, mover) && neighbor !== goalKey) continue;
         if (dx && dy) {
-          if (!isCellWalkable(cellX + dx, cellY, ignoreUnitId, true) || !isCellWalkable(cellX, cellY + dy, ignoreUnitId, true)) continue;
+          if (!isCellWalkable(cellX + dx, cellY, ignoreUnitId, true, mover) || !isCellWalkable(cellX, cellY + dy, ignoreUnitId, true, mover)) continue;
         }
-        const terrainPenalty = state.tiles[neighbor] === TILE.ROCK ? 0.25 : 0;
+        const terrainPenalty = getTerrainTraversalPenalty(mover, state.tiles[neighbor]);
         const tentativeG = (gScore.get(current) || Infinity) + cost + terrainPenalty;
         if (tentativeG < (gScore.get(neighbor) || Infinity)) {
           came.set(neighbor, current);
@@ -1636,10 +1682,41 @@ html{
     return path;
   }
 
+  function hasRidgeSightBlock(fromCellX, fromCellY, toCellX, toCellY) {
+    if (fromCellX === toCellX && fromCellY === toCellY) return false;
+    if (state.tiles[worldToKey(fromCellX, fromCellY)] === TILE.RIDGE) return false;
+    let x = fromCellX;
+    let y = fromCellY;
+    const dx = Math.abs(toCellX - fromCellX);
+    const dy = Math.abs(toCellY - fromCellY);
+    const stepX = fromCellX < toCellX ? 1 : -1;
+    const stepY = fromCellY < toCellY ? 1 : -1;
+    let error = dx - dy;
+
+    while (!(x === toCellX && y === toCellY)) {
+      const doubledError = error * 2;
+      if (doubledError > -dy) {
+        error -= dy;
+        x += stepX;
+      }
+      if (doubledError < dx) {
+        error += dx;
+        y += stepY;
+      }
+      if (x === toCellX && y === toCellY) return false;
+      if (state.tiles[worldToKey(x, y)] === TILE.RIDGE) return true;
+    }
+    return false;
+  }
+
+  function canSeeWorldPoint(fromX, fromY, toX, toY) {
+    return !hasRidgeSightBlock(pxToCell(fromX), pxToCell(fromY), pxToCell(toX), pxToCell(toY));
+  }
+
   function refreshFog() {
     for (const team of state.teams) {
       team.fogVisible.fill(0);
-      if (team.scanRevealUntil > state.time) {
+      if (state.buildings.some((building) => building.teamId === team.id && building.type === 'hq' && building.hp > 0 && (building.scanRevealUntil || 0) > state.time)) {
         team.fogVisible.fill(1);
       }
       const mark = (x, y, radius) => {
@@ -1652,6 +1729,7 @@ html{
             const ny = cy + oy;
             if (nx < 0 || ny < 0 || nx >= WORLD_CELLS_X || ny >= WORLD_CELLS_Y) continue;
             if (ox * ox + oy * oy > rad * rad) continue;
+            if (hasRidgeSightBlock(cx, cy, nx, ny)) continue;
             const key = worldToKey(nx, ny);
             team.fogVisible[key] = 1;
             team.fogExplored[key] = 1;
@@ -2125,8 +2203,6 @@ html{
         storage: team.storage,
         research: [...team.research],
         ai: { ...team.ai },
-        scanRevealUntil: team.scanRevealUntil || 0,
-        scanCooldownUntil: team.scanCooldownUntil || 0,
         enemyMemory: {
           units: Object.values(team.enemyMemory?.units || {}),
           buildings: Object.values(team.enemyMemory?.buildings || {})
@@ -2208,6 +2284,8 @@ html{
     }));
     state.buildings = (snapshot.buildings || []).map((building) => ({
       ...building,
+      scanRevealUntil: building.scanRevealUntil || 0,
+      scanCooldownUntil: building.scanCooldownUntil || 0,
       queue: building.queue ? { ...building.queue } : null,
       rally: building.rally ? { ...building.rally } : { x: building.x, y: building.y }
     }));
@@ -2243,8 +2321,6 @@ html{
       team.storage = saved.storage;
       team.research = new Set(saved.research || []);
       team.ai = { ...team.ai, ...(saved.ai || {}) };
-      team.scanRevealUntil = saved.scanRevealUntil || 0;
-      team.scanCooldownUntil = saved.scanCooldownUntil || 0;
       team.enemyMemory = {
         units: Object.fromEntries(((saved.enemyMemory && saved.enemyMemory.units) || []).map((entry) => [entry.id, { ...entry }])),
         buildings: Object.fromEntries(((saved.enemyMemory && saved.enemyMemory.buildings) || []).map((entry) => [entry.id, { ...entry }]))
@@ -2287,8 +2363,8 @@ html{
     updateResourceUI();
     updateCommandReadout();
     hudObjective.textContent = state.winner
-      ? (state.winner === 'Sun Nomads' ? 'Victory. The rival command hub is smoking on the horizon.' : 'The command hub is down. Resume or restart to reclaim the dunes.')
-      : 'Harvest spice, build out your tech tree, and destroy the Dust Cartel command hub.';
+      ? (state.winner === 'Sun Nomads' ? 'Victory. All rival command hubs are smoking on the horizon.' : 'All command hubs are down. Resume or restart to reclaim the dunes.')
+      : 'Harvest spice, build out your tech tree, and destroy every Dust Cartel command hub.';
     return true;
   }
 
@@ -2472,24 +2548,37 @@ html{
     if (!selected.length) return false;
     return selected.some((entity) => {
       if (entity.kind !== 'building' || entity.teamId !== TEAM_PLAYER) return false;
-      if (entity.queue && entity.queue.kind === 'research') return true;
+      if (entity.queue) return true;
       if (entity.type !== 'hq') return false;
-      const team = teamById(entity.teamId);
-      return !!team && (team.scanRevealUntil > state.time || team.scanCooldownUntil > state.time);
+      return (entity.scanRevealUntil || 0) > state.time || (entity.scanCooldownUntil || 0) > state.time;
     });
   }
 
-  function getScanAvailability(teamId) {
-    const team = teamById(teamId);
-    if (!team) return { enabled: false, active: false, reason: 'Scan unavailable.' };
+  function getScanAvailability(building) {
+    const team = building ? teamById(building.teamId) : null;
+    if (!building || building.kind !== 'building' || building.type !== 'hq' || !team) return { enabled: false, active: false, reason: 'Scan unavailable.' };
     if (!team.research.has('scanner')) return { enabled: false, active: false, reason: 'Research Scanner at the Signal Lab first.' };
-    if (team.scanRevealUntil > state.time) {
-      return { enabled: false, active: true, reason: 'Scan active for ' + Math.ceil(team.scanRevealUntil - state.time) + 's.' };
+    if ((building.scanRevealUntil || 0) > state.time) {
+      return { enabled: false, active: true, reason: 'Scan active for ' + Math.ceil(building.scanRevealUntil - state.time) + 's.' };
     }
-    if (team.scanCooldownUntil > state.time) {
-      return { enabled: false, active: false, reason: 'Scan recharging for ' + Math.ceil(team.scanCooldownUntil - state.time) + 's.' };
+    if ((building.scanCooldownUntil || 0) > state.time) {
+      return { enabled: false, active: false, reason: 'Scan recharging for ' + Math.ceil(building.scanCooldownUntil - state.time) + 's.' };
     }
     return { enabled: true, active: false, reason: 'Reveal the whole battlefield for ' + SCAN_DURATION + ' seconds. Cooldown ' + SCAN_COOLDOWN + ' seconds.' };
+  }
+
+  function getScanCooldownProgress(building) {
+    if (!building || building.kind !== 'building' || building.type !== 'hq') return null;
+    const cooldownUntil = building.scanCooldownUntil || 0;
+    if (cooldownUntil <= state.time) return null;
+    return clamp(1 - ((cooldownUntil - state.time) / SCAN_COOLDOWN), 0, 1);
+  }
+
+  function getQueueProgress(building, kind, key) {
+    if (!building || !building.queue) return null;
+    if (building.queue.kind !== kind || building.queue.item !== key) return null;
+    if (!building.queue.duration) return null;
+    return clamp(building.queue.progress / building.queue.duration, 0, 1);
   }
 
   function queueMinimapScanAlert(teamId) {
@@ -2503,25 +2592,24 @@ html{
     });
   }
 
-  function activateSatelliteScan(teamId) {
-    const availability = getScanAvailability(teamId);
+  function activateSatelliteScan(building) {
+    const availability = getScanAvailability(building);
     if (!availability.enabled) {
-      if (teamId === TEAM_PLAYER) {
+      if (building && building.teamId === TEAM_PLAYER) {
         playUiCue('error');
         toast(availability.reason);
       }
       return false;
     }
-    const team = teamById(teamId);
-    team.scanRevealUntil = state.time + SCAN_DURATION;
-    team.scanCooldownUntil = state.time + SCAN_COOLDOWN;
-    queueMinimapScanAlert(teamId);
+    building.scanRevealUntil = state.time + SCAN_DURATION;
+    building.scanCooldownUntil = state.time + SCAN_COOLDOWN;
+    queueMinimapScanAlert(building.teamId);
     refreshFog();
     updateEnemyMemory();
     rebuildMinimapFogLayer();
     state.selectionUiRefreshTimer = 0.25;
     updateSelectionUI();
-    if (teamId === TEAM_PLAYER) {
+    if (building.teamId === TEAM_PLAYER) {
       playUiCue('ready');
       toast('Satellite scan online. Battlefield revealed.');
     } else {
@@ -2537,7 +2625,7 @@ html{
       if (building.queue.progress >= building.queue.duration) {
         const item = building.queue.item;
         if (building.queue.kind === 'unit') {
-          const spawnCell = findBuildingSpawnCell(building, 10, false) || findBuildingSpawnCell(building, 10, true);
+          const spawnCell = findBuildingSpawnCell(building, 10, false, item) || findBuildingSpawnCell(building, 10, true, item);
           if (!spawnCell) {
             building.queue.progress = building.queue.duration;
             continue;
@@ -3132,7 +3220,7 @@ html{
     forEachNearbyUnit(unit.x, unit.y, range, (enemy) => {
       if (enemy.hp <= 0 || enemy.teamId === unit.teamId) return;
       const distance = dist(unit.x, unit.y, enemy.x, enemy.y);
-      if (distance < range && distance < bestDist) {
+      if (distance < range && distance < bestDist && canSeeWorldPoint(unit.x, unit.y, enemy.x, enemy.y)) {
         best = enemy;
         bestDist = distance;
       }
@@ -3142,7 +3230,7 @@ html{
       const bx = building.x + building.widthCells * CELL * 0.5;
       const by = building.y + building.heightCells * CELL * 0.5;
       const distance = dist(unit.x, unit.y, bx, by);
-      if (distance < range && distance < bestDist) {
+      if (distance < range && distance < bestDist && canSeeWorldPoint(unit.x, unit.y, bx, by)) {
         best = building;
         bestDist = distance;
       }
@@ -3153,7 +3241,7 @@ html{
   function moveUnitAlongOrder(unit, dt, targetX, targetY) {
     releaseClaim(unit);
     if (unit.repathTimer <= 0 || !unit.path.length) {
-      unit.path = findPath(unit.x, unit.y, targetX, targetY, unit.id);
+      unit.path = findPath(unit.x, unit.y, targetX, targetY, unit.id, unit);
       unit.repathTimer = 0.75 + random() * 0.25;
     }
     const waypoint = unit.path[0] || { x: targetX, y: targetY };
@@ -3174,7 +3262,7 @@ html{
       return;
     }
     const cellKey = worldToKey(pxToCell(unit.x), pxToCell(unit.y));
-    const terrainMul = state.tiles[cellKey] === TILE.ROCK ? 0.84 : 1;
+    const terrainMul = getTerrainSpeedMultiplier(unit, state.tiles[cellKey]);
     const speed = unit.speed * terrainMul;
     const step = Math.min(distance, speed * dt);
     unit.x += (dx / distance) * step;
@@ -3312,6 +3400,8 @@ html{
     }
     if (engineer && engineer.order.type === 'idle') {
       if (!counts.refinery && canAfford(team.id, 'refinery')) placeAiStructure(team, engineer, 'refinery');
+      else if (counts.hq < 2 && team.research.has('scanner') && team.spice >= 720 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
+      else if (counts.hq < 3 && counts.factory && team.spice >= 980 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
       else if (((counts.oilDerrick >= 2 && team.spice >= spiceCapacity * 0.68) || team.spice >= spiceCapacity * 0.82) && counts.silo < Math.max(1, counts.refinery + counts.oilDerrick) && canAfford(team.id, 'silo')) placeAiStructure(team, engineer, 'silo');
       else if (counts.refinery && counts.oilDerrick < 2 && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer);
       else if (!counts.barracks && canAfford(team.id, 'barracks')) placeAiStructure(team, engineer, 'barracks');
@@ -3329,7 +3419,7 @@ html{
     else if (lab && !lab.queue && team.research.has('rangefinding') && !team.research.has('composite-armor') && canAffordResearch(team.id, 'composite-armor')) enqueueProduction(lab, 'research', 'composite-armor');
     else if (lab && !lab.queue && team.research.has('composite-armor') && !team.research.has('scanner') && canAffordResearch(team.id, 'scanner')) enqueueProduction(lab, 'research', 'scanner');
     if (factory && !factory.queue && canAfford(team.id, 'tank')) enqueueProduction(factory, 'unit', 'tank');
-    if (hq) tryActivateAiScan(team, counts, hq);
+    tryActivateAiScan(team, counts);
     assignAiScoutOrders(team);
 
     for (const harvester of state.units.filter((unit) => unit.teamId === team.id && unit.type === 'harvester' && unit.hp > 0)) {
@@ -3357,6 +3447,42 @@ html{
     return false;
   }
 
+  function placeAiExpansionHub(team, engineer) {
+    const existingHubs = state.buildings.filter((building) => building.teamId === team.id && building.type === 'hq' && building.hp > 0);
+    const knownThreat = getBestAiAttackMemory(team);
+    let best = null;
+    let bestScore = -Infinity;
+    for (let cellY = 4; cellY < WORLD_CELLS_Y - 4; cellY += 2) {
+      for (let cellX = 4; cellX < WORLD_CELLS_X - 4; cellX += 2) {
+        if (!canPlaceBuilding('hq', cellX, cellY)) continue;
+        const centerX = (cellX + BUILDING_TYPES.hq.size[0] * 0.5) * CELL;
+        const centerY = (cellY + BUILDING_TYPES.hq.size[1] * 0.5) * CELL;
+        const nearestExisting = existingHubs.reduce((bestDistance, hub) => {
+          const hubX = hub.x + hub.widthCells * CELL * 0.5;
+          const hubY = hub.y + hub.heightCells * CELL * 0.5;
+          return Math.min(bestDistance, dist(centerX, centerY, hubX, hubY));
+        }, Infinity);
+        if (nearestExisting < CELL * 18) continue;
+        let ridgeCover = 0;
+        for (let oy = -2; oy <= 2; oy++) {
+          for (let ox = -2; ox <= 2; ox++) {
+            const nx = cellX + ox;
+            const ny = cellY + oy;
+            if (nx < 0 || ny < 0 || nx >= WORLD_CELLS_X || ny >= WORLD_CELLS_Y) continue;
+            if (state.tiles[worldToKey(nx, ny)] === TILE.RIDGE) ridgeCover++;
+          }
+        }
+        const threatDistance = knownThreat ? dist(centerX, centerY, knownThreat.x, knownThreat.y) : CELL * 30;
+        const score = nearestExisting * 0.4 + ridgeCover * 18 + threatDistance * 0.18 - dist(engineer.x, engineer.y, centerX, centerY) * 0.15;
+        if (score > bestScore) {
+          best = { cellX, cellY };
+          bestScore = score;
+        }
+      }
+    }
+    return best ? issueBuildOrder(engineer, 'hq', best.cellX, best.cellY, false) : false;
+  }
+
   function placeAiOilDerrick(team, engineer) {
     const def = BUILDING_TYPES.oilDerrick;
     const candidates = state.resources
@@ -3375,18 +3501,22 @@ html{
     return false;
   }
 
-  function tryActivateAiScan(team, counts, hq = nearestBuilding(team.id, 'hq', WORLD_WIDTH, WORLD_HEIGHT)) {
-    if (!hq || !team.research.has('scanner')) return false;
-    if (team.scanRevealUntil > state.time || team.scanCooldownUntil > state.time) return false;
-    const hqCenterX = hq.x + hq.widthCells * CELL * 0.5;
-    const hqCenterY = hq.y + hq.heightCells * CELL * 0.5;
-    const enemyThreatNearBase = getKnownEnemyMemories(team, 'units').some((memory) => state.time - memory.lastSeen <= 10 && dist(memory.x, memory.y, hqCenterX, hqCenterY) <= AI_SCAN_THREAT_RADIUS);
+  function tryActivateAiScan(team, counts) {
+    if (!team.research.has('scanner')) return false;
     const hiddenOilTarget = state.resources.some((resource) => resource.resourceType === 'oil' && !resource.claimedBy && !team.fogExplored[worldToKey(resource.cellX, resource.cellY)]);
     const knownTarget = getBestAiAttackMemory(team);
     const assaultReady = ((counts.tank || 0) + (counts.scout || 0) >= 5);
     const needsTargetRefresh = !knownTarget || state.time - knownTarget.lastSeen > AI_MEMORY_SCAN_STALE_AFTER;
-    if (!enemyThreatNearBase && !hiddenOilTarget && !(assaultReady && needsTargetRefresh)) return false;
-    return activateSatelliteScan(team.id);
+    const hubs = state.buildings.filter((building) => building.teamId === team.id && building.type === 'hq' && building.hp > 0);
+    for (const hq of hubs) {
+      if ((hq.scanRevealUntil || 0) > state.time || (hq.scanCooldownUntil || 0) > state.time) continue;
+      const hqCenterX = hq.x + hq.widthCells * CELL * 0.5;
+      const hqCenterY = hq.y + hq.heightCells * CELL * 0.5;
+      const enemyThreatNearBase = getKnownEnemyMemories(team, 'units').some((memory) => state.time - memory.lastSeen <= 10 && dist(memory.x, memory.y, hqCenterX, hqCenterY) <= AI_SCAN_THREAT_RADIUS);
+      if (!enemyThreatNearBase && !hiddenOilTarget && !(assaultReady && needsTargetRefresh)) continue;
+      return activateSatelliteScan(hq);
+    }
+    return false;
   }
 
   function toastOnceForAi(type) {
@@ -3477,20 +3607,20 @@ html{
   }
 
   function checkVictory() {
-    const playerBase = nearestBuilding(TEAM_PLAYER, 'hq', 0, 0);
-    const enemyBase = nearestBuilding(TEAM_AI, 'hq', WORLD_WIDTH, WORLD_HEIGHT);
-    if (!playerBase || playerBase.hp <= 0) {
+    const playerCounts = countTeamAssets(TEAM_PLAYER);
+    const enemyCounts = countTeamAssets(TEAM_AI);
+    if (!playerCounts.hq) {
       state.winner = 'Dust Cartel';
       state.paused = true;
       playUiCue('defeat');
       openMenu('defeat');
-      hudObjective.textContent = 'The command hub is down. Restart to reclaim the dunes.';
-    } else if (!enemyBase || enemyBase.hp <= 0) {
+      hudObjective.textContent = 'All command hubs are down. Restart to reclaim the dunes.';
+    } else if (!enemyCounts.hq) {
       state.winner = 'Sun Nomads';
       state.paused = true;
       playUiCue('victory');
       openMenu('victory');
-      hudObjective.textContent = 'Victory. The rival command hub is smoking on the horizon.';
+      hudObjective.textContent = 'Victory. All rival command hubs are smoking on the horizon.';
     }
   }
 
@@ -4224,7 +4354,7 @@ html{
     const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
     const seconds = String(elapsed % 60).padStart(2, '0');
     return [
-      { type: 'text', label: 'Outcome', description: 'Sun Nomads victorious. The rival command hub is smoking on the horizon.' },
+      { type: 'text', label: 'Outcome', description: 'Sun Nomads victorious. Every rival command hub is smoking on the horizon.' },
       { type: 'text', label: 'Battle Time', description: minutes + ':' + seconds },
       { type: 'text', label: 'Forces Remaining', description: remainingUnits + ' units and ' + remainingStructures + ' structures still standing.' },
       { type: 'text', label: 'Spice Reserve', description: String(Math.floor(team?.spice || 0)) + ' spice banked.' },
@@ -4243,7 +4373,7 @@ html{
     const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
     const seconds = String(elapsed % 60).padStart(2, '0');
     return [
-      { type: 'text', label: 'Outcome', description: 'Defeat. The Dust Cartel shattered the command hub and overran the dunes.' },
+      { type: 'text', label: 'Outcome', description: 'Defeat. The Dust Cartel shattered every command hub and overran the dunes.' },
       { type: 'text', label: 'Battle Time', description: minutes + ':' + seconds },
       { type: 'text', label: 'Forces Left', description: remainingUnits + ' units and ' + remainingStructures + ' structures survived the collapse.' },
       { type: 'text', label: 'Spice Reserve', description: String(Math.floor(team?.spice || 0)) + ' spice remained in reserve.' },
@@ -4552,7 +4682,7 @@ html{
     selectionMeta.appendChild(card);
   }
 
-  function makeAction(label, action, active = false, danger = false, disabled = false, titleText = label) {
+  function makeAction(label, action, active = false, danger = false, disabled = false, titleText = label, options = null) {
     const visual = actionVisual(label);
     const button = document.createElement('button');
     const panelHotkey = disabled ? null : assignActionPanelHotkey(action);
@@ -4566,6 +4696,16 @@ html{
       button.setAttribute('aria-keyshortcuts', panelHotkey.label);
     }
     button.disabled = disabled;
+    const progress = options && typeof options.progress === 'number' ? clamp(options.progress, 0, 1) : null;
+    if (progress !== null) {
+      const meter = document.createElement('span');
+      meter.className = 'action-progress';
+      const fill = document.createElement('span');
+      fill.className = 'action-progress-fill';
+      fill.style.width = Math.round(progress * 100) + '%';
+      meter.appendChild(fill);
+      button.appendChild(meter);
+    }
     if (!disabled) button.addEventListener('click', action);
     actionGrid.appendChild(button);
     return button;
@@ -4721,7 +4861,7 @@ html{
             playUiCue('error');
             toast(getProductionFailureMessage(building, 'unit', unitKey));
           }
-        }, false, false, availability.disabled, unitDef.label + '. ' + availability.reason);
+        }, !!getQueueProgress(building, 'unit', unitKey), false, availability.disabled, unitDef.label + '. ' + availability.reason, { progress: getQueueProgress(building, 'unit', unitKey) });
       }
     }
     if (def.research) {
@@ -4734,12 +4874,12 @@ html{
             playUiCue('error');
             toast(getProductionFailureMessage(building, 'research', researchKey));
           }
-        }, false, false, availability.disabled, RESEARCH[researchKey].label + '. ' + availability.reason);
+        }, !!getQueueProgress(building, 'research', researchKey), false, availability.disabled, RESEARCH[researchKey].label + '. ' + availability.reason, { progress: getQueueProgress(building, 'research', researchKey) });
       }
     }
     if (building.type === 'hq') {
-      const scanAvailability = getScanAvailability(building.teamId);
-      makeAction('Scan', () => activateSatelliteScan(building.teamId), scanAvailability.active, false, !scanAvailability.enabled, 'Scan. ' + scanAvailability.reason);
+      const scanAvailability = getScanAvailability(building);
+      makeAction('Scan', () => activateSatelliteScan(building), scanAvailability.active, false, !scanAvailability.enabled, 'Scan. ' + scanAvailability.reason, { progress: getScanCooldownProgress(building) });
     }
     if (canSetRally(building)) makeAction('Set Rally', () => setPendingRally(building), state.pendingRallyBuildingId === building.id);
     makeAction('Sell', () => sellBuilding(building), false, true);
@@ -5024,6 +5164,14 @@ html{
     ids.forEach((id) => state.selectedIds.add(id));
     playUiCue(state.selectedIds.size ? 'select' : 'cancel');
     updateSelectionUI();
+  }
+
+  function clearCurrentSelection() {
+    if (!state.selectedIds.size) return false;
+    state.selectedIds.clear();
+    playUiCue('cancel');
+    updateSelectionUI();
+    return true;
   }
 
   function selectUnitsByType(typeKey, additive) {
@@ -5512,6 +5660,11 @@ html{
         playUiCue('cancel');
         toast('Construction cancelled.');
       } else openMenu(getRootMenuId());
+      return;
+    }
+    if (!event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && event.code === 'Backspace') {
+      event.preventDefault();
+      clearCurrentSelection();
       return;
     }
     if (handleActionPanelHotkey(event)) {
