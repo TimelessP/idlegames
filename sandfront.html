@@ -691,6 +691,15 @@ html{
   const AI_SCAN_THREAT_RADIUS = CELL * 16;
   const AI_MEMORY_SCAN_STALE_AFTER = 18;
   const AI_SCOUT_GRID_STEP = 10;
+  const AI_STRUCTURE_MIN_GAP = {
+    refinery: 2,
+    silo: 2,
+    barracks: 3,
+    lab: 3,
+    factory: 3,
+    turret: 2,
+    hq: 6
+  };
 
   const state = {
     seed: 0,
@@ -1348,6 +1357,40 @@ html{
       }
     }
     return best;
+  }
+
+  function getFootprintGap(a, b) {
+    const aRight = a.cellX + a.widthCells - 1;
+    const aBottom = a.cellY + a.heightCells - 1;
+    const bRight = b.cellX + b.widthCells - 1;
+    const bBottom = b.cellY + b.heightCells - 1;
+    const gapX = a.cellX > bRight ? a.cellX - bRight - 1 : b.cellX > aRight ? b.cellX - aRight - 1 : 0;
+    const gapY = a.cellY > bBottom ? a.cellY - bBottom - 1 : b.cellY > aBottom ? b.cellY - aBottom - 1 : 0;
+    return Math.max(gapX, gapY);
+  }
+
+  function scoreAiStructurePlacement(teamId, type, cellX, cellY, anchorX, anchorY) {
+    const def = BUILDING_TYPES[type];
+    if (!def) return -Infinity;
+    const candidate = { cellX, cellY, widthCells: def.size[0], heightCells: def.size[1] };
+    const preferredGap = AI_STRUCTURE_MIN_GAP[type] ?? 2;
+    let nearestGap = Infinity;
+    let sameTypeGap = Infinity;
+    let nearbyCount = 0;
+    for (const building of state.buildings) {
+      if (building.hp <= 0 || building.teamId !== teamId) continue;
+      const gap = getFootprintGap(candidate, building);
+      nearestGap = Math.min(nearestGap, gap);
+      if (building.type === type) sameTypeGap = Math.min(sameTypeGap, gap);
+      if (gap <= preferredGap + 1) nearbyCount++;
+    }
+    const anchorDistance = Math.abs(cellX - anchorX) + Math.abs(cellY - anchorY);
+    let score = -anchorDistance * 1.4;
+    score += Math.min(nearestGap, preferredGap + 3) * 10;
+    score -= Math.max(0, preferredGap - nearestGap) * 18;
+    score -= Math.max(0, preferredGap + 1 - sameTypeGap) * 8;
+    score -= nearbyCount * 3;
+    return score;
   }
 
   function nearestDamagedBuilding(teamId, fromX, fromY, maxDistance = Infinity) {
@@ -2679,7 +2722,7 @@ html{
       if (building.queue.progress >= building.queue.duration) {
         const item = building.queue.item;
         if (building.queue.kind === 'unit') {
-          const spawnCell = findBuildingSpawnCell(building, 10, false, item) || findBuildingSpawnCell(building, 10, true, item);
+          const spawnCell = findBuildingSpawnCell(building, 1, false, item);
           if (!spawnCell) {
             building.queue.progress = building.queue.duration;
             continue;
@@ -3495,17 +3538,23 @@ html{
     const hub = nearestBuilding(team.id, 'hq', engineer.x, engineer.y);
     const anchorX = hub ? hub.cellX : pxToCell(engineer.x);
     const anchorY = hub ? hub.cellY : pxToCell(engineer.y);
+    let best = null;
+    let bestScore = -Infinity;
     for (let radius = 4; radius < 12; radius++) {
       for (let oy = -radius; oy <= radius; oy++) {
         for (let ox = -radius; ox <= radius; ox++) {
           const cellX = anchorX + ox;
           const cellY = anchorY + oy;
           if (!canPlaceBuilding(type, cellX, cellY)) continue;
-          if (issueBuildOrder(engineer, type, cellX, cellY, type === 'refinery')) return true;
+          const score = scoreAiStructurePlacement(team.id, type, cellX, cellY, anchorX, anchorY);
+          if (score > bestScore) {
+            best = { cellX, cellY };
+            bestScore = score;
+          }
         }
       }
     }
-    return false;
+    return best ? issueBuildOrder(engineer, type, best.cellX, best.cellY, type === 'refinery') : false;
   }
 
   function placeAiExpansionHub(team, engineer) {
