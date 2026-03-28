@@ -297,7 +297,7 @@ html{
 
 .selection-title{display:flex;justify-content:space-between;gap:6px;align-items:flex-start}
 .selection-title strong{font-size:13px;letter-spacing:.06em;text-transform:uppercase}
-.selection-title span{font-size:11px;color:#d0b18d;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;line-height:1.25}
+.selection-title span{font-size:11px;color:#d0b18d;display:-webkit-box;line-clamp:1;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;line-height:1.25}
 
 .selection-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
 .selection-meta .small-status{justify-content:center;padding:4px 6px;font-size:10px;gap:5px}
@@ -648,6 +648,7 @@ html{
   const toastEl = document.getElementById('toast');
   const resourceBar = document.getElementById('resourceBar');
   const fpsReadout = document.getElementById('fpsReadout');
+  const commandWrap = document.getElementById('commandWrap');
   const selectionTitle = document.getElementById('selectionTitle');
   const selectionSubtitle = document.getElementById('selectionSubtitle');
   const selectionMeta = document.getElementById('selectionMeta');
@@ -691,6 +692,7 @@ html{
   const AI_SCAN_THREAT_RADIUS = CELL * 16;
   const AI_MEMORY_SCAN_STALE_AFTER = 18;
   const AI_SCOUT_GRID_STEP = 10;
+  const AMBULANCE_RETREAT_MARGIN = 14;
   const AI_STRUCTURE_MIN_GAP = {
     refinery: 2,
     silo: 2,
@@ -727,6 +729,7 @@ html{
     toastTimer: 0,
     storageFullToastAt: -Infinity,
     selectionUiRefreshTimer: 0,
+    selectionUiInteractionBlockUntil: 0,
     drag: null,
     menuStack: [],
     tiles: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
@@ -764,6 +767,7 @@ html{
     scout: { label: 'Dust Scout', hp: 70, speed: 36, sight: 9, range: 44, damage: 7, reload: 0.75, cost: 80, buildTime: 7, sprite: 'scout', infantry: true, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 7, selectionRadius: 8, fireOrigin: { x: 0, y: -4 } } },
     engineer: { label: 'Engineer', hp: 64, speed: 30, sight: 8, range: 0, damage: 0, reload: 0, cost: 90, buildTime: 8, sprite: 'engineer', builder: true, infantry: true, repairRate: 16, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 7, selectionRadius: 8, fireOrigin: { x: 0, y: -4 } } },
     harvester: { label: 'Harvester', hp: 150, speed: 22, sight: 8, range: 0, damage: 0, reload: 0, cost: 140, buildTime: 10, sprite: 'harvester', capacity: 140, gatherRate: 34, vehicle: true, crushDamage: 999, crushRadius: 7, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 9, selectionRadius: 10, fireOrigin: { x: 0, y: -4 } } },
+    ambulance: { label: 'Ambulance', hp: 128, speed: 25, sight: 9, range: 0, damage: 0, reload: 0, cost: 160, buildTime: 11, sprite: 'ambulance', vehicle: true, support: true, healRate: 2.75, healRadius: 20, supportRange: 54, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 9, selectionRadius: 10, fireOrigin: { x: 0, y: -4 } } },
     tank: { label: 'Siege Tank', hp: 180, speed: 20, sight: 10, range: 58, damage: 18, reload: 1.25, cost: 180, buildTime: 12, sprite: 'tank', requires: ['factory', 'composite-armor'], vehicle: true, crushDamage: 999, crushRadius: 7.5, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 10, selectionRadius: 11, fireOrigin: { x: 0, y: -4 } } }
   };
 
@@ -774,7 +778,7 @@ html{
     oilDerrick: { label: 'Oil Derrick', size: [2, 2], hp: 320, sight: 9, cost: 140, incomeRate: OIL_TRICKLE_AMOUNT / OIL_TRICKLE_INTERVAL, sprite: 'oilDerrick', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     barracks: { label: 'Dust Barracks', size: [3, 3], hp: 400, sight: 9, cost: 160, queue: ['scout', 'engineer'], sprite: 'barracks', buildRequires: ['hq'], geometry: { spriteOffset: { x: -20, y: -20 } } },
     lab: { label: 'Signal Lab', size: [3, 3], hp: 340, sight: 9, cost: 210, research: ['rangefinding', 'composite-armor', 'scanner'], sprite: 'lab', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -20, y: -20 } } },
-    factory: { label: 'War Factory', size: [4, 3], hp: 540, sight: 10, cost: 260, queue: ['tank'], sprite: 'factory', buildRequires: ['lab', 'rangefinding'], geometry: { spriteOffset: { x: -16, y: -20 } } },
+    factory: { label: 'War Factory', size: [4, 3], hp: 540, sight: 10, cost: 260, queue: ['tank', 'ambulance'], sprite: 'factory', buildRequires: ['lab', 'rangefinding'], geometry: { spriteOffset: { x: -16, y: -20 } } },
     turret: { label: 'Turret', size: [2, 2], hp: 260, sight: 9, cost: 110, turret: true, range: 72, damage: 11, reload: 0.7, sprite: 'turret', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -24, y: -20 }, fireOrigin: { x: 8, y: 6 } } }
   };
 
@@ -1487,6 +1491,82 @@ html{
     return best;
   }
 
+  function nearestDamagedFriendlyUnit(teamId, fromX, fromY, maxDistance = Infinity, excludeUnitId = null) {
+    let best = null;
+    let bestScore = Infinity;
+    for (const unit of state.units) {
+      if (!canAmbulanceSupportUnit(unit, teamId, excludeUnitId)) continue;
+      const distance = dist(fromX, fromY, unit.x, unit.y);
+      if (distance > maxDistance) continue;
+      const missingRatio = (unit.maxHp - unit.hp) / Math.max(1, unit.maxHp);
+      const score = distance - missingRatio * 28;
+      if (score < bestScore) {
+        best = unit;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  function canAmbulanceSupportUnit(unit, teamId, excludeUnitId = null) {
+    if (!unit || unit.kind !== 'unit') return false;
+    if (unit.hp <= 0 || unit.teamId !== teamId || unit.id === excludeUnitId || unit.hp >= unit.maxHp) return false;
+    return true;
+  }
+
+  function getThreatEffectiveRange(threat) {
+    if (!threat || threat.hp <= 0) return CELL * 2;
+    if (threat.kind === 'building') {
+      return BUILDING_TYPES[threat.type]?.range || CELL * 2;
+    }
+    const def = UNIT_TYPES[threat.type];
+    if (!def) return CELL * 2;
+    const team = teamById(threat.teamId);
+    return def.range + ((def.range > 0 && team?.research.has('rangefinding')) ? 10 : 0);
+  }
+
+  function getThreatWorldPoint(threat) {
+    if (!threat) return null;
+    if (threat.kind === 'building') {
+      return {
+        x: threat.x + threat.widthCells * CELL * 0.5,
+        y: threat.y + threat.heightCells * CELL * 0.5
+      };
+    }
+    return { x: threat.x, y: threat.y };
+  }
+
+  function getAmbulanceRetreatRange(threat) {
+    return getThreatEffectiveRange(threat) + AMBULANCE_RETREAT_MARGIN;
+  }
+
+  function shouldAmbulanceRetreat(unit, threat, buffer = 6) {
+    const threatPoint = getThreatWorldPoint(threat);
+    if (!threatPoint) return false;
+    return dist(unit.x, unit.y, threatPoint.x, threatPoint.y) < getAmbulanceRetreatRange(threat) - buffer;
+  }
+
+  function getAmbulanceRetreatPoint(unit, threat, focusUnit = null) {
+    const threatPoint = getThreatWorldPoint(threat);
+    const threatX = threatPoint?.x ?? unit.x;
+    const threatY = threatPoint?.y ?? unit.y;
+    const retreatRange = getAmbulanceRetreatRange(threat);
+    const pivotX = focusUnit ? focusUnit.x : unit.x;
+    const pivotY = focusUnit ? focusUnit.y : unit.y;
+    let dx = pivotX - threatX;
+    let dy = pivotY - threatY;
+    let length = Math.hypot(dx, dy);
+    if (length < 0.01) {
+      dx = unit.x - threatX || 1;
+      dy = unit.y - threatY;
+      length = Math.hypot(dx, dy) || 1;
+    }
+    return {
+      x: clamp(threatX + dx / length * retreatRange, 0, WORLD_WIDTH),
+      y: clamp(threatY + dy / length * retreatRange, 0, WORLD_HEIGHT)
+    };
+  }
+
   function centerCameraOnPlayerBase() {
     const base = nearestBuilding(TEAM_PLAYER, 'hq', 0, 0);
     if (!base) return;
@@ -2003,6 +2083,7 @@ html{
         scout: buildUnitAtlas(team.color, team.accent, 'scout'),
         engineer: buildUnitAtlas(team.color, team.accent, 'engineer'),
         harvester: buildUnitAtlas(team.color, team.accent, 'harvester'),
+        ambulance: buildUnitAtlas(team.color, team.accent, 'ambulance'),
         tank: buildUnitAtlas(team.color, team.accent, 'tank')
       };
       team.sprites.buildings = {
@@ -2101,6 +2182,21 @@ html{
       ctx.fillStyle = '#bca27d';
       ctx.fillRect(4, 12, 2, 2);
       ctx.fillRect(18, 12, 2, 2);
+    } else if (type === 'ambulance') {
+      ctx.fillStyle = '#77624b';
+      ctx.fillRect(6, 10, 12, 7);
+      ctx.fillStyle = '#e4d6bd';
+      ctx.fillRect(8, 9, 8, 5);
+      ctx.fillStyle = teamColor;
+      ctx.fillRect(8, 8, 8, 2);
+      ctx.fillStyle = accentColor;
+      ctx.fillRect(11, 11, 2, 6);
+      ctx.fillRect(9, 13, 6, 2);
+      ctx.fillStyle = '#33261b';
+      ctx.fillRect(5, 16, 4, 2);
+      ctx.fillRect(15, 16, 4, 2);
+      ctx.fillStyle = '#bca27d';
+      ctx.fillRect(17, 12, 2, 2);
     } else if (type === 'tank') {
       ctx.fillStyle = '#6d5c46';
       ctx.fillRect(6, 11, 12, 6);
@@ -2634,10 +2730,20 @@ html{
     if (state.selectionUiRefreshTimer > 0) {
       state.selectionUiRefreshTimer -= dt;
     }
-    if (state.selectionUiRefreshTimer <= 0 && shouldRefreshSelectionUiForTimers()) {
+    if (state.selectionUiRefreshTimer <= 0 && shouldRefreshSelectionUiForTimers() && !shouldDeferSelectionUiTimerRefresh()) {
       state.selectionUiRefreshTimer = 0.25;
       updateSelectionUI();
     }
+  }
+
+  function shouldDeferSelectionUiTimerRefresh() {
+    return state.time < state.selectionUiInteractionBlockUntil || commandWrap.matches(':focus-within');
+  }
+
+  function noteSelectionUiInteraction(event) {
+    if (menuOverlay.classList.contains('open')) return;
+    if (event.pointerType && event.pointerType !== 'mouse' && event.pointerType !== 'pen') return;
+    state.selectionUiInteractionBlockUntil = state.time + 0.4;
   }
 
   function shouldRefreshSelectionUiForTimers() {
@@ -2843,6 +2949,9 @@ html{
       if (!def) continue;
 
       updateUnitAutonomy(unit, def);
+      if (def.support) {
+        applyAmbulanceAura(unit, def);
+      }
 
       if (unit.order.type === 'gather') {
         updateGatherer(unit, dt);
@@ -2854,6 +2963,8 @@ html{
         updateCrushOrder(unit, dt);
       } else if (unit.order.type === 'repair') {
         updateRepairOrder(unit, def, dt);
+      } else if (unit.order.type === 'support') {
+        updateAmbulanceSupport(unit, def, dt);
       } else if (unit.order.type === 'service') {
         updateServiceOrder(unit, def, dt);
       } else if (unit.order.type === 'build') {
@@ -2905,6 +3016,28 @@ html{
         releaseClaim(unit);
         unit.order = { type: 'repair', targetId: repairTarget.id };
         unit.targetId = repairTarget.id;
+        unit.path.length = 0;
+        return;
+      }
+    }
+
+    if (def.support) {
+      const damagedUnit = nearestDamagedFriendlyUnit(unit.teamId, unit.x, unit.y, (def.sight * CELL) + 48, unit.id);
+      const threat = getAutonomousThreat(unit, false);
+      if (damagedUnit) {
+        if (unit.order.type !== 'support' || unit.order.targetId !== damagedUnit.id) {
+          releaseClaim(unit);
+          unit.order = { type: 'support', targetId: damagedUnit.id };
+          unit.targetId = damagedUnit.id;
+          unit.path.length = 0;
+        }
+        return;
+      }
+      if (threat && shouldAmbulanceRetreat(unit, threat)) {
+        const retreat = getAmbulanceRetreatPoint(unit, threat);
+        releaseClaim(unit);
+        unit.order = { type: 'move', x: retreat.x, y: retreat.y };
+        unit.targetId = null;
         unit.path.length = 0;
         return;
       }
@@ -3128,6 +3261,60 @@ html{
         unit.targetId = null;
       }
     }
+  }
+
+  function applyAmbulanceAura(unit, def) {
+    if (!def.support || unit.reload > 0) return;
+    const healedUnits = [];
+    let healedAny = false;
+    forEachNearbyUnit(unit.x, unit.y, def.healRadius || 18, (ally) => {
+      if (!canAmbulanceSupportUnit(ally, unit.teamId, unit.id)) return;
+      if (dist(unit.x, unit.y, ally.x, ally.y) > (def.healRadius || 18)) return;
+      ally.hp = clamp(ally.hp + (def.healRate || 8), 0, ally.maxHp);
+      healedUnits.push(ally);
+      addEffect(ally.x + (Math.random() - 0.5) * 8, ally.y - 4 + (Math.random() - 0.5) * 8, '#8fe08f');
+      healedAny = true;
+    });
+    if (healedAny) {
+      unit.reload = 0.35;
+      refreshSelectionHudForUnits([...healedUnits, unit]);
+    }
+  }
+
+  function updateAmbulanceSupport(unit, def, dt) {
+    const target = getEntityById(unit.order.targetId);
+    if (!canAmbulanceSupportUnit(target, unit.teamId, unit.id)) {
+      unit.order = { type: 'idle' };
+      unit.targetId = null;
+      return;
+    }
+    const fallbackTarget = nearestDamagedFriendlyUnit(unit.teamId, unit.x, unit.y, (def.sight * CELL) + 48, unit.id);
+    if (target.hp >= target.maxHp) {
+      if (fallbackTarget && fallbackTarget.id !== target.id) {
+        unit.order = { type: 'support', targetId: fallbackTarget.id };
+        unit.targetId = fallbackTarget.id;
+        unit.path.length = 0;
+      } else {
+        unit.order = { type: 'idle' };
+        unit.targetId = null;
+      }
+      return;
+    }
+    const threat = getAutonomousThreat(unit, false);
+    if (threat && shouldAmbulanceRetreat(unit, threat)) {
+      const retreat = getAmbulanceRetreatPoint(unit, threat, target);
+      if (dist(unit.x, unit.y, retreat.x, retreat.y) > 8) {
+        moveUnitAlongOrder(unit, dt, retreat.x, retreat.y);
+        return;
+      }
+    }
+    const desiredRange = Math.max(12, (def.healRadius || 18) - 4);
+    if (dist(unit.x, unit.y, target.x, target.y) > desiredRange) {
+      moveUnitAlongOrder(unit, dt, target.x, target.y);
+      return;
+    }
+    releaseClaim(unit);
+    unit.path.length = 0;
   }
 
   function canUnitUseSupportBuilding(unit, building) {
@@ -3517,12 +3704,17 @@ html{
     const refinery = nearestBuilding(team.id, 'refinery', WORLD_WIDTH, WORLD_HEIGHT);
     const lab = nearestBuilding(team.id, 'lab', WORLD_WIDTH, WORLD_HEIGHT);
     const factory = nearestBuilding(team.id, 'factory', WORLD_WIDTH, WORLD_HEIGHT);
+    const combatCount = (counts.scout || 0) + (counts.tank || 0);
+    const desiredAmbulances = Math.min(2, Math.floor(combatCount / 4));
     if (refinery && !refinery.queue && counts.harvester < 2 && canAfford(team.id, 'harvester')) enqueueProduction(refinery, 'unit', 'harvester');
     if (barracks && !barracks.queue && counts.scout < 5 && canAfford(team.id, 'scout')) enqueueProduction(barracks, 'unit', 'scout');
     if (lab && !lab.queue && !team.research.has('rangefinding') && canAffordResearch(team.id, 'rangefinding')) enqueueProduction(lab, 'research', 'rangefinding');
     else if (lab && !lab.queue && team.research.has('rangefinding') && !team.research.has('composite-armor') && canAffordResearch(team.id, 'composite-armor')) enqueueProduction(lab, 'research', 'composite-armor');
     else if (lab && !lab.queue && team.research.has('composite-armor') && !team.research.has('scanner') && canAffordResearch(team.id, 'scanner')) enqueueProduction(lab, 'research', 'scanner');
-    if (factory && !factory.queue && canAfford(team.id, 'tank')) enqueueProduction(factory, 'unit', 'tank');
+    if (factory && !factory.queue) {
+      if ((counts.ambulance || 0) < desiredAmbulances && canAfford(team.id, 'ambulance')) enqueueProduction(factory, 'unit', 'ambulance');
+      else if (canAfford(team.id, 'tank')) enqueueProduction(factory, 'unit', 'tank');
+    }
     tryActivateAiScan(team, counts);
     assignAiScoutOrders(team);
 
@@ -3650,7 +3842,7 @@ html{
   }
 
   function countTeamAssets(teamId) {
-    const counts = { hq: 0, refinery: 0, silo: 0, oilDerrick: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, harvester: 0, engineer: 0 };
+    const counts = { hq: 0, refinery: 0, silo: 0, oilDerrick: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, ambulance: 0, harvester: 0, engineer: 0 };
     for (const building of state.buildings) {
       if (building.teamId === teamId && building.hp > 0 && counts.hasOwnProperty(building.type)) counts[building.type]++;
     }
@@ -3661,7 +3853,7 @@ html{
   }
 
   function totalRemainingUnits(counts) {
-    return ['scout', 'tank', 'harvester', 'engineer'].reduce((total, key) => total + (counts[key] || 0), 0);
+    return ['scout', 'tank', 'ambulance', 'harvester', 'engineer'].reduce((total, key) => total + (counts[key] || 0), 0);
   }
 
   function totalRemainingStructures(counts) {
@@ -4882,6 +5074,7 @@ html{
 
   function getUnitOrderStatusText(unit) {
     const order = unit.order || { type: 'idle' };
+    if (order.type === 'support') return 'Closing in to stabilize damaged friendly units while avoiding direct fire.';
     if (order.type === 'service') {
       const support = getEntityById(order.targetId);
       const supportLabel = support && support.kind === 'building'
@@ -4907,6 +5100,7 @@ html{
     if (order.type === 'attack') return 'Engaging the current hostile target.';
     if (order.type === 'attack-move') return 'Advancing and engaging hostiles on the way.';
     if (order.type === 'build') return 'Moving to the assigned construction site.';
+    if (unit.type === 'ambulance' && order.type === 'move') return 'Repositioning to stay clear of enemy fire and cover nearby allies.';
     if (order.type === 'move') return 'Moving to a new position.';
     return null;
   }
@@ -4918,11 +5112,15 @@ html{
     if (unit.type === 'engineer') {
       return 'Builds structures and repairs damaged friendly buildings.';
     }
+    if (unit.type === 'ambulance') {
+      return 'Heals nearby friendly units and keeps just outside hostile firing range.';
+    }
     return 'Moves and attacks based on current orders.';
   }
 
   function getUnitOrderSummaryLabel(unit) {
     const order = unit.order || { type: 'idle' };
+    if (order.type === 'support') return 'Support';
     if (order.type === 'service') return 'Service -> Rally';
     if (order.type === 'move' && order.nextOrder) {
       const resumeText = describeResumeOrderForHud(order.nextOrder);
@@ -5004,6 +5202,7 @@ html{
     const units = selected.filter((entity) => entity.kind === 'unit');
     if (units.some((unit) => unit.type === 'engineer')) return 'Engineers can open Build Orders or Repair from this panel. Oil Derricks must be placed over an oil deposit, while other structures still require free sand or rock.';
     if (units.some((unit) => unit.type === 'harvester')) return 'Harvesters can be sent directly onto spice seams or use Auto Gather to self-route between the nearest seam and refinery.';
+    if (units.some((unit) => unit.type === 'ambulance')) return 'Ambulances automatically close with damaged friendly units, pulse healing nearby, and drift back out of enemy weapon range when threatened.';
     if (units.some((unit) => UNIT_TYPES[unit.type]?.infantry || UNIT_TYPES[unit.type]?.vehicle)) return 'Infantry can recover at barracks and vehicles at the factory by moving onto the matching support structure.';
     if (units.length) return 'Combat units understand context commands: move on empty terrain, attack on enemies, gather on spice if a harvester is selected.';
     return 'Buildings queue one production or research job at a time.';
@@ -6086,6 +6285,16 @@ html{
     clampCamera();
   }
 
+  function handleHudButtonPointerUp(event) {
+    if (menuOverlay.classList.contains('open')) return;
+    if (event.pointerType !== 'mouse' && event.pointerType !== 'pen') return;
+    const button = event.target.closest('.hud-panel button');
+    if (!button) return;
+    requestAnimationFrame(() => {
+      if (document.activeElement === button) button.blur();
+    });
+  }
+
   function frame(now) {
     requestAnimationFrame(frame);
     if (!state.render.lastDraw) state.render.lastDraw = now;
@@ -6131,11 +6340,15 @@ html{
   stageShell.addEventListener('pointerdown', handlePointerDown);
   stageShell.addEventListener('pointermove', handlePointerMove);
   stageShell.addEventListener('pointerup', handlePointerUp);
+  stageShell.addEventListener('pointerup', handleHudButtonPointerUp);
   stageShell.addEventListener('pointercancel', handlePointerUp);
   stageShell.addEventListener('dblclick', handleDoubleClick);
   stageShell.addEventListener('pointerleave', () => { state.pointer.inside = false; });
   stageShell.addEventListener('wheel', handleWheel, { passive: false });
   stageShell.addEventListener('contextmenu', (event) => event.preventDefault());
+  commandWrap.addEventListener('pointerenter', noteSelectionUiInteraction);
+  commandWrap.addEventListener('pointermove', noteSelectionUiInteraction);
+  commandWrap.addEventListener('pointerdown', noteSelectionUiInteraction);
   minimap.addEventListener('pointerdown', handleMinimapJump);
   window.addEventListener('resize', () => syncRenderSize());
   window.addEventListener('beforeunload', () => persistGame(true));
