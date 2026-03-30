@@ -676,6 +676,7 @@ html{
     'Capture': { icon: 'context', short: 'Cap' },
     'Context': { icon: 'context', short: 'Ctx' },
     'Stop': { icon: 'stop', short: 'Stop' },
+    'Unload': { icon: 'move', short: 'Drop' },
     'Center': { icon: 'center', short: 'Center' },
     'Build': { icon: 'hammer', short: 'Build' },
     'Auto Gather': { icon: 'route', short: 'Auto' },
@@ -770,6 +771,7 @@ html{
     scout: { label: 'Dust Scout', hp: 70, speed: 36, sight: 9, range: 44, damage: 7, reload: 0.75, cost: 80, buildTime: 7, sprite: 'scout', infantry: true, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 7, selectionRadius: 8, fireOrigin: { x: 0, y: -4 } } },
     engineer: { label: 'Engineer', hp: 64, speed: 30, sight: 8, range: 0, damage: 0, reload: 0, cost: 90, buildTime: 8, sprite: 'engineer', builder: true, infantry: true, repairRate: 16, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 7, selectionRadius: 8, fireOrigin: { x: 0, y: -4 } } },
     harvester: { label: 'Harvester', hp: 150, speed: 22, sight: 8, range: 0, damage: 0, reload: 0, cost: 140, buildTime: 10, sprite: 'harvester', capacity: 140, gatherRate: 34, vehicle: true, crushDamage: 999, crushRadius: 7, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 9, selectionRadius: 10, fireOrigin: { x: 0, y: -4 } } },
+    transport: { label: 'Troop Transport', hp: 150, speed: 40, sight: 9, range: 0, damage: 0, reload: 0, cost: 150, buildTime: 10, sprite: 'transport', vehicle: true, transportCapacity: 6, crushDamage: 999, crushRadius: 7, crushAutonomy: false, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 9, selectionRadius: 10, fireOrigin: { x: 0, y: -4 } } },
     ambulance: { label: 'Ambulance', hp: 128, speed: 25, sight: 9, range: 0, damage: 0, reload: 0, cost: 160, buildTime: 11, sprite: 'ambulance', vehicle: true, support: true, healRate: 2.75, healRadius: 20, supportRange: 54, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 9, selectionRadius: 10, fireOrigin: { x: 0, y: -4 } } },
     tank: { label: 'Siege Tank', hp: 180, speed: 20, sight: 10, range: 58, damage: 18, reload: 1.25, cost: 180, buildTime: 12, sprite: 'tank', requires: ['factory', 'composite-armor'], vehicle: true, crushDamage: 999, crushRadius: 7.5, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 10, selectionRadius: 11, fireOrigin: { x: 0, y: -4 } } }
   };
@@ -781,7 +783,7 @@ html{
     oilDerrick: { label: 'Oil Derrick', size: [2, 2], hp: 320, sight: 9, cost: 140, incomeRate: OIL_TRICKLE_AMOUNT / OIL_TRICKLE_INTERVAL, sprite: 'oilDerrick', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     barracks: { label: 'Dust Barracks', size: [3, 3], hp: 400, sight: 9, cost: 160, queue: ['scout', 'engineer'], sprite: 'barracks', buildRequires: ['hq'], geometry: { spriteOffset: { x: -20, y: -20 } } },
     lab: { label: 'Signal Lab', size: [3, 3], hp: 340, sight: 9, cost: 210, research: ['rangefinding', 'composite-armor', 'scanner', 'capture'], sprite: 'lab', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -20, y: -20 } } },
-    factory: { label: 'War Factory', size: [4, 3], hp: 540, sight: 10, cost: 260, queue: ['tank', 'ambulance'], sprite: 'factory', buildRequires: ['lab', 'rangefinding'], geometry: { spriteOffset: { x: -16, y: -20 } } },
+    factory: { label: 'War Factory', size: [4, 3], hp: 540, sight: 10, cost: 260, queue: ['transport', 'tank', 'ambulance'], sprite: 'factory', buildRequires: ['lab', 'rangefinding'], geometry: { spriteOffset: { x: -16, y: -20 } } },
     turret: { label: 'Turret', size: [2, 2], hp: 260, sight: 9, cost: 110, turret: true, range: 72, damage: 11, reload: 0.7, sprite: 'turret', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -24, y: -20 }, fireOrigin: { x: 8, y: 6 } } }
   };
 
@@ -800,7 +802,8 @@ html{
     attack: 7,
     gather: 9,
     repair: 9,
-    build: 12
+    build: 12,
+    board: 6
   };
 
   const SUPPORT_BUILDING_BY_ROLE = {
@@ -924,6 +927,7 @@ html{
     'Context': 'C',
     'Build': 'B',
     'Stop': 'S',
+    'Unload': 'U',
     'Next Unit': 'Tab',
     'Auto Gather': 'H'
   };
@@ -997,7 +1001,7 @@ html{
   }
 
   function getSelectedEntities() {
-    return [...state.selectedIds].map(getEntityById).filter(Boolean);
+    return [...state.selectedIds].map(getEntityById).filter((entity) => entity && (entity.kind !== 'unit' || !entity.garrisonedIn));
   }
 
   function playerTeam() {
@@ -1360,7 +1364,9 @@ html{
       anim: 0,
       carrying: 0,
       capacity: def.capacity || 0,
+      transportCapacity: def.transportCapacity || 0,
       gatherRate: def.gatherRate || 0,
+      garrisonedIn: null,
       targetId: null,
       lastAttackerId: null,
       lastAttackerTimer: 0,
@@ -1500,7 +1506,7 @@ html{
     clearSpatialBuckets(state.spatial.unitBuckets);
     clearSpatialBuckets(state.spatial.buildingBuckets);
     for (const unit of state.units) {
-      if (unit.hp <= 0) continue;
+      if (unit.hp <= 0 || unit.garrisonedIn) continue;
       state.spatial.unitBuckets[getSpatialBucketIndexForWorld(unit.x, unit.y)].push(unit);
     }
     for (const building of state.buildings) {
@@ -1570,6 +1576,115 @@ html{
     if (!unit || unit.kind !== 'unit') return false;
     if (unit.hp <= 0 || unit.teamId !== teamId || unit.id === excludeUnitId || unit.hp >= unit.maxHp) return false;
     return true;
+  }
+
+  function isUnitEmbarked(unit) {
+    return !!(unit && unit.kind === 'unit' && unit.garrisonedIn);
+  }
+
+  function getTransportCapacity(transport) {
+    if (!transport || transport.kind !== 'unit') return 0;
+    return UNIT_TYPES[transport.type]?.transportCapacity || transport.transportCapacity || 0;
+  }
+
+  function getTransportOccupants(transport) {
+    if (!transport || transport.kind !== 'unit') return [];
+    return state.units.filter((unit) => unit.hp > 0 && unit.garrisonedIn === transport.id);
+  }
+
+  function canUnitBoardTransport(unit, transport) {
+    if (!unit || !transport || unit.kind !== 'unit' || transport.kind !== 'unit') return false;
+    if (unit.id === transport.id || unit.hp <= 0 || transport.hp <= 0) return false;
+    if (unit.teamId !== transport.teamId) return false;
+    if (isUnitEmbarked(unit)) return false;
+    const unitDef = UNIT_TYPES[unit.type];
+    if (!unitDef || !unitDef.infantry) return false;
+    const capacity = getTransportCapacity(transport);
+    if (!capacity) return false;
+    return getTransportOccupants(transport).length < capacity;
+  }
+
+  function syncEmbarkedUnitPosition(unit, transport) {
+    if (!unit || !transport) return;
+    unit.x = transport.x;
+    unit.y = transport.y;
+    unit.dir = transport.dir;
+    unit.path.length = 0;
+    releaseClaim(unit);
+  }
+
+  function boardUnitIntoTransport(unit, transport) {
+    if (!canUnitBoardTransport(unit, transport)) return false;
+    clearPendingConstruction(unit, true);
+    releaseClaim(unit);
+    unit.garrisonedIn = transport.id;
+    unit.order = { type: 'idle' };
+    unit.targetId = null;
+    unit.manualOrderTimer = 0;
+    syncEmbarkedUnitPosition(unit, transport);
+    if (state.selectedIds.delete(unit.id) && transport.teamId === TEAM_PLAYER) {
+      state.selectedIds.add(transport.id);
+      updateSelectionUI();
+    }
+    return true;
+  }
+
+  function disembarkTransportPassengers(transport, destroyPassengers = false) {
+    const passengers = getTransportOccupants(transport);
+    if (!passengers.length) return 0;
+    const centerCellX = pxToCell(transport.x);
+    const centerCellY = pxToCell(transport.y);
+    for (const passenger of passengers) {
+      passenger.garrisonedIn = null;
+      passenger.targetId = null;
+      passenger.path.length = 0;
+      passenger.manualOrderTimer = 0;
+      if (destroyPassengers) {
+        clearPendingConstruction(passenger, true);
+        releaseClaim(passenger);
+        passenger.hp = 0;
+        passenger.lastAttackerId = null;
+        passenger.lastAttackerTimer = 0;
+        state.selectedIds.delete(passenger.id);
+        continue;
+      }
+      passenger.order = { type: 'idle' };
+      const found = findNearestFreeCell(centerCellX, centerCellY, 8, passenger.id, false, passenger);
+      if (found) {
+        passenger.x = found.x * CELL + CELL * 0.5;
+        passenger.y = found.y * CELL + CELL * 0.5;
+      } else {
+        passenger.x = transport.x;
+        passenger.y = transport.y;
+      }
+      passenger.dir = transport.dir;
+      settleUnit(passenger);
+    }
+    updateSelectionUI();
+    return passengers.length;
+  }
+
+  function updateEmbarkedCombat(unit, transport) {
+    if (!transport || transport.hp <= 0 || unit.range <= 0) return;
+    const range = unit.range + (teamById(unit.teamId).research.has('rangefinding') ? 10 : 0);
+    const target = findEnemyInRangeFromPoint(unit.teamId, transport.x, transport.y, range);
+    if (!target || unit.reload > 0) return;
+    const targetPoint = target.kind === 'building' ? getBuildingAimPoint(target) : { x: target.x, y: target.y };
+    const transportGeometry = getUnitGeometry(transport);
+    launchProjectile({
+      sourceId: unit.id,
+      sourceTeamId: unit.teamId,
+      targetId: target.id,
+      x: transportGeometry.fire.x,
+      y: transportGeometry.fire.y,
+      targetX: targetPoint.x,
+      targetY: targetPoint.y,
+      damage: unit.damage,
+      speed: 220,
+      color: unit.teamId === TEAM_PLAYER ? '#ffd38b' : '#ffb36f'
+    });
+    unit.reload = UNIT_TYPES[unit.type].reload;
+    if (unit.teamId === TEAM_PLAYER) playSynth('combat', 230, 0.06, 0.035);
   }
 
   function getThreatEffectiveRange(threat) {
@@ -1972,6 +2087,7 @@ html{
         }
       };
       for (const unit of state.units) {
+        if (unit.garrisonedIn) continue;
         if (unit.teamId === team.id && unit.hp > 0) mark(unit.x, unit.y, unit.sight);
       }
       for (const building of state.buildings) {
@@ -2019,6 +2135,7 @@ html{
 
   function rememberVisibleEnemies(team) {
     for (const unit of state.units) {
+      if (unit.garrisonedIn) continue;
       if (unit.hp <= 0 || unit.teamId === team.id) continue;
       if (!isVisibleToTeam(team, unit.x, unit.y)) continue;
       team.enemyMemory.units[unit.id] = makeEnemyMemoryRecord(unit);
@@ -2141,6 +2258,7 @@ html{
         scout: buildUnitAtlas(team.color, team.accent, 'scout'),
         engineer: buildUnitAtlas(team.color, team.accent, 'engineer'),
         harvester: buildUnitAtlas(team.color, team.accent, 'harvester'),
+        transport: buildUnitAtlas(team.color, team.accent, 'transport'),
         ambulance: buildUnitAtlas(team.color, team.accent, 'ambulance'),
         tank: buildUnitAtlas(team.color, team.accent, 'tank')
       };
@@ -2240,6 +2358,20 @@ html{
       ctx.fillStyle = '#bca27d';
       ctx.fillRect(4, 12, 2, 2);
       ctx.fillRect(18, 12, 2, 2);
+    } else if (type === 'transport') {
+      ctx.fillStyle = '#6f5a43';
+      ctx.fillRect(5, 10, 14, 7);
+      ctx.fillStyle = teamColor;
+      ctx.fillRect(7, 8, 10, 2);
+      ctx.fillStyle = '#d8c8a9';
+      ctx.fillRect(8, 11, 8, 4);
+      ctx.fillStyle = accentColor;
+      ctx.fillRect(17, 11, 2, 4);
+      ctx.fillStyle = '#33261b';
+      ctx.fillRect(4, 16, 4, 2);
+      ctx.fillRect(16, 16, 4, 2);
+      ctx.fillStyle = '#bca27d';
+      ctx.fillRect(18, 13, 2, 2);
     } else if (type === 'ambulance') {
       ctx.fillStyle = '#77624b';
       ctx.fillRect(6, 10, 12, 7);
@@ -2530,6 +2662,8 @@ html{
     state.lastGroupRecall = { index: null, time: 0 };
     state.units = (snapshot.units || []).map((unit) => ({
       ...unit,
+      transportCapacity: unit.transportCapacity || 0,
+      garrisonedIn: unit.garrisonedIn || null,
       order: unit.order ? { ...unit.order } : { type: 'idle' },
       path: Array.isArray(unit.path) ? unit.path.map((point) => ({ ...point })) : []
     }));
@@ -2596,6 +2730,11 @@ html{
     for (const building of state.buildings) occupyBuildingCells(building, true);
     for (const unit of state.units) {
       if (unit.claimKey !== null && unit.claimKey !== undefined) state.unitClaims.set(unit.claimKey, unit.id);
+      if (unit.garrisonedIn) {
+        const transport = getEntityById(unit.garrisonedIn);
+        if (transport && transport.kind === 'unit' && transport.hp > 0) syncEmbarkedUnitPosition(unit, transport);
+        else unit.garrisonedIn = null;
+      }
     }
     recomputeDynamicBlocked();
     refreshFog();
@@ -3006,6 +3145,18 @@ html{
       const def = UNIT_TYPES[unit.type];
       if (!def) continue;
 
+      if (unit.garrisonedIn) {
+        const transport = getEntityById(unit.garrisonedIn);
+        if (!transport || transport.kind !== 'unit' || transport.hp <= 0) {
+          unit.garrisonedIn = null;
+          unit.order = { type: 'idle' };
+        } else {
+          syncEmbarkedUnitPosition(unit, transport);
+          updateEmbarkedCombat(unit, transport);
+          continue;
+        }
+      }
+
       updateUnitAutonomy(unit, def);
       if (def.support) {
         applyAmbulanceAura(unit, def);
@@ -3027,6 +3178,8 @@ html{
         updateAmbulanceSupport(unit, def, dt);
       } else if (unit.order.type === 'service') {
         updateServiceOrder(unit, def, dt);
+      } else if (unit.order.type === 'board') {
+        updateBoardOrder(unit, dt);
       } else if (unit.order.type === 'build') {
         updateBuildOrder(unit, dt);
       } else if (unit.order.type === 'move') {
@@ -3049,7 +3202,7 @@ html{
     if (unit.manualOrderTimer > 0) return;
     if (unit.order.type === 'capture') return;
 
-    if (def.crushDamage) {
+    if (def.crushDamage && def.crushAutonomy !== false) {
       const crushTarget = getCrushTarget(unit);
       if (crushTarget && (unit.order.type !== 'crush' || unit.order.targetId !== crushTarget.id)) {
         releaseClaim(unit);
@@ -3242,8 +3395,9 @@ html{
     const targetX = targetPoint.x;
     const targetY = targetPoint.y;
     const range = unit.range + (teamById(unit.teamId).research.has('rangefinding') ? 10 : 0);
+    const targetRadius = target.kind === 'unit' ? getUnitGeometry(target).hitRadius : 0;
     const distance = dist(unit.x, unit.y, targetX, targetY);
-    if (distance > range) {
+    if (distance > range + targetRadius) {
       moveUnitAlongOrder(unit, dt, targetX, targetY);
       return;
     }
@@ -3265,6 +3419,41 @@ html{
       });
       unit.reload = UNIT_TYPES[unit.type].reload;
       if (unit.teamId === TEAM_PLAYER) playSynth('combat', 230, 0.06, 0.035);
+    }
+  }
+
+  function updateBoardOrder(unit, dt) {
+    const transport = getEntityById(unit.order.targetId);
+    if (!transport || transport.kind !== 'unit' || transport.hp <= 0 || transport.teamId !== unit.teamId) {
+      unit.order = { type: 'idle' };
+      unit.targetId = null;
+      return;
+    }
+    if (!getTransportCapacity(transport)) {
+      unit.order = { type: 'idle' };
+      unit.targetId = null;
+      return;
+    }
+    if (!UNIT_TYPES[unit.type]?.infantry || isUnitEmbarked(unit)) {
+      unit.order = { type: 'idle' };
+      unit.targetId = null;
+      return;
+    }
+    if (getTransportOccupants(transport).length >= getTransportCapacity(transport)) {
+      unit.order = { type: 'idle' };
+      unit.targetId = null;
+      return;
+    }
+    const boardRange = getUnitGeometry(transport).hitRadius + 6;
+    if (dist(unit.x, unit.y, transport.x, transport.y) > boardRange) {
+      moveUnitAlongOrder(unit, dt, transport.x, transport.y);
+      return;
+    }
+    if (boardUnitIntoTransport(unit, transport)) {
+      unit.targetId = null;
+    } else {
+      unit.order = { type: 'idle' };
+      unit.targetId = null;
     }
   }
 
@@ -3553,7 +3742,13 @@ html{
   function updateProjectiles(dt) {
     for (let i = state.projectiles.length - 1; i >= 0; i--) {
       const projectile = state.projectiles[i];
-      const target = getEntityById(projectile.targetId);
+      let target = getEntityById(projectile.targetId);
+      if (target && target.kind === 'unit' && isUnitEmbarked(target)) {
+        const transport = getEntityById(target.garrisonedIn);
+        if (transport && transport.kind === 'unit' && transport.hp > 0 && transport.teamId === target.teamId) {
+          target = transport;
+        }
+      }
       if (target && target.hp > 0 && target.teamId !== projectile.sourceTeamId) {
         const targetPoint = target.kind === 'building' ? getBuildingAimPoint(target) : { x: target.x, y: target.y };
         projectile.targetX = targetPoint.x;
@@ -3595,28 +3790,32 @@ html{
     return best;
   }
 
-  function findEnemyInRange(unit, range) {
+  function findEnemyInRangeFromPoint(teamId, worldX, worldY, range) {
     let best = null;
     let bestDist = Infinity;
-    forEachNearbyUnit(unit.x, unit.y, range, (enemy) => {
-      if (enemy.hp <= 0 || enemy.teamId === unit.teamId) return;
-      const distance = dist(unit.x, unit.y, enemy.x, enemy.y);
-      if (distance < range && distance < bestDist && canSeeWorldPoint(unit.x, unit.y, enemy.x, enemy.y)) {
+    forEachNearbyUnit(worldX, worldY, range, (enemy) => {
+      if (enemy.hp <= 0 || enemy.teamId === teamId || enemy.garrisonedIn) return;
+      const distance = dist(worldX, worldY, enemy.x, enemy.y);
+      if (distance < range && distance < bestDist && canSeeWorldPoint(worldX, worldY, enemy.x, enemy.y)) {
         best = enemy;
         bestDist = distance;
       }
     });
-    forEachNearbyBuilding(unit.x, unit.y, range, (building) => {
-      if (building.hp <= 0 || building.teamId === unit.teamId) return;
+    forEachNearbyBuilding(worldX, worldY, range, (building) => {
+      if (building.hp <= 0 || building.teamId === teamId) return;
       const bx = building.x + building.widthCells * CELL * 0.5;
       const by = building.y + building.heightCells * CELL * 0.5;
-      const distance = dist(unit.x, unit.y, bx, by);
-      if (distance < range && distance < bestDist && canSeeWorldPoint(unit.x, unit.y, bx, by)) {
+      const distance = dist(worldX, worldY, bx, by);
+      if (distance < range && distance < bestDist && canSeeWorldPoint(worldX, worldY, bx, by)) {
         best = building;
         bestDist = distance;
       }
     });
     return best;
+  }
+
+  function findEnemyInRange(unit, range) {
+    return findEnemyInRangeFromPoint(unit.teamId, unit.x, unit.y, range);
   }
 
   function moveUnitAlongOrder(unit, dt, targetX, targetY) {
@@ -3727,6 +3926,9 @@ html{
     if (target.hp > 0) return;
     target.hp = 0;
     if (target.kind === 'unit') {
+      if (getTransportCapacity(target)) {
+        disembarkTransportPassengers(target, true);
+      }
       clearPendingConstruction(target, true);
       releaseClaim(target);
       state.selectedIds.delete(target.id);
@@ -3940,7 +4142,7 @@ html{
   }
 
   function countTeamAssets(teamId) {
-    const counts = { hq: 0, refinery: 0, silo: 0, oilDerrick: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, ambulance: 0, harvester: 0, engineer: 0 };
+    const counts = { hq: 0, refinery: 0, silo: 0, oilDerrick: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, transport: 0, ambulance: 0, harvester: 0, engineer: 0 };
     for (const building of state.buildings) {
       if (building.teamId === teamId && building.hp > 0 && counts.hasOwnProperty(building.type)) counts[building.type]++;
     }
@@ -3951,7 +4153,7 @@ html{
   }
 
   function totalRemainingUnits(counts) {
-    return ['scout', 'tank', 'ambulance', 'harvester', 'engineer'].reduce((total, key) => total + (counts[key] || 0), 0);
+    return ['scout', 'tank', 'transport', 'ambulance', 'harvester', 'engineer'].reduce((total, key) => total + (counts[key] || 0), 0);
   }
 
   function totalRemainingStructures(counts) {
@@ -4176,6 +4378,7 @@ html{
   function drawUnits() {
     const sorted = [...state.units].filter((unit) => unit.hp > 0).sort((a, b) => a.y - b.y);
     for (const unit of sorted) {
+      if (unit.garrisonedIn) continue;
       if (!isVisibleToPlayer(unit.x, unit.y) && unit.teamId !== TEAM_PLAYER) continue;
       const team = teamById(unit.teamId);
       const atlas = team.sprites.units[unit.type];
@@ -4192,6 +4395,7 @@ html{
       if (groupIndex !== null) drawUnitGroupBadge(unit.x, geometry.sprite.y - 4, String(groupIndex));
       drawHealthBar(screen.x + 2, screen.y - 4, drawW - 4, unit.hp / unit.maxHp, team.color);
       if (unit.carrying) drawCargoPip(screen.x + drawW - 6, screen.y + 2, unit.carrying / unit.capacity);
+      if (unit.transportCapacity) drawTransportPips(screen.x + 2, screen.y + drawH + 1, unit.transportCapacity, getTransportOccupants(unit).length, team.color);
       if (state.selectedIds.has(unit.id)) drawSelectionBracket(geometry.visualCenter.x, geometry.visualCenter.y + 1, geometry.selectionRadius + Math.sin(unit.selectedPulse) * 1.2, team.color);
     }
   }
@@ -4317,10 +4521,13 @@ html{
       for (let x = startX; x <= endX; x++) {
         const key = worldToKey(x, y);
         const screenX = Math.round((x * CELL - state.camera.x) * state.camera.zoom + halfRenderWidth);
+        if (team.fogVisible[key]) {
+          continue;
+        }
         if (!team.fogExplored[key]) {
           backCtx.fillStyle = 'rgba(6,5,4,0.92)';
           backCtx.fillRect(screenX, screenY, tileSpan, tileSpan);
-        } else if (!team.fogVisible[key]) {
+        } else {
           backCtx.fillStyle = 'rgba(18,12,8,0.54)';
           backCtx.fillRect(screenX, screenY, tileSpan, tileSpan);
         }
@@ -4375,6 +4582,18 @@ html{
     backCtx.fillRect(x, y + 11 - Math.round(11 * ratio), 3, Math.round(11 * ratio));
   }
 
+  function drawTransportPips(x, y, capacity, filled, color) {
+    const spacing = 4;
+    for (let index = 0; index < capacity; index++) {
+      backCtx.beginPath();
+      backCtx.fillStyle = index < filled ? color : 'rgba(0,0,0,0.45)';
+      backCtx.strokeStyle = '#f5e7c4';
+      backCtx.arc(x + index * spacing + 1.5, y + 1.5, 1.5, 0, Math.PI * 2);
+      backCtx.fill();
+      backCtx.stroke();
+    }
+  }
+
   function drawSelectionBracket(worldX, worldY, radius, color) {
     const screen = worldToScreen(worldX, worldY);
     const size = Math.round(radius * state.camera.zoom);
@@ -4394,7 +4613,8 @@ html{
     const scaleY = minimap.height / WORLD_CELLS_Y;
     const fog = playerTeam();
     for (const resource of state.resources) {
-      if (isDepletedResource(resource) || !fog.fogExplored[worldToKey(resource.cellX, resource.cellY)]) continue;
+      const key = worldToKey(resource.cellX, resource.cellY);
+      if (isDepletedResource(resource) || (!fog.fogExplored[key] && !fog.fogVisible[key])) continue;
       minimapCtx.fillStyle = resource.resourceType === 'oil' ? '#8dd7df' : '#ffc55b';
       minimapCtx.fillRect(resource.cellX * scaleX - 1, resource.cellY * scaleY - 1, 3, 3);
     }
@@ -4457,7 +4677,7 @@ html{
     for (let y = 0; y < WORLD_CELLS_Y; y++) {
       for (let x = 0; x < WORLD_CELLS_X; x++) {
         const key = worldToKey(x, y);
-        if (!fog.fogExplored[key]) {
+        if (!fog.fogVisible[key] && !fog.fogExplored[key]) {
           minimapFogCtx.fillRect(Math.floor(x * scaleX), Math.floor(y * scaleY), Math.ceil(scaleX), Math.ceil(scaleY));
         }
       }
@@ -4497,10 +4717,10 @@ html{
     return PRIMARY_ACTION_SHORTCUTS[label] || null;
   }
 
-  function assignActionPanelHotkey(action) {
+  function assignActionPanelHotkey(action, disabled = false) {
     const slot = ACTION_PANEL_HOTKEYS[nextActionPanelHotkeyIndex++];
     if (!slot) return null;
-    actionPanelHotkeys.push({ code: slot.code, action });
+    actionPanelHotkeys.push({ code: slot.code, action, disabled });
     return slot;
   }
 
@@ -4517,6 +4737,7 @@ html{
     const match = actionPanelHotkeys.find((item) => item.code === event.code);
     if (!match) return false;
     event.preventDefault();
+    if (match.disabled || typeof match.action !== 'function') return true;
     match.action();
     return true;
   }
@@ -5065,6 +5286,7 @@ html{
         addMeta('HP', entity.hp + ' / ' + entity.maxHp);
         addMeta('Sight', String(entity.sight));
         addMeta('Speed', String(def.speed));
+        if (entity.transportCapacity) addMeta('Seats', getTransportOccupants(entity).length + ' / ' + entity.transportCapacity);
         addMeta('Order', getUnitOrderSummaryLabel(entity));
         makeCommonUnitActions(units);
         if (def.builder) makeAction('Build', () => openBuildMenu());
@@ -5111,7 +5333,7 @@ html{
   function makeAction(label, action, active = false, danger = false, disabled = false, titleText = label, options = null) {
     const visual = actionVisual(label);
     const button = document.createElement('button');
-    const panelHotkey = disabled ? null : assignActionPanelHotkey(action);
+    const panelHotkey = assignActionPanelHotkey(action, disabled);
     button.type = 'button';
     button.className = 'action-button' + (active ? ' is-active' : '') + (danger ? ' is-danger' : '') + (disabled ? ' is-disabled' : '');
     button.innerHTML = iconMarkup(visual.icon, visual.short);
@@ -5119,7 +5341,7 @@ html{
     button.title = formatActionHotkeyTitle(titleText, panelHotkey);
     if (panelHotkey) {
       button.dataset.hotkeyBadge = panelHotkey.badge;
-      button.setAttribute('aria-keyshortcuts', panelHotkey.label);
+      if (!disabled) button.setAttribute('aria-keyshortcuts', panelHotkey.label);
     }
     button.disabled = disabled;
     const progress = options && typeof options.progress === 'number' ? clamp(options.progress, 0, 1) : null;
@@ -5155,12 +5377,14 @@ html{
 
   function getUnitCommandCapabilities(units) {
     const captureEnabled = units.some((unit) => unit.type === 'scout' && teamById(unit.teamId)?.research.has('capture'));
+    const unloadEnabled = units.some((unit) => unit.transportCapacity && getTransportOccupants(unit).length > 0);
     return {
       move: units.length > 0,
       attack: units.some((unit) => unit.range > 0),
       gather: units.some((unit) => unit.type === 'harvester'),
       repair: units.some((unit) => unit.type === 'engineer'),
       capture: captureEnabled,
+      unload: unloadEnabled,
       context: true
     };
   }
@@ -5200,6 +5424,7 @@ html{
 
   function getUnitOrderStatusText(unit) {
     const order = unit.order || { type: 'idle' };
+    if (order.type === 'board') return 'Moving to board a transport. Once inside, boarded scouts fire from the vehicle while it moves.';
     if (order.type === 'capture') return 'Capturing an enemy structure. The scout cannot fire until the channel is interrupted or complete.';
     if (order.type === 'support') return 'Closing in to stabilize damaged friendly units while avoiding direct fire.';
     if (order.type === 'service') {
@@ -5233,6 +5458,9 @@ html{
   }
 
   function getUnitRoleSubtitle(unit) {
+    if (unit.type === 'transport') {
+      return 'Fast troop carrier for up to six infantry. Boarded scouts fire from inside while the vehicle keeps moving.';
+    }
     if (unit.type === 'scout' && teamById(unit.teamId)?.research.has('capture')) {
       return 'Recon infantry that can capture enemy buildings with the Capture command.';
     }
@@ -5250,6 +5478,7 @@ html{
 
   function getUnitOrderSummaryLabel(unit) {
     const order = unit.order || { type: 'idle' };
+    if (order.type === 'board') return 'Board';
     if (order.type === 'capture') return 'Capture';
     if (order.type === 'support') return 'Support';
     if (order.type === 'service') return 'Service -> Rally';
@@ -5276,6 +5505,7 @@ html{
     if (capabilities.capture) makeAction('Capture', () => setCommandMode('capture'), state.commandMode === 'capture');
     if (capabilities.gather) makeAction('Gather', () => setCommandMode('gather'), state.commandMode === 'gather');
     if (capabilities.repair) makeAction('Repair', () => setCommandMode('repair'), state.commandMode === 'repair');
+    if (capabilities.unload) makeAction('Unload', () => unloadSelectedTransports(units));
     makeAction('Context', () => setCommandMode('context'), state.commandMode === 'context');
     makeAction('Stop', () => {
       for (const unit of units) {
@@ -5332,6 +5562,7 @@ html{
 
   function helpTextForSelection(selected) {
     const units = selected.filter((entity) => entity.kind === 'unit');
+    if (units.some((unit) => unit.type === 'transport')) return 'Move infantry onto a troop transport to board it. Each carrier holds six infantry, and boarded scouts keep firing from inside while unload drops everyone at once.';
     if (units.some((unit) => unit.type === 'engineer')) return 'Engineers can open Build Orders or Repair from this panel. Oil Derricks must be placed over an oil deposit, while other structures still require free sand or rock.';
     if (units.some((unit) => unit.type === 'scout') && playerTeam()?.research.has('capture')) return 'Scouts can use Capture on enemy buildings. They must remain in range for 15 seconds and cannot attack while channeling.';
     if (units.some((unit) => unit.type === 'harvester')) return 'Harvesters can be sent directly onto spice seams or use Auto Gather to self-route between the nearest seam and refinery.';
@@ -5379,6 +5610,41 @@ html{
       toast('Capture order acknowledged.');
     }
     return { captureCount: scouts.length, scoutCount: scouts.length, scouts };
+  }
+
+  function issueBoardTransportOrder(units, transport, manualLock = MANUAL_ORDER_LOCK.board) {
+    if (!transport || transport.kind !== 'unit' || !getTransportCapacity(transport)) {
+      return { boardCount: 0, infantryCount: 0, boarders: [] };
+    }
+    const infantry = units.filter((unit) => canUnitBoardTransport(unit, transport));
+    for (const unit of infantry) {
+      clearPendingConstruction(unit, true);
+      releaseClaim(unit);
+      unit.order = { type: 'board', targetId: transport.id };
+      unit.path.length = 0;
+      unit.targetId = transport.id;
+      unit.manualOrderTimer = manualLock;
+    }
+    if (infantry.length) {
+      refreshSelectionHudForUnits(infantry);
+      playSynth('ui', 350, 0.05, 0.03);
+      toast('Boarding order acknowledged.');
+    }
+    return { boardCount: infantry.length, infantryCount: infantry.length, boarders: infantry };
+  }
+
+  function unloadSelectedTransports(units) {
+    const transports = units.filter((unit) => unit.transportCapacity && getTransportOccupants(unit).length > 0);
+    let unloaded = 0;
+    for (const transport of transports) {
+      transport.order = { type: 'idle' };
+      transport.targetId = null;
+      transport.path.length = 0;
+      unloaded += disembarkTransportPassengers(transport, false);
+    }
+    if (!unloaded) return;
+    playSynth('ui', 300, 0.05, 0.03);
+    toast(unloaded === 1 ? '1 passenger disembarked.' : unloaded + ' passengers disembarked.');
   }
 
   function updateCommandReadout() {
@@ -5563,7 +5829,7 @@ html{
   }
 
   function getVisiblePlayerUnits() {
-    return state.units.filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0 && isWorldPointInViewport(unit.x, unit.y));
+    return state.units.filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0 && !unit.garrisonedIn && isWorldPointInViewport(unit.x, unit.y));
   }
 
   function getVisiblePlayerBuildings() {
@@ -5621,7 +5887,11 @@ html{
 
   function selectEntities(ids, additive) {
     if (!additive) state.selectedIds.clear();
-    ids.forEach((id) => state.selectedIds.add(id));
+    ids.forEach((id) => {
+      const entity = getEntityById(id);
+      if (!entity || (entity.kind === 'unit' && entity.garrisonedIn)) return;
+      state.selectedIds.add(id);
+    });
     playUiCue(state.selectedIds.size ? 'select' : 'cancel');
     updateSelectionUI();
   }
@@ -5636,7 +5906,7 @@ html{
 
   function selectUnitsByType(typeKey, additive) {
     const ids = state.units
-      .filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0 && unit.type === typeKey)
+      .filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0 && !unit.garrisonedIn && unit.type === typeKey)
       .map((unit) => unit.id);
     if (!ids.length) return;
     selectEntities(ids, additive);
@@ -5721,6 +5991,14 @@ html{
     let selected = getSelectedEntities().filter((entity) => entity.kind === 'unit' && entity.teamId === TEAM_PLAYER);
     if (!selected.length) return;
     const target = findEntityAt(worldX, worldY);
+    if ((state.commandMode === 'context' || state.commandMode === 'move') && target && target.kind === 'unit' && target.teamId === TEAM_PLAYER && getTransportCapacity(target)) {
+      const boardOrder = issueBoardTransportOrder(selected, target);
+      if (boardOrder.boardCount) {
+        const boardingIds = new Set(boardOrder.boarders.map((unit) => unit.id));
+        selected = selected.filter((unit) => !boardingIds.has(unit.id));
+      }
+      if (!selected.length) return;
+    }
     if (target && target.kind === 'building' && target.teamId === TEAM_PLAYER) {
       const supportOrder = issueSupportServiceOrder(selected, target);
       if (supportOrder.eligibleCount) {
@@ -5935,9 +6213,11 @@ html{
   }
 
   function findEntityAt(worldX, worldY) {
-    for (let i = state.units.length - 1; i >= 0; i--) {
-      const unit = state.units[i];
-      if (unit.hp <= 0) continue;
+    const selectableUnits = state.units
+      .filter((unit) => unit.hp > 0 && !unit.garrisonedIn)
+      .sort((a, b) => b.y - a.y);
+    for (const unit of selectableUnits) {
+      if (unit.hp <= 0 || unit.garrisonedIn) continue;
       if (dist(worldX, worldY, unit.x, unit.y) <= getUnitGeometry(unit).hitRadius) return unit;
     }
     for (let i = state.buildings.length - 1; i >= 0; i--) {
@@ -5960,7 +6240,7 @@ html{
     const maxX = Math.max(startWorld.x, endWorld.x);
     const maxY = Math.max(startWorld.y, endWorld.y);
     const ids = state.units
-      .filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0 && unit.x >= minX && unit.x <= maxX && unit.y >= minY && unit.y <= maxY)
+      .filter((unit) => unit.teamId === TEAM_PLAYER && unit.hp > 0 && !unit.garrisonedIn && unit.x >= minX && unit.x <= maxX && unit.y >= minY && unit.y <= maxY)
       .map((unit) => unit.id);
     selectEntities(ids, additive);
   }
