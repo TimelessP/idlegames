@@ -673,6 +673,7 @@ html{
     'Attack': { icon: 'attack', short: 'Atk' },
     'Gather': { icon: 'gather', short: 'Harv' },
     'Repair': { icon: 'hammer', short: 'Fix' },
+    'Capture': { icon: 'context', short: 'Cap' },
     'Context': { icon: 'context', short: 'Ctx' },
     'Stop': { icon: 'stop', short: 'Stop' },
     'Center': { icon: 'center', short: 'Center' },
@@ -683,12 +684,14 @@ html{
     'Optics': { icon: 'tech', short: 'Optics' },
     'Armour': { icon: 'tech', short: 'Armour' },
     'Scanner': { icon: 'tech', short: 'Scan' },
+    'Capture Tech': { icon: 'tech', short: 'Cap' },
     'Scan': { icon: 'tech', short: 'Scan' }
   };
 
   const KEYBOARD_CURSOR_IDLE_HIDE = 2.5;
   const SCAN_DURATION = 10;
   const SCAN_COOLDOWN = 45;
+  const CAPTURE_DURATION = 15;
   const AI_SCAN_THREAT_RADIUS = CELL * 16;
   const AI_MEMORY_SCAN_STALE_AFTER = 18;
   const AI_SCOUT_GRID_STEP = 10;
@@ -777,7 +780,7 @@ html{
     silo: { label: 'Spice Silo', size: [2, 2], hp: 300, sight: 8, cost: 120, storage: 28000, sprite: 'silo', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     oilDerrick: { label: 'Oil Derrick', size: [2, 2], hp: 320, sight: 9, cost: 140, incomeRate: OIL_TRICKLE_AMOUNT / OIL_TRICKLE_INTERVAL, sprite: 'oilDerrick', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     barracks: { label: 'Dust Barracks', size: [3, 3], hp: 400, sight: 9, cost: 160, queue: ['scout', 'engineer'], sprite: 'barracks', buildRequires: ['hq'], geometry: { spriteOffset: { x: -20, y: -20 } } },
-    lab: { label: 'Signal Lab', size: [3, 3], hp: 340, sight: 9, cost: 210, research: ['rangefinding', 'composite-armor', 'scanner'], sprite: 'lab', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -20, y: -20 } } },
+    lab: { label: 'Signal Lab', size: [3, 3], hp: 340, sight: 9, cost: 210, research: ['rangefinding', 'composite-armor', 'scanner', 'capture'], sprite: 'lab', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -20, y: -20 } } },
     factory: { label: 'War Factory', size: [4, 3], hp: 540, sight: 10, cost: 260, queue: ['tank', 'ambulance'], sprite: 'factory', buildRequires: ['lab', 'rangefinding'], geometry: { spriteOffset: { x: -16, y: -20 } } },
     turret: { label: 'Turret', size: [2, 2], hp: 260, sight: 9, cost: 110, turret: true, range: 72, damage: 11, reload: 0.7, sprite: 'turret', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -24, y: -20 }, fireOrigin: { x: 8, y: 6 } } }
   };
@@ -785,7 +788,8 @@ html{
   const RESEARCH = {
     rangefinding: { label: 'Optics', cost: 160, time: 12, requires: ['lab'], desc: 'Improves line of sight and the factory unlock chain.' },
     'composite-armor': { label: 'Armour', cost: 220, time: 18, requires: ['lab', 'rangefinding'], desc: 'Unlocks siege tanks and slightly toughens combat units.' },
-    scanner: { label: 'Scanner', cost: 260, time: 20, requires: ['lab', 'rangefinding'], desc: 'Unlocks the Command Hub satellite scan action.' }
+    scanner: { label: 'Scanner', cost: 260, time: 20, requires: ['lab', 'rangefinding'], desc: 'Unlocks the Command Hub satellite scan action.' },
+    capture: { label: 'Capture Tech', cost: 190, time: 16, requires: ['lab'], desc: 'Lets Dust Scouts capture enemy buildings if they can hold the channel.' }
   };
 
   const BUILDABLE_BY_ENGINEER = ['hq', 'refinery', 'silo', 'oilDerrick', 'barracks', 'lab', 'factory', 'turret'];
@@ -1237,11 +1241,65 @@ html{
     state.sortedBuildingsDirty = true;
     occupyBuildingCells(building, true);
     const team = teamById(teamId);
-    if (team) team.research.add(typeKey);
+    syncTeamStructureUnlock(teamId, typeKey);
     if (!free && team) team.spice -= def.cost;
     if (oilResource) oilResource.claimedBy = building.id;
     if (typeKey === 'refinery' && autoQueueFreeHarvester) enqueueProduction(building, 'unit', 'harvester', true);
     return building;
+  }
+
+  function syncTeamStructureUnlock(teamId, typeKey) {
+    const team = teamById(teamId);
+    if (!team || !BUILDING_TYPES[typeKey]) return;
+    const ownsType = state.buildings.some((building) => building.hp > 0 && building.teamId === teamId && building.type === typeKey);
+    if (ownsType) team.research.add(typeKey);
+    else team.research.delete(typeKey);
+  }
+
+  function canScoutCaptureBuilding(unit, building) {
+    if (!unit || !building || building.kind !== 'building') return false;
+    if (unit.kind !== 'unit' || unit.type !== 'scout' || unit.hp <= 0) return false;
+    if (building.hp <= 0 || building.teamId === unit.teamId) return false;
+    const team = teamById(unit.teamId);
+    return !!(team && team.research.has('capture'));
+  }
+
+  function getBuildingCaptureRange(building) {
+    const geometry = getBuildingGeometry(building);
+    return Math.max(geometry.footprint.width, geometry.footprint.height) * 0.5 + 10;
+  }
+
+  function getBuildingCapturePoint(building) {
+    const geometry = getBuildingGeometry(building);
+    return {
+      x: geometry.footprint.centerX,
+      y: geometry.footprint.centerY
+    };
+  }
+
+  function transferBuildingOwnership(building, newTeamId) {
+    if (!building || building.kind !== 'building' || building.teamId === newTeamId) return false;
+    const oldTeamId = building.teamId;
+    building.teamId = newTeamId;
+    building.queue = null;
+    building.reload = 0;
+    building.scanRevealUntil = 0;
+    building.scanCooldownUntil = 0;
+    syncTeamStructureUnlock(oldTeamId, building.type);
+    syncTeamStructureUnlock(newTeamId, building.type);
+    recomputeTeamResearchBonuses(oldTeamId);
+    recomputeTeamResearchBonuses(newTeamId);
+    if (oldTeamId === TEAM_PLAYER && state.pendingRallyBuildingId === building.id) {
+      state.pendingRallyBuildingId = null;
+      state.pendingActionLabel = '';
+    }
+    if (oldTeamId === TEAM_PLAYER) state.selectedIds.delete(building.id);
+    refreshFog();
+    updateEnemyMemory();
+    rebuildMinimapFogLayer();
+    updateSelectionUI();
+    updateCommandReadout();
+    return true;
   }
 
   function occupyBuildingCells(building, occupy) {
@@ -2961,6 +3019,8 @@ html{
         updateAttackOrder(unit, dt);
       } else if (unit.order.type === 'crush') {
         updateCrushOrder(unit, dt);
+      } else if (unit.order.type === 'capture') {
+        updateCaptureOrder(unit, dt);
       } else if (unit.order.type === 'repair') {
         updateRepairOrder(unit, def, dt);
       } else if (unit.order.type === 'support') {
@@ -2987,6 +3047,7 @@ html{
 
   function updateUnitAutonomy(unit, def) {
     if (unit.manualOrderTimer > 0) return;
+    if (unit.order.type === 'capture') return;
 
     if (def.crushDamage) {
       const crushTarget = getCrushTarget(unit);
@@ -3223,6 +3284,42 @@ html{
     moveUnitAlongOrder(unit, dt, target.x, target.y);
     if (target.hp > 0 && dist(unit.x, unit.y, target.x, target.y) <= (UNIT_TYPES[unit.type].crushRadius || 7)) {
       tryVehicleCrush(unit, UNIT_TYPES[unit.type]);
+    }
+  }
+
+  function updateCaptureOrder(unit, dt) {
+    const target = getEntityById(unit.order.targetId);
+    if (!canScoutCaptureBuilding(unit, target)) {
+      unit.order = { type: 'idle' };
+      unit.targetId = null;
+      return;
+    }
+    const targetPoint = getBuildingCapturePoint(target);
+    const captureRange = getBuildingCaptureRange(target);
+    if (dist(unit.x, unit.y, targetPoint.x, targetPoint.y) > captureRange) {
+      if ((unit.order.progress || 0) > 0) unit.order.progress = 0;
+      moveUnitAlongOrder(unit, dt, targetPoint.x, targetPoint.y);
+      return;
+    }
+    releaseClaim(unit);
+    unit.path.length = 0;
+    unit.order.progress = (unit.order.progress || 0) + dt;
+    if (state.selectedIds.has(unit.id)) updateSelectionUI();
+    if (unit.order.progress < CAPTURE_DURATION) return;
+    const capturedLabel = BUILDING_TYPES[target.type]?.label || 'Structure';
+    if (!transferBuildingOwnership(target, unit.teamId)) {
+      unit.order = { type: 'idle' };
+      unit.targetId = null;
+      return;
+    }
+    unit.order = { type: 'idle' };
+    unit.targetId = null;
+    unit.path.length = 0;
+    if (unit.teamId === TEAM_PLAYER) {
+      playUiCue('ready');
+      toast(capturedLabel + ' captured.');
+    } else {
+      toast('Enemy scouts captured a structure.');
     }
   }
 
@@ -3598,6 +3695,7 @@ html{
     const index = state.buildings.findIndex((entry) => entry.id === building.id);
     if (index !== -1) state.buildings.splice(index, 1);
     state.sortedBuildingsDirty = true;
+    syncTeamStructureUnlock(building.teamId, building.type);
     if (state.pendingRallyBuildingId === building.id) {
       state.pendingRallyBuildingId = null;
       state.pendingActionLabel = '';
@@ -3947,6 +4045,7 @@ html{
     drawBuildings();
     drawUnits();
     drawRallyOverlays();
+    drawCaptureOverlays();
     drawProjectiles();
     drawEffects();
     drawFog();
@@ -4120,6 +4219,31 @@ html{
       drawPixelDashedLine(start.x, start.y, end.x, end.y, '#fff1b2');
       drawHollowMarker(end.x, end.y, Math.max(5, Math.round(5 * state.camera.zoom * 0.6)), '#fff1b2');
     }
+  }
+
+  function drawCaptureOverlays() {
+    for (const unit of state.units) {
+      if (unit.hp <= 0 || unit.order?.type !== 'capture') continue;
+      const target = getEntityById(unit.order.targetId);
+      if (!target || target.kind !== 'building' || target.hp <= 0) continue;
+      const visible = isVisibleToPlayer(unit.x, unit.y) || isVisibleToPlayer(target.x + target.widthCells * CELL * 0.5, target.y + target.heightCells * CELL * 0.5);
+      if (!visible) continue;
+      const start = worldToScreen(unit.x, unit.y - 5);
+      const capturePoint = getBuildingCapturePoint(target);
+      const end = worldToScreen(capturePoint.x, capturePoint.y);
+      const color = unit.teamId === TEAM_PLAYER ? '#fff1b2' : '#ffb38a';
+      drawPixelDashedLine(start.x, start.y, end.x, end.y, color);
+      drawHollowMarker(end.x, end.y, Math.max(5, Math.round(5 * state.camera.zoom * 0.6)), color);
+      drawCaptureProgressBar(end.x, end.y - 10, clamp((unit.order.progress || 0) / CAPTURE_DURATION, 0, 1), color);
+    }
+  }
+
+  function drawCaptureProgressBar(x, y, progress, color) {
+    const width = 18;
+    backCtx.fillStyle = 'rgba(18,12,10,0.85)';
+    backCtx.fillRect(Math.round(x - width * 0.5) - 1, Math.round(y) - 1, width + 2, 5);
+    backCtx.fillStyle = color;
+    backCtx.fillRect(Math.round(x - width * 0.5), Math.round(y), Math.round(width * progress), 3);
   }
 
   function drawProjectiles() {
@@ -5030,11 +5154,13 @@ html{
   }
 
   function getUnitCommandCapabilities(units) {
+    const captureEnabled = units.some((unit) => unit.type === 'scout' && teamById(unit.teamId)?.research.has('capture'));
     return {
       move: units.length > 0,
       attack: units.some((unit) => unit.range > 0),
       gather: units.some((unit) => unit.type === 'harvester'),
       repair: units.some((unit) => unit.type === 'engineer'),
+      capture: captureEnabled,
       context: true
     };
   }
@@ -5074,6 +5200,7 @@ html{
 
   function getUnitOrderStatusText(unit) {
     const order = unit.order || { type: 'idle' };
+    if (order.type === 'capture') return 'Capturing an enemy structure. The scout cannot fire until the channel is interrupted or complete.';
     if (order.type === 'support') return 'Closing in to stabilize damaged friendly units while avoiding direct fire.';
     if (order.type === 'service') {
       const support = getEntityById(order.targetId);
@@ -5106,6 +5233,9 @@ html{
   }
 
   function getUnitRoleSubtitle(unit) {
+    if (unit.type === 'scout' && teamById(unit.teamId)?.research.has('capture')) {
+      return 'Recon infantry that can capture enemy buildings with the Capture command.';
+    }
     if (unit.type === 'harvester') {
       return 'Carries ' + unit.carrying + ' / ' + unit.capacity + ' spice.';
     }
@@ -5120,6 +5250,7 @@ html{
 
   function getUnitOrderSummaryLabel(unit) {
     const order = unit.order || { type: 'idle' };
+    if (order.type === 'capture') return 'Capture';
     if (order.type === 'support') return 'Support';
     if (order.type === 'service') return 'Service -> Rally';
     if (order.type === 'move' && order.nextOrder) {
@@ -5142,6 +5273,7 @@ html{
     const capabilities = getUnitCommandCapabilities(units);
     makeAction('Move', () => setCommandMode('move'), state.commandMode === 'move');
     if (capabilities.attack) makeAction('Attack', () => setCommandMode('attack'), state.commandMode === 'attack');
+    if (capabilities.capture) makeAction('Capture', () => setCommandMode('capture'), state.commandMode === 'capture');
     if (capabilities.gather) makeAction('Gather', () => setCommandMode('gather'), state.commandMode === 'gather');
     if (capabilities.repair) makeAction('Repair', () => setCommandMode('repair'), state.commandMode === 'repair');
     makeAction('Context', () => setCommandMode('context'), state.commandMode === 'context');
@@ -5201,6 +5333,7 @@ html{
   function helpTextForSelection(selected) {
     const units = selected.filter((entity) => entity.kind === 'unit');
     if (units.some((unit) => unit.type === 'engineer')) return 'Engineers can open Build Orders or Repair from this panel. Oil Derricks must be placed over an oil deposit, while other structures still require free sand or rock.';
+    if (units.some((unit) => unit.type === 'scout') && playerTeam()?.research.has('capture')) return 'Scouts can use Capture on enemy buildings. They must remain in range for 15 seconds and cannot attack while channeling.';
     if (units.some((unit) => unit.type === 'harvester')) return 'Harvesters can be sent directly onto spice seams or use Auto Gather to self-route between the nearest seam and refinery.';
     if (units.some((unit) => unit.type === 'ambulance')) return 'Ambulances automatically close with damaged friendly units, pulse healing nearby, and drift back out of enemy weapon range when threatened.';
     if (units.some((unit) => UNIT_TYPES[unit.type]?.infantry || UNIT_TYPES[unit.type]?.vehicle)) return 'Infantry can recover at barracks and vehicles at the factory by moving onto the matching support structure.';
@@ -5228,6 +5361,24 @@ html{
       toast('No damaged units need service.');
     }
       return { supportCount: supportUnits.length, eligibleCount: eligible.length, eligibleUnits: eligible };
+  }
+
+  function issueCaptureOrder(units, building) {
+    if (!building || building.kind !== 'building' || building.hp <= 0) return { captureCount: 0, scoutCount: 0, scouts: [] };
+    const scouts = units.filter((unit) => canScoutCaptureBuilding(unit, building));
+    for (const unit of scouts) {
+      releaseClaim(unit);
+      unit.order = { type: 'capture', targetId: building.id, progress: 0 };
+      unit.targetId = building.id;
+      unit.path.length = 0;
+      unit.manualOrderTimer = 0;
+    }
+    if (scouts.length) {
+      refreshSelectionHudForUnits(scouts);
+      playSynth('ui', 350, 0.05, 0.03);
+      toast('Capture order acknowledged.');
+    }
+    return { captureCount: scouts.length, scoutCount: scouts.length, scouts };
   }
 
   function updateCommandReadout() {
@@ -5604,6 +5755,15 @@ html{
     if (state.commandMode === 'gather') {
       if (target && target.kind === 'resource') issuedGatherOrder(selected, target);
       else autoAssignHarvesters(selected);
+      return;
+    }
+    if (state.commandMode === 'capture') {
+      if (target && target.kind === 'building' && target.teamId !== TEAM_PLAYER) {
+        const captureOrder = issueCaptureOrder(selected, target);
+        if (captureOrder.captureCount) return;
+      }
+      playUiCue('error');
+      toast('Select an enemy building with capture-ready scouts.');
       return;
     }
     if (state.commandMode === 'repair') {
@@ -5997,6 +6157,7 @@ html{
     }
     if (event.code === 'KeyM') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('move'); return; }
     if (event.code === 'KeyA') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('attack'); return; }
+    if (event.code === 'KeyP') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('capture'); return; }
     if (event.code === 'KeyG') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('gather'); return; }
     if (event.code === 'KeyR') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('repair'); return; }
     if (event.code === 'KeyC') { event.preventDefault(); focusKeyboardCursorOnSelectionOrCamera(); setCommandMode('context'); return; }
@@ -6107,7 +6268,9 @@ html{
       };
       return;
     }
-    const shouldCommandPointer = !!state.pendingBuild || !!state.pendingRallyBuildingId || (event.pointerType === 'touch' && state.touchMode !== 'select');
+    const shouldCommandPointer = !!state.pendingBuild
+      || !!state.pendingRallyBuildingId
+      || (event.pointerType === 'touch' && (state.touchMode !== 'select' || state.commandMode !== 'context'));
     state.drag = {
       mode: shouldCommandPointer ? 'command' : 'select',
       startClientX: event.clientX,
