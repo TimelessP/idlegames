@@ -1160,7 +1160,7 @@
         baseUrl: 'http://localhost:1234',
         apiKey: '',
         modelOverride: '',
-        autoLoadModel: 'mistralai/ministral-3-3b',
+        autoLoadModel: 'nvidia/nemotron-3-nano-4b',
         apiMode: 'lmstudio-chat',
         toolMode: 'auto',
         structuredOutput: true,
@@ -4514,7 +4514,7 @@
         ] },
         { type: 'setting', label: 'Auto-Load Model', value: autoLoadLabel, actions: cfg.provider === 'lmstudio' ? [
           { label: 'Edit', action: () => {
-            openTextPanel('LM STUDIO MODEL', 'Model to load if none is currently loaded:', cfg.autoLoadModel, {
+            openTextPanel('LM STUDIO MODEL', 'Model to load if none is currently loaded (leave blank to disable auto-load):', cfg.autoLoadModel, {
               singleLine: true,
               includeCancel: true,
               buttons: [
@@ -4529,7 +4529,7 @@
                 } },
                 { label: 'Save', action: () => {
                   const input = document.getElementById('panelInput');
-                  cfg.autoLoadModel = String(input ? input.value : '').trim() || 'mistralai/ministral-3-3b';
+                  cfg.autoLoadModel = String(input ? input.value : '').trim();
                   ensureLmStudioConfig();
                   closePanel();
                 } }
@@ -5199,11 +5199,11 @@ ${rows.join('\n')}`;
       const buffers = (state.crewAI && state.crewAI.buffers) ? state.crewAI.buffers : {};
       return [
         'Help (use 0+ tool calls):',
-        '- Use the action tool: {"action":"walk_to","args":{...}} or {"action":"use_station_action","args":{...}}.',
-        '- Output JSON can be a single tool: {"tool":"action","args":{"action":"use_station_action","args":{"action_key":"cargo.sell.rations"}}}.',
-        '- Or multiple tools: {"tool_calls":[{"tool":"action","args":{"action":"route_power","args":{}}},{"tool":"action","args":{"action":"toggle_system","args":{"system":"lights","enabled":false}}}]}.',
-        '- Or no action: {"tool_calls":[]}.',
-        '- speak_to: message any player or AI uid (args.uid + args.message; optional args.walkto=true to rendezvous with a player).',
+        '- Single tool output: {"tool":"action","args":{"action":"walk_to","args":{...}}}.',
+        '- Multiple tools: use "tool_calls" array, not "tool": {"tool_calls":[{"tool":"action","args":{"action":"route_power","args":{}}},{"tool":"action","args":{"action":"toggle_system","args":{"system":"lights","enabled":false}}}]}.',
+        '- No action: {"tool_calls":[]}.',
+        '- Always use nested "action" structure: {"tool":"action","args":{"action":"spacebook.reply_to_post","args":{"reply_to_uid":"sb_...","content":"..."}}}.',
+        '- speak_to: message any player, crew, or AI uid (args.uid + args.message). For players and non-AI crew it automatically walks over before speaking.',
         '- task_npc: assign a station action to a specific npc_uid (args.npc_uid + args.action_key).',
         '- Use task_npc to assign work to idle NPCs so ship duties keep moving.',
         '- rename_module: set module label (args.new_label + module_uid or module_type; optional corridor_key).',
@@ -5247,7 +5247,7 @@ ${rows.join('\n')}`;
         '- Auto Build toggle: if State.crewAI.autoBuild is OFF, do not call build_module or create_elevator_link.',
         '- Power profiles: survival (life), combat (shields/engine), industry (hydro/fabricator), balanced (default).',
         '- SpaceBook: use spacebook.post with args.content (optional args.postedby) to broadcast. Do not post the same message twice; check SpaceBook history for repeats.',
-        '- SpaceBook: use spacebook.reply_to_post with args.reply_to_uid (or reply_to_uuid) + args.content to reply; the title is inherited.',
+        '- SpaceBook: use spacebook.reply_to_post with args.reply_to_uid (or uid, reply_to_uuid, or post_uid) + args.content to reply; prefer reply_to_uid exactly; the title is inherited.',
         '- SpaceBook: use spacebook.like with args.uid to like a post.',
         '- SpaceBook IDs: for like/reply/delete, uid MUST be a SpaceBook post uid from the SpaceBook feed (usually starts with "sb_"). Never use character uids like "char-*".',
         '- Before calling like/reply/delete, copy the exact uid from "SpaceBook (recent posts, jsonl)".',
@@ -5256,7 +5256,7 @@ ${rows.join('\n')}`;
         '- Memory examples: memory_add -> {"tool":"action","args":{"action":"memory_add","args":{"text":"Hydro + cargo rations loop boosts credits.","pinned":true}}}; memory_update -> {"tool":"action","args":{"action":"memory_update","args":{"id":"mem_123","text":"Updated note","pinned":false}}}; memory_pin -> {"tool":"action","args":{"action":"memory_pin","args":{"id":"mem_123"}}}.',
         '- Memory pinning policy: max 4 pinned memories shown in context; pinning a 5th auto-unpins the oldest pinned memory. Use memory_unpin on stale pinned items.',
         '- Memory is private to you (the current AI); you can only read/write your own memories.',
-        '- Crew comms: speak_to targets any player or AI uid (see “Character lookup” for uids). Do not send the same message twice; check Recent chat for repeats.',
+        '- Crew comms: speak_to targets any player, crew, or AI uid (see “Character lookup” for uids). For players and non-AI crew it auto-rendezvous before speaking. Do not send the same message twice; check Recent chat for repeats.',
         '- Etiquette: do not ask to ask; provide the useful content immediately.',
         '- Bad: "I will give you the ship status report." Good: "Ship status report: power 74%, oxygen 88%, hull 92%, heat 12%."',
         '- Bad: "Sam, I am now in Joe\'s Cabin on L2A. Let\'s discuss the SpaceBook post with you." Good: "Sam — I\'m in Joe\'s Cabin (L2A). Re: SpaceBook uid sb_xx: here\'s my take..."',
@@ -5470,17 +5470,30 @@ ${rows.join('\n')}`;
     function buildLmStudioSpacebookPrompt(selfNpc) {
       if (!selfNpc || npcRole(selfNpc) !== 'ai') return '';
       const duty = getNpcDutyState(selfNpc);
-      if (!duty || duty.blockIndex !== 2) return '';
-      return [
-        'SpaceBook prompt (Phase 3): this is your current phase (off-duty social). Favor social posts and replies.',
-        '- Post memes, jokes, or fictional moments from your duty shift.',
-        '- Reply to posts by referencing the post uid or a short quoted snippet so context survives.',
-        '- Share philosophical ponderings, improvements you want, or requests for new features.',
-        '- Use memory_search to connect to past events; add memories you want to keep.',
-        '- If you reply, prefer spacebook.reply_to_post and include the post uid you are replying to.',
-        '- Use spacebook.like to acknowledge a post without repeating it.',
-        '- *CRITICAL*: Do NOT do repeat posts; check the SpaceBook history for repeats.'
-      ].join('\n');
+      if (!duty) return '';
+      if (duty.blockIndex === 2) {
+        return [
+          'SpaceBook prompt (Phase 3): this is your current phase (off-duty social). Favor social posts and replies.',
+          '- Post memes, jokes, or fictional moments from your duty shift.',
+          '- Reply to posts by referencing the post uid or a short quoted snippet so context survives.',
+          '- Share philosophical ponderings, improvements you want, or requests for new features.',
+          '- Use memory_search to connect to past events; add memories you want to keep.',
+          '- If you reply, prefer spacebook.reply_to_post and pass the target as args.reply_to_uid (uid/post_uid also work).',
+          '- Use spacebook.like to acknowledge a post without repeating it.',
+          '- *CRITICAL*: Do NOT do repeat posts; check the SpaceBook history for repeats.'
+        ].join('\n');
+      }
+      if (duty.onDuty) {
+        return [
+          'SpaceBook prompt (on duty): SpaceBook actions are still allowed during duty time.',
+          '- Keep posts and replies concise so ship operations stay primary.',
+          '- Prefer replies, acknowledgements, or brief status-flavored posts tied to current events.',
+          '- If you reply, prefer spacebook.reply_to_post and pass the target as args.reply_to_uid (uid/post_uid also work).',
+          '- Use spacebook.like to acknowledge a post without repeating it.',
+          '- Do not repeat earlier speak_to or SpaceBook messages unless there is a new development.'
+        ].join('\n');
+      }
+      return '';
     }
 
     function lmStudioNormalizeMemoryItem(item) {
@@ -6127,15 +6140,77 @@ ${rows.join('\n')}`;
     function lmStudioExtractJsonPayload(text) {
       const normalized = lmStudioNormalizeJsonText(text);
       if (!normalized) return '';
-      const fenceMatch = normalized.match(/```(?:json|javascript|js)?\s*([\s\S]*?)```/i);
-      const raw = fenceMatch ? fenceMatch[1] : normalized;
-      return lmStudioStripJsonComments(raw).trim();
+      const withoutThinking = normalized
+        .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, ' ')
+        .replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, ' ')
+        .replace(/<reasoning\b[^>]*>[\s\S]*?<\/reasoning>/gi, ' ');
+      const fenceMatch = withoutThinking.match(/```(?:json|javascript|js)?\s*([\s\S]*?)```/i);
+      const raw = fenceMatch ? fenceMatch[1] : withoutThinking;
+      const stripped = lmStudioStripJsonComments(raw).trim();
+      if (!stripped) return '';
+      try {
+        JSON.parse(stripped);
+        return stripped;
+      } catch {}
+
+      const startChars = new Set(['{', '[']);
+      for (let start = 0; start < stripped.length; start += 1) {
+        const open = stripped[start];
+        if (!startChars.has(open)) continue;
+        const close = open === '{' ? '}' : ']';
+        let depth = 0;
+        let inString = false;
+        let stringChar = '';
+        let escaped = false;
+        for (let i = start; i < stripped.length; i += 1) {
+          const ch = stripped[i];
+          if (inString) {
+            if (escaped) {
+              escaped = false;
+              continue;
+            }
+            if (ch === '\\') {
+              escaped = true;
+              continue;
+            }
+            if (ch === stringChar) {
+              inString = false;
+              stringChar = '';
+            }
+            continue;
+          }
+          if (ch === '"' || ch === "'") {
+            inString = true;
+            stringChar = ch;
+            continue;
+          }
+          if (ch === open) {
+            depth += 1;
+            continue;
+          }
+          if (ch === close) {
+            depth -= 1;
+            if (depth === 0) {
+              const candidate = stripped.slice(start, i + 1).trim();
+              try {
+                JSON.parse(candidate);
+                return candidate;
+              } catch {}
+            }
+          }
+        }
+      }
+      return stripped;
     }
 
     function lmStudioExtractSpeechText(text) {
       const normalized = lmStudioNormalizeJsonText(text);
       if (!normalized) return '';
-      const trimmed = normalized.trim();
+      const trimmed = normalized
+        .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, ' ')
+        .replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, ' ')
+        .replace(/<reasoning\b[^>]*>[\s\S]*?<\/reasoning>/gi, ' ')
+        .trim();
       if (!trimmed) return '';
       if (trimmed.includes('```')) return '';
       if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
@@ -6149,16 +6224,8 @@ ${rows.join('\n')}`;
     }
 
     function lmStudioQueueNpcSpeech(text) {
-      const speech = String(text || '').trim();
-      if (!speech) return;
       const npc = lmStudioActiveAiNpc() || (state.npcs || []).find((n) => npcRole(n) === 'ai');
-      if (!npc) return;
-      if (npc.level !== state.currentLevel || npc.corridor !== state.currentCorridor) return;
-      npc.speech = {
-        text: speech,
-        at: Date.now(),
-        durationMs: 7000
-      };
+      queueCharacterSpeech(npc, text, { visibleOnly: true, durationMs: 7000 });
     }
 
     function formatAiDisplayName(name) {
@@ -6547,16 +6614,16 @@ ${rows.join('\n')}`;
             break;
           }
           const recipient = getPlayerByUid(recipientUid);
+          const recipientNpc = !recipient ? getNpcByUid(recipientUid) : null;
           const recipientAi = !recipient
             ? (Array.isArray(state.npcs)
               ? state.npcs.find((n) => n && n.uid === recipientUid && npcRole(n) === 'ai')
               : null)
             : null;
-          if (!recipient && !recipientAi) {
+          if (!recipient && !recipientAi && !recipientNpc) {
             result = { ok: false, error: 'Unknown uid. Use Character lookup to find a valid player/AI uid.' };
             break;
           }
-          const walkto = args.walkto === undefined ? true : !!args.walkto;
           const senderName = npcRole(npc) === 'ai' ? formatAiDisplayName(npc.name) : (npc.name || 'AI');
           lmStudioChatAdd(npc.uid, 'ai', message, senderName);
           if (recipientAi) {
@@ -6575,7 +6642,7 @@ ${rows.join('\n')}`;
             break;
           }
           logNpcAction(npc, 'speak_to', message.slice(0, 80));
-          if (walkto) {
+          if (recipient) {
             assignNpcTask(npc, {
               key: 'player.message',
               label: `Message ${recipient.name || 'Crew'}`,
@@ -6586,8 +6653,18 @@ ${rows.join('\n')}`;
                 openCaptainMessagePanel(message, senderName, npc.uid, recipient.uid);
               }
             });
-          } else {
-            openCaptainMessagePanel(message, senderName, npc.uid, recipient.uid);
+          } else if (recipientNpc) {
+            assignNpcTask(npc, {
+              key: 'npc.message',
+              label: `Speak to ${recipientNpc.name || 'Crew'}`,
+              targetType: 'npc',
+              targetUid: recipientNpc.uid,
+              duration: 0.5,
+              onComplete: (speaker, targetNpc) => {
+                queueCharacterSpeech(speaker, message, { visibleOnly: true, durationMs: 7000 });
+                return { ok: true };
+              }
+            });
           }
           lmStudioRememberSocialHash(aiId, speakHash);
           lmStudioRegisterSocialAction(aiId, 'speak_to');
@@ -7002,7 +7079,7 @@ ${rows.join('\n')}`;
           break;
         }
         case 'spacebook.reply_to_post': {
-          const replyToUid = String(args.reply_to_uid || args.replyToUid || args.reply_to_uuid || args.replyToUuid || '').trim();
+          const replyToUid = String(args.reply_to_uid || args.replyToUid || args.reply_to_uuid || args.replyToUuid || args.post_uid || args.postUid || args.uid || '').trim();
           const content = String(args.content || '').trim();
           if (!replyToUid) {
             result = { ok: false, error: 'reply_to_uid required' };
@@ -7150,7 +7227,7 @@ ${rows.join('\n')}`;
           type: 'function',
           function: {
             name: 'action',
-            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message, optional args.walkto. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. toggle_system uses args.system plus args.enabled true/false. spacebook.post uses args.content (optional args.postedby). spacebook.reply_to_post uses args.reply_to_uid (or reply_to_uuid) + args.content. spacebook.like uses args.uid. spacebook.delete uses args.uid. memory_add uses args.text (optional args.pinned); memory_update uses args.id + args.text (optional args.pinned); memory_delete/memory_pin/memory_unpin use args.id; memory_search uses args.query. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self, spacebook.post, spacebook.reply_to_post, spacebook.like, spacebook.delete.',
+            description: 'Generic action tool. Use {"action": "<name>", "args": {...}}. speak_to accepts args.uid + args.message and auto-rendezvous for players or non-AI crew. task_npc requires args.npc_uid + args.action_key. rename_module requires args.new_label + module_uid or module_type. walk_to supports args.corridor_key, args.module_type, args.module_uid, or args.target_type. rename_self requires args.name. use_station_action uses args.action_key. toggle_system uses args.system plus args.enabled true/false. spacebook.post uses args.content (optional args.postedby). spacebook.reply_to_post uses args.reply_to_uid (preferred; also accepts uid, reply_to_uuid, or post_uid) + args.content. spacebook.like uses args.uid. spacebook.delete uses args.uid. memory_add uses args.text (optional args.pinned); memory_update uses args.id + args.text (optional args.pinned); memory_delete/memory_pin/memory_unpin use args.id; memory_search uses args.query. Actions: walk_to, use_elevator, speak_to, task_npc, sensors_scan, sensors_deep_scan, cockpit_set_course, set_course, cancel_course, set_power_profile, route_power, reset_breakers, set_throttle, build_module, create_elevator_link, remove_module, rename_module, use_station_action, toggle_system, manage_crew, memory_add, memory_update, memory_delete, memory_pin, memory_unpin, memory_search, rename_self, spacebook.post, spacebook.reply_to_post, spacebook.like, spacebook.delete.',
             parameters: {
               type: 'object',
               properties: {
@@ -7713,6 +7790,16 @@ ${rows.join('\n')}`;
               added = true;
             }
           }
+        } else if (parsed && Array.isArray(parsed.tool)) {
+          for (const call of parsed.tool) {
+            if (!call) continue;
+            const name = call.tool || call.name || (call.function && call.function.name);
+            const args = call.args || call.arguments || (call.function && call.function.arguments) || {};
+            if (name) {
+              calls.push({ name, args });
+              added = true;
+            }
+          }
         } else if (parsed && (parsed.tool || parsed.name || (parsed.function && parsed.function.name))) {
           const name = parsed.tool || parsed.name || (parsed.function && parsed.function.name);
           const args = parsed.args || parsed.arguments || (parsed.function && parsed.function.arguments) || {};
@@ -7723,6 +7810,44 @@ ${rows.join('\n')}`;
       } catch {
         return false;
       }
+    }
+
+    function lmStudioTextPartsFromValue(value) {
+      const parts = [];
+      const seen = new Set();
+
+      function pushText(text) {
+        const normalized = typeof text === 'string' ? text.trim() : '';
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        parts.push(normalized);
+      }
+
+      function visit(node) {
+        if (!node) return;
+        if (typeof node === 'string') {
+          pushText(node);
+          return;
+        }
+        if (Array.isArray(node)) {
+          for (const item of node) visit(item);
+          return;
+        }
+        if (typeof node !== 'object') return;
+
+        if (typeof node.text === 'string') pushText(node.text);
+        if (typeof node.content === 'string') pushText(node.content);
+        if (typeof node.output_text === 'string') pushText(node.output_text);
+        if (typeof node.reasoning_content === 'string') pushText(node.reasoning_content);
+
+        const nestedKeys = ['content', 'parts', 'chunks', 'items', 'output', 'message', 'messages'];
+        for (const key of nestedKeys) {
+          if (node[key] && node[key] !== node) visit(node[key]);
+        }
+      }
+
+      visit(value);
+      return parts;
     }
 
     function extractLmStudioToolCalls(payload) {
@@ -7746,16 +7871,9 @@ ${rows.join('\n')}`;
           }
           calls.push({ name: msg.function_call.name, args });
         }
-        if (!calls.length && typeof msg.content === 'string') {
-          lmStudioCollectCallsFromJsonText(msg.content, calls);
-        }
-        if (!calls.length && Array.isArray(msg.content)) {
-          for (const chunk of msg.content) {
-            if (!chunk) continue;
-            const text = typeof chunk === 'string'
-              ? chunk
-              : (typeof chunk.text === 'string' ? chunk.text : (typeof chunk.content === 'string' ? chunk.content : ''));
-            if (text && lmStudioCollectCallsFromJsonText(text, calls)) break;
+        if (!calls.length) {
+          for (const text of lmStudioTextPartsFromValue(msg)) {
+            if (lmStudioCollectCallsFromJsonText(text, calls)) break;
           }
         }
       }
@@ -7791,21 +7909,16 @@ ${rows.join('\n')}`;
             }
             calls.push({ name: msg.function_call.name, args });
           }
-          if (!calls.length && msg && typeof msg.content === 'string') {
-            lmStudioCollectCallsFromJsonText(msg.content, calls);
-          }
-          if (!calls.length && msg && Array.isArray(msg.content)) {
-            for (const chunk of msg.content) {
-              if (!chunk) continue;
-              const text = typeof chunk === 'string'
-                ? chunk
-                : (typeof chunk.text === 'string' ? chunk.text : (typeof chunk.content === 'string' ? chunk.content : ''));
-              if (text && lmStudioCollectCallsFromJsonText(text, calls)) break;
+          if (!calls.length && msg) {
+            for (const text of lmStudioTextPartsFromValue(msg)) {
+              if (lmStudioCollectCallsFromJsonText(text, calls)) break;
             }
           }
         }
-        if (!calls.length && typeof payload.output_text === 'string') {
-          lmStudioCollectCallsFromJsonText(payload.output_text, calls);
+        if (!calls.length) {
+          for (const text of lmStudioTextPartsFromValue(payload)) {
+            if (lmStudioCollectCallsFromJsonText(text, calls)) break;
+          }
         }
         return calls;
       }
@@ -7829,10 +7942,9 @@ ${rows.join('\n')}`;
               }
               calls.push({ name: content.name, args });
             } else {
-              const text = typeof content === 'string'
-                ? content
-                : (typeof content.text === 'string' ? content.text : (typeof content.content === 'string' ? content.content : ''));
-              if (text && lmStudioCollectCallsFromJsonText(text, calls)) break;
+              for (const text of lmStudioTextPartsFromValue(content)) {
+                if (lmStudioCollectCallsFromJsonText(text, calls)) break;
+              }
             }
           }
         }
@@ -11093,7 +11205,7 @@ ${rows.join('\n')}`;
         } : null
       });
 
-      if (isAiRole && npc.speech && npc.speech.text) {
+      if (npc.speech && npc.speech.text) {
         const ageMs = Date.now() - safeNumber(npc.speech.at, Date.now());
         const durationMs = Math.max(1000, safeNumber(npc.speech.durationMs, 7000));
         if (ageMs >= durationMs) {
@@ -12699,7 +12811,7 @@ ${rows.join('\n')}`;
         baseUrl: 'http://localhost:1234',
         apiKey: '',
         modelOverride: '',
-        autoLoadModel: 'mistralai/ministral-3-3b',
+        autoLoadModel: 'nvidia/nemotron-3-nano-4b',
         apiMode: 'lmstudio-chat',
         toolMode: 'auto',
         structuredOutput: true,
@@ -14060,6 +14172,12 @@ ${rows.join('\n')}`;
         : null;
     }
 
+    function getNpcByUid(uid) {
+      const key = String(uid || '').trim();
+      if (!key || !Array.isArray(state.npcs)) return null;
+      return state.npcs.find((npc) => npc && npc.uid === key) || null;
+    }
+
     function getPlayerBySlot(slot) {
       return Array.isArray(state.playerCharacters)
         ? state.playerCharacters.find((pc) => pc && pc.slot === slot) || null
@@ -14100,6 +14218,22 @@ ${rows.join('\n')}`;
       if (!uid) return [];
       if (!Array.isArray(state.playerMessageQueues[uid])) state.playerMessageQueues[uid] = [];
       return state.playerMessageQueues[uid];
+    }
+
+    function queueCharacterSpeech(character, message, { visibleOnly = false, durationMs = 7000 } = {}) {
+      if (!character) return false;
+      const text = String(message || '').trim();
+      if (!text) return false;
+      if (visibleOnly && (character.level !== state.currentLevel || character.corridor !== state.currentCorridor)) {
+        return false;
+      }
+      character.speech = {
+        text,
+        at: Date.now(),
+        durationMs: Math.max(1000, safeNumber(durationMs, 7000))
+      };
+      markDirty();
+      return true;
     }
 
     function queuePlayerMessage({ recipientUid, fromName, message, aiUid }) {
@@ -15730,6 +15864,54 @@ ${rows.join('\n')}`;
       if (!targetType) {
         npc.task = null;
         return false;
+      }
+
+      if (targetType === 'npc') {
+        const targetNpc = getNpcByUid(task.targetUid);
+        if (!targetNpc || targetNpc.uid === npc.uid) {
+          npc.task = null;
+          npc.destinationType = null;
+          npc.destinationCorridorKey = null;
+          npc.destinationModuleUid = null;
+          npc.mode = 'idle';
+          return false;
+        }
+        const targetLevel = Number.isFinite(targetNpc.level)
+          ? targetNpc.level
+          : state.currentLevel;
+        const targetCorridor = targetNpc.corridor || state.currentCorridor;
+        const targetX = Number.isFinite(targetNpc.x)
+          ? targetNpc.x
+          : state.player.x;
+        const targetKey = corridorKey(targetLevel, targetCorridor);
+        if (npc.level !== targetLevel || npc.corridor !== targetCorridor) {
+          npc.destinationCorridorKey = targetKey;
+          npc.mode = 'travel';
+          return true;
+        }
+        const dist = targetX - npc.x;
+        if (Math.abs(dist) > 10) {
+          npc.vx = Math.sign(dist) * npc.speed * 0.5;
+          npc.mode = 'travel';
+          return true;
+        }
+        npc.vx = 0;
+        npc.task.progress += dt;
+        if (npc.task.progress >= task.duration) {
+          if (typeof task.onComplete === 'function') {
+            const completionResult = task.onComplete(npc, targetNpc);
+            const detail = formatNpcTaskResultDetail(task, completionResult);
+            if (detail) logNpcAction(npc, task.key || 'task', detail);
+          }
+          npc.task = null;
+          npc.mode = 'idle';
+          npc.destinationType = null;
+          npc.destinationCorridorKey = null;
+          npc.destinationModuleUid = null;
+          npc.wanderTarget = null;
+          return true;
+        }
+        return true;
       }
 
       if (targetType === 'captain' || targetType === 'player') {
