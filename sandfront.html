@@ -1751,6 +1751,44 @@ html{
     };
   }
 
+  function getNearestFriendlyTurret(teamId, fromX, fromY, maxDistance) {
+    let best = null;
+    let bestDistance = maxDistance;
+    for (const building of state.buildings) {
+      if (building.hp <= 0 || building.teamId !== teamId || building.type !== 'turret') continue;
+      const geometry = getBuildingGeometry(building);
+      const distance = dist(fromX, fromY, geometry.visualCenter.x, geometry.visualCenter.y);
+      if (distance <= bestDistance) {
+        best = building;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  function getEngineerRetreatPoint(unit, threat) {
+    const maxTurretDistance = unit.sight * CELL;
+    const turret = getNearestFriendlyTurret(unit.teamId, unit.x, unit.y, maxTurretDistance);
+    if (!turret) return getAmbulanceRetreatPoint(unit, threat);
+    const threatPoint = getThreatWorldPoint(threat);
+    const turretGeometry = getBuildingGeometry(turret);
+    const turretX = turretGeometry.visualCenter.x;
+    const turretY = turretGeometry.visualCenter.y;
+    let dx = turretX - (threatPoint?.x ?? unit.x);
+    let dy = turretY - (threatPoint?.y ?? unit.y);
+    let length = Math.hypot(dx, dy);
+    if (length < 0.01) {
+      dx = turretX - unit.x || 1;
+      dy = turretY - unit.y;
+      length = Math.hypot(dx, dy) || 1;
+    }
+    const offset = Math.max(turretGeometry.hit.width, turretGeometry.hit.height) * 0.5 + getUnitGeometry(unit).hitRadius + 8;
+    return {
+      x: clamp(turretX + dx / length * offset, 0, WORLD_WIDTH),
+      y: clamp(turretY + dy / length * offset, 0, WORLD_HEIGHT)
+    };
+  }
+
   function centerCameraOnPlayerBase() {
     const base = nearestBuilding(TEAM_PLAYER, 'hq', 0, 0);
     if (!base) return;
@@ -3218,6 +3256,20 @@ html{
   }
 
   function updateUnitAutonomy(unit, def) {
+    if (def.builder && unit.hp < unit.maxHp) {
+      const threat = resolveCombatTargetEntity(getEntityById(unit.lastAttackerId));
+      if (threat && threat.kind === 'unit' && threat.hp > 0 && threat.teamId !== unit.teamId) {
+        const retreat = getEngineerRetreatPoint(unit, threat);
+        if (dist(unit.x, unit.y, retreat.x, retreat.y) > 6) {
+          releaseClaim(unit);
+          unit.order = { type: 'move', x: retreat.x, y: retreat.y };
+          unit.targetId = null;
+          unit.path.length = 0;
+        }
+        return;
+      }
+    }
+
     if (unit.manualOrderTimer > 0) return;
     if (unit.order.type === 'capture') return;
 
