@@ -1168,14 +1168,26 @@
         modelCaps: {},
         activeModelKey: '',
         lastCallAt: 0,
+        lastCallAtByAi: {},
         inflight: false,
         lastError: '',
         lastCaptainMessage: '',
         lastCaptainReply: '',
+        activeAiUid: null,
+        aiTurnIndex: 0,
         memory: [],
+        memoryByAi: {},
         lastMemorySearch: [],
+        lastMemorySearchByAi: {},
         chatHistory: {},
-        toolLog: []
+        toolLog: [],
+        actionQueuesByAi: {},
+        socialState: {
+          lastSocialSigByAi: {},
+          lastSocialActionByAi: {},
+          recentSocialHashesByAi: {},
+          spacebookMutedByAi: {}
+        }
       },
       spacebook: {
         posts: []
@@ -6286,12 +6298,13 @@ ${rows.join('\n')}`;
         .trim();
       if (!trimmed) return '';
       if (trimmed.includes('```')) return '';
-      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-        try {
-          JSON.parse(trimmed);
-          return '';
-        } catch {}
+      // Suppress JSON objects or arrays, valid or malformed
+      if ((trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+          (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+        return '';
       }
+      // Suppress mixed text + embedded JSON tool call structure (model added preamble before JSON)
+      if (/[{[]\s*"tool/.test(trimmed)) return '';
       if (trimmed.includes('<tool_call') || trimmed.includes('<|begin_of_box|>')) return '';
       return trimmed;
     }
@@ -6379,6 +6392,168 @@ ${rows.join('\n')}`;
           || null;
       }
       return aiNpcs[0] || null;
+    }
+
+    function lmStudioGetAiActionQueue(aiId) {
+      ensureLmStudioConfig();
+      const key = String(aiId || '').trim() || 'ai';
+      if (!state.lmStudio.actionQueuesByAi[key] || typeof state.lmStudio.actionQueuesByAi[key] !== 'object') {
+        state.lmStudio.actionQueuesByAi[key] = { pending: [], active: null, history: [] };
+      }
+      const queue = state.lmStudio.actionQueuesByAi[key];
+      if (!Array.isArray(queue.pending)) queue.pending = [];
+      if (!Array.isArray(queue.history)) queue.history = [];
+      return queue;
+    }
+
+    function lmStudioResolveQueuedCallName(call) {
+      const rawName = call && call.name ? String(call.name) : '';
+      if (rawName === 'action' && call && call.args && typeof call.args === 'object') {
+        const nested = String(call.args.action || '').trim();
+        return nested || rawName;
+      }
+      return rawName;
+    }
+
+    function lmStudioResolveQueuedCallArgs(call) {
+      if (!call || typeof call !== 'object') return {};
+      if (call.name === 'action' && call.args && typeof call.args === 'object') {
+        return (call.args.args && typeof call.args.args === 'object') ? call.args.args : {};
+      }
+      return (call.args && typeof call.args === 'object') ? call.args : {};
+    }
+
+    function lmStudioResolveQueuedCallNpcUid(call, aiId) {
+      const args = lmStudioResolveQueuedCallArgs(call);
+      const requested = String(args.npc_uid || '').trim();
+      if (requested) return requested;
+      return String(aiId || '').trim() || 'ai';
+    }
+
+    function lmStudioResolveQueuedWaitKind(call, result) {
+      if (!result || result.ok === false) return '';
+      const name = lmStudioResolveQueuedCallName(call);
+      if (name === 'task_npc' || name === 'use_station_action' || name === 'speak_to') return 'task';
+      if (name === 'walk_to' || name === 'use_elevator') return 'travel';
+      return '';
+    }
+
+    function lmStudioIsQueuedWaitComplete(waiter) {
+      if (!waiter || !waiter.kind) return true;
+      const npc = getNpcByUid(waiter.npcUid);
+      if (!npc) return true;
+      if (waiter.kind === 'task') {
+        return !npc.task;
+      }
+      if (waiter.kind === 'travel') {
+        if (waiter.targetCorridorKey) {
+          const reached = corridorKey(npc.level, npc.corridor) === waiter.targetCorridorKey;
+          if (reached) return true;
+        }
+        if (npc.mode !== 'travel' && !npc.destinationCorridorKey && !npc.destinationType && !npc.destinationModuleUid) {
+          return true;
+        }
+        return false;
+      }
+      return true;
+    }
+
+    function lmStudioQueueToolCalls(aiId, calls) {
+      const queue = lmStudioGetAiActionQueue(aiId);
+      const list = Array.isArray(calls) ? calls : [];
+      for (const call of list) {
+        if (!call || !call.name) continue;
+        queue.pending.push({
+          call,
+          name: lmStudioResolveQueuedCallName(call),
+          enqueuedAt: Date.now(),
+          status: 'pending'
+        });
+      }
+      markDirty();
+      return queue.pending.length;
+    }
+
+    function lmStudioHasPendingQueue(aiId) {
+      const queue = lmStudioGetAiActionQueue(aiId);
+      return !!(queue.active || queue.pending.length);
+    }
+
+    function lmStudioProcessAiActionQueue(aiId, { maxImmediateSteps = 6 } = {}) {
+      const queue = lmStudioGetAiActionQueue(aiId);
+      const now = Date.now();
+
+      if (queue.active) {
+        const timeoutMs = Math.max(20000, safeNumber(queue.active.timeoutMs, 180000));
+        const timedOut = now - safeNumber(queue.active.startedAt, now) > timeoutMs;
+        if (timedOut) {
+          queue.history.push({
+            name: queue.active.name || 'action',
+            ok: false,
+            error: 'Queue step timeout',
+            at: now
+          });
+          state.lmStudio.lastError = `AI ${aiId} queue timeout on ${queue.active.name || 'action'}.`;
+          queue.active = null;
+          markDirty();
+        } else if (lmStudioIsQueuedWaitComplete(queue.active.waiter)) {
+          queue.history.push({
+            name: queue.active.name || 'action',
+            ok: true,
+            error: '',
+            at: now
+          });
+          queue.active = null;
+          markDirty();
+        } else {
+          return true;
+        }
+      }
+
+      let steps = 0;
+      while (!queue.active && queue.pending.length && steps < Math.max(1, maxImmediateSteps)) {
+        const next = queue.pending.shift();
+        steps += 1;
+        if (!next || !next.call || !next.call.name) continue;
+
+        const result = executeLmStudioToolCall(next.call);
+        const waitKind = lmStudioResolveQueuedWaitKind(next.call, result);
+        const args = lmStudioResolveQueuedCallArgs(next.call);
+        const targetCorridorKey = String(
+          (result && result.target) || args.corridor_key || ''
+        ).trim();
+
+        if (waitKind) {
+          queue.active = {
+            name: next.name || next.call.name,
+            startedAt: now,
+            timeoutMs: waitKind === 'travel' ? 180000 : 120000,
+            waiter: {
+              kind: waitKind,
+              npcUid: lmStudioResolveQueuedCallNpcUid(next.call, aiId),
+              targetCorridorKey
+            }
+          };
+          markDirty();
+          break;
+        }
+
+        queue.history.push({
+          name: next.name || next.call.name,
+          ok: !!(result && result.ok),
+          error: result && result.ok === false ? (result.error || 'Action failed') : '',
+          at: Date.now()
+        });
+        if (result && result.ok === false && !state.lmStudio.lastError) {
+          state.lmStudio.lastError = result.error || 'Action failed';
+        }
+      }
+
+      if (queue.history.length > 30) {
+        queue.history = queue.history.slice(-30);
+      }
+
+      return !!(queue.active || queue.pending.length);
     }
 
     function buildCargoInventorySummary() {
@@ -6705,11 +6880,24 @@ ${rows.join('\n')}`;
               result = { ok: false, error: 'Sender must be AI role to message another AI. Use an AI npc_uid.' };
               break;
             }
-            const senderTag = `${senderName} (${npc.uid})`;
-            lmStudioChatAdd(recipientAi.uid, 'ai', message, senderTag);
             logNpcAction(npc, 'speak_to', message.slice(0, 80));
-            if (state.lmStudio) state.lmStudio.activeAiUid = recipientAi.uid;
-            markDirty();
+            assignNpcTask(npc, {
+              key: 'npc.message',
+              label: `Speak to ${recipientAi.name || 'AI'}`,
+              targetType: 'npc',
+              targetUid: recipientAi.uid,
+              duration: 0.5,
+              onComplete: (speaker, targetNpc) => {
+                const senderTag = `${senderName} (${npc.uid})`;
+                lmStudioChatAdd(recipientAi.uid, 'ai', message, senderTag);
+                queueCharacterSpeech(speaker, message, { visibleOnly: true, durationMs: 7000 });
+                if (state.lmStudio && targetNpc && targetNpc.uid) {
+                  state.lmStudio.activeAiUid = targetNpc.uid;
+                }
+                markDirty();
+                return { ok: true };
+              }
+            });
             lmStudioRememberSocialHash(aiId, speakHash);
             lmStudioRegisterSocialAction(aiId, 'speak_to');
             result = { ok: true };
@@ -8369,27 +8557,45 @@ ${rows.join('\n')}`;
       ensureLmStudioConfig();
       const cfg = state.lmStudio;
       if (!cfg.enabled || cfg.inflight) return;
-      if (document.visibilityState === 'hidden') return;
-      const now = Date.now();
-      if (now - cfg.lastCallAt < LMS_ACTION_INTERVAL_MS) return;
+      const aiNpcs = lmStudioListAiNpcs();
+      const isCallableAi = (n) => n && npcRole(n) === 'ai' && !n.sleeping && n.dutyPhase !== 'off_sleep';
+      const candidateAiNpcs = aiNpcs.filter(isCallableAi);
+      if (!candidateAiNpcs.length) {
+        cfg.lastError = 'No awake AI NPC available.';
+        return;
+      }
 
+      // First, progress every AI queue so blocking chains can finish while other AIs continue.
+      for (const aiNpc of candidateAiNpcs) {
+        lmStudioProcessAiActionQueue(aiNpc.uid);
+      }
+
+      if (document.visibilityState === 'hidden') return;
+
+      const now = Date.now();
+      const unblockedAi = candidateAiNpcs.filter((n) => !lmStudioHasPendingQueue(n.uid));
+      if (!unblockedAi.length) return;
+
+      const readyAi = unblockedAi.filter((n) => {
+        const lastAt = safeNumber(cfg.lastCallAtByAi[n.uid], 0);
+        return now - lastAt >= LMS_ACTION_INTERVAL_MS;
+      });
+      if (!readyAi.length) return;
+
+      const rotatedNpc = readyAi.length > 1 ? lmStudioPickNextAiNpc(readyAi) : (readyAi[0] || null);
+      if (readyAi.length === 1 && rotatedNpc) state.lmStudio.activeAiUid = rotatedNpc.uid;
+      const activeAi = lmStudioActiveAiNpc();
+      const selfNpc = (activeAi && isCallableAi(activeAi) && !lmStudioHasPendingQueue(activeAi.uid))
+        ? activeAi
+        : (rotatedNpc || readyAi[0] || null);
+      if (!selfNpc) return;
+
+      const selfId = selfNpc.uid || 'ai';
       cfg.lastCallAt = now;
+      cfg.lastCallAtByAi[selfId] = now;
       cfg.inflight = true;
       try {
         lmStudioLogEvent('tick_start', { at: now, activeModelKey: cfg.activeModelKey || '' });
-        const aiNpcs = lmStudioListAiNpcs();
-        const isCallableAi = (n) => n && npcRole(n) === 'ai' && !n.sleeping && n.dutyPhase !== 'off_sleep';
-        const candidateAiNpcs = aiNpcs.filter(isCallableAi);
-        const rotatedNpc = candidateAiNpcs.length > 1 ? lmStudioPickNextAiNpc(candidateAiNpcs) : (candidateAiNpcs[0] || null);
-        if (candidateAiNpcs.length === 1 && rotatedNpc) state.lmStudio.activeAiUid = rotatedNpc.uid;
-        const activeAi = lmStudioActiveAiNpc();
-        const selfNpc = (activeAi && isCallableAi(activeAi)) ? activeAi : (rotatedNpc || candidateAiNpcs[0] || null);
-        if (!selfNpc) {
-          cfg.lastError = 'No awake AI NPC available.';
-          cfg.lastCallAt = Date.now();
-          lmStudioLogEvent('tick_error', { error: cfg.lastError });
-          return;
-        }
 
         const modelKey = await lmStudioEnsureLoadedModel();
         if (!modelKey) {
@@ -8402,7 +8608,6 @@ ${rows.join('\n')}`;
         const guidance = buildLmStudioGuidance();
         const nowIso = new Date().toISOString();
         const selfName = formatAiDisplayName(selfNpc.name);
-        const selfId = selfNpc.uid || 'ai';
         const selfRole = npcRole(selfNpc) || 'ai';
         const roleLabel = selfRole === 'ai' ? 'AI' : selfRole;
         const memoryCatalog = buildLmStudioMemoryCatalog(selfId, { limit: 12 });
@@ -8503,8 +8708,6 @@ ${rows.join('\n')}`;
         if (!payload.output_text && outputText) {
           payload.output_text = outputText;
         }
-        const speechText = lmStudioExtractSpeechText(outputText);
-        if (speechText) lmStudioQueueNpcSpeech(speechText);
         const payloadSummary = lmStudioSummarizePayload(payload);
         lmStudioLogEvent('llm_response', {
           mode: requestMode,
@@ -8520,15 +8723,12 @@ ${rows.join('\n')}`;
         });
         const calls = extractLmStudioToolCalls(payload);
         if (calls.length) {
-          let firstError = '';
+          lmStudioQueueToolCalls(selfId, calls);
           for (const call of calls) {
-            const result = executeLmStudioToolCall(call);
-            if (!firstError && result && result.ok === false) {
-              firstError = result.error || 'Tool failed';
-            }
-            lmStudioLogEvent('tool_selected', { name: call.name, ok: !!result.ok });
+            lmStudioLogEvent('tool_selected', { name: call.name, ok: true, queued: true, aiUid: selfId });
           }
-          cfg.lastError = firstError;
+          lmStudioProcessAiActionQueue(selfId);
+          cfg.lastError = '';
         } else {
           if ((requestMode || '').includes('tools') && !(outputText || '').trim()) {
             lmStudioSetModelCaps(modelKey, { tools: false });
@@ -8542,6 +8742,8 @@ ${rows.join('\n')}`;
             lmStudioLogEvent('tool_call', { name: '', args: {}, error: cfg.lastError });
             return;
           }
+          const speechText = lmStudioExtractSpeechText(outputText);
+          if (speechText) lmStudioQueueNpcSpeech(speechText);
           lmStudioLogEvent('tool_call', { name: '', args: {}, error: 'No tool calls returned' });
         }
       } catch (err) {
@@ -12904,6 +13106,7 @@ ${rows.join('\n')}`;
         modelCaps: {},
         activeModelKey: '',
         lastCallAt: 0,
+        lastCallAtByAi: {},
         inflight: false,
         lastError: '',
         lastCaptainMessage: '',
@@ -12944,6 +13147,9 @@ ${rows.join('\n')}`;
         state.lmStudio.modelCaps = {};
       }
       if (!Number.isFinite(state.lmStudio.lastCallAt)) state.lmStudio.lastCallAt = 0;
+      if (!state.lmStudio.lastCallAtByAi || typeof state.lmStudio.lastCallAtByAi !== 'object') {
+        state.lmStudio.lastCallAtByAi = {};
+      }
       if (typeof state.lmStudio.inflight !== 'boolean') state.lmStudio.inflight = false;
       if (typeof state.lmStudio.lastError !== 'string') state.lmStudio.lastError = '';
       if (typeof state.lmStudio.lastCaptainMessage !== 'string') state.lmStudio.lastCaptainMessage = '';
@@ -12961,6 +13167,9 @@ ${rows.join('\n')}`;
         state.lmStudio.chatHistory = {};
       }
       if (!Array.isArray(state.lmStudio.toolLog)) state.lmStudio.toolLog = [];
+      if (!state.lmStudio.actionQueuesByAi || typeof state.lmStudio.actionQueuesByAi !== 'object') {
+        state.lmStudio.actionQueuesByAi = {};
+      }
     }
 
     function lmStudioLogEvent(kind, payload) {
