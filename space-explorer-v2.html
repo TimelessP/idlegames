@@ -5163,7 +5163,12 @@
         .filter((t) => !['rear', 'front', 'doorway', 'elevator'].includes(t))
         .sort();
       if (!types.length) return '';
-      return `Module types (module_type): ${types.join(', ')}`;
+      const unlocked = types.filter((t) => isModuleUnlocked(t));
+      const locked = types.filter((t) => !isModuleUnlocked(t));
+      const lines = [];
+      if (unlocked.length) lines.push(`Unlocked module types: ${unlocked.join(', ')}`);
+      if (locked.length) lines.push(`Locked module types (run sensors_deep_scan first): ${locked.join(', ')}`);
+      return lines.join('\n');
     }
 
     function buildLmStudioAnomalySummary({ maxItems = 6 } = {}) {
@@ -5267,7 +5272,7 @@ ${rows.join('\n')}`;
         '- Use task_npc to assign work to idle NPCs so ship duties keep moving.',
         '- Valid mixed example: {"tool_calls":[{"tool":"task_npc","args":{"npc_uid":"char-...","action_key":"sensors.deep_scan"}},{"tool":"action","args":{"action":"set_throttle","args":{"percent":100}}}]}',
         '- rename_module: set module label (args.new_label + module_uid or module_type; optional corridor_key).',
-        '- rename_module: if using corridor_key, pick one from “Valid corridor_key values” in the context; otherwise prefer module_uid when known.',
+        '- rename_module: prefer module_uid (from Module table); module_type + corridor_key only works if that type is unique in that corridor — error returned if ambiguous.',
         '- Aliases: see “Module aliases (custom labels)” for renamed rooms like “Captain\'s Cabin”; use those to target walk_to or rename_module by corridor/uid.',
         '- walk_to supports args.corridor_key (example: L1B), args.module_type (example: cargo), args.module_uid, or args.target_type (example: cargo).',
         '- Station actions auto-walk: use_station_action or task_npc will move the NPC to the right station; do NOT use walk_to first unless you are repositioning or exploring.',
@@ -5278,7 +5283,7 @@ ${rows.join('\n')}`;
         '- Throttle: use set_throttle with args.percent (0-100). Engine must be online to gain speed.',
         '- Power reporting: State.systems.power is the summed total across all Power Cores; State.systems.powerPerCorePct is the per-core percentage.',
         '- Layout: build_module adds a module at the end of a corridor; requires args.module_type + args.corridor_key (pick from “Valid corridor_key values”).',
-        '- build_module: module_type must be from “Module types”; non-structural modules require a Fabricator and an unlocked blueprint.',
+        '- build_module: module_type must be from "Unlocked module types"; non-structural modules require a Fabricator and an unlocked blueprint.',
         '- build_module: if the module is locked, run sensors_deep_scan to unlock; if you need a second copy, set args.allow_duplicate=true.',
         '- Structural modules (doorway/elevator/front/rear/empty) require args.allow_structure=true; elevators can be linked via create_elevator_link (direction up/down).',
         '- Navigation: action set_course to travel; action cancel_course to stop travel; cockpit_set_course uses cockpit nav.',
@@ -5303,7 +5308,7 @@ ${rows.join('\n')}`;
         '- Contracts: open comms/contracts in cockpit when available; gather required items then transmit completion.',
         '- Travel: use navigation to pick destination once ready; ensure engine online and power stable.',
         '- Blueprints: sensors_deep_scan to unlock; then build_module when Fabricator + unlocks are ready.',
-        '- Layout: build_module to add; remove_module to remove non-structural modules (requires module_uid or module_type + corridor_key).',
+        '- remove_module: remove non-structural modules (args.module_uid preferred; module_type + corridor_key only if that type is unique there — duplicates return an error with uids to use).',
         '- Auto-build: ensure fabricator, then build missing crew/engineering/ops/science modules.',
         '- Auto Build toggle: if State.crewAI.autoBuild is OFF, do not call build_module or create_elevator_link.',
         '- Power profiles: survival (life), combat (shields/engine), industry (hydro/fabricator), balanced (default).',
@@ -6662,9 +6667,13 @@ ${rows.join('\n')}`;
       }
 
       const modules = getModulesForCorridor(targetLevel, targetCorridor).filter(Boolean);
-      const candidate = modules.find((m) => m.type === moduleType && (allowStructure || !STRUCTURE_TYPES.has(m.type)));
-      if (!candidate) return { error: `No removable ${moduleType} module found` };
-      return { uid: candidate.uid, module: candidate };
+      const candidates = modules.filter((m) => m.type === moduleType && (allowStructure || !STRUCTURE_TYPES.has(m.type)));
+      if (!candidates.length) return { error: `No removable ${moduleType} module found` };
+      if (candidates.length > 1) {
+        const uids = candidates.map((m) => m.uid).join(', ');
+        return { error: `Multiple ${moduleType} modules found; use module_uid to specify (${uids}).` };
+      }
+      return { uid: candidates[0].uid, module: candidates[0] };
     }
 
     function executeLmStudioToolCall(call) {
@@ -7121,7 +7130,17 @@ ${rows.join('\n')}`;
               break;
             }
             const modules = getModulesForCorridor(target.level, target.corridor).filter(Boolean);
-            moduleRef = modules.find((m) => m.type === moduleType) || null;
+            const matching = modules.filter((m) => m.type === moduleType);
+            if (!matching.length) {
+              result = { ok: false, error: `No ${moduleType} module found` };
+              break;
+            }
+            if (matching.length > 1) {
+              const uids = matching.map((m) => m.uid).join(', ');
+              result = { ok: false, error: `Multiple ${moduleType} modules; use module_uid (${uids}).` };
+              break;
+            }
+            moduleRef = matching[0];
             if (!moduleRef) {
               result = { ok: false, error: `No ${moduleType} module found` };
               break;
