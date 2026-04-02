@@ -686,13 +686,18 @@ html{
     'Armour': { icon: 'tech', short: 'Armour' },
     'Scanner': { icon: 'tech', short: 'Scan' },
     'Capture Tech': { icon: 'tech', short: 'Cap' },
+    'Drone Tech': { icon: 'tech', short: 'Drone' },
+    'Deploy Drone': { icon: 'tech', short: 'Drone' },
     'Scan': { icon: 'tech', short: 'Scan' }
   };
 
   const KEYBOARD_CURSOR_IDLE_HIDE = 2.5;
   const SCAN_DURATION = 10;
   const SCAN_COOLDOWN = 45;
+  const DRONE_DEPLOY_COOLDOWN = SCAN_COOLDOWN;
   const CAPTURE_DURATION = 15;
+  const DRONE_REVEAL_MULTIPLIER = 3;
+  const DRONE_ORBIT_SPEED = 1.2;
   const AI_SCAN_THREAT_RADIUS = CELL * 16;
   const AI_MEMORY_SCAN_STALE_AFTER = 18;
   const AI_SCOUT_GRID_STEP = 10;
@@ -729,6 +734,8 @@ html{
     placementGhost: null,
     pendingRallyBuildingId: null,
     pendingRallyInputSource: 'pointer',
+    pendingDroneHubId: null,
+    pendingDroneInputSource: 'pointer',
     pendingActionLabel: '',
     toastTimer: 0,
     storageFullToastAt: -Infinity,
@@ -769,6 +776,7 @@ html{
 
   const UNIT_TYPES = {
     scout: { label: 'Dust Scout', hp: 70, speed: 36, sight: 9, range: 44, damage: 7, reload: 0.75, cost: 80, buildTime: 7, sprite: 'scout', infantry: true, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 7, selectionRadius: 8, fireOrigin: { x: 0, y: -4 } } },
+    drone: { label: 'Drone', hp: 50, speed: 54, sight: 9, range: 0, damage: 0, reload: 0, cost: 0, buildTime: 0, sprite: 'drone', flying: true, revealRadiusMultiplier: DRONE_REVEAL_MULTIPLIER, geometry: { spriteOffset: { x: -12, y: -18 }, hitRadius: 7, selectionRadius: 8, fireOrigin: { x: 0, y: -6 } } },
     engineer: { label: 'Engineer', hp: 64, speed: 30, sight: 8, range: 0, damage: 0, reload: 0, cost: 90, buildTime: 8, sprite: 'engineer', builder: true, infantry: true, repairRate: 16, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 7, selectionRadius: 8, fireOrigin: { x: 0, y: -4 } } },
     harvester: { label: 'Harvester', hp: 150, speed: 22, sight: 8, range: 0, damage: 0, reload: 0, cost: 140, buildTime: 10, sprite: 'harvester', capacity: 140, gatherRate: 34, vehicle: true, crushDamage: 999, crushRadius: 7, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 9, selectionRadius: 10, fireOrigin: { x: 0, y: -4 } } },
     transport: { label: 'Troop Transport', hp: 150, speed: 40, sight: 9, range: 0, damage: 0, reload: 0, cost: 150, buildTime: 10, sprite: 'transport', vehicle: true, transportCapacity: 6, crushDamage: 999, crushRadius: 7, crushAutonomy: false, geometry: { spriteOffset: { x: -12, y: -16 }, hitRadius: 9, selectionRadius: 10, fireOrigin: { x: 0, y: -4 } } },
@@ -782,7 +790,7 @@ html{
     silo: { label: 'Spice Silo', size: [2, 2], hp: 300, sight: 8, cost: 120, storage: 28000, sprite: 'silo', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     oilDerrick: { label: 'Oil Derrick', size: [2, 2], hp: 320, sight: 9, cost: 140, incomeRate: OIL_TRICKLE_AMOUNT / OIL_TRICKLE_INTERVAL, sprite: 'oilDerrick', buildRequires: ['hq'], geometry: { spriteOffset: { x: -24, y: -18 } } },
     barracks: { label: 'Dust Barracks', size: [3, 3], hp: 400, sight: 9, cost: 160, queue: ['scout', 'engineer'], sprite: 'barracks', buildRequires: ['hq'], geometry: { spriteOffset: { x: -20, y: -20 } } },
-    lab: { label: 'Signal Lab', size: [3, 3], hp: 340, sight: 9, cost: 210, research: ['rangefinding', 'composite-armor', 'scanner', 'capture'], sprite: 'lab', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -20, y: -20 } } },
+    lab: { label: 'Signal Lab', size: [3, 3], hp: 340, sight: 9, cost: 210, research: ['rangefinding', 'composite-armor', 'scanner', 'capture', 'drone-tech'], sprite: 'lab', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -20, y: -20 } } },
     factory: { label: 'War Factory', size: [4, 3], hp: 540, sight: 10, cost: 260, queue: ['transport', 'tank', 'ambulance'], sprite: 'factory', buildRequires: ['lab', 'rangefinding'], geometry: { spriteOffset: { x: -16, y: -20 } } },
     turret: { label: 'Turret', size: [2, 2], hp: 260, sight: 9, cost: 110, turret: true, range: 72, damage: 11, reload: 0.7, sprite: 'turret', buildRequires: ['barracks'], geometry: { spriteOffset: { x: -24, y: -20 }, fireOrigin: { x: 8, y: 6 } } }
   };
@@ -791,7 +799,8 @@ html{
     rangefinding: { label: 'Optics', cost: 160, time: 12, requires: ['lab'], desc: 'Improves line of sight and the factory unlock chain.' },
     'composite-armor': { label: 'Armour', cost: 220, time: 18, requires: ['lab', 'rangefinding'], desc: 'Unlocks siege tanks and slightly toughens combat units.' },
     scanner: { label: 'Scanner', cost: 260, time: 20, requires: ['lab', 'rangefinding'], desc: 'Unlocks the Command Hub satellite scan action.' },
-    capture: { label: 'Capture Tech', cost: 190, time: 16, requires: ['lab'], desc: 'Lets Dust Scouts capture enemy buildings if they can hold the channel.' }
+    capture: { label: 'Capture Tech', cost: 190, time: 16, requires: ['lab'], desc: 'Lets Dust Scouts capture enemy buildings if they can hold the channel.' },
+    'drone-tech': { label: 'Drone Tech', cost: 240, time: 18, requires: ['lab', 'rangefinding'], desc: 'Unlocks drone deployment from each Command Hub.' }
   };
 
   const BUILDABLE_BY_ENGINEER = ['hq', 'refinery', 'silo', 'oilDerrick', 'barracks', 'lab', 'factory', 'turret'];
@@ -1004,6 +1013,21 @@ html{
     return [...state.selectedIds].map(getEntityById).filter((entity) => entity && (entity.kind !== 'unit' || !entity.garrisonedIn));
   }
 
+  function getDroneOrbitRadius(unit) {
+    const def = UNIT_TYPES[unit.type];
+    return (def?.sight || unit.sight || 8) * CELL;
+  }
+
+  function makeDroneOrbitOrder(unit, centerX, centerY) {
+    return {
+      type: 'orbit',
+      centerX,
+      centerY,
+      radius: getDroneOrbitRadius(unit),
+      angle: unit.orbitAngle
+    };
+  }
+
   function playerTeam() {
     return teamById(TEAM_PLAYER);
   }
@@ -1055,6 +1079,7 @@ html{
     state.pendingBuild = null;
     state.placementGhost = null;
     state.pendingRallyBuildingId = null;
+    state.pendingDroneHubId = null;
     state.pendingActionLabel = '';
     state.winner = null;
     state.keyboardCursor.anchor = null;
@@ -1239,6 +1264,7 @@ html{
       spawnedAt: state.time,
       scanRevealUntil: 0,
       scanCooldownUntil: 0,
+      droneCooldownUntil: 0,
       rally: { x: (cellX + def.size[0] + 1) * CELL, y: (cellY + def.size[1] * 0.5) * CELL }
     };
     state.buildings.push(building);
@@ -1289,12 +1315,17 @@ html{
     building.reload = 0;
     building.scanRevealUntil = 0;
     building.scanCooldownUntil = 0;
+    building.droneCooldownUntil = 0;
     syncTeamStructureUnlock(oldTeamId, building.type);
     syncTeamStructureUnlock(newTeamId, building.type);
     recomputeTeamResearchBonuses(oldTeamId);
     recomputeTeamResearchBonuses(newTeamId);
     if (oldTeamId === TEAM_PLAYER && state.pendingRallyBuildingId === building.id) {
       state.pendingRallyBuildingId = null;
+      state.pendingActionLabel = '';
+    }
+    if (oldTeamId === TEAM_PLAYER && state.pendingDroneHubId === building.id) {
+      state.pendingDroneHubId = null;
       state.pendingActionLabel = '';
     }
     if (oldTeamId === TEAM_PLAYER) state.selectedIds.delete(building.id);
@@ -1358,6 +1389,7 @@ html{
       reload: 0,
       order: { type: 'idle' },
       path: [],
+      orbitAngle: random() * Math.PI * 2,
       repathTimer: 0,
       idleTimer: 0,
       dir: 0,
@@ -1806,6 +1838,11 @@ html{
   }
 
   function settleUnit(unit) {
+    if (UNIT_TYPES[unit.type]?.flying) {
+      releaseClaim(unit);
+      unit.path.length = 0;
+      return;
+    }
     releaseClaim(unit);
     const startCellX = pxToCell(unit.x);
     const startCellY = pxToCell(unit.y);
@@ -1846,17 +1883,22 @@ html{
 
   function canMoverTraverseTile(mover, tile) {
     const def = getMoverDefinition(mover);
+    if (def?.flying) return true;
     if (tile !== TILE.RIDGE) return true;
     return !(def && def.vehicle);
   }
 
   function getTerrainTraversalPenalty(mover, tile) {
+    const def = getMoverDefinition(mover);
+    if (def?.flying) return 0;
     if (tile === TILE.ROCK) return 0.25;
     if (tile === TILE.RIDGE) return 0.55;
     return 0;
   }
 
   function getTerrainSpeedMultiplier(mover, tile) {
+    const def = getMoverDefinition(mover);
+    if (def?.flying) return 1;
     if (tile === TILE.ROCK) return 0.84;
     if (tile === TILE.RIDGE) return 0.68;
     return 1;
@@ -2118,7 +2160,7 @@ html{
       if (state.buildings.some((building) => building.teamId === team.id && building.type === 'hq' && building.hp > 0 && (building.scanRevealUntil || 0) > state.time)) {
         team.fogVisible.fill(1);
       }
-      const mark = (x, y, radius) => {
+      const mark = (x, y, radius, ignoreRidges = false) => {
         const cx = pxToCell(x);
         const cy = pxToCell(y);
         const rad = Math.ceil(radius);
@@ -2128,7 +2170,7 @@ html{
             const ny = cy + oy;
             if (nx < 0 || ny < 0 || nx >= WORLD_CELLS_X || ny >= WORLD_CELLS_Y) continue;
             if (ox * ox + oy * oy > rad * rad) continue;
-            if (hasRidgeSightBlock(cx, cy, nx, ny)) continue;
+            if (!ignoreRidges && hasRidgeSightBlock(cx, cy, nx, ny)) continue;
             const key = worldToKey(nx, ny);
             team.fogVisible[key] = 1;
             team.fogExplored[key] = 1;
@@ -2137,7 +2179,11 @@ html{
       };
       for (const unit of state.units) {
         if (unit.garrisonedIn) continue;
-        if (unit.teamId === team.id && unit.hp > 0) mark(unit.x, unit.y, unit.sight);
+        if (unit.teamId === team.id && unit.hp > 0) {
+          const unitDef = UNIT_TYPES[unit.type] || null;
+          const radius = unit.sight * (unitDef?.revealRadiusMultiplier || 1);
+          mark(unit.x, unit.y, radius, !!unitDef?.flying);
+        }
       }
       for (const building of state.buildings) {
         if (building.teamId === team.id && building.hp > 0) {
@@ -2305,6 +2351,7 @@ html{
     for (const team of state.teams) {
       team.sprites.units = {
         scout: buildUnitAtlas(team.color, team.accent, 'scout'),
+        drone: buildUnitAtlas(team.color, team.accent, 'drone'),
         engineer: buildUnitAtlas(team.color, team.accent, 'engineer'),
         harvester: buildUnitAtlas(team.color, team.accent, 'harvester'),
         transport: buildUnitAtlas(team.color, team.accent, 'transport'),
@@ -2394,7 +2441,22 @@ html{
     ctx.fillStyle = 'rgba(0,0,0,0.25)';
     ctx.fillRect(7, 17, 10, 3);
 
-    if (type === 'harvester') {
+    if (type === 'drone') {
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.fillRect(7, 16, 10, 2);
+      ctx.fillStyle = teamColor;
+      ctx.fillRect(9, 10, 6, 4);
+      ctx.fillStyle = accentColor;
+      ctx.fillRect(6, 11, 3, 1);
+      ctx.fillRect(15, 11, 3, 1);
+      ctx.fillRect(11, 7, 2, 2);
+      ctx.fillStyle = '#cfeaff';
+      ctx.fillRect(11, 12, 2, 2);
+      ctx.fillStyle = '#3a2a1e';
+      ctx.fillRect(5, 10, 2, 1);
+      ctx.fillRect(17, 10, 2, 1);
+      ctx.fillRect(10, 15, 4, 1);
+    } else if (type === 'harvester') {
       ctx.fillStyle = '#7b6648';
       ctx.fillRect(6, 10, 12, 7);
       ctx.fillStyle = teamColor;
@@ -2626,6 +2688,8 @@ html{
       pendingBuildInputSource: state.pendingBuildInputSource,
       pendingRallyBuildingId: state.pendingRallyBuildingId,
       pendingRallyInputSource: state.pendingRallyInputSource,
+      pendingDroneHubId: state.pendingDroneHubId,
+      pendingDroneInputSource: state.pendingDroneInputSource,
       pendingActionLabel: state.pendingActionLabel,
       groups: state.groups.map((group) => [...group]),
       selectedIds: [...state.selectedIds],
@@ -2705,6 +2769,8 @@ html{
     state.pendingBuildInputSource = snapshot.pendingBuildInputSource || 'pointer';
     state.pendingRallyBuildingId = snapshot.pendingRallyBuildingId || null;
     state.pendingRallyInputSource = snapshot.pendingRallyInputSource || 'pointer';
+    state.pendingDroneHubId = snapshot.pendingDroneHubId || null;
+    state.pendingDroneInputSource = snapshot.pendingDroneInputSource || 'pointer';
     state.pendingActionLabel = snapshot.pendingActionLabel || '';
     state.groups = Array.isArray(snapshot.groups) ? snapshot.groups.map((group) => [...group]) : Array.from({ length: MAX_GROUPS }, () => []);
     state.selectedIds = new Set(snapshot.selectedIds || []);
@@ -2720,6 +2786,7 @@ html{
       ...building,
       scanRevealUntil: building.scanRevealUntil || 0,
       scanCooldownUntil: building.scanCooldownUntil || 0,
+      droneCooldownUntil: building.droneCooldownUntil || 0,
       queue: building.queue ? { ...building.queue } : null,
       rally: building.rally ? { ...building.rally } : { x: building.x, y: building.y }
     }));
@@ -3007,7 +3074,7 @@ html{
       if (entity.kind !== 'building' || entity.teamId !== TEAM_PLAYER) return false;
       if (entity.queue) return true;
       if (entity.type !== 'hq') return false;
-      return (entity.scanRevealUntil || 0) > state.time || (entity.scanCooldownUntil || 0) > state.time;
+      return (entity.scanRevealUntil || 0) > state.time || (entity.scanCooldownUntil || 0) > state.time || (entity.droneCooldownUntil || 0) > state.time;
     });
   }
 
@@ -3029,6 +3096,58 @@ html{
     const cooldownUntil = building.scanCooldownUntil || 0;
     if (cooldownUntil <= state.time) return null;
     return clamp(1 - ((cooldownUntil - state.time) / SCAN_COOLDOWN), 0, 1);
+  }
+
+  function getDroneAvailability(building) {
+    const team = building ? teamById(building.teamId) : null;
+    if (!building || building.kind !== 'building' || building.type !== 'hq' || !team) return { enabled: false, active: false, reason: 'Drone unavailable.' };
+    if (!team.research.has('drone-tech')) return { enabled: false, active: false, reason: 'Research Drone Tech at the Signal Lab first.' };
+    if (state.pendingDroneHubId === building.id) return { enabled: true, active: true, reason: 'Choose a deployment point for this drone.' };
+    if ((building.droneCooldownUntil || 0) > state.time) {
+      return { enabled: false, active: false, reason: 'Drone bay recharging for ' + Math.ceil(building.droneCooldownUntil - state.time) + 's.' };
+    }
+    return { enabled: true, active: false, reason: 'Deploy a drone anywhere on the battlefield. Cooldown ' + DRONE_DEPLOY_COOLDOWN + ' seconds.' };
+  }
+
+  function getDroneCooldownProgress(building) {
+    if (!building || building.kind !== 'building' || building.type !== 'hq') return null;
+    const cooldownUntil = building.droneCooldownUntil || 0;
+    if (cooldownUntil <= state.time) return null;
+    return clamp(1 - ((cooldownUntil - state.time) / DRONE_DEPLOY_COOLDOWN), 0, 1);
+  }
+
+  function deployDroneFromHub(building, worldX, worldY) {
+    const availability = getDroneAvailability(building);
+    if (!availability.enabled && !availability.active) {
+      if (building && building.teamId === TEAM_PLAYER) {
+        playUiCue('error');
+        toast(availability.reason);
+      }
+      return false;
+    }
+    const drone = spawnUnit(building.teamId, 'drone', pxToCell(worldX), pxToCell(worldY), false);
+    if (!drone) return false;
+    drone.x = clamp(worldX, 0, WORLD_WIDTH);
+    drone.y = clamp(worldY, 0, WORLD_HEIGHT);
+    drone.order = makeDroneOrbitOrder(drone, drone.x, drone.y);
+    drone.path.length = 0;
+    drone.claimKey = null;
+    building.droneCooldownUntil = state.time + DRONE_DEPLOY_COOLDOWN;
+    if (state.pendingDroneHubId === building.id) {
+      state.pendingDroneHubId = null;
+      state.pendingActionLabel = '';
+    }
+    if (building.teamId === TEAM_PLAYER) {
+      playUiCue('confirm');
+      toast('Drone deployed.');
+    }
+    refreshFog();
+    updateEnemyMemory();
+    rebuildMinimapFogLayer();
+    state.selectionUiRefreshTimer = 0.25;
+    updateSelectionUI();
+    updateCommandReadout();
+    return true;
   }
 
   function getQueueProgress(building, kind, key) {
@@ -3237,6 +3356,8 @@ html{
         updateServiceOrder(unit, def, dt);
       } else if (unit.order.type === 'board') {
         updateBoardOrder(unit, dt);
+      } else if (unit.order.type === 'orbit') {
+        updateDroneOrbit(unit, dt);
       } else if (unit.order.type === 'build') {
         updateBuildOrder(unit, dt);
       } else if (unit.order.type === 'move') {
@@ -3250,7 +3371,7 @@ html{
           moveUnitAlongOrder(unit, dt, unit.order.x, unit.order.y);
         }
       } else {
-        if (!unit.claimKey) settleUnit(unit);
+        if (!UNIT_TYPES[unit.type]?.flying && !unit.claimKey) settleUnit(unit);
       }
     }
   }
@@ -3462,6 +3583,12 @@ html{
       unit.targetId = null;
       return;
     }
+    if (!canSourceDamageTarget(unit, target)) {
+      unit.order = { type: 'idle' };
+      unit.targetId = null;
+      unit.path.length = 0;
+      return;
+    }
     const targetPoint = target.kind === 'building' ? getBuildingAimPoint(target) : { x: target.x, y: target.y };
     const targetX = targetPoint.x;
     const targetY = targetPoint.y;
@@ -3528,6 +3655,23 @@ html{
     }
   }
 
+  function updateDroneOrbit(unit, dt) {
+    const radius = unit.order.radius || getDroneOrbitRadius(unit);
+    unit.order.angle = (unit.order.angle ?? unit.orbitAngle ?? 0) + dt * DRONE_ORBIT_SPEED;
+    unit.orbitAngle = unit.order.angle;
+    const targetX = clamp(unit.order.centerX + Math.cos(unit.order.angle) * radius, 0, WORLD_WIDTH);
+    const targetY = clamp(unit.order.centerY + Math.sin(unit.order.angle) * radius, 0, WORLD_HEIGHT);
+    const dx = targetX - unit.x;
+    const dy = targetY - unit.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance > 0.01) {
+      const step = Math.min(distance, unit.speed * dt);
+      unit.x += dx / distance * step;
+      unit.y += dy / distance * step;
+      unit.dir = Math.atan2(dy, dx);
+    }
+  }
+
   function updateCrushOrder(unit, dt) {
     const target = getEntityById(unit.order.targetId || unit.targetId);
     if (!target || target.kind !== 'unit' || target.hp <= 0 || target.teamId === unit.teamId) {
@@ -3575,6 +3719,13 @@ html{
     unit.order = { type: 'idle' };
     unit.targetId = null;
     unit.path.length = 0;
+    if (unit.teamId === TEAM_PLAYER && state.selectedIds.has(unit.id) && state.commandMode === 'capture') {
+      state.commandMode = 'context';
+      state.pendingActionLabel = '';
+      updateTouchButtons();
+      updateSelectionUI();
+      updateCommandReadout();
+    }
     if (unit.teamId === TEAM_PLAYER) {
       playUiCue('ready');
       toast(capturedLabel + ' captured.');
@@ -3795,10 +3946,13 @@ html{
   }
 
   function launchProjectile({ sourceId, sourceTeamId, targetId, x, y, targetX, targetY, damage, speed, color }) {
+    const source = getEntityById(sourceId);
     state.projectiles.push({
       id: makeId('projectile'),
       sourceId,
       sourceTeamId,
+      sourceKind: source?.kind || null,
+      sourceType: source?.type || null,
       targetId,
       x,
       y,
@@ -3832,7 +3986,10 @@ html{
       const step = projectile.speed * dt;
       if (distance <= Math.max(3, step)) {
         if (target && target.hp > 0 && target.teamId !== projectile.sourceTeamId) {
-          applyDamage(target, projectile.damage, projectile.sourceTeamId, projectile.sourceId);
+          applyDamage(target, projectile.damage, projectile.sourceTeamId, projectile.sourceId, {
+            kind: projectile.sourceKind,
+            type: projectile.sourceType
+          });
         }
         addEffect(projectile.targetX, projectile.targetY, projectile.color);
         playImpactCue(projectile.sourceTeamId, projectile.color);
@@ -3853,6 +4010,7 @@ html{
     let bestDist = Infinity;
     forEachNearbyUnit(bx, by, def.range, (unit) => {
       if (unit.hp <= 0 || unit.teamId === building.teamId) return;
+      if (!canSourceDamageTarget(building, unit)) return;
       const distance = dist(unit.x, unit.y, bx, by);
       if (distance <= def.range && distance < bestDist) {
         best = unit;
@@ -3862,11 +4020,12 @@ html{
     return best;
   }
 
-  function findEnemyInRangeFromPoint(teamId, worldX, worldY, range) {
+  function findEnemyInRangeFromPoint(teamId, worldX, worldY, range, source = null) {
     let best = null;
     let bestDist = Infinity;
     forEachNearbyUnit(worldX, worldY, range, (enemy) => {
       if (enemy.hp <= 0 || enemy.teamId === teamId || enemy.garrisonedIn) return;
+      if (source && !canSourceDamageTarget(source, enemy)) return;
       const distance = dist(worldX, worldY, enemy.x, enemy.y);
       if (distance < range && distance < bestDist && canSeeWorldPoint(worldX, worldY, enemy.x, enemy.y)) {
         best = enemy;
@@ -3875,6 +4034,7 @@ html{
     });
     forEachNearbyBuilding(worldX, worldY, range, (building) => {
       if (building.hp <= 0 || building.teamId === teamId) return;
+      if (source && !canSourceDamageTarget(source, building)) return;
       const bx = building.x + building.widthCells * CELL * 0.5;
       const by = building.y + building.heightCells * CELL * 0.5;
       const distance = dist(worldX, worldY, bx, by);
@@ -3887,7 +4047,7 @@ html{
   }
 
   function findEnemyInRange(unit, range) {
-    return findEnemyInRangeFromPoint(unit.teamId, unit.x, unit.y, range);
+    return findEnemyInRangeFromPoint(unit.teamId, unit.x, unit.y, range, unit);
   }
 
   function moveUnitAlongOrder(unit, dt, targetX, targetY) {
@@ -3897,7 +4057,7 @@ html{
       if (path === null) {
         unit.path.length = 0;
         unit.repathTimer = 0.25;
-        settleUnit(unit);
+        if (!UNIT_TYPES[unit.type]?.flying) settleUnit(unit);
         return;
       }
       unit.path = path;
@@ -3916,7 +4076,7 @@ html{
           unit.targetId = nextOrder?.targetId || null;
           refreshSelectionHudForUnits([unit]);
         }
-        settleUnit(unit);
+        if (!UNIT_TYPES[unit.type]?.flying) settleUnit(unit);
       }
       return;
     }
@@ -3930,6 +4090,19 @@ html{
     tryVehicleCrush(unit, UNIT_TYPES[unit.type]);
   }
 
+  function isDroneDamageSource(source) {
+    if (!source) return false;
+    if (source.kind === 'building') return source.type === 'turret';
+    if (source.kind === 'unit') return source.type === 'scout';
+    return false;
+  }
+
+  function canSourceDamageTarget(source, target) {
+    if (!source || !target) return true;
+    if (target.kind === 'unit' && target.type === 'drone') return isDroneDamageSource(source);
+    return true;
+  }
+
   function tryVehicleCrush(unit, def) {
     if (!def || !def.crushDamage || unit.crushTimer > 0) return;
     const crushRadius = def.crushRadius || 7;
@@ -3938,7 +4111,7 @@ html{
       const enemyDef = UNIT_TYPES[enemy.type];
       if (!enemyDef || !enemyDef.infantry) return;
       if (dist(unit.x, unit.y, enemy.x, enemy.y) > crushRadius) return;
-      applyDamage(enemy, def.crushDamage, unit.teamId, unit.id);
+      applyDamage(enemy, def.crushDamage, unit.teamId, unit.id, { kind: 'unit', type: unit.type });
       unit.crushTimer = 0.18;
       addEffect(enemy.x, enemy.y, '#ffb46c');
       if (unit.teamId === TEAM_PLAYER) playSynth('combat', 120, 0.05, 0.03);
@@ -3989,7 +4162,8 @@ html{
     toast(def.label + ' sold for ' + refund + ' spice.');
   }
 
-  function applyDamage(target, amount, attackerTeamId, attackerId = null) {
+  function applyDamage(target, amount, attackerTeamId, attackerId = null, damageSource = null) {
+    if (target.kind === 'unit' && target.type === 'drone' && !isDroneDamageSource(damageSource)) return;
     if (target.kind === 'unit' && attackerTeamId !== target.teamId) {
       target.lastAttackerId = attackerId;
       target.lastAttackerTimer = 7;
@@ -4083,11 +4257,13 @@ html{
     if (lab && !lab.queue && !team.research.has('rangefinding') && canAffordResearch(team.id, 'rangefinding')) enqueueProduction(lab, 'research', 'rangefinding');
     else if (lab && !lab.queue && team.research.has('rangefinding') && !team.research.has('composite-armor') && canAffordResearch(team.id, 'composite-armor')) enqueueProduction(lab, 'research', 'composite-armor');
     else if (lab && !lab.queue && team.research.has('composite-armor') && !team.research.has('scanner') && canAffordResearch(team.id, 'scanner')) enqueueProduction(lab, 'research', 'scanner');
+    else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('drone-tech') && canAffordResearch(team.id, 'drone-tech')) enqueueProduction(lab, 'research', 'drone-tech');
     if (factory && !factory.queue) {
       if ((counts.ambulance || 0) < desiredAmbulances && canAfford(team.id, 'ambulance')) enqueueProduction(factory, 'unit', 'ambulance');
       else if (canAfford(team.id, 'tank')) enqueueProduction(factory, 'unit', 'tank');
     }
     tryActivateAiScan(team, counts);
+    tryDeployAiDrone(team, counts);
     assignAiScoutOrders(team);
 
     for (const harvester of state.units.filter((unit) => unit.teamId === team.id && unit.type === 'harvester' && unit.hp > 0)) {
@@ -4193,6 +4369,40 @@ html{
     return false;
   }
 
+  function hasAiDroneCoverage(teamId, worldX, worldY) {
+    return state.units.some((unit) => {
+      if (unit.teamId !== teamId || unit.type !== 'drone' || unit.hp <= 0) return false;
+      const radius = unit.sight * (UNIT_TYPES.drone.revealRadiusMultiplier || 1) * CELL;
+      return dist(unit.x, unit.y, worldX, worldY) <= radius * 0.65;
+    });
+  }
+
+  function tryDeployAiDrone(team, counts) {
+    if (!team.research.has('drone-tech')) return false;
+    const hubs = state.buildings.filter((building) => building.teamId === team.id && building.type === 'hq' && building.hp > 0);
+    if (!hubs.length) return false;
+    const hiddenOil = state.resources.find((resource) => resource.resourceType === 'oil' && !resource.claimedBy && !team.fogExplored[worldToKey(resource.cellX, resource.cellY)]);
+    const knownTarget = getBestAiAttackMemory(team);
+    const assaultReady = ((counts.tank || 0) + (counts.scout || 0) >= 5);
+    for (const hq of hubs) {
+      if ((hq.droneCooldownUntil || 0) > state.time) continue;
+      const hqCenterX = hq.x + hq.widthCells * CELL * 0.5;
+      const hqCenterY = hq.y + hq.heightCells * CELL * 0.5;
+      const nearbyThreat = getKnownEnemyMemories(team, 'units')
+        .filter((memory) => state.time - memory.lastSeen <= 10)
+        .sort((a, b) => dist(a.x, a.y, hqCenterX, hqCenterY) - dist(b.x, b.y, hqCenterX, hqCenterY))[0] || null;
+      const droneTarget = nearbyThreat && dist(nearbyThreat.x, nearbyThreat.y, hqCenterX, hqCenterY) <= AI_SCAN_THREAT_RADIUS
+        ? { x: nearbyThreat.x, y: nearbyThreat.y }
+        : (knownTarget && (assaultReady || state.time - knownTarget.lastSeen > AI_MEMORY_SCAN_STALE_AFTER)
+          ? { x: knownTarget.x, y: knownTarget.y }
+          : (hiddenOil ? { x: hiddenOil.x, y: hiddenOil.y } : null));
+      if (!droneTarget) continue;
+      if (hasAiDroneCoverage(team.id, droneTarget.x, droneTarget.y)) continue;
+      return deployDroneFromHub(hq, droneTarget.x, droneTarget.y);
+    }
+    return false;
+  }
+
   function toastOnceForAi(type) {
     if (type === 'lab' && !state.aiLabAnnounced) {
       state.aiLabAnnounced = true;
@@ -4214,7 +4424,7 @@ html{
   }
 
   function countTeamAssets(teamId) {
-    const counts = { hq: 0, refinery: 0, silo: 0, oilDerrick: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, transport: 0, ambulance: 0, harvester: 0, engineer: 0 };
+    const counts = { hq: 0, refinery: 0, silo: 0, oilDerrick: 0, barracks: 0, lab: 0, factory: 0, turret: 0, scout: 0, tank: 0, transport: 0, ambulance: 0, harvester: 0, engineer: 0, drone: 0 };
     for (const building of state.buildings) {
       if (building.teamId === teamId && building.hp > 0 && counts.hasOwnProperty(building.type)) counts[building.type]++;
     }
@@ -5491,6 +5701,7 @@ html{
     if (!order) return 'hold position';
     if (order.type === 'gather') return 'resume harvesting';
     if (order.type === 'return') return 'return its cargo';
+    if (order.type === 'orbit') return 'begin orbiting the destination';
     return 'resume orders';
   }
 
@@ -5498,6 +5709,7 @@ html{
     const order = unit.order || { type: 'idle' };
     if (order.type === 'board') return 'Moving to board a transport. Once inside, boarded scouts fire from the vehicle while it moves.';
     if (order.type === 'capture') return 'Capturing an enemy structure. The scout cannot fire until the channel is interrupted or complete.';
+    if (order.type === 'orbit') return 'Holding an aerial orbit over the assigned position while revealing a wide area.';
     if (order.type === 'support') return 'Closing in to stabilize damaged friendly units while avoiding direct fire.';
     if (order.type === 'service') {
       const support = getEntityById(order.targetId);
@@ -5512,6 +5724,9 @@ html{
     }
     if (order.type === 'move' && order.nextOrder) {
       const resumeText = describeResumeOrderForHud(order.nextOrder);
+      if (order.nextOrder.type === 'orbit') {
+        return 'Repositioning to a new patrol point, then will begin orbiting there.';
+      }
       return resumeText === 'hold position'
         ? 'Heading to the support rally point.'
         : 'Heading to the support rally point, then will ' + resumeText + '.';
@@ -5545,6 +5760,9 @@ html{
     if (unit.type === 'ambulance') {
       return 'Heals nearby friendly units and keeps just outside hostile firing range.';
     }
+    if (unit.type === 'drone') {
+      return 'Flying recon unit that circles its assigned point and reveals a wide swath of fog.';
+    }
     return 'Moves and attacks based on current orders.';
   }
 
@@ -5552,9 +5770,11 @@ html{
     const order = unit.order || { type: 'idle' };
     if (order.type === 'board') return 'Board';
     if (order.type === 'capture') return 'Capture';
+    if (order.type === 'orbit') return 'Orbit';
     if (order.type === 'support') return 'Support';
     if (order.type === 'service') return 'Service -> Rally';
     if (order.type === 'move' && order.nextOrder) {
+      if (order.nextOrder.type === 'orbit') return 'Move -> Orbit';
       const resumeText = describeResumeOrderForHud(order.nextOrder);
       if (resumeText === 'resume harvesting') return 'Rally -> Harvest';
       if (resumeText === 'return its cargo') return 'Rally -> Return';
@@ -5622,6 +5842,8 @@ html{
     if (building.type === 'hq') {
       const scanAvailability = getScanAvailability(building);
       makeAction('Scan', () => activateSatelliteScan(building), scanAvailability.active, false, !scanAvailability.enabled, 'Scan. ' + scanAvailability.reason, { progress: getScanCooldownProgress(building) });
+      const droneAvailability = getDroneAvailability(building);
+      makeAction('Deploy Drone', () => setPendingDrone(building), droneAvailability.active, false, !droneAvailability.enabled, 'Deploy Drone. ' + droneAvailability.reason, { progress: getDroneCooldownProgress(building) });
     }
     if (canSetRally(building)) makeAction('Set Rally', () => setPendingRally(building), state.pendingRallyBuildingId === building.id);
     makeAction('Sell', () => sellBuilding(building), false, true);
@@ -5731,6 +5953,8 @@ html{
     state.pendingBuildInputSource = 'pointer';
     state.pendingRallyBuildingId = null;
     state.pendingRallyInputSource = 'pointer';
+    state.pendingDroneHubId = null;
+    state.pendingDroneInputSource = 'pointer';
     state.commandMode = mode;
     state.pendingActionLabel = '';
     updateTouchButtons();
@@ -5745,6 +5969,8 @@ html{
     state.pendingBuildInputSource = 'pointer';
     state.pendingRallyBuildingId = building.id;
     state.pendingRallyInputSource = state.pointer.inside ? 'pointer' : 'keyboard';
+    state.pendingDroneHubId = null;
+    state.pendingDroneInputSource = 'pointer';
     state.commandMode = 'context';
     state.pendingActionLabel = 'Rally';
     updateTouchButtons();
@@ -5754,10 +5980,35 @@ html{
     toast('Tap or click to set rally point.');
   }
 
+  function setPendingDrone(building) {
+    const availability = getDroneAvailability(building);
+    if (!availability.enabled && !availability.active) {
+      playUiCue('error');
+      toast(availability.reason);
+      return false;
+    }
+    state.pendingBuild = null;
+    state.pendingBuildInputSource = 'pointer';
+    state.pendingRallyBuildingId = null;
+    state.pendingRallyInputSource = 'pointer';
+    state.pendingDroneHubId = building.id;
+    state.pendingDroneInputSource = state.pointer.inside ? 'pointer' : 'keyboard';
+    state.commandMode = 'context';
+    state.pendingActionLabel = 'Drone';
+    updateTouchButtons();
+    updateSelectionUI();
+    updateCommandReadout();
+    playUiCue('mode');
+    toast('Choose where to deploy the drone.');
+    return true;
+  }
+
   function clearPendingBuildPlacement(clearSelection = false) {
     state.pendingBuild = null;
     state.pendingBuildInputSource = 'pointer';
     state.placementGhost = null;
+    state.pendingDroneHubId = null;
+    state.pendingDroneInputSource = 'pointer';
     state.commandMode = 'context';
     state.pendingActionLabel = '';
     if (clearSelection) state.selectedIds.clear();
@@ -5805,6 +6056,10 @@ html{
     state.pendingRallyInputSource = source;
   }
 
+  function setPendingDroneInputSource(source) {
+    state.pendingDroneInputSource = source;
+  }
+
   function primeKeyboardCursorFromPlacementGhost() {
     const ghost = getPlacementGhostAtCursor();
     const world = getPlacementGhostCenterWorld(ghost);
@@ -5825,8 +6080,27 @@ html{
     return { x: state.keyboardCursor.x, y: state.keyboardCursor.y };
   }
 
+  function getPendingDroneWorld() {
+    if (state.pendingDroneInputSource === 'keyboard') {
+      return { x: state.keyboardCursor.x, y: state.keyboardCursor.y };
+    }
+    if (state.pointer.inside) {
+      return screenToWorld(state.pointer.x, state.pointer.y);
+    }
+    const hub = getEntityById(state.pendingDroneHubId);
+    if (hub && hub.kind === 'building') {
+      return { x: hub.x + hub.widthCells * CELL * 0.5, y: hub.y + hub.heightCells * CELL * 0.5 };
+    }
+    return { x: state.keyboardCursor.x, y: state.keyboardCursor.y };
+  }
+
   function primeKeyboardCursorFromPendingRally() {
     const world = getPendingRallyWorld();
+    setKeyboardCursorWorld(world.x, world.y, false);
+  }
+
+  function primeKeyboardCursorFromPendingDrone() {
+    const world = getPendingDroneWorld();
     setKeyboardCursorWorld(world.x, world.y, false);
   }
 
@@ -5860,7 +6134,7 @@ html{
   }
 
   function updateKeyboardCursorUi() {
-    if (!state.keyboardCursor.visible || state.pendingBuild || state.pendingRallyBuildingId) {
+    if (!state.keyboardCursor.visible || state.pendingBuild || state.pendingRallyBuildingId || state.pendingDroneHubId) {
       keyboardCursorEl.style.display = 'none';
       return;
     }
@@ -6031,6 +6305,17 @@ html{
       tryPlacePendingBuild(worldX, worldY);
       return;
     }
+    if (state.pendingDroneHubId) {
+      const building = getEntityById(state.pendingDroneHubId);
+      if (building && building.kind === 'building' && building.teamId === TEAM_PLAYER) {
+        deployDroneFromHub(building, worldX, worldY);
+      } else {
+        state.pendingDroneHubId = null;
+        state.pendingActionLabel = '';
+        updateCommandReadout();
+      }
+      return;
+    }
     if (state.pendingRallyBuildingId) {
       const building = getEntityById(state.pendingRallyBuildingId);
       if (building && building.kind === 'building' && building.teamId === TEAM_PLAYER) {
@@ -6142,7 +6427,11 @@ html{
     for (const unit of units) {
       clearPendingConstruction(unit, true);
       releaseClaim(unit);
-      unit.order = { type: attackMove ? 'attack-move' : 'move', x: worldX, y: worldY };
+      if (unit.type === 'drone') {
+        unit.order = { type: 'move', x: worldX, y: worldY, nextOrder: makeDroneOrbitOrder(unit, worldX, worldY) };
+      } else {
+        unit.order = { type: attackMove ? 'attack-move' : 'move', x: worldX, y: worldY };
+      }
       unit.path.length = 0;
       unit.targetId = null;
       unit.manualOrderTimer = manualLock;
@@ -6415,8 +6704,8 @@ html{
       state.keyboardCursor.x = clamp(state.keyboardCursor.x, 0, WORLD_WIDTH);
       state.keyboardCursor.y = clamp(state.keyboardCursor.y, 0, WORLD_HEIGHT);
       clampKeyboardCursorToViewport();
-      state.keyboardCursor.visible = !(state.pendingBuild || state.pendingRallyBuildingId);
-    } else if (state.keyboardCursor.visible && !state.keyboardCursor.anchor && !state.pendingBuild && !state.pendingRallyBuildingId) {
+      state.keyboardCursor.visible = !(state.pendingBuild || state.pendingRallyBuildingId || state.pendingDroneHubId);
+    } else if (state.keyboardCursor.visible && !state.keyboardCursor.anchor && !state.pendingBuild && !state.pendingRallyBuildingId && !state.pendingDroneHubId) {
       state.keyboardCursor.idleTimer += dt;
       if (state.keyboardCursor.idleTimer >= KEYBOARD_CURSOR_IDLE_HIDE) state.keyboardCursor.visible = false;
     }
@@ -6476,10 +6765,10 @@ html{
     }
     if (event.code === 'Escape') {
       event.preventDefault();
-      if (state.pendingBuild) {
+      if (state.pendingBuild || state.pendingDroneHubId) {
         clearPendingBuildPlacement();
         playUiCue('cancel');
-        toast('Construction cancelled.');
+        toast(state.pendingBuild ? 'Construction cancelled.' : 'Drone deployment cancelled.');
       } else openMenu(getRootMenuId());
       return;
     }
@@ -6530,6 +6819,9 @@ html{
         issueContextCommand((ghost.cellX + 0.5) * CELL, (ghost.cellY + 0.5) * CELL);
       } else if (state.pendingRallyBuildingId) {
         const world = getPendingRallyWorld();
+        issueContextCommand(world.x, world.y);
+      } else if (state.pendingDroneHubId) {
+        const world = getPendingDroneWorld();
         issueContextCommand(world.x, world.y);
       } else {
         focusKeyboardCursorOnSelectionOrCamera();
@@ -6599,6 +6891,7 @@ html{
       getPlacementGhostAtWorld(world.x, world.y);
     }
     if (state.pendingRallyBuildingId) setPendingRallyInputSource('pointer');
+    if (state.pendingDroneHubId) setPendingDroneInputSource('pointer');
     const entity = findEntityAt(world.x, world.y);
     if (state.touchMode === 'pan' && event.pointerType === 'touch') {
       state.drag = { mode: 'pan', startClientX: event.clientX, startClientY: event.clientY, cameraX: state.camera.x, cameraY: state.camera.y };
@@ -6622,6 +6915,7 @@ html{
     }
     const shouldCommandPointer = !!state.pendingBuild
       || !!state.pendingRallyBuildingId
+      || !!state.pendingDroneHubId
       || (event.pointerType === 'touch' && (state.touchMode !== 'select' || state.commandMode !== 'context'));
     state.drag = {
       mode: shouldCommandPointer ? 'command' : 'select',
@@ -6641,6 +6935,7 @@ html{
     if (state.pointers.has(event.pointerId)) state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY, type: event.pointerType });
     if (state.pendingBuild) setPendingBuildInputSource('pointer');
     if (state.pendingRallyBuildingId) setPendingRallyInputSource('pointer');
+    if (state.pendingDroneHubId) setPendingDroneInputSource('pointer');
     if (state.pinch && state.pointers.size >= 2) {
       updatePinch();
       return;
