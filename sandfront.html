@@ -701,6 +701,12 @@ html{
   const AI_SCAN_THREAT_RADIUS = CELL * 16;
   const AI_MEMORY_SCAN_STALE_AFTER = 18;
   const AI_SCOUT_GRID_STEP = 10;
+  const AI_OIL_RACE_MAP_SPICE_THRESHOLD = 2600;
+  const AI_OIL_INTEL_STALE_AFTER = 24;
+  const AI_OIL_RECON_REFRESH_AFTER = 14;
+  const AI_OIL_CAPTURE_THREAT_MAX = 4;
+  const AI_OIL_HARASS_THREAT_MAX = 8;
+  const AI_OIL_ZONE_RADIUS = CELL * 10;
   const AMBULANCE_RETREAT_MARGIN = 14;
   const AI_STRUCTURE_MIN_GAP = {
     refinery: 2,
@@ -1047,7 +1053,15 @@ html{
       storage: 700,
       research: new Set(['hq']),
       sprites: { units: {}, buildings: {} },
-      ai: { thinkTimer: 0, attackTimer: 10 + random() * 5, waveBias: 0, scoutCursor: 0 },
+      ai: {
+        thinkTimer: 0,
+        attackTimer: 10 + random() * 5,
+        waveBias: 0,
+        scoutCursor: 0,
+        phase: 'normal',
+        oilIntel: {},
+        oilObjective: null
+      },
       enemyMemory: { units: {}, buildings: {} },
       fogVisible: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
       fogExplored: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y)
@@ -1918,7 +1932,7 @@ html{
     return null;
   }
 
-  function findBuildingSpawnCell(building, maxRadius = 5, ignoreUnits = false, mover = null) {
+  function findBuildingSpawnCell(building, maxRadius = null, ignoreUnits = false, mover = null) {
     const footprint = {
       left: building.cellX,
       top: building.cellY,
@@ -1931,7 +1945,10 @@ html{
     };
     let best = null;
     let bestScore = Infinity;
-    for (let radius = 1; radius <= maxRadius; radius++) {
+    const searchLimit = maxRadius == null
+      ? Math.max(WORLD_CELLS_X, WORLD_CELLS_Y)
+      : maxRadius;
+    for (let radius = 1; radius <= searchLimit; radius++) {
       const left = footprint.left - radius;
       const right = footprint.right + radius;
       const top = footprint.top - radius;
@@ -2269,8 +2286,152 @@ html{
     return Object.values(team.enemyMemory?.[kind] || {});
   }
 
+  function getRemainingSpiceOnMap() {
+    return state.resources.reduce((sum, resource) => {
+      if (resource.resourceType !== 'spice' || isDepletedResource(resource)) return sum;
+      return sum + Math.max(0, resource.amount || 0);
+    }, 0);
+  }
+
+  function getOilOwnerTeamId(resource) {
+    if (!resource || resource.resourceType !== 'oil' || !resource.claimedBy) return null;
+    const owner = getEntityById(resource.claimedBy);
+    return owner && owner.kind === 'building' && owner.hp > 0 ? owner.teamId : null;
+  }
+
+  function estimateAiThreatAt(team, worldX, worldY, radius = AI_OIL_ZONE_RADIUS) {
+    let threat = 0;
+    forEachNearbyBuilding(worldX, worldY, radius, (building) => {
+      if (building.hp <= 0 || building.teamId === team.id) return;
+      if (building.type === 'turret') threat += 4;
+      else if (building.type === 'hq' || building.type === 'factory') threat += 1.5;
+      else threat += 0.6;
+    });
+    forEachNearbyUnit(worldX, worldY, radius, (unit) => {
+      if (unit.hp <= 0 || unit.teamId === team.id || unit.garrisonedIn) return;
+      if (unit.type === 'tank') threat += 3;
+      else if (unit.type === 'scout') threat += 1;
+      else if (unit.type === 'transport' || unit.type === 'ambulance') threat += 0.8;
+      else if (unit.type === 'drone') threat += 0.25;
+      else threat += 0.5;
+    });
+    return threat;
+  }
+
+  function refreshAiOilIntel(team) {
+    const oilIntel = team.ai.oilIntel || (team.ai.oilIntel = {});
+    for (const resource of state.resources) {
+      if (resource.resourceType !== 'oil') continue;
+      const entry = oilIntel[resource.id] || {
+        resourceId: resource.id,
+        x: resource.x,
+        y: resource.y,
+        cellX: resource.cellX,
+        cellY: resource.cellY,
+        lastSeenAt: -Infinity,
+        ownerTeamId: null,
+        threatScore: 0,
+        lastDroneReconAt: -Infinity,
+        lastFailedCaptureAt: -Infinity
+      };
+      entry.x = resource.x;
+      entry.y = resource.y;
+      entry.cellX = resource.cellX;
+      entry.cellY = resource.cellY;
+      const key = worldToKey(resource.cellX, resource.cellY);
+      if (team.fogVisible[key]) {
+        entry.lastSeenAt = state.time;
+        entry.ownerTeamId = getOilOwnerTeamId(resource);
+        entry.threatScore = estimateAiThreatAt(team, resource.x, resource.y);
+      } else if (state.time - entry.lastSeenAt > AI_OIL_INTEL_STALE_AFTER) {
+        entry.threatScore *= 0.5;
+      }
+      oilIntel[resource.id] = entry;
+    }
+  }
+
+  function updateAiStrategicPhase(team, counts) {
+    const lowMapSpice = getRemainingSpiceOnMap() <= AI_OIL_RACE_MAP_SPICE_THRESHOLD;
+    const weakOilIncome = team.spice < 260 && (counts.oilDerrick || 0) < 2;
+    team.ai.phase = lowMapSpice || weakOilIncome ? 'oil-race' : 'normal';
+  }
+
+  function getAiOilObjective(team) {
+    if (team.ai.phase === 'normal') return null;
+    const hq = nearestBuilding(team.id, 'hq', WORLD_WIDTH, WORLD_HEIGHT);
+    let best = null;
+    let bestScore = -Infinity;
+    for (const resource of state.resources) {
+      if (resource.resourceType !== 'oil') continue;
+      const intel = team.ai.oilIntel?.[resource.id] || null;
+      const ownerTeamId = getOilOwnerTeamId(resource) ?? intel?.ownerTeamId ?? null;
+      if (ownerTeamId === team.id) continue;
+      const key = worldToKey(resource.cellX, resource.cellY);
+      const explored = !!team.fogExplored[key];
+      const stale = state.time - (intel?.lastSeenAt ?? -Infinity) > AI_OIL_INTEL_STALE_AFTER;
+      const threatScore = intel?.threatScore ?? 0;
+      const lastDroneReconAt = intel?.lastDroneReconAt ?? -Infinity;
+      const needsDroneRefresh = state.time - lastDroneReconAt > AI_OIL_RECON_REFRESH_AFTER;
+      const ownerBuilding = resource.claimedBy ? getEntityById(resource.claimedBy) : null;
+      let kind = 'recon';
+      let score = 0;
+      if (!explored || stale || (needsDroneRefresh && threatScore > AI_OIL_CAPTURE_THREAT_MAX)) {
+        kind = 'recon';
+        score = 86;
+      } else if (ownerTeamId == null) {
+        kind = threatScore <= AI_OIL_CAPTURE_THREAT_MAX ? 'build' : 'recon';
+        score = kind === 'build' ? 118 : 88;
+      } else if (ownerTeamId !== team.id) {
+        if (team.research.has('capture') && threatScore <= AI_OIL_CAPTURE_THREAT_MAX && ownerBuilding) {
+          kind = 'capture';
+          score = 112;
+        } else if (ownerBuilding && threatScore <= AI_OIL_HARASS_THREAT_MAX) {
+          kind = 'harass';
+          score = 98;
+        } else {
+          kind = 'recon';
+          score = 90;
+        }
+      }
+      if (!explored) score += 16;
+      if (stale) score += 12;
+      if (ownerTeamId === TEAM_PLAYER) score += 8;
+      score -= Math.min(42, hq ? dist(hq.x + hq.widthCells * CELL * 0.5, hq.y + hq.heightCells * CELL * 0.5, resource.x, resource.y) * 0.05 : 0);
+      score -= Math.min(28, (intel?.lastFailedCaptureAt && Number.isFinite(intel.lastFailedCaptureAt)) ? Math.max(0, 24 - (state.time - intel.lastFailedCaptureAt)) * 1.2 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        best = {
+          kind,
+          x: resource.x,
+          y: resource.y,
+          resourceId: resource.id,
+          buildingId: ownerBuilding && ownerBuilding.kind === 'building' ? ownerBuilding.id : null,
+          ownerTeamId,
+          threatScore,
+          lastSeenAt: intel?.lastSeenAt ?? -Infinity
+        };
+      }
+    }
+    if (best && best.kind === 'harass' && best.threatScore > AI_OIL_CAPTURE_THREAT_MAX) {
+      team.ai.phase = 'siege';
+    } else if (team.ai.phase !== 'normal') {
+      team.ai.phase = 'oil-race';
+    }
+    return best;
+  }
+
   function getBestAiAttackMemory(team) {
-    const buildingPriority = { hq: 100, factory: 70, lab: 60, refinery: 50, barracks: 45, turret: 35, silo: 20, oilDerrick: 15 };
+    const oilBias = team.ai.phase === 'oil-race' || team.ai.phase === 'siege';
+    const buildingPriority = {
+      hq: 100,
+      factory: 70,
+      lab: 60,
+      refinery: oilBias ? 62 : 50,
+      barracks: 45,
+      turret: team.ai.phase === 'siege' ? 54 : 35,
+      silo: 20,
+      oilDerrick: oilBias ? 68 : 15
+    };
     const buildingTarget = getKnownEnemyMemories(team, 'buildings')
       .sort((a, b) => {
         const priorityDelta = (buildingPriority[b.type] || 0) - (buildingPriority[a.type] || 0);
@@ -2315,12 +2476,31 @@ html{
     const scouts = state.units.filter((unit) => unit.teamId === team.id && unit.type === 'scout' && unit.hp > 0);
     if (!scouts.length) return;
     const knownTarget = getBestAiAttackMemory(team);
+    const oilObjective = team.ai.oilObjective;
+    let oilReconAssigned = false;
     for (const scout of scouts) {
       const order = scout.order || { type: 'idle' };
+      if (order.type === 'capture') continue;
       const scoutingOrder = (order.type === 'move' || order.type === 'attack-move') && order.aiScout;
       const targetCellX = order.aiScoutCellX ?? pxToCell(scout.x);
       const targetCellY = order.aiScoutCellY ?? pxToCell(scout.y);
       const scoutingCellExplored = scoutingOrder ? !!team.fogExplored[worldToKey(targetCellX, targetCellY)] : false;
+      const canUseForOilRecon = oilObjective && oilObjective.kind === 'recon' && !oilReconAssigned && (order.type === 'idle' || scoutingOrder);
+      if (canUseForOilRecon) {
+        releaseClaim(scout);
+        scout.order = {
+          type: 'attack-move',
+          x: oilObjective.x,
+          y: oilObjective.y,
+          aiScout: true,
+          aiScoutCellX: pxToCell(oilObjective.x),
+          aiScoutCellY: pxToCell(oilObjective.y)
+        };
+        scout.targetId = null;
+        scout.path.length = 0;
+        oilReconAssigned = true;
+        continue;
+      }
       const shouldRetaskForRecon = !knownTarget && (order.type === 'idle' || (scoutingOrder && scoutingCellExplored));
       const shouldRetaskForTarget = !!knownTarget && (order.type === 'idle' || scoutingOrder);
       if (shouldRetaskForTarget) {
@@ -2698,7 +2878,11 @@ html{
         spice: team.spice,
         storage: team.storage,
         research: [...team.research],
-        ai: { ...team.ai },
+        ai: {
+          ...team.ai,
+          oilIntel: Object.fromEntries(Object.entries(team.ai?.oilIntel || {}).map(([key, value]) => [key, { ...value }])),
+          oilObjective: team.ai?.oilObjective ? { ...team.ai.oilObjective } : null
+        },
         enemyMemory: {
           units: Object.values(team.enemyMemory?.units || {}),
           buildings: Object.values(team.enemyMemory?.buildings || {})
@@ -2821,7 +3005,12 @@ html{
       team.spice = saved.spice;
       team.storage = saved.storage;
       team.research = new Set(saved.research || []);
-      team.ai = { ...team.ai, ...(saved.ai || {}) };
+      team.ai = {
+        ...team.ai,
+        ...(saved.ai || {}),
+        oilIntel: Object.fromEntries(Object.entries(saved.ai?.oilIntel || {}).map(([key, value]) => [key, { ...value }])),
+        oilObjective: saved.ai?.oilObjective ? { ...saved.ai.oilObjective } : null
+      };
       team.enemyMemory = {
         units: Object.fromEntries(((saved.enemyMemory && saved.enemyMemory.units) || []).map((entry) => [entry.id, { ...entry }])),
         buildings: Object.fromEntries(((saved.enemyMemory && saved.enemyMemory.buildings) || []).map((entry) => [entry.id, { ...entry }]))
@@ -4228,6 +4417,9 @@ html{
   function runAiEconomy(team) {
     const engineer = state.units.find((unit) => unit.teamId === team.id && unit.type === 'engineer' && unit.hp > 0);
     const counts = countTeamAssets(team.id);
+    updateAiStrategicPhase(team, counts);
+    refreshAiOilIntel(team);
+    team.ai.oilObjective = getAiOilObjective(team);
     const hq = nearestBuilding(team.id, 'hq', WORLD_WIDTH, WORLD_HEIGHT);
     const barracks = nearestBuilding(team.id, 'barracks', WORLD_WIDTH, WORLD_HEIGHT);
     const spiceCapacity = getTeamSpiceCapacity(team.id);
@@ -4239,6 +4431,7 @@ html{
       if (!counts.refinery && canAfford(team.id, 'refinery')) placeAiStructure(team, engineer, 'refinery');
       else if (counts.hq < 2 && team.research.has('scanner') && team.spice >= 720 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
       else if (counts.hq < 3 && counts.factory && team.spice >= 980 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
+      else if (team.ai.oilObjective?.kind === 'build' && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer, team.ai.oilObjective.resourceId);
       else if (((counts.oilDerrick >= 2 && team.spice >= spiceCapacity * 0.68) || team.spice >= spiceCapacity * 0.82) && counts.silo < Math.max(1, counts.refinery + counts.oilDerrick) && canAfford(team.id, 'silo')) placeAiStructure(team, engineer, 'silo');
       else if (counts.refinery && counts.oilDerrick < 2 && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer);
       else if (!counts.barracks && canAfford(team.id, 'barracks')) placeAiStructure(team, engineer, 'barracks');
@@ -4257,11 +4450,14 @@ html{
     if (lab && !lab.queue && !team.research.has('rangefinding') && canAffordResearch(team.id, 'rangefinding')) enqueueProduction(lab, 'research', 'rangefinding');
     else if (lab && !lab.queue && team.research.has('rangefinding') && !team.research.has('composite-armor') && canAffordResearch(team.id, 'composite-armor')) enqueueProduction(lab, 'research', 'composite-armor');
     else if (lab && !lab.queue && team.research.has('composite-armor') && !team.research.has('scanner') && canAffordResearch(team.id, 'scanner')) enqueueProduction(lab, 'research', 'scanner');
+    else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('capture') && team.ai.phase !== 'normal' && canAffordResearch(team.id, 'capture')) enqueueProduction(lab, 'research', 'capture');
     else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('drone-tech') && canAffordResearch(team.id, 'drone-tech')) enqueueProduction(lab, 'research', 'drone-tech');
+    else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('capture') && canAffordResearch(team.id, 'capture')) enqueueProduction(lab, 'research', 'capture');
     if (factory && !factory.queue) {
       if ((counts.ambulance || 0) < desiredAmbulances && canAfford(team.id, 'ambulance')) enqueueProduction(factory, 'unit', 'ambulance');
       else if (canAfford(team.id, 'tank')) enqueueProduction(factory, 'unit', 'tank');
     }
+    tryAiOilOperations(team, counts, engineer);
     tryActivateAiScan(team, counts);
     tryDeployAiDrone(team, counts);
     assignAiScoutOrders(team);
@@ -4333,11 +4529,15 @@ html{
     return best ? issueBuildOrder(engineer, 'hq', best.cellX, best.cellY, false) : false;
   }
 
-  function placeAiOilDerrick(team, engineer) {
+  function placeAiOilDerrick(team, engineer, preferredResourceId = null) {
     const def = BUILDING_TYPES.oilDerrick;
     const candidates = state.resources
       .filter((resource) => resource.resourceType === 'oil' && !resource.claimedBy && (team.fogExplored[worldToKey(resource.cellX, resource.cellY)] || team.fogVisible[worldToKey(resource.cellX, resource.cellY)]))
-      .sort((a, b) => dist(engineer.x, engineer.y, a.x, a.y) - dist(engineer.x, engineer.y, b.x, b.y));
+      .sort((a, b) => {
+        if (preferredResourceId && a.id === preferredResourceId) return -1;
+        if (preferredResourceId && b.id === preferredResourceId) return 1;
+        return dist(engineer.x, engineer.y, a.x, a.y) - dist(engineer.x, engineer.y, b.x, b.y);
+      });
     for (const resource of candidates) {
       for (let oy = 0; oy < def.size[1]; oy++) {
         for (let ox = 0; ox < def.size[0]; ox++) {
@@ -4351,8 +4551,60 @@ html{
     return false;
   }
 
+  function dispatchAiHarassForce(team, worldX, worldY, maxUnits = 3) {
+    const candidates = state.units
+      .filter((unit) => {
+        if (unit.teamId !== team.id || unit.hp <= 0 || (unit.type !== 'scout' && unit.type !== 'tank')) return false;
+        const orderType = unit.order?.type || 'idle';
+        if (orderType === 'capture' || orderType === 'support' || orderType === 'service' || orderType === 'board') return false;
+        return orderType === 'idle' || orderType === 'move' || orderType === 'attack-move';
+      })
+      .sort((a, b) => {
+        const typeDelta = (b.type === 'tank' ? 1 : 0) - (a.type === 'tank' ? 1 : 0);
+        if (typeDelta) return typeDelta;
+        return dist(a.x, a.y, worldX, worldY) - dist(b.x, b.y, worldX, worldY);
+      });
+    const group = candidates.slice(0, maxUnits);
+    if (group.length < 2) return false;
+    for (const unit of group) {
+      releaseClaim(unit);
+      unit.order = { type: 'attack-move', x: worldX, y: worldY };
+      unit.targetId = null;
+      unit.path.length = 0;
+    }
+    return true;
+  }
+
+  function tryAiOilOperations(team, counts, engineer) {
+    const objective = team.ai.oilObjective;
+    if (!objective) return false;
+    if (objective.kind === 'build') {
+      if (!engineer || engineer.order.type !== 'idle' || !canAfford(team.id, 'oilDerrick')) return false;
+      return placeAiOilDerrick(team, engineer, objective.resourceId);
+    }
+    if (objective.kind === 'capture') {
+      if (!team.research.has('capture')) return false;
+      const target = objective.buildingId ? getEntityById(objective.buildingId) : null;
+      if (!target || target.kind !== 'building' || target.hp <= 0 || target.teamId === team.id) return false;
+      const scout = state.units
+        .filter((unit) => canScoutCaptureBuilding(unit, target) && ['idle', 'move', 'attack-move'].includes(unit.order?.type || 'idle'))
+        .sort((a, b) => dist(a.x, a.y, objective.x, objective.y) - dist(b.x, b.y, objective.x, objective.y))[0] || null;
+      if (!scout) return false;
+      const captureOrder = issueCaptureOrder([scout], target);
+      if (!captureOrder.captureCount && team.ai.oilIntel?.[objective.resourceId]) {
+        team.ai.oilIntel[objective.resourceId].lastFailedCaptureAt = state.time;
+      }
+      return !!captureOrder.captureCount;
+    }
+    if (objective.kind === 'harass') {
+      return dispatchAiHarassForce(team, objective.x, objective.y, counts.tank >= 2 ? 3 : 2);
+    }
+    return false;
+  }
+
   function tryActivateAiScan(team, counts) {
     if (!team.research.has('scanner')) return false;
+    const oilObjective = team.ai.oilObjective;
     const hiddenOilTarget = state.resources.some((resource) => resource.resourceType === 'oil' && !resource.claimedBy && !team.fogExplored[worldToKey(resource.cellX, resource.cellY)]);
     const knownTarget = getBestAiAttackMemory(team);
     const assaultReady = ((counts.tank || 0) + (counts.scout || 0) >= 5);
@@ -4363,7 +4615,8 @@ html{
       const hqCenterX = hq.x + hq.widthCells * CELL * 0.5;
       const hqCenterY = hq.y + hq.heightCells * CELL * 0.5;
       const enemyThreatNearBase = getKnownEnemyMemories(team, 'units').some((memory) => state.time - memory.lastSeen <= 10 && dist(memory.x, memory.y, hqCenterX, hqCenterY) <= AI_SCAN_THREAT_RADIUS);
-      if (!enemyThreatNearBase && !hiddenOilTarget && !(assaultReady && needsTargetRefresh)) continue;
+      const oilNeedsRefresh = oilObjective && (oilObjective.kind === 'recon' || state.time - oilObjective.lastSeenAt > AI_OIL_INTEL_STALE_AFTER);
+      if (!enemyThreatNearBase && !hiddenOilTarget && !(assaultReady && needsTargetRefresh) && !oilNeedsRefresh) continue;
       return activateSatelliteScan(hq);
     }
     return false;
@@ -4381,6 +4634,7 @@ html{
     if (!team.research.has('drone-tech')) return false;
     const hubs = state.buildings.filter((building) => building.teamId === team.id && building.type === 'hq' && building.hp > 0);
     if (!hubs.length) return false;
+    const oilObjective = team.ai.oilObjective;
     const hiddenOil = state.resources.find((resource) => resource.resourceType === 'oil' && !resource.claimedBy && !team.fogExplored[worldToKey(resource.cellX, resource.cellY)]);
     const knownTarget = getBestAiAttackMemory(team);
     const assaultReady = ((counts.tank || 0) + (counts.scout || 0) >= 5);
@@ -4391,14 +4645,21 @@ html{
       const nearbyThreat = getKnownEnemyMemories(team, 'units')
         .filter((memory) => state.time - memory.lastSeen <= 10)
         .sort((a, b) => dist(a.x, a.y, hqCenterX, hqCenterY) - dist(b.x, b.y, hqCenterX, hqCenterY))[0] || null;
-      const droneTarget = nearbyThreat && dist(nearbyThreat.x, nearbyThreat.y, hqCenterX, hqCenterY) <= AI_SCAN_THREAT_RADIUS
-        ? { x: nearbyThreat.x, y: nearbyThreat.y }
-        : (knownTarget && (assaultReady || state.time - knownTarget.lastSeen > AI_MEMORY_SCAN_STALE_AFTER)
-          ? { x: knownTarget.x, y: knownTarget.y }
-          : (hiddenOil ? { x: hiddenOil.x, y: hiddenOil.y } : null));
+      const oilNeedsDrone = oilObjective && (oilObjective.kind === 'recon' || oilObjective.threatScore > AI_OIL_CAPTURE_THREAT_MAX || state.time - oilObjective.lastSeenAt > AI_OIL_INTEL_STALE_AFTER);
+      const droneTarget = oilNeedsDrone
+        ? { x: oilObjective.x, y: oilObjective.y, resourceId: oilObjective.resourceId }
+        : nearbyThreat && dist(nearbyThreat.x, nearbyThreat.y, hqCenterX, hqCenterY) <= AI_SCAN_THREAT_RADIUS
+          ? { x: nearbyThreat.x, y: nearbyThreat.y }
+          : (knownTarget && (assaultReady || state.time - knownTarget.lastSeen > AI_MEMORY_SCAN_STALE_AFTER)
+            ? { x: knownTarget.x, y: knownTarget.y }
+            : (hiddenOil ? { x: hiddenOil.x, y: hiddenOil.y, resourceId: hiddenOil.id } : null));
       if (!droneTarget) continue;
       if (hasAiDroneCoverage(team.id, droneTarget.x, droneTarget.y)) continue;
-      return deployDroneFromHub(hq, droneTarget.x, droneTarget.y);
+      const deployed = deployDroneFromHub(hq, droneTarget.x, droneTarget.y);
+      if (deployed && droneTarget.resourceId && team.ai.oilIntel?.[droneTarget.resourceId]) {
+        team.ai.oilIntel[droneTarget.resourceId].lastDroneReconAt = state.time;
+      }
+      return deployed;
     }
     return false;
   }
@@ -4413,8 +4674,13 @@ html{
   function runAiAttack(team) {
     const target = getBestAiAttackMemory(team);
     if (!target) return;
-    const attackers = state.units.filter((unit) => unit.teamId === team.id && unit.hp > 0 && (unit.type === 'scout' || unit.type === 'tank'));
-    if (attackers.length < 3) return;
+    const attackers = state.units.filter((unit) => {
+      if (unit.teamId !== team.id || unit.hp <= 0 || (unit.type !== 'scout' && unit.type !== 'tank')) return false;
+      const orderType = unit.order?.type || 'idle';
+      return orderType !== 'capture';
+    });
+    const minimumWave = team.ai.phase === 'oil-race' ? 4 : 3;
+    if (attackers.length < minimumWave) return;
     const wave = attackers.slice(0, Math.min(attackers.length, 6));
     for (const unit of wave) {
       unit.order = { type: 'attack-move', x: target.x, y: target.y };
@@ -4712,8 +4978,7 @@ html{
       if (unit.hp <= 0 || unit.order?.type !== 'capture') continue;
       const target = getEntityById(unit.order.targetId);
       if (!target || target.kind !== 'building' || target.hp <= 0) continue;
-      const visible = isVisibleToPlayer(unit.x, unit.y) || isVisibleToPlayer(target.x + target.widthCells * CELL * 0.5, target.y + target.heightCells * CELL * 0.5);
-      if (!visible) continue;
+      if (!isVisibleToPlayer(unit.x, unit.y)) continue;
       const start = worldToScreen(unit.x, unit.y - 5);
       const capturePoint = getBuildingCapturePoint(target);
       const end = worldToScreen(capturePoint.x, capturePoint.y);
@@ -5900,8 +6165,10 @@ html{
     }
     if (scouts.length) {
       refreshSelectionHudForUnits(scouts);
-      playSynth('ui', 350, 0.05, 0.03);
-      toast('Capture order acknowledged.');
+      if (scouts[0].teamId === TEAM_PLAYER) {
+        playSynth('ui', 350, 0.05, 0.03);
+        toast('Capture order acknowledged.');
+      }
     }
     return { captureCount: scouts.length, scoutCount: scouts.length, scouts };
   }
