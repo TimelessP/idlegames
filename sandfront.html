@@ -707,6 +707,8 @@ html{
   const AI_OIL_CAPTURE_THREAT_MAX = 4;
   const AI_OIL_HARASS_THREAT_MAX = 8;
   const AI_OIL_ZONE_RADIUS = CELL * 10;
+  const AI_OIL_TURRET_COVER_RADIUS = CELL * 8;
+  const AI_OIL_TURRET_ENGINEER_RANGE = CELL * 10;
   const AMBULANCE_RETREAT_MARGIN = 14;
   const AI_STRUCTURE_MIN_GAP = {
     refinery: 2,
@@ -4423,6 +4425,7 @@ html{
     const hq = nearestBuilding(team.id, 'hq', WORLD_WIDTH, WORLD_HEIGHT);
     const barracks = nearestBuilding(team.id, 'barracks', WORLD_WIDTH, WORLD_HEIGHT);
     const spiceCapacity = getTeamSpiceCapacity(team.id);
+    const exposedOilDerrick = engineer ? findAiOilDerrickNeedingTurret(team.id, engineer) : null;
     if (!counts.engineer) {
       const engineerProducer = barracks || hq;
       if (engineerProducer && !engineerProducer.queue && canAfford(team.id, 'engineer')) enqueueProduction(engineerProducer, 'unit', 'engineer');
@@ -4431,6 +4434,7 @@ html{
       if (!counts.refinery && canAfford(team.id, 'refinery')) placeAiStructure(team, engineer, 'refinery');
       else if (counts.hq < 2 && team.research.has('scanner') && team.spice >= 720 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
       else if (counts.hq < 3 && counts.factory && team.spice >= 980 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
+      else if (counts.barracks && exposedOilDerrick && canAfford(team.id, 'turret')) placeAiTurretNearOil(team, engineer, exposedOilDerrick);
       else if (team.ai.oilObjective?.kind === 'build' && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer, team.ai.oilObjective.resourceId);
       else if (((counts.oilDerrick >= 2 && team.spice >= spiceCapacity * 0.68) || team.spice >= spiceCapacity * 0.82) && counts.silo < Math.max(1, counts.refinery + counts.oilDerrick) && canAfford(team.id, 'silo')) placeAiStructure(team, engineer, 'silo');
       else if (counts.refinery && counts.oilDerrick < 2 && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer);
@@ -4549,6 +4553,81 @@ html{
       }
     }
     return false;
+  }
+
+  function getNearestEnemyHub(teamId, fromX, fromY) {
+    let best = null;
+    let bestDistance = Infinity;
+    for (const building of state.buildings) {
+      if (building.hp <= 0 || building.teamId === teamId || building.type !== 'hq') continue;
+      const geometry = getBuildingGeometry(building);
+      const distance = dist(fromX, fromY, geometry.visualCenter.x, geometry.visualCenter.y);
+      if (distance < bestDistance) {
+        best = building;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  function findAiOilDerrickNeedingTurret(teamId, engineer) {
+    return state.buildings
+      .filter((building) => {
+        if (building.hp <= 0 || building.teamId !== teamId || building.type !== 'oilDerrick') return false;
+        const geometry = getBuildingGeometry(building);
+        if (dist(engineer.x, engineer.y, geometry.visualCenter.x, geometry.visualCenter.y) > AI_OIL_TURRET_ENGINEER_RANGE) return false;
+        return !getNearestFriendlyTurret(teamId, geometry.visualCenter.x, geometry.visualCenter.y, AI_OIL_TURRET_COVER_RADIUS);
+      })
+      .sort((a, b) => dist(engineer.x, engineer.y, a.x, a.y) - dist(engineer.x, engineer.y, b.x, b.y))[0] || null;
+  }
+
+  function placeAiTurretNearOil(team, engineer, oilDerrick) {
+    if (!oilDerrick || oilDerrick.kind !== 'building' || oilDerrick.type !== 'oilDerrick') return false;
+    const turretDef = BUILDING_TYPES.turret;
+    const oilGeometry = getBuildingGeometry(oilDerrick);
+    const enemyHub = getNearestEnemyHub(team.id, oilGeometry.visualCenter.x, oilGeometry.visualCenter.y);
+    const desired = enemyHub
+      ? {
+          x: getBuildingGeometry(enemyHub).visualCenter.x - oilGeometry.visualCenter.x,
+          y: getBuildingGeometry(enemyHub).visualCenter.y - oilGeometry.visualCenter.y
+        }
+      : { x: 1, y: 0 };
+    const desiredLength = Math.hypot(desired.x, desired.y) || 1;
+    let best = null;
+    let bestScore = -Infinity;
+    for (let radius = 1; radius <= 4; radius++) {
+      const left = oilDerrick.cellX - radius - turretDef.size[0] + 1;
+      const right = oilDerrick.cellX + oilDerrick.widthCells + radius - 1;
+      const top = oilDerrick.cellY - radius - turretDef.size[1] + 1;
+      const bottom = oilDerrick.cellY + oilDerrick.heightCells + radius - 1;
+      const candidates = [];
+      for (let cellX = left; cellX <= right; cellX++) {
+        candidates.push({ cellX, cellY: top });
+        candidates.push({ cellX, cellY: bottom });
+      }
+      for (let cellY = top + 1; cellY < bottom; cellY++) {
+        candidates.push({ cellX: left, cellY });
+        candidates.push({ cellX: right, cellY });
+      }
+      for (const candidate of candidates) {
+        if (!canPlaceBuilding('turret', candidate.cellX, candidate.cellY)) continue;
+        const centerX = (candidate.cellX + turretDef.size[0] * 0.5) * CELL;
+        const centerY = (candidate.cellY + turretDef.size[1] * 0.5) * CELL;
+        const offsetX = centerX - oilGeometry.visualCenter.x;
+        const offsetY = centerY - oilGeometry.visualCenter.y;
+        const offsetLength = Math.hypot(offsetX, offsetY) || 1;
+        const alignment = (offsetX * desired.x + offsetY * desired.y) / (offsetLength * desiredLength);
+        const distancePenalty = dist(centerX, centerY, oilGeometry.visualCenter.x, oilGeometry.visualCenter.y) * 0.08;
+        const engineerPenalty = dist(centerX, centerY, engineer.x, engineer.y) * 0.03;
+        const score = alignment * 90 - distancePenalty - engineerPenalty;
+        if (score > bestScore) {
+          bestScore = score;
+          best = candidate;
+        }
+      }
+      if (best) break;
+    }
+    return best ? issueBuildOrder(engineer, 'turret', best.cellX, best.cellY, false) : false;
   }
 
   function dispatchAiHarassForce(team, worldX, worldY, maxUnits = 3) {
