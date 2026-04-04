@@ -96,3 +96,19 @@ Use this document as a living reference—update it whenever repo conventions ev
 - **sidescroller-spa-game-dev**
   - **Use when:** building or refining production-quality side-scroller SPA games in this repo (single-file HTML/CSS/JS, SVG camera systems, robust controls, modal UX, and mobile/PWA polish).
   - **File:** `.github/skills/sidescroller-spa-game-dev/SKILL.md`
+
+- **rts-games**
+  - **Use when:** building or refining browser RTS games in this repo, especially single-file HTML/CSS/JS runtimes with data-driven units, buildings, orders, fog, factions, and HUD systems.
+  - **File:** `.github/skills/rts-games/SKILL.md`
+
+- **rts-ai-doctrine**
+  - **Use when:** designing RTS AI economy phases, scouting, enemy memory, objective scoring, tactical assignments, and air doctrine without relying on cheating information.
+  - **File:** `.github/skills/rts-ai-doctrine/SKILL.md`
+
+- **rts-pathfinding**
+  - **Use when:** implementing RTS movement, occupancy, traversal costs, reservations, spawn cells, approach cells, transport unloading, and route recovery.
+  - **File:** `.github/skills/rts-pathfinding/SKILL.md`
+
+- **rts-rendering-persistence**
+  - **Use when:** building RTS render pipelines, minimaps, fog-of-war, procedural sprite atlases, save/load systems, and restore pipelines that rebuild derived caches safely.
+  - **File:** `.github/skills/rts-rendering-persistence/SKILL.md`
