@@ -60,7 +60,148 @@ Suggested runtime sections inside the script:
 8. Rendering and HUD updates
 9. Save/load and offline integration if needed
 
+## HUD and Controls
+
+### Treat HUD Buttons as Persistent UI, Not Render Output
+
+Action panels, touch strips, and selection HUD controls should usually be created once and updated in place.
+
+Do not rebuild command buttons every frame or on every lightweight selection refresh if you can avoid it.
+
+Prefer this model:
+
+- create button nodes once at startup
+- keep stable slot positions for shortcuts when that helps muscle memory
+- update labels, disabled state, active state, progress meters, and handlers in place
+- hide unused slots instead of destroying and recreating them
+- refresh the panel from explicit events such as selection change, deselection, mode change, queue progress tick, or game restore
+
+This reduces:
+
+- flicker from repeated DOM churn
+- accidental focus loss
+- hotkey bookkeeping bugs
+- unnecessary layout and paint work
+
+### Keep Shortcut Semantics Stable
+
+If your HUD exposes numbered or lettered actions, stable positions matter.
+
+Good examples:
+
+- reserve a destructive action such as `Sell` for a fixed final slot
+- keep `Move`, `Context`, or similar core actions in predictable positions when practical
+- avoid shifting hotkey meaning every time the selection changes if a stable mapping is possible
+
+If some selections need fewer actions, keep the slots but hide the unused ones so the DOM remains stable while the layout can still collapse cleanly.
+
+### Refresh from State Events, Not from the Render Loop
+
+HUD rebuild triggers should be explicit.
+
+Typical triggers:
+
+- selection changed
+- selection cleared
+- command mode changed
+- pending build, rally, or special ability state changed
+- queue or cooldown progress crossed a visible update threshold
+- save game restored
+
+Separate high-frequency simulation updates from lower-frequency HUD refreshes where possible.
+
+### Example: Fixed Action Button Slots
+
+```javascript
+const ACTION_SLOTS = Array.from({ length: 9 }, (_, index) => ({
+  key: 'Alt+' + (index + 1),
+  element: null,
+  iconEl: null,
+  labelEl: null,
+  progressEl: null,
+  clickHandler: null
+}));
+
+function initActionHud(container) {
+  for (const slot of ACTION_SLOTS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'action-button is-hidden';
+    button.innerHTML = `
+      <svg class="button-icon" aria-hidden="true"><use href="#icon-context"></use></svg>
+      <span class="button-label"></span>
+      <span class="action-progress" hidden><span class="action-progress-fill"></span></span>
+    `;
+    slot.element = button;
+    slot.iconEl = button.querySelector('use');
+    slot.labelEl = button.querySelector('.button-label');
+    slot.progressEl = button.querySelector('.action-progress-fill');
+    button.addEventListener('click', () => {
+      if (button.disabled || typeof slot.clickHandler !== 'function') return;
+      slot.clickHandler();
+    });
+    container.appendChild(button);
+  }
+}
+
+function clearActionHud() {
+  for (const slot of ACTION_SLOTS) {
+    slot.clickHandler = null;
+    slot.element.className = 'action-button is-hidden';
+    slot.element.disabled = true;
+    slot.element.hidden = true;
+    slot.labelEl.textContent = '';
+    slot.progressEl.parentElement.hidden = true;
+    slot.progressEl.style.width = '0%';
+  }
+}
+
+function setActionSlot(index, item) {
+  const slot = ACTION_SLOTS[index];
+  if (!slot) return;
+  slot.clickHandler = item.onClick;
+  slot.element.hidden = false;
+  slot.element.disabled = !!item.disabled;
+  slot.element.className = 'action-button'
+    + (item.active ? ' is-active' : '')
+    + (item.danger ? ' is-danger' : '')
+    + (item.disabled ? ' is-disabled' : '');
+  slot.iconEl.setAttribute('href', '#icon-' + item.icon);
+  slot.labelEl.textContent = item.label;
+  if (typeof item.progress === 'number') {
+    slot.progressEl.parentElement.hidden = false;
+    slot.progressEl.style.width = Math.round(item.progress * 100) + '%';
+  }
+}
+
+function refreshActionHud(selectionState) {
+  clearActionHud();
+  const items = buildActionsForSelection(selectionState);
+  const sell = items.find((item) => item.id === 'sell');
+  const regular = items.filter((item) => item.id !== 'sell');
+  regular.forEach((item, index) => setActionSlot(index, item));
+  if (sell) setActionSlot(ACTION_SLOTS.length - 1, sell);
+}
+```
+
+Key point:
+
+- the selection changes, but the button nodes do not
+
+### Keep Touch HUD Minimal
+
+Touch strips should not duplicate every command if the action panel already exposes them clearly.
+
+A good split is:
+
+- touch strip for input posture such as `Select`, `Pan`, and maybe `Move`
+- action HUD for command semantics such as `Attack`, `Gather`, `Repair`, `Capture`, `Build`, `Sell`, or cooldown abilities
+
+This keeps the touch HUD small and avoids maintaining two competing command surfaces.
+
 ## Architecture Pattern
+- HUD refreshes do not recreate large DOM sections unnecessarily
+- action hotkeys and fixed button positions remain stable across selection changes
 
 ### 1. Define the Command Grammar First
 

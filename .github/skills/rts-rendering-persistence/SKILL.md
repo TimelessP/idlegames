@@ -129,6 +129,34 @@ Typical effect categories:
 
 Keep effects lightweight, short-lived, and state-driven.
 
+## HUD Refresh Strategy
+
+HUDs sit between rendering and application state, but they should not be treated like per-frame canvas output.
+
+### Do Not Rebuild Command DOM Repeatedly
+
+If your RTS uses DOM buttons for actions, touch modes, production queues, or cooldown abilities, prefer persistent elements updated in place.
+
+Good practice:
+
+- create HUD buttons once at startup
+- mutate text, progress, active state, disabled state, and handlers in place
+- hide unused controls instead of tearing the whole panel down
+- update from explicit state transitions rather than from every render pass
+
+This reduces paint churn and prevents visible button flicker in busy RTS HUDs.
+
+### Separate Fast and Slow UI Refresh Paths
+
+Some UI state changes every frame, and some only changes on events.
+
+Examples:
+
+- fast path: canvas world rendering, camera transforms, lightweight screen-space overlays
+- slow path: selection card content, action button assignment, menu population, touch-mode availability
+
+When using DOM HUDs, keep these paths separate so the command surface is not rebuilt at render frequency.
+
 ## Persistence Model
 
 ### Snapshot Authoritative State Only
@@ -142,6 +170,12 @@ Persist the real state of the simulation, for example:
 - AI memory and strategic state
 - fog exploration state
 - camera and UI mode if useful
+
+If UI mode is saved, restore it carefully:
+
+- validate it against the current game version
+- normalize deprecated or removed modes to a safe default
+- refresh the HUD after restore so buttons, labels, and hotkeys are rebound to live runtime objects
 
 Do not persist purely derived caches if they can be rebuilt.
 
@@ -188,7 +222,7 @@ Recommended steps:
 4. rebuild research-derived team bonuses
 5. rebuild fog and visibility caches
 6. rebuild spatial indices
-7. refresh selection and HUD state
+7. refresh selection and HUD state, including rebinding persistent DOM controls
 8. validate camera and viewport state
 
 Do not assume the restored state is immediately ready just because the JSON parsed successfully.
@@ -202,6 +236,8 @@ Do not assume the restored state is immediately ready just because the JSON pars
 - Verify save/load preserves orders, timers, AI phase, and memory where intended
 - Verify restore rebuilds all derived caches instead of reusing stale transient state
 - Verify imported saves fail safely on version mismatch
+- Verify saved HUD or touch modes are normalized if the command surface changed between versions
+- Verify persistent HUD controls do not keep stale handlers after restore or deselection
 
 ## Example Prompts
 
