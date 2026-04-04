@@ -228,7 +228,7 @@ html{
 
 .hud-button.is-active,.touch-button.is-active,.action-button.is-active{background:linear-gradient(180deg,#93703d,#674620);color:#fff5d8}
 .hud-button.is-danger,.action-button.is-danger{background:linear-gradient(180deg,#874328,#602919);color:#ffe1d4}
-.touch-button:disabled,.touch-button.is-disabled,.action-button:disabled,.action-button.is-disabled{
+.touch-button:disabled,.touch-button.is-disabled,.action-button:disabled,.action-button.is-disabled,.menu-button:disabled,.menu-button.is-disabled{
   cursor:default;
   filter:none;
   opacity:.45;
@@ -245,7 +245,9 @@ html{
 .touch-button:disabled:hover,.touch-button:disabled:focus-visible,
 .touch-button.is-disabled:hover,.touch-button.is-disabled:focus-visible,
 .action-button:disabled:hover,.action-button:disabled:focus-visible,
-.action-button.is-disabled:hover,.action-button.is-disabled:focus-visible{
+.action-button.is-disabled:hover,.action-button.is-disabled:focus-visible,
+.menu-button:disabled:hover,.menu-button:disabled:focus-visible,
+.menu-button.is-disabled:hover,.menu-button.is-disabled:focus-visible{
   border-color:rgba(255,224,176,.1);
   filter:none;
 }
@@ -664,6 +666,11 @@ html{
   const centerSelectionButton = document.getElementById('centerSelection');
   const commandReadout = document.getElementById('commandReadout');
   const hudObjective = document.getElementById('hudObjective');
+  const jsonLoadInput = document.createElement('input');
+  jsonLoadInput.type = 'file';
+  jsonLoadInput.accept = 'application/json,.json';
+  jsonLoadInput.hidden = true;
+  document.body.appendChild(jsonLoadInput);
 
   const ACTION_VISUALS = {
     'Center Base': { icon: 'home', short: 'Base' },
@@ -2845,6 +2852,73 @@ html{
     }
   }
 
+  function canExportJsonSave() {
+    return !!createGameSnapshot();
+  }
+
+  function formatJsonSaveFileName() {
+    const stamp = new Date().toISOString().replace(/[:]/g, '-').replace(/\.\d{3}Z$/, 'Z');
+    return 'sandfront-save-' + stamp + '.json';
+  }
+
+  function triggerJsonSaveDownload() {
+    const snapshot = createGameSnapshot();
+    if (!snapshot) {
+      playUiCue('error');
+      toast('Start a skirmish before exporting a save file.');
+      return false;
+    }
+    try {
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = formatJsonSaveFileName();
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      playUiCue('confirm');
+      toast('Save exported to JSON.');
+      return true;
+    } catch {
+      playUiCue('error');
+      toast('Unable to export the save file.');
+      return false;
+    }
+  }
+
+  function finishJsonLoad(snapshot) {
+    if (!snapshot || snapshot.version !== SAVE_VERSION) {
+      playUiCue('error');
+      toast('That save file is incompatible with this version.');
+      return false;
+    }
+    if (!restoreGameSnapshot(snapshot)) {
+      playUiCue('error');
+      toast('Unable to load that save file.');
+      return false;
+    }
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot));
+    } catch {
+      // Ignore local persistence failures when loading from file.
+    }
+    updateSelectionUI();
+    updateResourceUI();
+    updateCommandReadout();
+    if (state.winner) openMenu(getRootMenuId());
+    else closeMenu();
+    playUiCue('ready');
+    toast('Save loaded from JSON.');
+    return true;
+  }
+
+  function promptJsonLoad() {
+    jsonLoadInput.value = '';
+    jsonLoadInput.click();
+  }
+
   function createGameSnapshot() {
     if (!state.matchStarted) return null;
     return {
@@ -3239,12 +3313,21 @@ html{
       state.minimapAlerts[i].life -= dt;
       if (state.minimapAlerts[i].life <= 0) state.minimapAlerts.splice(i, 1);
     }
+    let selectionTimerExpired = false;
     if (state.selectionUiRefreshTimer > 0) {
       state.selectionUiRefreshTimer -= dt;
+      if (state.selectionUiRefreshTimer <= 0) {
+        state.selectionUiRefreshTimer = 0;
+        selectionTimerExpired = true;
+      }
     }
-    if (state.selectionUiRefreshTimer <= 0 && shouldRefreshSelectionUiForTimers() && !shouldDeferSelectionUiTimerRefresh()) {
-      state.selectionUiRefreshTimer = 0.25;
+    const deferSelectionRefresh = shouldDeferSelectionUiTimerRefresh();
+    if (selectionTimerExpired && !deferSelectionRefresh) {
       updateSelectionUI();
+    }
+    if (state.selectionUiRefreshTimer <= 0 && shouldRefreshSelectionUiForTimers() && !deferSelectionRefresh) {
+      state.selectionUiRefreshTimer = 0.25;
+      if (!selectionTimerExpired) updateSelectionUI();
     }
   }
 
@@ -5494,10 +5577,12 @@ html{
     if (item.type === 'action') {
       const button = document.createElement('button');
       button.type = 'button';
-      button.className = 'menu-button';
+      const disabled = !!item.disabled;
+      button.className = 'menu-button' + (disabled ? ' is-disabled' : '');
       button.textContent = getMenuButtonLabel(item);
       if (item.hotkey) button.setAttribute('aria-keyshortcuts', item.hotkey);
-      button.addEventListener('click', () => runMenuItem(item));
+      button.disabled = disabled;
+      if (!disabled) button.addEventListener('click', () => runMenuItem(item));
       row.appendChild(button);
       if (item.description) {
         const p = document.createElement('p');
@@ -5605,6 +5690,8 @@ html{
       items.push({ type: 'action', label: 'Restart', description: 'Generate a new desert layout and restart the match immediately.', action: restartMatch, behavior: 'close' });
     }
     items.push(
+      { type: 'action', label: 'Save JSON', description: state.matchStarted ? 'Download the current skirmish as a JSON save file.' : 'Start or load a skirmish first to export a JSON save file.', action: triggerJsonSaveDownload, behavior: 'keep-open', disabled: !canExportJsonSave() },
+      { type: 'action', label: 'Load JSON', description: 'Import a JSON save file from disk and resume it immediately.', action: promptJsonLoad, behavior: 'keep-open' },
       { type: 'action', label: 'Settings', description: 'Controls, graphics, and sound volumes.', target: 'settings', behavior: 'submenu' },
       { type: 'action', label: 'About', description: 'Read the tech tree, render pipeline, and control philosophy.', target: 'about', behavior: 'submenu' }
     );
@@ -5613,6 +5700,8 @@ html{
 
   function buildPauseMenuItems() {
     return [
+      { type: 'action', label: 'Save JSON', description: 'Download the current skirmish as a JSON save file.', action: triggerJsonSaveDownload, behavior: 'keep-open', disabled: !canExportJsonSave() },
+      { type: 'action', label: 'Load JSON', description: 'Import a JSON save file from disk and replace the current battlefield.', action: promptJsonLoad, behavior: 'keep-open' },
       { type: 'action', label: 'Settings', description: 'Graphics, controls, and audio.', target: 'settings', behavior: 'submenu' },
       { type: 'action', label: 'Restart Skirmish', description: 'Keep the same game rules and generate a fresh map.', action: restartMatch, behavior: 'close' }
     ];
@@ -7473,6 +7562,20 @@ html{
 
   document.getElementById('menuToggle').addEventListener('click', () => openMenu(getRootMenuId()));
   document.getElementById('touchMenu').addEventListener('click', () => openMenu(getRootMenuId()));
+  jsonLoadInput.addEventListener('change', async () => {
+    const file = jsonLoadInput.files && jsonLoadInput.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const snapshot = JSON.parse(text);
+      finishJsonLoad(snapshot);
+    } catch {
+      playUiCue('error');
+      toast('Unable to read that JSON save file.');
+    } finally {
+      jsonLoadInput.value = '';
+    }
+  });
   centerSelectionButton.addEventListener('click', () => {
     const selected = getSelectedEntities();
     if (selected.length) centerOnEntities(selected);
