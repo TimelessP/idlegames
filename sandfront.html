@@ -726,7 +726,7 @@ html{
   const FIGHTER_REARM_RATE = 1.2;
   const FIGHTER_TAKEOFF_SPEED = 40;
   const FIGHTER_LANDING_SPEED = 34;
-  const FIGHTER_GUARD_RADIUS = CELL * 2.5;
+  const FIGHTER_GUARD_RADIUS = CELL * 9;
   const FIGHTER_GUARD_ACQUIRE_RADIUS = CELL * 5.5;
   const FIGHTER_TURN_RATE = Math.PI * 1.85;
   const FIGHTER_GLIDE_CAPTURE_RADIUS = CELL * 1.15;
@@ -1639,7 +1639,7 @@ html{
     let best = null;
     let bestScore = Infinity;
     for (const unit of state.units) {
-      if (!canAmbulanceSupportUnit(unit, teamId, excludeUnitId)) continue;
+      if (!canAmbulanceSupportTarget(unit, teamId, excludeUnitId)) continue;
       const distance = dist(fromX, fromY, unit.x, unit.y);
       if (distance > maxDistance) continue;
       const missingRatio = (unit.maxHp - unit.hp) / Math.max(1, unit.maxHp);
@@ -1652,9 +1652,15 @@ html{
     return best;
   }
 
-  function canAmbulanceSupportUnit(unit, teamId, excludeUnitId = null) {
+  function canAmbulanceRepairUnit(unit, teamId, excludeUnitId = null) {
     if (!unit || unit.kind !== 'unit') return false;
     if (unit.hp <= 0 || unit.teamId !== teamId || unit.id === excludeUnitId || unit.hp >= unit.maxHp) return false;
+    return true;
+  }
+
+  function canAmbulanceSupportTarget(unit, teamId, excludeUnitId = null) {
+    if (!canAmbulanceRepairUnit(unit, teamId, excludeUnitId)) return false;
+    if (unit.type === 'drone' || unit.type === 'fighter') return false;
     return true;
   }
 
@@ -3393,6 +3399,12 @@ html{
     return delta;
   }
 
+  function wrapAngle(angle) {
+    let value = angle % (Math.PI * 2);
+    if (value < 0) value += Math.PI * 2;
+    return value;
+  }
+
   function getAssignedAirfield(unit) {
     const airfield = unit?.assignedAirfieldId ? getEntityById(unit.assignedAirfieldId) : null;
     if (!airfield || airfield.kind !== 'building' || airfield.hp <= 0 || airfield.type !== 'airfield' || airfield.teamId !== unit.teamId) return null;
@@ -3448,13 +3460,13 @@ html{
     return unit && unit.hp > 0 && unit.type === 'fighter';
   }
 
-  function moveFlyingUnitDirect(unit, dt, targetX, targetY, speedMultiplier = 1) {
+  function moveFlyingUnitDirect(unit, dt, targetX, targetY, speedMultiplier = 1, turnRateMultiplier = 1) {
     const dx = targetX - unit.x;
     const dy = targetY - unit.y;
     const distance = Math.hypot(dx, dy);
     if (distance <= 0.01) return true;
     const desiredDir = Math.atan2(dy, dx);
-    const maxTurn = FIGHTER_TURN_RATE * dt;
+    const maxTurn = FIGHTER_TURN_RATE * Math.max(0.2, turnRateMultiplier) * dt;
     const turn = clamp(shortestAngleDelta(unit.dir, desiredDir), -maxTurn, maxTurn);
     unit.dir += turn;
     const step = Math.min(distance, unit.speed * speedMultiplier * dt);
@@ -3517,9 +3529,25 @@ html{
     if (!order) return null;
     if (order.type === 'guard') return makeFighterGuardOrder(order.x, order.y);
     if (order.type === 'return') return { type: 'return', airfieldId: order.airfieldId, nextOrder: cloneFighterResumeOrder(order.nextOrder || null) };
-    if (order.type === 'strike') return { type: 'strike', targetId: order.targetId };
+    if (order.type === 'strike') return { type: 'strike', targetId: order.targetId, lockTarget: !!order.lockTarget };
     if (order.type === 'waypoint') return { type: 'waypoint', x: order.x, y: order.y, nextOrder: cloneFighterResumeOrder(order.nextOrder || null) };
     return { ...order };
+  }
+
+  function cloneFighterRedirectResumeOrder(order, worldX, worldY) {
+    if (!order) return null;
+    if (order.type === 'strike' && order.lockTarget) return makeFighterGuardOrder(worldX, worldY);
+    if (order.type === 'guard') return makeFighterGuardOrder(worldX, worldY);
+    if (order.type === 'return') {
+      const nextOrder = cloneFighterRedirectResumeOrder(order.nextOrder || null, worldX, worldY);
+      return nextOrder ? { type: 'return', airfieldId: order.airfieldId, nextOrder } : { type: 'return', airfieldId: order.airfieldId, nextOrder: null };
+    }
+    if (order.type === 'waypoint') return makeFighterGuardOrder(worldX, worldY);
+    return cloneFighterResumeOrder(order);
+  }
+
+  function makeFighterStrikeOrder(targetId, lockTarget = false) {
+    return { type: 'strike', targetId, lockTarget };
   }
 
   function makeFighterWaypointOrder(worldX, worldY, nextOrder = null) {
@@ -3530,10 +3558,10 @@ html{
     const order = unit.order || { type: 'idle' };
     if (order.type === 'return' || order.type === 'landing') {
       const airfieldId = order.airfieldId || getAssignedAirfield(unit)?.id || null;
-      if (airfieldId) return { type: 'return', airfieldId, nextOrder: cloneFighterResumeOrder(order.nextOrder || null) };
+      if (airfieldId) return { type: 'return', airfieldId, nextOrder: cloneFighterRedirectResumeOrder(order.nextOrder || null, worldX, worldY) };
     }
     if (order.type === 'waypoint' && order.nextOrder?.type === 'return') {
-      return cloneFighterResumeOrder(order.nextOrder);
+      return cloneFighterRedirectResumeOrder(order.nextOrder, worldX, worldY);
     }
     return makeFighterGuardOrder(worldX, worldY);
   }
@@ -3618,6 +3646,56 @@ html{
     return true;
   }
 
+  function canFighterFireAtTarget(unit, targetPoint, range) {
+    const distance = dist(unit.x, unit.y, targetPoint.x, targetPoint.y);
+    if (distance > range) return false;
+    const toTargetAngle = Math.atan2(targetPoint.y - unit.y, targetPoint.x - unit.x);
+    return Math.abs(shortestAngleDelta(unit.dir, toTargetAngle)) <= Math.PI * 0.5;
+  }
+
+  function getFighterEngagementTargetScore(unit, target, range, currentTargetId = null) {
+    if (!target || target.hp <= 0 || target.teamId === unit.teamId) return -Infinity;
+    if (!canSourceDamageTarget(unit, target)) return -Infinity;
+    const targetPoint = target.kind === 'building' ? getBuildingAimPoint(target) : { x: target.x, y: target.y };
+    const distance = dist(unit.x, unit.y, targetPoint.x, targetPoint.y);
+    const toTargetAngle = Math.atan2(targetPoint.y - unit.y, targetPoint.x - unit.x);
+    const angleError = Math.abs(shortestAngleDelta(unit.dir, toTargetAngle));
+    let score = getFighterTargetPriority(target) - distance * 0.16;
+    if (distance <= range) score += 24;
+    if (angleError <= Math.PI * 0.5) {
+      score += 34;
+    } else {
+      score -= (angleError - Math.PI * 0.5) * 14;
+    }
+    if (target.id === currentTargetId) score += 8;
+    return score;
+  }
+
+  function findBestFighterEngagementTarget(unit, currentTarget, range) {
+    const searchRadius = Math.max(range + CELL * 10, unit.sight * CELL + CELL * 4);
+    const currentTargetId = currentTarget?.id || unit.order?.targetId || unit.targetId || null;
+    let best = currentTarget && currentTarget.hp > 0 && currentTarget.teamId !== unit.teamId ? currentTarget : null;
+    let bestScore = best ? getFighterEngagementTargetScore(unit, best, range, currentTargetId) : -Infinity;
+
+    forEachNearbyUnit(unit.x, unit.y, searchRadius, (enemy) => {
+      if (enemy.hp <= 0 || enemy.teamId === unit.teamId || enemy.garrisonedIn) return;
+      const score = getFighterEngagementTargetScore(unit, enemy, range, currentTargetId);
+      if (score > bestScore + 6) {
+        best = enemy;
+        bestScore = score;
+      }
+    });
+    forEachNearbyBuilding(unit.x, unit.y, searchRadius, (building) => {
+      if (building.hp <= 0 || building.teamId === unit.teamId) return;
+      const score = getFighterEngagementTargetScore(unit, building, range, currentTargetId);
+      if (score > bestScore + 6) {
+        best = building;
+        bestScore = score;
+      }
+    });
+    return best;
+  }
+
   function updateFighterEngagement(unit, dt, target, fallbackOrder = null) {
     if (!target || target.hp <= 0 || target.teamId === unit.teamId) {
       unit.targetId = null;
@@ -3630,24 +3708,92 @@ html{
     }
     const range = unit.range + (teamById(unit.teamId).research.has('rangefinding') ? 10 : 0);
     const targetPoint = target.kind === 'building' ? getBuildingAimPoint(target) : { x: target.x, y: target.y };
-    const distance = dist(unit.x, unit.y, targetPoint.x, targetPoint.y);
     const engagementState = fallbackOrder || unit.order;
-    const orbitRadius = target.kind === 'building'
+    const currentAngle = Math.atan2(unit.y - targetPoint.y, unit.x - targetPoint.x);
+    const toTargetAngle = Math.atan2(targetPoint.y - unit.y, targetPoint.x - unit.x);
+    if (engagementState.attackTargetId !== target.id) {
+      engagementState.attackTargetId = target.id;
+      engagementState.attackRunPhase = 'inbound';
+      engagementState.attackSide = shortestAngleDelta(unit.dir, toTargetAngle) >= 0 ? 1 : -1;
+      engagementState.attackRunBearing = toTargetAngle;
+    }
+    const standOffRadius = target.kind === 'building'
       ? Math.max(range * 0.92, CELL * 4.2)
       : Math.max(range * 0.74, CELL * 2.8);
-    const orbitRate = target.kind === 'building' ? 1.2 : 1.6;
-    const orbitSpeedMultiplier = distance > range
-      ? 1.12
-      : target.kind === 'building'
-        ? 1.04
-        : 0.96;
-    engagementState.attackAngle = (engagementState.attackAngle ?? Math.atan2(unit.y - targetPoint.y, unit.x - targetPoint.x)) + dt * orbitRate;
-    const desiredX = targetPoint.x + Math.cos(engagementState.attackAngle) * orbitRadius;
-    const desiredY = targetPoint.y + Math.sin(engagementState.attackAngle) * (target.kind === 'building' ? orbitRadius * 0.52 : orbitRadius * 0.72);
-    moveFlyingUnitDirect(unit, dt, desiredX, desiredY, orbitSpeedMultiplier);
-    const toTargetAngle = Math.atan2(targetPoint.y - unit.y, targetPoint.x - unit.x);
-    if (distance <= range && Math.abs(shortestAngleDelta(unit.dir, toTargetAngle)) <= Math.PI * 0.5) {
-      fireFighterMissile(unit, target);
+    const currentRadius = dist(unit.x, unit.y, targetPoint.x, targetPoint.y);
+    const angleError = Math.abs(shortestAngleDelta(unit.dir, toTargetAngle));
+    const attackSide = engagementState.attackSide || 1;
+    const isLockedStrike = !!engagementState.lockTarget;
+    const turnNeed = clamp((angleError - Math.PI * 0.34) / (Math.PI * 0.66), 0, 1);
+    const extensionRadius = standOffRadius + (target.kind === 'building' ? Math.max(CELL * 5, standOffRadius * 0.7) : Math.max(CELL * 3.5, standOffRadius * 0.48)) * Math.max(0.45, turnNeed);
+    let fired = false;
+    if (canFighterFireAtTarget(unit, targetPoint, range)) {
+      fired = fireFighterMissile(unit, target);
+      if (fired && unit.missiles > 0) {
+        engagementState.attackRunPhase = 'outbound';
+        if (isLockedStrike) engagementState.attackRunBearing = unit.dir;
+      }
+    }
+
+    const phase = engagementState.attackRunPhase || 'inbound';
+    const runBearing = engagementState.attackRunBearing ?? toTargetAngle;
+    let desiredX = targetPoint.x;
+    let desiredY = targetPoint.y;
+    let speedMultiplier = 1.04;
+    let turnRateMultiplier = 1;
+
+    if (isLockedStrike) {
+      const lateralOffset = (target.kind === 'building' ? CELL * 2.2 : CELL * 1.4) * attackSide;
+      const perpX = Math.cos(runBearing + Math.PI * 0.5);
+      const perpY = Math.sin(runBearing + Math.PI * 0.5);
+      if (phase === 'outbound') {
+        desiredX = targetPoint.x - Math.cos(runBearing) * extensionRadius + perpX * lateralOffset * 1.75;
+        desiredY = targetPoint.y - Math.sin(runBearing) * extensionRadius + perpY * lateralOffset * 1.75;
+        speedMultiplier = 1.1 + turnNeed * 0.06;
+        turnRateMultiplier = 0.62;
+        if (currentRadius >= extensionRadius - CELL * 0.8) {
+          engagementState.attackRunPhase = 'inbound';
+          engagementState.attackRunBearing = toTargetAngle;
+          engagementState.attackSide = shortestAngleDelta(unit.dir, toTargetAngle) >= 0 ? 1 : -1;
+        }
+      } else {
+        const throughDistance = target.kind === 'building' ? CELL * 3.2 : CELL * 2.2;
+        desiredX = targetPoint.x + Math.cos(runBearing) * throughDistance + perpX * lateralOffset;
+        desiredY = targetPoint.y + Math.sin(runBearing) * throughDistance + perpY * lateralOffset;
+        speedMultiplier = currentRadius > range ? 1.15 : 1.05;
+        turnRateMultiplier = 1.52;
+        if (currentRadius < standOffRadius * 0.72 && angleError > Math.PI * 0.58) {
+          engagementState.attackRunPhase = 'outbound';
+          engagementState.attackRunBearing = unit.dir;
+        }
+      }
+    } else if (phase === 'outbound') {
+      const escapeAngle = currentAngle + attackSide * (0.62 + turnNeed * 0.42);
+      desiredX = targetPoint.x + Math.cos(escapeAngle) * extensionRadius;
+      desiredY = targetPoint.y + Math.sin(escapeAngle) * extensionRadius;
+      speedMultiplier = 1.08 + turnNeed * 0.06;
+      turnRateMultiplier = 0.58;
+      if (currentRadius >= extensionRadius - CELL * 0.8) {
+        engagementState.attackRunPhase = 'inbound';
+      }
+    } else {
+      const throughDistance = target.kind === 'building' ? CELL * 2.8 : CELL * 1.8;
+      desiredX = targetPoint.x + Math.cos(toTargetAngle) * throughDistance;
+      desiredY = targetPoint.y + Math.sin(toTargetAngle) * throughDistance;
+      speedMultiplier = currentRadius > range ? 1.14 : 1.02;
+      turnRateMultiplier = 1.48;
+      if (currentRadius < standOffRadius * 0.72 && angleError > Math.PI * 0.62) {
+        engagementState.attackRunPhase = 'outbound';
+      }
+    }
+
+    moveFlyingUnitDirect(unit, dt, desiredX, desiredY, speedMultiplier, turnRateMultiplier);
+    if (!fired && canFighterFireAtTarget(unit, targetPoint, range)) {
+      fired = fireFighterMissile(unit, target);
+      if (fired && unit.missiles > 0) {
+        engagementState.attackRunPhase = 'outbound';
+        if (isLockedStrike) engagementState.attackRunBearing = unit.dir;
+      }
     }
     return true;
   }
@@ -3657,27 +3803,22 @@ html{
     if (target.kind === 'unit') {
       switch (target.type) {
         case 'fighter': return 240;
-        case 'drone': return 232;
-        case 'tank': return 220;
-        case 'transport': return 200;
-        case 'ambulance': return 190;
-        case 'harvester': return 185;
-        case 'engineer': return 175;
-        case 'scout': return 165;
+        case 'scout': return 220;
+        case 'tank': return 210;
         default: return 150;
       }
     }
     if (target.kind === 'building') {
       switch (target.type) {
-        case 'turret': return 210;
-        case 'hq': return 205;
-        case 'airfield': return 195;
-        case 'factory': return 190;
-        case 'lab': return 185;
-        case 'refinery': return 180;
-        case 'oilDerrick': return 176;
-        case 'barracks': return 172;
-        case 'silo': return 160;
+        case 'turret': return 230;
+        case 'hq': return 150;
+        case 'airfield': return 150;
+        case 'factory': return 150;
+        case 'lab': return 150;
+        case 'refinery': return 150;
+        case 'oilDerrick': return 150;
+        case 'barracks': return 150;
+        case 'silo': return 150;
         default: return 150;
       }
     }
@@ -3839,19 +3980,31 @@ html{
     if (order.angle === null || order.angle === undefined) {
       order.angle = Math.atan2(unit.y - order.y, unit.x - order.x);
     }
-    order.angle = (order.angle ?? 0) + dt * 1.4;
     const radius = order.radius || FIGHTER_GUARD_RADIUS;
-    const orbitX = order.x + Math.cos(order.angle) * radius;
-    const orbitY = order.y + Math.sin(order.angle) * (radius * 0.6);
-    moveFlyingUnitDirect(unit, dt, orbitX, orbitY, 0.92);
+    const currentRadius = Math.hypot(unit.x - order.x, unit.y - order.y);
+    const angularSpeed = Math.max(0.82, Math.min(1.18, unit.speed / Math.max(radius, 1)));
+    order.angle = wrapAngle((order.angle ?? 0) + dt * angularSpeed);
+
+    const radiusError = radius - currentRadius;
+    const correctedRadius = radius + clamp(radiusError * 0.7, -CELL * 1.5, CELL * 1.5);
+    const leadAngle = order.angle + Math.min(Math.PI * 0.32, 0.2 + Math.max(0, currentRadius / Math.max(radius, 1) - 1) * 0.18);
+    const orbitX = order.x + Math.cos(leadAngle) * correctedRadius;
+    const orbitY = order.y + Math.sin(leadAngle) * correctedRadius;
+    const speedMultiplier = currentRadius < radius * 0.9 ? 1.02 : 0.95;
+    moveFlyingUnitDirect(unit, dt, orbitX, orbitY, speedMultiplier);
   }
 
   function updateFighterStrike(unit, dt) {
-    const target = resolveCombatTargetEntity(getEntityById(unit.order.targetId || unit.targetId));
+    const range = unit.range + (teamById(unit.teamId).research.has('rangefinding') ? 10 : 0);
+    let target = resolveCombatTargetEntity(getEntityById(unit.order.targetId || unit.targetId));
+    if (!unit.order.lockTarget) {
+      target = findBestFighterEngagementTarget(unit, target, range);
+    }
     if (!target || target.hp <= 0 || target.teamId === unit.teamId) {
       beginFighterReturn(unit, null);
       return;
     }
+    unit.order.targetId = target.id;
     unit.targetId = target.id;
     if (unit.missiles <= 0) {
       beginFighterReturn(unit, null);
@@ -3876,7 +4029,7 @@ html{
       if (unit.order.type === 'move' && unit.order.guardPoint) unit.order = { ...unit.order.guardPoint };
       updateFighterGuard(unit, dt);
     } else if (unit.order.type === 'strike' || (unit.order.type === 'attack' && unit.order.attackMode === 'fighter-strike')) {
-      if (unit.order.type === 'attack' && unit.order.attackMode === 'fighter-strike') unit.order = { type: 'strike', targetId: unit.order.targetId };
+      if (unit.order.type === 'attack' && unit.order.attackMode === 'fighter-strike') unit.order = makeFighterStrikeOrder(unit.order.targetId, !!unit.order.lockTarget);
       updateFighterStrike(unit, dt);
     } else if (unit.order.type === 'idle') {
       if (unit.missiles < (UNIT_TYPES.fighter.maxMissiles || FIGHTER_MISSILES) || unit.hp < unit.maxHp) beginFighterReturn(unit, null);
@@ -4778,7 +4931,7 @@ html{
     const healedUnits = [];
     let healedAny = false;
     forEachNearbyUnit(unit.x, unit.y, def.healRadius || 18, (ally) => {
-      if (!canAmbulanceSupportUnit(ally, unit.teamId, unit.id)) return;
+      if (!canAmbulanceRepairUnit(ally, unit.teamId, unit.id)) return;
       if (dist(unit.x, unit.y, ally.x, ally.y) > (def.healRadius || 18)) return;
       ally.hp = clamp(ally.hp + (def.healRate || 8), 0, ally.maxHp);
       healedUnits.push(ally);
@@ -4793,7 +4946,7 @@ html{
 
   function updateAmbulanceSupport(unit, def, dt) {
     const target = getEntityById(unit.order.targetId);
-    if (!canAmbulanceSupportUnit(target, unit.teamId, unit.id)) {
+    if (!canAmbulanceSupportTarget(target, unit.teamId, unit.id)) {
       unit.order = { type: 'idle' };
       unit.targetId = null;
       return;
@@ -4831,6 +4984,7 @@ html{
     if (!unit || !building || building.kind !== 'building') return false;
     const def = UNIT_TYPES[unit.type];
     if (!def) return false;
+    if (unit.type === 'drone') return building.type === 'airfield';
     if (def.infantry) return building.type === SUPPORT_BUILDING_BY_ROLE.infantry;
     if (def.vehicle) return building.type === SUPPORT_BUILDING_BY_ROLE.vehicle;
     return false;
@@ -5586,19 +5740,81 @@ html{
     return false;
   }
 
-  function assignAiFighterOrders(team) {
+  function getAiDirectStrikeTarget(team) {
+    const memory = getBestAiAttackMemory(team);
+    if (!memory) return null;
+    const entity = getEntityById(memory.id);
+    if (!entity || entity.hp <= 0 || entity.teamId === team.id) return null;
+    if (entity.kind === 'unit' && entity.garrisonedIn) return null;
+    const visible = entity.kind === 'building'
+      ? isVisibleToTeam(team, entity.x + entity.widthCells * CELL * 0.5, entity.y + entity.heightCells * CELL * 0.5)
+      : isVisibleToTeam(team, entity.x, entity.y);
+    if (!visible) return null;
+    return entity;
+  }
+
+  function getAiFighterLoiterPoint(team) {
     const objective = team.ai.oilObjective;
-    const target = objective && objective.x !== undefined && objective.y !== undefined
-      ? { x: objective.x, y: objective.y }
-      : getBestAiAttackMemory(team);
-    if (!target) return false;
+    if (objective && objective.x !== undefined && objective.y !== undefined) {
+      return { x: objective.x, y: objective.y, reason: objective.kind };
+    }
+    const memory = getBestAiAttackMemory(team);
+    if (memory) return { x: memory.x, y: memory.y, reason: 'memory' };
+    const enemyHub = state.buildings
+      .filter((building) => building.hp > 0 && building.teamId !== team.id && building.type === 'hq')
+      .sort((a, b) => a.hp - b.hp)[0] || null;
+    if (enemyHub) {
+      const geometry = getBuildingGeometry(enemyHub);
+      return { x: geometry.visualCenter.x, y: geometry.visualCenter.y, reason: 'enemy-hq' };
+    }
+    const friendlyHub = nearestBuilding(team.id, 'hq', WORLD_WIDTH * 0.5, WORLD_HEIGHT * 0.5);
+    if (friendlyHub) {
+      const geometry = getBuildingGeometry(friendlyHub);
+      return { x: geometry.visualCenter.x + CELL * 10, y: geometry.visualCenter.y, reason: 'home' };
+    }
+    return null;
+  }
+
+  function hasMatchingFighterMission(unit, mission) {
+    if (!unit || !mission) return false;
+    const order = unit.order || { type: 'idle' };
+    const pending = order.type === 'landed' || order.type === 'takeoff' || order.type === 'return' || order.type === 'landing'
+      ? order.nextOrder || null
+      : order;
+    if (!pending) return false;
+    if (mission.type === 'strike') {
+      return pending.type === 'strike' && pending.targetId === mission.targetId;
+    }
+    if (mission.type === 'guard') {
+      return pending.type === 'guard' && dist(pending.x, pending.y, mission.x, mission.y) <= CELL * 2;
+    }
+    return false;
+  }
+
+  function assignAiFighterOrders(team) {
+    const fighters = state.units.filter((unit) => unit.teamId === team.id && unit.type === 'fighter' && unit.hp > 0);
+    if (!fighters.length) return false;
+    const directTarget = getAiDirectStrikeTarget(team);
+    const loiterPoint = getAiFighterLoiterPoint(team);
     let assigned = false;
-    for (const fighter of state.units) {
-      if (fighter.teamId !== team.id || fighter.type !== 'fighter' || fighter.hp <= 0) continue;
-      if (fighter.order?.type === 'guard') continue;
-      if (fighter.order?.type === 'takeoff' || fighter.order?.type === 'return' || fighter.order?.type === 'landing') continue;
-      if (fighter.order?.type === 'strike') continue;
-      issuedMoveOrder([fighter], target.x, target.y, false, 0);
+    let strikeAssigned = false;
+
+    for (const fighter of fighters) {
+      if (fighter.order?.type === 'landing') continue;
+      let mission = null;
+      if (directTarget && !strikeAssigned) {
+        mission = { type: 'strike', targetId: directTarget.id };
+        strikeAssigned = true;
+      } else if (loiterPoint) {
+        mission = makeFighterGuardOrder(loiterPoint.x, loiterPoint.y);
+      } else if (directTarget) {
+        const targetPoint = directTarget.kind === 'building' ? getBuildingAimPoint(directTarget) : { x: directTarget.x, y: directTarget.y };
+        mission = makeFighterGuardOrder(targetPoint.x, targetPoint.y);
+      }
+      if (!mission || hasMatchingFighterMission(fighter, mission)) continue;
+      queueFighterMission(fighter, mission);
+      fighter.targetId = mission.targetId || null;
+      fighter.path.length = 0;
       assigned = true;
     }
     return assigned;
@@ -7772,11 +7988,11 @@ html{
       releaseClaim(unit);
       if (unit.type === 'fighter') {
         if (unit.order?.type === 'landed') {
-          queueFighterMission(unit, { type: 'strike', targetId: target.id });
+          queueFighterMission(unit, makeFighterStrikeOrder(target.id, true));
         } else if (unit.order?.type === 'takeoff') {
-          unit.order.nextOrder = { type: 'strike', targetId: target.id };
+          unit.order.nextOrder = makeFighterStrikeOrder(target.id, true);
         } else {
-          unit.order = { type: 'strike', targetId: target.id };
+          unit.order = makeFighterStrikeOrder(target.id, true);
         }
       } else {
         unit.order = { type: 'attack', targetId: target.id };
@@ -7913,13 +8129,6 @@ html{
     const selectableUnits = state.units
       .filter((unit) => unit.hp > 0 && !unit.garrisonedIn)
       .sort((a, b) => b.y - a.y);
-    const clickedAirfield = getAirfieldSelectionAtWorldPoint(null, worldX, worldY);
-    if (clickedAirfield) {
-      for (const unit of selectableUnits) {
-        if (dist(worldX, worldY, unit.x, unit.y) <= getUnitGeometry(unit).hitRadius) return unit;
-      }
-      return clickedAirfield;
-    }
     for (const unit of selectableUnits) {
       if (unit.hp <= 0 || unit.garrisonedIn) continue;
       if (dist(worldX, worldY, unit.x, unit.y) <= getUnitGeometry(unit).hitRadius) return unit;
@@ -7930,6 +8139,8 @@ html{
       const bounds = getBuildingHitBounds(building);
       if (worldX >= bounds.left && worldX <= bounds.right && worldY >= bounds.top && worldY <= bounds.bottom) return building;
     }
+    const clickedAirfield = getAirfieldSelectionAtWorldPoint(null, worldX, worldY);
+    if (clickedAirfield) return clickedAirfield;
     for (let i = state.resources.length - 1; i >= 0; i--) {
       const node = state.resources[i];
       if (isDepletedResource(node)) continue;
