@@ -304,8 +304,9 @@ html{
 .selection-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
 .selection-meta .small-status{justify-content:center;padding:4px 6px;font-size:10px;gap:5px}
 
-.action-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
+.action-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
 .action-grid .action-button{min-height:48px}
+.action-grid .action-button.is-hidden{display:none}
 
 .context-help{display:none}
 
@@ -456,7 +457,7 @@ html{
   .minimap-wrap{width:92px;padding:5px;top:54px;bottom:auto}
   #minimap{width:80px;height:80px}
   .selection-meta{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .action-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .action-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
   .hud-right{display:none}
   .hud-top{padding-right:96px}
   .toast{bottom:280px;max-width:calc(100vw - 24px);text-align:center}
@@ -957,9 +958,10 @@ html{
     { code: 'Digit6', label: 'Alt+6', badge: '6' },
     { code: 'Digit7', label: 'Alt+7', badge: '7' },
     { code: 'Digit8', label: 'Alt+8', badge: '8' },
-    { code: 'Digit9', label: 'Alt+9', badge: '9' },
-    { code: 'Digit0', label: 'Alt+0', badge: '0' }
+    { code: 'Digit9', label: 'Alt+9', badge: '9' }
   ];
+
+  const ACTION_PANEL_SELL_SLOT_INDEX = ACTION_PANEL_HOTKEYS.length - 1;
 
   const PRIMARY_ACTION_SHORTCUTS = {
     'Move': 'M',
@@ -976,7 +978,8 @@ html{
 
   let menuFocusRestoreTarget = null;
   let actionPanelHotkeys = [];
-  let nextActionPanelHotkeyIndex = 0;
+  let actionPanelSlots = [];
+  let pendingActionPanelItems = [];
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -6434,18 +6437,10 @@ html{
 
   function resetActionPanelHotkeys() {
     actionPanelHotkeys = [];
-    nextActionPanelHotkeyIndex = 0;
   }
 
   function getPrimaryActionShortcut(label) {
     return PRIMARY_ACTION_SHORTCUTS[label] || null;
-  }
-
-  function assignActionPanelHotkey(action, disabled = false) {
-    const slot = ACTION_PANEL_HOTKEYS[nextActionPanelHotkeyIndex++];
-    if (!slot) return null;
-    actionPanelHotkeys.push({ code: slot.code, action, disabled });
-    return slot;
   }
 
   function formatActionHotkeyTitle(label, panelHotkey) {
@@ -6464,6 +6459,95 @@ html{
     if (match.disabled || typeof match.action !== 'function') return true;
     match.action();
     return true;
+  }
+
+  function ensureActionPanelSlots() {
+    if (actionPanelSlots.length) return;
+    for (const hotkey of ACTION_PANEL_HOTKEYS) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'action-button is-hidden';
+      button.disabled = true;
+      button.setAttribute('aria-hidden', 'true');
+      button.innerHTML = '<svg class="button-icon" aria-hidden="true"><use href="#icon-context"></use></svg><span class="button-label"></span><span class="action-progress" hidden><span class="action-progress-fill"></span></span>';
+      const slot = {
+        hotkey,
+        button,
+        iconUse: button.querySelector('use'),
+        labelEl: button.querySelector('.button-label'),
+        progressEl: button.querySelector('.action-progress'),
+        progressFillEl: button.querySelector('.action-progress-fill'),
+        action: null
+      };
+      button.addEventListener('click', () => {
+        if (button.disabled || typeof slot.action !== 'function') return;
+        slot.action();
+      });
+      actionGrid.appendChild(button);
+      actionPanelSlots.push(slot);
+    }
+  }
+
+  function clearActionPanelSlot(slot) {
+    slot.action = null;
+    slot.button.className = 'action-button is-hidden';
+    slot.button.disabled = true;
+    slot.button.hidden = true;
+    slot.button.title = '';
+    slot.button.removeAttribute('aria-label');
+    slot.button.removeAttribute('aria-keyshortcuts');
+    slot.button.removeAttribute('data-hotkey-badge');
+    slot.button.setAttribute('aria-hidden', 'true');
+    slot.button.setAttribute('aria-disabled', 'true');
+    slot.iconUse.setAttribute('href', '#icon-context');
+    slot.labelEl.textContent = '';
+    slot.progressEl.hidden = true;
+    slot.progressFillEl.style.width = '0%';
+  }
+
+  function resetActionPanelSlots() {
+    pendingActionPanelItems = [];
+    resetActionPanelHotkeys();
+    ensureActionPanelSlots();
+    for (const slot of actionPanelSlots) clearActionPanelSlot(slot);
+  }
+
+  function configureActionPanelSlot(slotIndex, item) {
+    const slot = actionPanelSlots[slotIndex];
+    if (!slot) return;
+    const visual = actionVisual(item.label);
+    const disabled = !!item.disabled;
+    slot.action = item.action;
+    slot.button.className = 'action-button' + (item.active ? ' is-active' : '') + (item.danger ? ' is-danger' : '') + (disabled ? ' is-disabled' : '');
+    slot.button.disabled = disabled;
+    slot.button.hidden = false;
+    slot.button.setAttribute('aria-hidden', 'false');
+    slot.button.setAttribute('aria-disabled', String(disabled));
+    slot.button.setAttribute('aria-label', item.label);
+    slot.button.title = formatActionHotkeyTitle(item.titleText, slot.hotkey);
+    slot.button.dataset.hotkeyBadge = slot.hotkey.badge;
+    if (!disabled) slot.button.setAttribute('aria-keyshortcuts', slot.hotkey.label);
+    else slot.button.removeAttribute('aria-keyshortcuts');
+    slot.iconUse.setAttribute('href', '#icon-' + visual.icon);
+    slot.labelEl.textContent = visual.short;
+    if (item.progress === null) {
+      slot.progressEl.hidden = true;
+      slot.progressFillEl.style.width = '0%';
+    } else {
+      slot.progressEl.hidden = false;
+      slot.progressFillEl.style.width = Math.round(item.progress * 100) + '%';
+    }
+    actionPanelHotkeys.push({ code: slot.hotkey.code, action: item.action, disabled });
+  }
+
+  function commitActionPanelItems() {
+    const sellIndex = pendingActionPanelItems.findIndex((item) => item.label === 'Sell');
+    const sellItem = sellIndex >= 0 ? pendingActionPanelItems[sellIndex] : null;
+    const regularItems = pendingActionPanelItems.filter((_, index) => index !== sellIndex);
+    const regularLimit = sellItem ? ACTION_PANEL_SELL_SLOT_INDEX : actionPanelSlots.length;
+    regularItems.slice(0, regularLimit).forEach((item, index) => configureActionPanelSlot(index, item));
+    if (sellItem) configureActionPanelSlot(ACTION_PANEL_SELL_SLOT_INDEX, sellItem);
+    pendingActionPanelItems = [];
   }
 
   function getMenuFocusableElements() {
@@ -6766,7 +6850,7 @@ html{
       { type: 'text', label: 'Trackpad', description: 'Single-finger click behaves like mouse left-click, so clicking empty ground deselects. Two-finger slide pans. Ctrl plus a two-finger gesture zooms when the browser exposes pinch that way. During building placement, a single click places the green ghost if valid.' },
       { type: 'text', label: 'Touch', description: 'Use the touch strip to switch between Select, Pan, Move, Attack, and Gather. In Select mode, dragging one finger draws a marquee and tapping empty ground clears selection. In Move, Attack, Gather, or Build placement, a tap issues that command instead of deselecting. Two-finger pinch pans and zooms together. Tap the minimap to jump.' },
       { type: 'text', label: 'Keyboard', description: 'Arrow keys pan the camera. IJKL moves the keyboard command cursor, which fades after a short idle pause. Space selects under that cursor. X sets or completes a keyboard marquee. Enter issues the current command, and during building placement it places the current ghost location. Tab and Shift+Tab cycle visible friendly units only. [ and ] cycle visible friendly buildings. Ctrl+A selects all visible friendly units. Ctrl+0-9 stores groups; Shift+Ctrl+0-9 clears; 0-9 recalls; Shift+digit adds.' },
-      { type: 'text', label: 'Modes And Menus', description: 'M, A, G, R, and C switch Move, Attack, Gather, Repair, and Context only when those actions make sense for the current selection. B opens Build Orders when an engineer is selected, and the bracketed letters inside that menu choose structures immediately. Alt+1 through Alt+0 activate the visible action buttons in the command panel. Esc cancels a pending build placement, closes menus with Close, and goes Back in menus that expose Back.' }
+      { type: 'text', label: 'Modes And Menus', description: 'M, A, G, R, and C switch Move, Attack, Gather, Repair, and Context only when those actions make sense for the current selection. B opens Build Orders when an engineer is selected, and the bracketed letters inside that menu choose structures immediately. Alt+1 through Alt+9 activate the visible action buttons in the command panel. Esc cancels a pending build placement, closes menus with Close, and goes Back in menus that expose Back.' }
     ];
   }
 
@@ -6925,9 +7009,8 @@ html{
   function updateSelectionUI() {
     const selected = getSelectedEntities().filter((entity) => isInspectableEntity(entity) && (entity.kind === 'resource' ? entity.amount > 0 : true));
     updateResourceUI();
-    resetActionPanelHotkeys();
+    resetActionPanelSlots();
     selectionMeta.innerHTML = '';
-    actionGrid.innerHTML = '';
     normalizeSelectionCommandModes(selected);
     if (!selected.length) {
       selectionTitle.textContent = 'Awaiting orders';
@@ -6938,6 +7021,7 @@ html{
       contextHelp.textContent = 'Mouse drag, keyboard cursor, or touch strip all lead into the same command systems.';
       updateTouchButtons();
       updateCommandReadout();
+      commitActionPanelItems();
       return;
     }
 
@@ -6955,12 +7039,12 @@ html{
         addMeta('Status', resource.amount > 0 ? 'Rich' : 'Dry');
       }
       addMeta('Cell', resource.cellX + ', ' + resource.cellY);
-      makeAction('Center', () => centerOnEntities([resource]));
       contextHelp.textContent = resource.resourceType === 'oil'
         ? 'Oil deposits are infinite, but only Oil Derricks can exploit them. Engineers must place the derrick directly over the deposit.'
         : 'Harvesters can be sent onto this seam to gather spice until it runs dry.';
       updateTouchButtons();
       updateCommandReadout();
+      commitActionPanelItems();
       return;
     }
 
@@ -6984,10 +7068,10 @@ html{
         addMeta('Sight', String(entity.sight));
         addMeta('Footprint', entity.widthCells + 'x' + entity.heightCells);
       }
-      makeAction('Center', () => centerOnEntities([entity]));
       contextHelp.textContent = 'Enemy units and structures can be inspected, but orders still require a friendly selection.';
       updateTouchButtons();
       updateCommandReadout();
+      commitActionPanelItems();
       return;
     }
 
@@ -7002,6 +7086,7 @@ html{
       contextHelp.textContent = 'Mouse drag, keyboard cursor, or touch strip all lead into the same command systems.';
       updateTouchButtons();
       updateCommandReadout();
+      commitActionPanelItems();
       return;
     }
 
@@ -7051,6 +7136,7 @@ html{
     contextHelp.textContent = helpTextForSelection(selected);
     updateTouchButtons();
     updateCommandReadout();
+    commitActionPanelItems();
   }
 
   function addMeta(label, value) {
@@ -7061,32 +7147,8 @@ html{
   }
 
   function makeAction(label, action, active = false, danger = false, disabled = false, titleText = label, options = null) {
-    const visual = actionVisual(label);
-    const button = document.createElement('button');
-    const panelHotkey = assignActionPanelHotkey(action, disabled);
-    button.type = 'button';
-    button.className = 'action-button' + (active ? ' is-active' : '') + (danger ? ' is-danger' : '') + (disabled ? ' is-disabled' : '');
-    button.innerHTML = iconMarkup(visual.icon, visual.short);
-    button.setAttribute('aria-label', label);
-    button.title = formatActionHotkeyTitle(titleText, panelHotkey);
-    if (panelHotkey) {
-      button.dataset.hotkeyBadge = panelHotkey.badge;
-      if (!disabled) button.setAttribute('aria-keyshortcuts', panelHotkey.label);
-    }
-    button.disabled = disabled;
     const progress = options && typeof options.progress === 'number' ? clamp(options.progress, 0, 1) : null;
-    if (progress !== null) {
-      const meter = document.createElement('span');
-      meter.className = 'action-progress';
-      const fill = document.createElement('span');
-      fill.className = 'action-progress-fill';
-      fill.style.width = Math.round(progress * 100) + '%';
-      meter.appendChild(fill);
-      button.appendChild(meter);
-    }
-    if (!disabled) button.addEventListener('click', action);
-    actionGrid.appendChild(button);
-    return button;
+    pendingActionPanelItems.push({ label, action, active, danger, disabled, titleText, progress });
   }
 
   function getProductionAvailability(building, kind, key) {
@@ -7288,7 +7350,6 @@ html{
       updateSelectionUI();
       toast('Units holding position.');
     });
-    makeAction('Center', () => centerOnEntities(units));
   }
 
   function makeBuildingActions(building) {
@@ -7330,7 +7391,6 @@ html{
     }
     if (canSetRally(building)) makeAction('Set Rally', () => setPendingRally(building), state.pendingRallyBuildingId === building.id);
     makeAction('Sell', () => sellBuilding(building), false, true);
-    makeAction('Center', () => centerOnEntities([building]));
   }
 
   function formatQueue(queue) {
@@ -8727,6 +8787,7 @@ html{
   });
 
   loadPersistedSettings();
+  ensureActionPanelSlots();
   const restoredGame = loadPersistedGame();
   if (!restoredGame) resetMatch();
   openMenu(restoredGame && state.winner ? getRootMenuId() : 'main');
