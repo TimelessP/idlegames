@@ -732,6 +732,8 @@ html{
   const FIGHTER_GUARD_ACQUIRE_RADIUS = CELL * 5.5;
   const FIGHTER_TURN_RATE = Math.PI * 1.85;
   const FIGHTER_GLIDE_CAPTURE_RADIUS = CELL * 1.15;
+  const FIGHTER_EMERGENCY_HOLD_RADIUS = CELL * 7;
+  const FIGHTER_EMERGENCY_HOLD_DURATION = 15;
   const AI_STRUCTURE_MIN_GAP = {
     refinery: 2,
     silo: 2,
@@ -3113,7 +3115,7 @@ html{
       ...snapshot.keyboardCursor,
       anchor: snapshot.keyboardCursor?.anchor ? { ...snapshot.keyboardCursor.anchor } : null
     };
-    state.settings = { ...(snapshot.settings || {}), ...state.settings };
+    state.settings = { ...state.settings, ...(snapshot.settings || {}) };
     state.commandMode = snapshot.commandMode || 'context';
     state.touchMode = ['select', 'pan', 'move'].includes(snapshot.touchMode) ? snapshot.touchMode : 'select';
     state.pendingBuild = snapshot.pendingBuild || null;
@@ -3208,6 +3210,23 @@ html{
         if (transport && transport.kind === 'unit' && transport.hp > 0) syncEmbarkedUnitPosition(unit, transport);
         else unit.garrisonedIn = null;
       }
+        if (unit.type === 'fighter') {
+          if (unit.assignedAirfieldId && !getAssignedAirfield(unit)) unit.assignedAirfieldId = null;
+          if (unit.order?.type === 'landed' || unit.order?.type === 'takeoff' || unit.order?.type === 'return' || unit.order?.type === 'landing') {
+            const referencedAirfieldId = unit.order.airfieldId || unit.assignedAirfieldId || null;
+            const isValidRunway = !!getOperationalAirfieldById(referencedAirfieldId, unit.teamId);
+            if (!isValidRunway) {
+              recoverFighterAirfieldState(unit, unit.order?.nextOrder || null, false, referencedAirfieldId);
+            }
+          } else if (unit.order?.type === 'emergency-hold') {
+            const hub = unit.order.hubId ? getEntityById(unit.order.hubId) : null;
+            if (hub && hub.kind === 'building' && hub.hp > 0 && hub.type === 'hq') {
+              const center = getBuildingGeometry(hub).visualCenter;
+              unit.order.x = center.x;
+              unit.order.y = center.y;
+            }
+          }
+        }
     }
     recomputeDynamicBlocked();
     refreshFog();
@@ -3415,6 +3434,12 @@ html{
     return airfield;
   }
 
+  function getOperationalAirfieldById(airfieldId, teamId) {
+    const airfield = airfieldId ? getEntityById(airfieldId) : null;
+    if (!airfield || airfield.kind !== 'building' || airfield.hp <= 0 || airfield.type !== 'airfield' || airfield.teamId !== teamId) return null;
+    return airfield;
+  }
+
   function clearFighterAirfieldAssignment(unit) {
     if (!unit) return;
     const airfield = getAssignedAirfield(unit);
@@ -3422,7 +3447,7 @@ html{
     unit.assignedAirfieldId = null;
   }
 
-  function assignFighterToAirfield(unit, airfield) {
+  function reserveFighterAirfield(unit, airfield) {
     if (!unit) return false;
     const previous = getAssignedAirfield(unit);
     if (previous && previous.id !== airfield?.id && previous.assignedFighterId === unit.id) previous.assignedFighterId = null;
@@ -3436,9 +3461,13 @@ html{
     return true;
   }
 
-  function findAvailableAirfield(teamId, preferredX = WORLD_WIDTH * 0.5, preferredY = WORLD_HEIGHT * 0.5, preferredId = null) {
+  function assignFighterToAirfield(unit, airfield) {
+    return reserveFighterAirfield(unit, airfield);
+  }
+
+  function findAvailableAirfield(teamId, preferredX = WORLD_WIDTH * 0.5, preferredY = WORLD_HEIGHT * 0.5, preferredId = null, excludedId = null) {
     const candidates = state.buildings
-      .filter((building) => building.hp > 0 && building.teamId === teamId && building.type === 'airfield' && (!building.assignedFighterId || building.id === preferredId))
+      .filter((building) => building.hp > 0 && building.teamId === teamId && building.type === 'airfield' && building.id !== excludedId && (!building.assignedFighterId || building.id === preferredId))
       .sort((a, b) => dist(preferredX, preferredY, getBuildingGeometry(a).visualCenter.x, getBuildingGeometry(a).visualCenter.y) - dist(preferredX, preferredY, getBuildingGeometry(b).visualCenter.x, getBuildingGeometry(b).visualCenter.y));
     return candidates[0] || null;
   }
@@ -3485,18 +3514,71 @@ html{
     return distance <= Math.max(3, step);
   }
 
-  function beginFighterReturn(unit, nextOrder = null) {
-    const airfield = ensureFighterAirfield(unit);
-    if (!airfield) {
-      unit.order = nextOrder || { type: 'idle' };
-      unit.targetId = nextOrder?.targetId || null;
-      unit.path.length = 0;
+  function getNearestEmergencyCommandHub(teamId, worldX, worldY) {
+    const friendlyHub = nearestBuilding(teamId, 'hq', worldX, worldY);
+    if (friendlyHub) return friendlyHub;
+    let best = null;
+    let bestDist = Infinity;
+    for (const building of state.buildings) {
+      if (building.hp <= 0 || building.type !== 'hq') continue;
+      const center = getBuildingGeometry(building).visualCenter;
+      const distance = dist(worldX, worldY, center.x, center.y);
+      if (distance < bestDist) {
+        best = building;
+        bestDist = distance;
+      }
+    }
+    return best;
+  }
+
+  function makeFighterEmergencyHoldOrder(unit, hub = null, crashAt = state.time + FIGHTER_EMERGENCY_HOLD_DURATION) {
+    const targetHub = hub && hub.kind === 'building' && hub.hp > 0 && hub.type === 'hq'
+      ? hub
+      : getNearestEmergencyCommandHub(unit.teamId, unit.x, unit.y);
+    const center = targetHub ? getBuildingGeometry(targetHub).visualCenter : { x: unit.x, y: unit.y };
+    const initialAngle = Math.atan2(unit.y - center.y, unit.x - center.x);
+    return {
+      type: 'emergency-hold',
+      hubId: targetHub?.id || null,
+      x: center.x,
+      y: center.y,
+      radius: FIGHTER_EMERGENCY_HOLD_RADIUS,
+      angle: Number.isFinite(initialAngle) ? wrapAngle(initialAngle) : 0,
+      crashAt,
+      reported: true
+    };
+  }
+
+  function enterFighterEmergencyHold(unit, refreshHud = true) {
+    if (!isFighterOperational(unit)) return false;
+    if (unit.order?.type === 'emergency-hold' && (unit.order.crashAt || 0) > state.time) {
+      if (refreshHud) refreshSelectionHudForUnits([unit]);
       return false;
     }
-    unit.order = { type: 'return', airfieldId: airfield.id, nextOrder };
+    clearFighterAirfieldAssignment(unit);
+    unit.order = makeFighterEmergencyHoldOrder(unit);
     unit.targetId = null;
     unit.path.length = 0;
-    return true;
+    if (unit.teamId === TEAM_PLAYER) toast('Making a landing request.');
+    if (refreshHud) refreshSelectionHudForUnits([unit]);
+    return false;
+  }
+
+  function routeFighterToLandingOption(unit, nextOrder = null, refreshHud = true, excludedAirfieldId = null) {
+    const fallbackOrder = getSafeFighterResumeOrder(unit, nextOrder);
+    const airfield = findAvailableAirfield(unit.teamId, unit.x, unit.y, unit.assignedAirfieldId, excludedAirfieldId);
+    if (airfield && assignFighterToAirfield(unit, airfield)) {
+      unit.order = { type: 'return', airfieldId: airfield.id, nextOrder: fallbackOrder };
+      unit.targetId = null;
+      unit.path.length = 0;
+      if (refreshHud) refreshSelectionHudForUnits([unit]);
+      return true;
+    }
+    return enterFighterEmergencyHold(unit, refreshHud);
+  }
+
+  function beginFighterReturn(unit, nextOrder = null) {
+    return routeFighterToLandingOption(unit, nextOrder, false);
   }
 
   function issueFighterLandingOrder(unit, airfield, nextOrder = null) {
@@ -3535,7 +3617,22 @@ html{
     if (order.type === 'return') return { type: 'return', airfieldId: order.airfieldId, nextOrder: cloneFighterResumeOrder(order.nextOrder || null) };
     if (order.type === 'strike') return { type: 'strike', targetId: order.targetId, lockTarget: !!order.lockTarget };
     if (order.type === 'waypoint') return { type: 'waypoint', x: order.x, y: order.y, nextOrder: cloneFighterResumeOrder(order.nextOrder || null) };
+    if (order.type === 'emergency-hold') return { type: 'emergency-hold', hubId: order.hubId || null, x: order.x, y: order.y, radius: order.radius, angle: order.angle, crashAt: order.crashAt, reported: !!order.reported };
     return { ...order };
+  }
+
+  function getSafeFighterResumeOrder(unit, order) {
+    if (!order) return null;
+    if (order.type === 'return') {
+      const airfield = getOperationalAirfieldById(order.airfieldId, unit.teamId);
+      if (!airfield) return getSafeFighterResumeOrder(unit, order.nextOrder || null);
+    }
+    return cloneFighterResumeOrder(order);
+  }
+
+  function recoverFighterAirfieldState(unit, preferredOrder = null, refreshHud = true, excludedAirfieldId = null) {
+    if (!isFighterOperational(unit)) return false;
+    return routeFighterToLandingOption(unit, preferredOrder, refreshHud, excludedAirfieldId);
   }
 
   function makeFighterStrikeOrder(targetId, lockTarget = false) {
@@ -3574,14 +3671,17 @@ html{
   }
 
   function queueFighterMission(unit, nextOrder) {
-    const airfield = ensureFighterAirfield(unit);
+    const airfield = unit.order?.type === 'landed'
+      ? (unit.order.airfieldId ? getOperationalAirfieldById(unit.order.airfieldId, unit.teamId) : getAssignedAirfield(unit))
+      : ensureFighterAirfield(unit);
     const ready = unit.hp >= unit.maxHp && unit.missiles >= (UNIT_TYPES.fighter.maxMissiles || FIGHTER_MISSILES);
     if (unit.order?.type === 'takeoff' || unit.order?.type === 'return' || unit.order?.type === 'landing') {
       unit.order.nextOrder = nextOrder;
       return;
     }
     if (unit.order?.type === 'landed') {
-      unit.order = ready && airfield
+      const canDepart = !!airfield && ready;
+      unit.order = canDepart
         ? { type: 'takeoff', airfieldId: airfield.id, nextOrder }
         : makeFighterLandedOrder(airfield?.id || null, nextOrder);
       return;
@@ -3845,9 +3945,15 @@ html{
   }
 
   function updateFighterLanded(unit, dt) {
-    const airfield = unit.order.airfieldId ? getEntityById(unit.order.airfieldId) : ensureFighterAirfield(unit);
+    const airfield = unit.order.airfieldId
+      ? getOperationalAirfieldById(unit.order.airfieldId, unit.teamId)
+      : ensureFighterAirfield(unit);
+    if (!airfield || airfield.kind !== 'building' || airfield.hp <= 0 || airfield.type !== 'airfield') {
+      recoverFighterAirfieldState(unit, unit.order.nextOrder || null);
+      return;
+    }
     if (airfield && airfield.kind === 'building' && airfield.hp > 0 && airfield.type === 'airfield') {
-      assignFighterToAirfield(unit, airfield);
+      reserveFighterAirfield(unit, airfield);
       const runway = getAirfieldRunwayPoints(airfield);
       unit.x = runway.parkX;
       unit.y = runway.parkY;
@@ -3871,12 +3977,12 @@ html{
   }
 
   function updateFighterTakeoff(unit, dt) {
-    const airfield = getEntityById(unit.order.airfieldId) || ensureFighterAirfield(unit);
+    const airfield = getOperationalAirfieldById(unit.order.airfieldId, unit.teamId) || ensureFighterAirfield(unit);
     if (!airfield || airfield.kind !== 'building' || airfield.hp <= 0 || airfield.type !== 'airfield') {
-      unit.order = unit.order.nextOrder || { type: 'idle' };
+      recoverFighterAirfieldState(unit, unit.order.nextOrder || null, true, unit.order.airfieldId || unit.assignedAirfieldId || null);
       return;
     }
-    assignFighterToAirfield(unit, airfield);
+    reserveFighterAirfield(unit, airfield);
     const runway = getAirfieldRunwayPoints(airfield);
     if (!unit.order.phase) unit.order.phase = 'roll';
     const targetX = unit.order.phase === 'roll' ? runway.launchX : runway.departX;
@@ -3888,9 +3994,9 @@ html{
       const nextOrder = unit.order.nextOrder || { type: 'idle' };
       if (nextOrder.type === 'return' && nextOrder.airfieldId && nextOrder.airfieldId !== airfield.id) {
         airfield.assignedFighterId = airfield.assignedFighterId === unit.id ? null : airfield.assignedFighterId;
-        const destinationAirfield = getEntityById(nextOrder.airfieldId);
+        const destinationAirfield = getOperationalAirfieldById(nextOrder.airfieldId, unit.teamId);
         if (destinationAirfield && destinationAirfield.kind === 'building' && destinationAirfield.type === 'airfield' && destinationAirfield.hp > 0) {
-          assignFighterToAirfield(unit, destinationAirfield);
+          reserveFighterAirfield(unit, destinationAirfield);
         }
       }
       unit.order = nextOrder;
@@ -3899,12 +4005,12 @@ html{
   }
 
   function updateFighterLanding(unit, dt) {
-    const airfield = getEntityById(unit.order.airfieldId) || ensureFighterAirfield(unit);
+    const airfield = getOperationalAirfieldById(unit.order.airfieldId, unit.teamId) || ensureFighterAirfield(unit);
     if (!airfield || airfield.kind !== 'building' || airfield.hp <= 0 || airfield.type !== 'airfield') {
-      unit.order = makeFighterLandedOrder(null, null);
+      recoverFighterAirfieldState(unit, unit.order.nextOrder || null, true, unit.order.airfieldId || unit.assignedAirfieldId || null);
       return;
     }
-    assignFighterToAirfield(unit, airfield);
+    reserveFighterAirfield(unit, airfield);
     const runway = getAirfieldRunwayPoints(airfield);
     if (!unit.order.phase) unit.order.phase = 'touchdown';
     const targetX = unit.order.phase === 'touchdown'
@@ -3935,12 +4041,12 @@ html{
   }
 
   function updateFighterReturn(unit, dt) {
-    const airfield = getEntityById(unit.order.airfieldId) || ensureFighterAirfield(unit);
+    const airfield = getOperationalAirfieldById(unit.order.airfieldId, unit.teamId) || ensureFighterAirfield(unit);
     if (!airfield || airfield.kind !== 'building' || airfield.hp <= 0 || airfield.type !== 'airfield') {
-      unit.order = makeFighterLandedOrder(null, unit.order.nextOrder || null);
+      recoverFighterAirfieldState(unit, unit.order.nextOrder || null, true, unit.order.airfieldId || unit.assignedAirfieldId || null);
       return;
     }
-    assignFighterToAirfield(unit, airfield);
+    reserveFighterAirfield(unit, airfield);
     const runway = getAirfieldRunwayPoints(airfield);
     const approachDistance = dist(unit.x, unit.y, runway.approachX, runway.approachY);
     if (approachDistance <= FIGHTER_GLIDE_CAPTURE_RADIUS || moveFlyingUnitDirect(unit, dt, runway.approachX, runway.approachY, 1.02)) {
@@ -3949,6 +4055,54 @@ html{
       unit.path.length = 0;
       refreshSelectionHudForUnits([unit]);
     }
+  }
+
+  function crashFighterFromEmergencyHold(unit) {
+    if (!unit || unit.hp <= 0) return;
+    if (unit.teamId === TEAM_PLAYER) {
+      playUiCue('error');
+      toast('Fighter crashed after its landing request went unanswered.');
+    }
+    applyDamage(unit, unit.hp, unit.teamId, unit.id, { kind: 'unit', type: 'fighter' });
+  }
+
+  function tryResolveEmergencyLandingRequest(unit, refreshHud = true) {
+    if (!isFighterOperational(unit)) return false;
+    const reservedAirfield = findAvailableAirfield(unit.teamId, unit.x, unit.y, unit.assignedAirfieldId);
+    if (!reservedAirfield || !assignFighterToAirfield(unit, reservedAirfield)) return false;
+    unit.order = { type: 'return', airfieldId: reservedAirfield.id, nextOrder: null };
+    unit.targetId = null;
+    unit.path.length = 0;
+    if (refreshHud) refreshSelectionHudForUnits([unit]);
+    return true;
+  }
+
+  function updateFighterEmergencyHold(unit, dt) {
+    const order = unit.order;
+    const hub = order.hubId ? getEntityById(order.hubId) : null;
+    if (hub && hub.kind === 'building' && hub.hp > 0 && hub.type === 'hq') {
+      const center = getBuildingGeometry(hub).visualCenter;
+      order.x = center.x;
+      order.y = center.y;
+    }
+    if (tryResolveEmergencyLandingRequest(unit)) {
+      return;
+    }
+    if ((order.crashAt || 0) <= state.time) {
+      crashFighterFromEmergencyHold(unit);
+      return;
+    }
+    if (order.angle === null || order.angle === undefined) {
+      order.angle = Math.atan2(unit.y - order.y, unit.x - order.x);
+    }
+    const radius = order.radius || FIGHTER_EMERGENCY_HOLD_RADIUS;
+    const currentRadius = Math.hypot(unit.x - order.x, unit.y - order.y);
+    order.angle = wrapAngle((order.angle ?? 0) + dt * Math.max(0.88, Math.min(1.24, unit.speed / Math.max(radius, 1))));
+    const targetX = order.x + Math.cos(order.angle) * radius;
+    const targetY = order.y + Math.sin(order.angle) * radius;
+    const speedMultiplier = currentRadius > radius * 1.45 ? 1.08 : 0.96;
+    moveFlyingUnitDirect(unit, dt, targetX, targetY, speedMultiplier);
+    unit.targetId = null;
   }
 
   function updateFighterGuard(unit, dt) {
@@ -4023,6 +4177,8 @@ html{
     } else if (unit.order.type === 'strike' || (unit.order.type === 'attack' && unit.order.attackMode === 'fighter-strike')) {
       if (unit.order.type === 'attack' && unit.order.attackMode === 'fighter-strike') unit.order = makeFighterStrikeOrder(unit.order.targetId, !!unit.order.lockTarget);
       updateFighterStrike(unit, dt);
+    } else if (unit.order.type === 'emergency-hold') {
+      updateFighterEmergencyHold(unit, dt);
     } else if (unit.order.type === 'idle') {
       if (unit.missiles < (UNIT_TYPES.fighter.maxMissiles || FIGHTER_MISSILES) || unit.hp < unit.maxHp) beginFighterReturn(unit, null);
     } else {
@@ -4038,7 +4194,7 @@ html{
       unit.assignedAirfieldId = null;
       if (unit.order?.airfieldId === airfieldId) unit.order.airfieldId = null;
       if (unit.order?.type === 'takeoff' || unit.order?.type === 'return' || unit.order?.type === 'landing' || unit.order?.type === 'landed') {
-        unit.order = makeFighterLandedOrder(null, unit.order?.nextOrder || null);
+        recoverFighterAirfieldState(unit, unit.order?.nextOrder || null, false, airfieldId);
       }
     }
   }
@@ -7395,9 +7551,13 @@ html{
         if (unit.type === 'fighter') {
           if (unit.order?.type === 'landed') {
             const airfield = unit.order.airfieldId ? getEntityById(unit.order.airfieldId) : getAssignedAirfield(unit);
-            unit.order = makeFighterLandedOrder(airfield?.id || null, null);
-            unit.targetId = null;
-            unit.path.length = 0;
+              if (airfield && airfield.kind === 'building' && airfield.hp > 0 && airfield.type === 'airfield') {
+                unit.order = makeFighterLandedOrder(airfield.id, null);
+                unit.targetId = null;
+                unit.path.length = 0;
+              } else {
+                recoverFighterAirfieldState(unit, null);
+              }
           } else {
             beginFighterReturn(unit, null);
           }
