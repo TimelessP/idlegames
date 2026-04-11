@@ -238,6 +238,7 @@ let toastTimer = null;
 let pedestrianTiles = [];
 let parkTiles = [];
 let nextPersonId = 1;
+let nextCarId = 1;
 const CIVIC_BUILDING_SPECS = {
   hospital: {
     type: 'hospital',
@@ -267,15 +268,19 @@ const BUILDING_STYLE_PRESETS = {
   shop: { wallPalette: PAL.wallWarm, roofPalette: PAL.roofTan, roofRatio: [0.34, 0.42], signChance: 1, brandMode: 'retail', rooftopDensity: 0.9 },
   bank: { wallPalette: ['#a89878', '#9c8e73', '#b2a184'], roofPalette: PAL.roofGrey, roofRatio: [0.4, 0.48], signChance: 1, brandMode: 'bank', rooftopDensity: 1.1 },
   house: { wallPalette: ['#b98d77', '#c79c84', '#a97d68', '#8f6d5c'], roofPalette: ['#8b8276', '#7c756b', '#9a8f80'], roofRatio: [0.3, 0.38], signChance: 0, brandMode: 'residential', rooftopDensity: 0.45 },
+  'car-sales': { wallPalette: ['#d8dadc', '#cfd5da', '#e3dfd6'], roofPalette: ['#8e959d', '#7e858c'], roofRatio: [0.34, 0.42], signChance: 1, brandMode: 'car-sales', rooftopDensity: 0.8 },
+  scrapyard: { wallPalette: ['#8a7f72', '#756b61', '#988d7f'], roofPalette: ['#6c6f72', '#5c6064'], roofRatio: [0.32, 0.4], signChance: 1, brandMode: 'scrapyard', rooftopDensity: 0.95 },
   hospital: { wallPalette: ['#d8dde6'], roofPalette: ['#f4f7fb'], roofRatio: [0.42, 0.5], signChance: 1, brandMode: 'hospital', rooftopDensity: 1.35 },
   'police-station': { wallPalette: ['#6d7f93'], roofPalette: ['#c7d7e7'], roofRatio: [0.4, 0.48], signChance: 1, brandMode: 'police', rooftopDensity: 1.2 },
   'fire-station': { wallPalette: ['#b94a3a'], roofPalette: ['#f0cdc4'], roofRatio: [0.38, 0.44], signChance: 1, brandMode: 'fire', rooftopDensity: 1.1 },
 };
 const civicBuildings = { hospital: null, policeStation: null, fireStation: null };
+const specialBuildings = { carSales: null, scrapyard: null };
 const ACTION_CAM_SLOTS = [
   { id: 'police', label: 'Cam: Chase' },
   { id: 'medical', label: 'Cam: Ambulance' },
   { id: 'fire', label: 'Cam: Fire' },
+  { id: 'delivery', label: 'Cam: Delivery' },
   { id: 'rally', label: 'Cam: Rally' },
   { id: 'gathering', label: 'Cam: Gathering' },
 ];
@@ -318,7 +323,6 @@ function rng() {
   return (seed - 1) / 2147483646;
 }
 function rngInt(min, max) { return Math.floor(rng() * (max - min + 1)) + min; }
-  assignCivicBuildings();
 function pick(arr) { return arr[rngInt(0, arr.length - 1)]; }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 const LEGACY_FPS = 60;
@@ -678,7 +682,7 @@ function getIncidentTarget(incidentId) {
       if (emergencies.police.phase === 'dispatch' || emergencies.police.phase === 'chase' || emergencies.police.phase === 'intercept') {
         if (emergencies.police.policeCar) return { x: emergencies.police.policeCar.x, y: emergencies.police.policeCar.y };
       }
-      if (emergencies.police.phase === 'officer-approach' || emergencies.police.phase === 'escorting' || emergencies.police.phase === 'boarding') {
+      if (emergencies.police.phase === 'officer-approach' || emergencies.police.phase === 'escorting' || emergencies.police.phase === 'rights-read' || emergencies.police.phase === 'boarding') {
         if (emergencies.police.officer && emergencies.police.hijacker) {
           return {
             x: (emergencies.police.officer.x + emergencies.police.hijacker.x) / 2,
@@ -708,6 +712,20 @@ function getIncidentTarget(incidentId) {
       }
       if (emergencies.fire.fireTruck) return { x: emergencies.fire.fireTruck.x, y: emergencies.fire.fireTruck.y };
       return null;
+    case 'delivery': {
+      const vans = cars.filter(car => car.vehicleType === 'delivery');
+      if (!vans.length) return null;
+      let best = vans[0];
+      let bestDist = distanceSq(vans[0], cam);
+      for (let i = 1; i < vans.length; i++) {
+        const dist = distanceSq(vans[i], cam);
+        if (dist < bestDist) {
+          best = vans[i];
+          bestDist = dist;
+        }
+      }
+      return { x: best.x, y: best.y };
+    }
     case 'rally':
       if (!civicRally.active) return null;
       return { x: civicRally.x, y: civicRally.y };
@@ -725,6 +743,14 @@ function getRoadDistanceBetweenTiles(a, b) {
 
 function getCarRoadTile(car) {
   return getCarAnchorTile(car);
+}
+
+function isCarNearTargetRoad(car, targetPoint, maxRoadDistance = 1, maxWorldDistance = 32) {
+  if (!car || !targetPoint) return false;
+  const anchor = getCarRoadTile(car);
+  const targetTile = findNearestRoad(targetPoint.x, targetPoint.y);
+  if (!anchor || !targetTile) return false;
+  return getRoadDistanceBetweenTiles(anchor, targetTile) <= maxRoadDistance && distanceSq(car, targetPoint) <= maxWorldDistance * maxWorldDistance;
 }
 
 function findNearestRoadExact(px, py, maxRadius = 12) {
@@ -753,16 +779,7 @@ function findNearestRoadExact(px, py, maxRadius = 12) {
 
 function getBuildingFacadePoint(building) {
   const door = getDoorPoint(building);
-  switch (building.exitSide) {
-    case 'top':
-      return { x: door.x, y: building.y - 10 };
-    case 'left':
-      return { x: building.x - 10, y: door.y };
-    case 'right':
-      return { x: building.x + building.w + 10, y: door.y };
-    default:
-      return { x: door.x, y: building.y + building.h + 10 };
-  }
+  return { x: door.x, y: building.y + building.h + 10 };
 }
 
 function getBuildingSceneRoadTile(building) {
@@ -883,6 +900,68 @@ function findRoadSpawnNearBuilding(building, preferredIndex = 0) {
   return tiles[Math.min(preferredIndex, tiles.length - 1)];
 }
 
+function getRoadLaneCandidatesForTile(tx, ty, laneIndex = getOuterLaneIndex()) {
+  const tile = map[ty]?.[tx];
+  const candidates = [];
+  if (supportsHorizontalLaneTile(tile)) {
+    candidates.push({ dir: 0, laneIndex, point: getLaneCenterForRoad(tx, ty, 0, laneIndex) });
+    candidates.push({ dir: 2, laneIndex, point: getLaneCenterForRoad(tx, ty, 2, laneIndex) });
+  }
+  if (supportsVerticalLaneTile(tile)) {
+    candidates.push({ dir: 1, laneIndex, point: getLaneCenterForRoad(tx, ty, 1, laneIndex) });
+    candidates.push({ dir: 3, laneIndex, point: getLaneCenterForRoad(tx, ty, 3, laneIndex) });
+  }
+  return candidates;
+}
+
+function getDeliveryStopPlanForBuilding(building) {
+  if (!building) return null;
+  const doorPoint = getDoorPoint(building);
+  const roadTiles = getRoadTilesNearPoint(doorPoint, 12);
+  let best = null;
+  let bestScore = Infinity;
+  for (const roadTile of roadTiles.slice(0, 10)) {
+    for (const lane of getRoadLaneCandidatesForTile(roadTile.x, roadTile.y, getOuterLaneIndex())) {
+      const score = distanceSq(lane.point, doorPoint) + roadTile.distance * 0.35;
+      if (score < bestScore) {
+        bestScore = score;
+        best = {
+          building,
+          doorPoint,
+          roadTile: { x: roadTile.x, y: roadTile.y },
+          stopDir: lane.dir,
+          laneIndex: lane.laneIndex,
+          stopPoint: lane.point,
+          phase: 'idle',
+          phaseTimer: 0,
+          driverId: null,
+        };
+      }
+    }
+  }
+  return best;
+}
+
+function planDeliveryStop(car) {
+  const origin = getCarRoadTile(car) || findRoadSpawn();
+  if (!origin || !buildings.length) return null;
+
+  let best = null;
+  let bestScore = -Infinity;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const candidate = getDeliveryStopPlanForBuilding(pick(buildings));
+    if (!candidate) continue;
+    const roadDistance = getRoadDistanceBetweenTiles(origin, candidate.roadTile);
+    if (!Number.isFinite(roadDistance) || roadDistance < 6) continue;
+    const score = Math.min(roadDistance, 26) + rng() * 5 - distanceSq(candidate.stopPoint, candidate.doorPoint) / 520;
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
 function getEmergencyVehicleSpawn(type) {
   const building = getCivicBuildingForVehicleType(type);
   return building ? findRoadSpawnNearBuilding(building, countVehiclesByType(type)) || findRoadSpawn() : findRoadSpawn();
@@ -935,6 +1014,7 @@ function getActionCamIncidents() {
   if (emergencies.police) incidents.push({ id: 'police', label: 'Cam: Chase' });
   if (emergencies.medical) incidents.push({ id: 'medical', label: 'Cam: Ambulance' });
   if (emergencies.fire) incidents.push({ id: 'fire', label: 'Cam: Fire' });
+  if (cars.some(car => car.vehicleType === 'delivery')) incidents.push({ id: 'delivery', label: 'Cam: Delivery' });
   if (civicRally.active) incidents.push({ id: 'rally', label: 'Cam: Rally' });
   if (getActiveGatheringTarget()) incidents.push({ id: 'gathering', label: 'Cam: Gathering' });
   return incidents;
@@ -996,11 +1076,217 @@ function syncActionCamButtons() {
   }
 }
 
+function signalContainsTile(signal, tx, ty) {
+  return !!signal && tx >= signal.minX && tx <= signal.maxX && ty >= signal.minY && ty <= signal.maxY && signal.tileKeys.has(`${tx},${ty}`);
+}
+
+function getTrafficLightActiveAxis(tl) {
+  if (tl.state.startsWith('horizontal')) return 'horizontal';
+  if (tl.state.startsWith('vertical')) return 'vertical';
+  return tl.nextGreenAxis || 'horizontal';
+}
+
+function getTrafficLightStateLabel(tl) {
+  switch (tl.state) {
+    case 'horizontal-green':
+      return 'east-west green';
+    case 'horizontal-amber':
+      return 'east-west amber';
+    case 'vertical-green':
+      return 'north-south green';
+    case 'vertical-amber':
+      return 'north-south amber';
+    default:
+      return `all red, ${tl.nextGreenAxis === 'vertical' ? 'north-south next' : 'east-west next'}`;
+  }
+}
+
+function isTrafficLightGreenForDir(tl, dir) {
+  return dir === 0 || dir === 2 ? tl.state === 'horizontal-green' : tl.state === 'vertical-green';
+}
+
+function setTrafficLightState(tl, state, nextGreenAxis = tl.nextGreenAxis || 'horizontal') {
+  tl.state = state;
+  tl.nextGreenAxis = nextGreenAxis;
+  tl.phaseAge = 0;
+  if (state.endsWith('green')) tl.timer = tl.maxGreen;
+  else if (state.endsWith('amber')) tl.timer = tl.amberDuration;
+  else tl.timer = tl.clearanceDuration;
+}
+
+function switchTrafficLightPhase(tl, nextAxis = null) {
+  const currentAxis = getTrafficLightActiveAxis(tl);
+  const targetAxis = nextAxis || (currentAxis === 'horizontal' ? 'vertical' : 'horizontal');
+  setTrafficLightState(tl, `${currentAxis}-amber`, targetAxis);
+}
+
+function buildTrafficLights() {
+  const signals = [];
+  const seen = new Set();
+  const key = (x, y) => `${x},${y}`;
+
+  for (let y = 0; y < MAP_H; y++) {
+    for (let x = 0; x < MAP_W; x++) {
+      if (map[y][x] !== T.ROAD_X || seen.has(key(x, y))) continue;
+
+      const queue = [{ x, y }];
+      const tiles = [];
+      seen.add(key(x, y));
+      let qi = 0;
+      let minX = x;
+      let maxX = x;
+      let minY = y;
+      let maxY = y;
+
+      while (qi < queue.length) {
+        const current = queue[qi++];
+        tiles.push(current);
+        minX = Math.min(minX, current.x);
+        maxX = Math.max(maxX, current.x);
+        minY = Math.min(minY, current.y);
+        maxY = Math.max(maxY, current.y);
+
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = current.x + dx;
+          const ny = current.y + dy;
+          const tileKey = key(nx, ny);
+          if (nx < 0 || nx >= MAP_W || ny < 0 || ny >= MAP_H || seen.has(tileKey) || map[ny][nx] !== T.ROAD_X) continue;
+          seen.add(tileKey);
+          queue.push({ x: nx, y: ny });
+        }
+      }
+
+      const centerX = ((minX + maxX + 1) * TILE) / 2;
+      const centerY = ((minY + maxY + 1) * TILE) / 2;
+      const phaseDuration = framesToSeconds(192);
+      const phaseAge = rng() * framesToSeconds(90);
+      signals.push({
+        x: centerX,
+        y: centerY,
+        state: rng() < 0.5 ? 'horizontal-green' : 'vertical-green',
+        timer: phaseDuration - Math.min(phaseAge, phaseDuration),
+        phaseAge,
+        minGreen: phaseDuration,
+        maxGreen: phaseDuration,
+        amberDuration: phaseDuration,
+        clearanceDuration: phaseDuration,
+        nextGreenAxis: rng() < 0.5 ? 'vertical' : 'horizontal',
+        minX,
+        maxX,
+        minY,
+        maxY,
+        tileKeys: new Set(tiles.map(tile => key(tile.x, tile.y))),
+        queueHorizontal: 0,
+        queueVertical: 0,
+        occupancy: 0,
+      });
+    }
+  }
+
+  return signals;
+}
+
+function getTrafficLightQueues(tl) {
+  let horizontal = 0;
+  let vertical = 0;
+  let occupancy = 0;
+
+  for (const car of cars) {
+    const anchor = getCarRoadTile(car);
+    if (!anchor) continue;
+
+    if (signalContainsTile(tl, anchor.x, anchor.y)) {
+      occupancy++;
+      continue;
+    }
+
+    if (anchor.y >= tl.minY && anchor.y <= tl.maxY) {
+      if (car.dir === 0 && anchor.x < tl.minX && tl.minX - anchor.x <= 4) horizontal++;
+      else if (car.dir === 2 && anchor.x > tl.maxX && anchor.x - tl.maxX <= 4) horizontal++;
+    }
+    if (anchor.x >= tl.minX && anchor.x <= tl.maxX) {
+      if (car.dir === 1 && anchor.y < tl.minY && tl.minY - anchor.y <= 4) vertical++;
+      else if (car.dir === 3 && anchor.y > tl.maxY && anchor.y - tl.maxY <= 4) vertical++;
+    }
+  }
+
+  return { horizontal, vertical, occupancy };
+}
+
+function updateTrafficLights(dtSec) {
+  for (const tl of trafficLights) {
+    tl.phaseAge += dtSec;
+    const queues = getTrafficLightQueues(tl);
+    tl.queueHorizontal = queues.horizontal;
+    tl.queueVertical = queues.vertical;
+    tl.occupancy = queues.occupancy;
+
+    if (tl.state.endsWith('green')) {
+      tl.timer = Math.max(0, tl.maxGreen - tl.phaseAge);
+      const currentAxis = getTrafficLightActiveAxis(tl);
+      const currentQueue = currentAxis === 'horizontal' ? queues.horizontal : queues.vertical;
+      const oppositeQueue = currentAxis === 'horizontal' ? queues.vertical : queues.horizontal;
+      const shouldSwitch = tl.phaseAge >= tl.minGreen && (
+        (oppositeQueue > 0 && currentQueue === 0) ||
+        (oppositeQueue > currentQueue + 1) ||
+        (tl.phaseAge >= tl.maxGreen && oppositeQueue > 0) ||
+        (tl.phaseAge >= tl.maxGreen * 1.35)
+      );
+
+      if (shouldSwitch) {
+        switchTrafficLightPhase(tl);
+      }
+      continue;
+    }
+
+    if (tl.state.endsWith('amber')) {
+      tl.timer = Math.max(0, tl.amberDuration - tl.phaseAge);
+      if (tl.phaseAge >= tl.amberDuration) {
+        setTrafficLightState(tl, 'all-red', tl.nextGreenAxis || (getTrafficLightActiveAxis(tl) === 'horizontal' ? 'vertical' : 'horizontal'));
+      }
+      continue;
+    }
+
+    tl.timer = Math.max(0, tl.clearanceDuration - tl.phaseAge);
+    if ((queues.occupancy === 0 && tl.phaseAge >= tl.clearanceDuration) || tl.phaseAge >= tl.clearanceDuration * 2.2) {
+      setTrafficLightState(tl, `${tl.nextGreenAxis}-green`, tl.nextGreenAxis === 'horizontal' ? 'vertical' : 'horizontal');
+    }
+  }
+}
+
+function getBlockingTrafficLight(car, anchor) {
+  if (!anchor || map[anchor.y]?.[anchor.x] === T.ROAD_X) return null;
+  if ((!car.waypoints || !car.waypoints.length) && !planCarWaypoints(car)) return null;
+  if (!Number.isInteger(car.pendingRoadTx) || !Number.isInteger(car.pendingRoadTy)) return null;
+
+  for (const tl of trafficLights) {
+    if (!signalContainsTile(tl, car.pendingRoadTx, car.pendingRoadTy)) continue;
+    if (isTrafficLightGreenForDir(tl, car.dir)) return null;
+    return tl;
+  }
+  return null;
+}
+
+function getTrafficLightStopDistance(tl, car) {
+  if (!tl || !car) return Infinity;
+  switch (car.dir) {
+    case 0:
+      return tl.minX * TILE - 6 - car.x;
+    case 1:
+      return tl.minY * TILE - 6 - car.y;
+    case 2:
+      return car.x - ((tl.maxX + 1) * TILE + 6);
+    default:
+      return car.y - ((tl.maxY + 1) * TILE + 6);
+  }
+}
+
 // ═══════════════════════════════════════════════════════
 // MAP GENERATION
 // ═══════════════════════════════════════════════════════
 function generateMap() {
   map = Array.from({ length: MAP_H }, () => new Uint8Array(MAP_W).fill(T.GRASS));
+  trafficLights = [];
 
   // Lay road grid — varying block sizes for organic feel
   const roadCols = [];
@@ -1045,20 +1331,11 @@ function generateMap() {
     }
   }
 
-  // Traffic lights at intersections
-  for (let y = 2; y < MAP_H - 2; y++) {
-    for (let x = 2; x < MAP_W - 2; x++) {
-      if (map[y][x] === T.ROAD_X) {
-        // Place traffic light near intersection
-        if (rng() < 0.3) {
-          trafficLights.push({ x: x * TILE + 8, y: y * TILE + 8, state: rng() < 0.5 ? 'red' : 'green', timer: randomDuration(120, 300) });
-        }
-      }
-    }
-  }
+  trafficLights = buildTrafficLights();
 
   // Place buildings in blocks
   placeBuildings(roadCols, roadRows);
+  assignCivicBuildings();
 
   // Scatter trees on remaining grass
   for (let y = 0; y < MAP_H; y++) {
@@ -1119,6 +1396,8 @@ function generateBuildingBrandName(mode) {
   if (mode === 'hospital') return 'HOSP';
   if (mode === 'police') return 'POLICE';
   if (mode === 'fire') return 'FIRE';
+  if (mode === 'car-sales') return 'AUTO';
+  if (mode === 'scrapyard') return 'SCRAP';
   if (mode === 'retail') return pick(['BODEGA', 'METRO', 'CAFE', 'MARKET', 'VIDEO', 'DINER', 'CORNER']);
   if (mode === 'residential') return '';
 
@@ -1208,16 +1487,13 @@ function placeBuildings(roadCols, roadRows) {
 
       if (bw >= 2 && bh >= 2 && canPlaceBuildingLot(x, y, bw, bh)) {
         carveBuildingWalkways(x, y, bw, bh);
-        const exits = findExitSides(x, y, bw, bh);
-        if (exits.length === 0) continue;
-
         const type = pick(['brick', 'office', 'shop', 'bank', 'house']);
         const building = {
           x: x * TILE, y: y * TILE,
           w: bw * TILE, h: bh * TILE,
           tw: bw, th: bh,
           type,
-          exitSide: pick(exits),
+          exitSide: 'bottom',
           roomTimer: randomDuration(80, 220),
           active: false, glowing: false, glowTimer: 0
         };
@@ -1255,6 +1531,8 @@ function assignCivicBuildings() {
   civicBuildings.hospital = null;
   civicBuildings.policeStation = null;
   civicBuildings.fireStation = null;
+  specialBuildings.carSales = null;
+  specialBuildings.scrapyard = null;
 
   const candidates = buildings.filter(building => building.tw >= 3 && building.th >= 2);
   const used = new Set();
@@ -1266,6 +1544,28 @@ function assignCivicBuildings() {
     if (!best) continue;
     used.add(best);
     applyCivicBuildingSpec(best, civicKey, spec);
+  }
+
+  const carSales = candidates
+    .filter(building => !used.has(building))
+    .sort((a, b) => scoreCivicBuildingCandidate(b, ['shop', 'office', 'bank']) - scoreCivicBuildingCandidate(a, ['shop', 'office', 'bank']))[0];
+  if (carSales) {
+    used.add(carSales);
+    applyBuildingVisualStyle(carSales, { type: 'car-sales', signText: 'AUTO', forceSign: true });
+    carSales.specialKey = 'carSales';
+    carSales.sceneRoad = null;
+    specialBuildings.carSales = carSales;
+  }
+
+  const scrapyard = candidates
+    .filter(building => !used.has(building))
+    .sort((a, b) => scoreCivicBuildingCandidate(b, ['brick', 'shop', 'office']) - scoreCivicBuildingCandidate(a, ['brick', 'shop', 'office']))[0];
+  if (scrapyard) {
+    used.add(scrapyard);
+    applyBuildingVisualStyle(scrapyard, { type: 'scrapyard', signText: 'SCRAP', forceSign: true });
+    scrapyard.specialKey = 'scrapyard';
+    scrapyard.sceneRoad = null;
+    specialBuildings.scrapyard = scrapyard;
   }
 }
 
@@ -1331,32 +1631,13 @@ function isWalkableTileForPerson(tx, ty) {
 }
 
 function getDoorRect(b) {
-  switch (b.exitSide) {
-    case 'top':
-      return { x: b.x + Math.floor(b.w / 2) - 2, y: b.y, w: 4, h: 4 };
-    case 'left':
-      return { x: b.x, y: b.y + Math.floor(b.h / 2) - 2, w: 4, h: 4 };
-    case 'right':
-      return { x: b.x + b.w - 4, y: b.y + Math.floor(b.h / 2) - 2, w: 4, h: 4 };
-    default:
-      return { x: b.x + Math.floor(b.w / 2) - 2, y: b.y + b.h - 5, w: 4, h: 5 };
-  }
+  return { x: b.x + Math.floor(b.w / 2) - 2, y: b.y + b.h - 5, w: 4, h: 5 };
 }
 
 function getDoorPoint(b) {
   const rect = getDoorRect(b);
   const cx = rect.x + Math.floor(rect.w / 2);
-  const cy = rect.y + Math.floor(rect.h / 2);
-  switch (b.exitSide) {
-    case 'top':
-      return { x: cx, y: rect.y - 2 };
-    case 'left':
-      return { x: rect.x - 2, y: cy };
-    case 'right':
-      return { x: rect.x + rect.w + 2, y: cy };
-    default:
-      return { x: cx, y: rect.y + rect.h + 2 };
-  }
+  return { x: cx, y: rect.y + rect.h + 2 };
 }
 
 function worldToTile(wx, wy) {
@@ -1545,24 +1826,67 @@ function getVerticalRoadBaseCol(tx, ty) {
   return tx;
 }
 
-function getLaneCenterForRoad(tx, ty, dir) {
+function clampLaneIndex(index) {
+  return index === 1 ? 1 : 0;
+}
+
+function getInnerLaneIndex() {
+  return 0;
+}
+
+function getOuterLaneIndex() {
+  return 1;
+}
+
+function pickPreferredLaneIndex(vehicleType = 'civilian') {
+  if (vehicleType === 'delivery') return getOuterLaneIndex();
+  if (vehicleType === 'police' || vehicleType === 'ambulance' || vehicleType === 'fire') {
+    return rng() < 0.6 ? getInnerLaneIndex() : getOuterLaneIndex();
+  }
+  return rng() < 0.3 ? getInnerLaneIndex() : getOuterLaneIndex();
+}
+
+function getDirectionalLaneOffset(dir, laneIndex = 0) {
+  const idx = clampLaneIndex(laneIndex);
+  if (dir === 0) return idx === 0 ? 5 : 11;
+  if (dir === 2) return idx === 0 ? 11 : 5;
+  if (dir === 1) return idx === 0 ? 5 : 11;
+  return idx === 0 ? 11 : 5;
+}
+
+function getLaneCenterForRoad(tx, ty, dir, laneIndex = 0) {
   if (dir === 0 || dir === 2) {
     const baseRow = getHorizontalRoadBaseRow(tx, ty);
+    const laneY = (dir === 0 ? baseRow + 1 : baseRow) * TILE + getDirectionalLaneOffset(dir, laneIndex);
     if (dir === 0) {
-      return { x: tx * TILE + 8, y: (baseRow + 1) * TILE + 4 };
+      return { x: tx * TILE + 8, y: laneY };
     }
-    return { x: tx * TILE + 8, y: baseRow * TILE + 12 };
+    return { x: tx * TILE + 8, y: laneY };
   }
 
   const baseCol = getVerticalRoadBaseCol(tx, ty);
+  const laneX = (dir === 1 ? baseCol + 1 : baseCol) * TILE + getDirectionalLaneOffset(dir, laneIndex);
   if (dir === 1) {
-    return { x: (baseCol + 1) * TILE + 4, y: ty * TILE + 8 };
+    return { x: laneX, y: ty * TILE + 8 };
   }
-  return { x: baseCol * TILE + 12, y: ty * TILE + 8 };
+  return { x: laneX, y: ty * TILE + 8 };
 }
 
 function getCarLaneDir(car) {
   return Number.isInteger(car.laneDir) ? car.laneDir : car.dir;
+}
+
+function getCarPreferredLaneIndex(car) {
+  return Number.isInteger(car.preferredLaneIndex) ? clampLaneIndex(car.preferredLaneIndex) : 0;
+}
+
+function getCarLaneIndex(car) {
+  if (Number.isInteger(car.laneIndex)) return clampLaneIndex(car.laneIndex);
+  return getCarPreferredLaneIndex(car);
+}
+
+function getAdjacentLaneIndex(laneIndex) {
+  return clampLaneIndex(laneIndex) === 0 ? 1 : 0;
 }
 
 function clearCarRoute(car) {
@@ -1577,29 +1901,37 @@ function clearCarWaypoints(car) {
   car.pendingRoadTy = null;
   car.pendingDir = null;
   car.pendingLaneDir = null;
+  car.pendingLaneIndex = null;
 }
 
 function getResponderPhase(car) {
   return car.mode === 'pursuit' || car.mode === 'intercept' || car.mode === 'medical-response' || car.mode === 'medical-arriving' || car.mode === 'fire-response' || car.mode === 'fire-arriving';
 }
 
-function canResponderOvertake(car, originTx, originTy) {
-  if (!getResponderPhase(car)) return false;
+function canUseAdjacentOvertakeLane(car, originTx, originTy) {
   const tile = map[originTy]?.[originTx];
   if (!(tile === T.ROAD_H || tile === T.ROAD_V)) return false;
-  const altLaneDir = (car.dir + 2) % 4;
-  const altLane = getLaneCenterForRoad(originTx, originTy, altLaneDir);
+  const altLaneIndex = getAdjacentLaneIndex(getCarPreferredLaneIndex(car));
+  const altLane = getLaneCenterForRoad(originTx, originTy, car.dir, altLaneIndex);
+  const carExtents = getCarHalfExtents(car);
   for (const other of cars) {
     if (other === car) continue;
+    const otherExtents = getCarHalfExtents(other);
     if (car.dir === 0 || car.dir === 2) {
-      if (Math.abs(other.y - altLane.y) > 2.5) continue;
+      const lateralLimit = carExtents.y + otherExtents.y + 0.7;
+      if (Math.abs(other.y - altLane.y) > lateralLimit) continue;
       const delta = car.dir === 0 ? other.x - car.x : car.x - other.x;
-      if (delta > -10 && delta < 64) return false;
+      const backClearance = carExtents.x + otherExtents.x + 2.5;
+      const frontClearance = carExtents.x + otherExtents.x + 16;
+      if (delta > -backClearance && delta < frontClearance) return false;
       continue;
     }
-    if (Math.abs(other.x - altLane.x) > 2.5) continue;
+    const lateralLimit = carExtents.x + otherExtents.x + 0.7;
+    if (Math.abs(other.x - altLane.x) > lateralLimit) continue;
     const delta = car.dir === 1 ? other.y - car.y : car.y - other.y;
-    if (delta > -10 && delta < 64) return false;
+    const backClearance = carExtents.y + otherExtents.y + 2.5;
+    const frontClearance = carExtents.y + otherExtents.y + 16;
+    if (delta > -backClearance && delta < frontClearance) return false;
   }
   return true;
 }
@@ -1640,21 +1972,21 @@ function getCarRouteNextTile(car, anchor, targetTile) {
   return car.routeTiles[routeIndex + 1];
 }
 
-function getIntersectionTurnWaypoint(tx, ty, fromDir, toDir) {
+function getIntersectionTurnWaypoint(tx, ty, fromDir, toDir, fromLaneIndex = 0, toLaneIndex = 0) {
   if (fromDir === toDir) return null;
   if (toDir === (fromDir + 2) % 4) {
-    return getLaneCenterForRoad(tx, ty, toDir);
+    return getLaneCenterForRoad(tx, ty, toDir, toLaneIndex);
   }
-  const entryLane = getLaneCenterForRoad(tx, ty, fromDir);
-  const exitLane = getLaneCenterForRoad(tx, ty, toDir);
+  const entryLane = getLaneCenterForRoad(tx, ty, fromDir, fromLaneIndex);
+  const exitLane = getLaneCenterForRoad(tx, ty, toDir, toLaneIndex);
   if (fromDir === 0 || fromDir === 2) {
     return { x: exitLane.x, y: entryLane.y };
   }
   return { x: entryLane.x, y: exitLane.y };
 }
 
-function makeCarWaypoint(x, y, exitDir, exitLaneDir, roadTx = null, roadTy = null) {
-  return { x, y, exitDir, exitLaneDir, roadTx, roadTy };
+function makeCarWaypoint(x, y, exitDir, exitLaneDir, exitLaneIndex, roadTx = null, roadTy = null) {
+  return { x, y, exitDir, exitLaneDir, exitLaneIndex, roadTx, roadTy };
 }
 
 function planCarWaypoints(car) {
@@ -1681,15 +2013,12 @@ function planCarWaypoints(car) {
     nextDir = chooseCarTurn(car, targetPoint, strategy, anchor.x, anchor.y);
   }
 
-  const currentLaneDir = getCarLaneDir(car);
-  let laneDir = currentLaneDir;
-  if (laneDir !== car.dir && (tile === T.ROAD_X || !getResponderPhase(car) || car.overtakeTimer <= 0)) {
-    laneDir = car.dir;
-    car.overtakeTimer = 0;
-  }
-
-  if (laneDir === car.dir && car.overtakeTimer > 0 && tile !== T.ROAD_X) {
-    laneDir = (car.dir + 2) % 4;
+  const laneDir = car.dir;
+  const preferredLaneIndex = getCarPreferredLaneIndex(car);
+  const currentLaneIndex = getCarLaneIndex(car);
+  let laneIndex = preferredLaneIndex;
+  if (car.overtakeTimer > 0 && tile !== T.ROAD_X && nextDir === car.dir) {
+    laneIndex = getAdjacentLaneIndex(preferredLaneIndex);
   }
 
   const [dx, dy] = [[1, 0], [0, 1], [-1, 0], [0, -1]][nextDir];
@@ -1700,22 +2029,24 @@ function planCarWaypoints(car) {
   }
 
   const points = [];
-  if (currentLaneDir !== laneDir) {
-    const lanePoint = getLaneCenterForRoad(anchor.x, anchor.y, laneDir);
-    points.push(makeCarWaypoint(lanePoint.x, lanePoint.y, car.dir, laneDir));
+  const laneShiftOnly = currentLaneIndex !== laneIndex && nextDir === car.dir;
+  if (currentLaneIndex !== laneIndex && !laneShiftOnly) {
+    const lanePoint = getLaneCenterForRoad(anchor.x, anchor.y, laneDir, laneIndex);
+    points.push(makeCarWaypoint(lanePoint.x, lanePoint.y, car.dir, laneDir, laneIndex));
   }
   if (nextDir !== car.dir) {
-    const turnPoint = getIntersectionTurnWaypoint(anchor.x, anchor.y, laneDir, nextDir);
-    if (turnPoint) points.push(makeCarWaypoint(turnPoint.x, turnPoint.y, nextDir, nextDir));
-    laneDir = nextDir;
+    const turnPoint = getIntersectionTurnWaypoint(anchor.x, anchor.y, laneDir, nextDir, laneIndex, preferredLaneIndex);
+    if (turnPoint) points.push(makeCarWaypoint(turnPoint.x, turnPoint.y, nextDir, nextDir, preferredLaneIndex));
+    laneIndex = preferredLaneIndex;
   }
-  const nextLanePoint = getLaneCenterForRoad(nextTx, nextTy, laneDir);
-  points.push(makeCarWaypoint(nextLanePoint.x, nextLanePoint.y, nextDir, laneDir, nextTx, nextTy));
+  const nextLanePoint = getLaneCenterForRoad(nextTx, nextTy, nextDir, laneIndex);
+  points.push(makeCarWaypoint(nextLanePoint.x, nextLanePoint.y, nextDir, nextDir, laneIndex, nextTx, nextTy));
   car.waypoints = points;
   car.pendingRoadTx = nextTx;
   car.pendingRoadTy = nextTy;
   car.pendingDir = nextDir;
-  car.pendingLaneDir = laneDir;
+  car.pendingLaneDir = nextDir;
+  car.pendingLaneIndex = laneIndex;
   return true;
 }
 
@@ -1738,6 +2069,7 @@ function advanceCarAlongRoad(car, distance) {
       car.waypoints.shift();
       if (Number.isInteger(target.exitDir)) car.dir = target.exitDir;
       if (Number.isInteger(target.exitLaneDir)) car.laneDir = target.exitLaneDir;
+      if (Number.isInteger(target.exitLaneIndex)) car.laneIndex = target.exitLaneIndex;
       if (Number.isInteger(target.roadTx) && Number.isInteger(target.roadTy)) {
         car.roadTx = target.roadTx;
         car.roadTy = target.roadTy;
@@ -1756,6 +2088,7 @@ function getVehicleColor(type, fallback = pick(PAL.car)) {
   if (type === 'police') return '#f3f3f0';
   if (type === 'ambulance') return '#f3f3f0';
   if (type === 'fire') return '#c5342d';
+  if (type === 'delivery') return pick(['#eadfca', '#d8c2a2', '#cfc7bc', '#e4d1ac']);
   if (type === 'hijacked') return '#2f2f34';
   return fallback;
 }
@@ -1764,24 +2097,35 @@ function getVehicleBaseSpeed(type, fallback = legacySpeed(0.3 + rng() * 0.4)) {
   if (type === 'police') return legacySpeed(0.46);
   if (type === 'ambulance') return legacySpeed(0.45);
   if (type === 'fire') return legacySpeed(0.42);
+  if (type === 'delivery') return legacySpeed(0.29 + rng() * 0.12);
   return fallback;
 }
 
+function getVehicleDefaultMode(type) {
+  if (type === 'civilian') return 'cruising';
+  if (type === 'delivery') return 'delivery-cruising';
+  return 'patrol';
+}
+
 function createCarAtRoad(tx, ty, dir, speed = legacySpeed(0.3 + rng() * 0.4), color = pick(PAL.car), vehicleType = 'civilian') {
-  const lane = getLaneCenterForRoad(tx, ty, dir);
+  const preferredLaneIndex = pickPreferredLaneIndex(vehicleType);
+  const lane = getLaneCenterForRoad(tx, ty, dir, preferredLaneIndex);
   const baseSpeed = getVehicleBaseSpeed(vehicleType, speed);
   return {
+    id: nextCarId++,
     x: lane.x,
     y: lane.y,
     roadTx: tx,
     roadTy: ty,
     dir,
     laneDir: dir,
+    preferredLaneIndex,
+    laneIndex: preferredLaneIndex,
     speed: baseSpeed,
     baseSpeed,
     color: getVehicleColor(vehicleType, color),
     vehicleType,
-    mode: vehicleType === 'civilian' ? 'cruising' : 'patrol',
+    mode: getVehicleDefaultMode(vehicleType),
     waiting: 0,
     stopped: false,
     stopReason: null,
@@ -1793,6 +2137,7 @@ function createCarAtRoad(tx, ty, dir, speed = legacySpeed(0.3 + rng() * 0.4), co
     pendingRoadTy: null,
     pendingDir: null,
     pendingLaneDir: null,
+    pendingLaneIndex: null,
     routeTiles: null,
     routeGoalKey: null,
     routeRefreshTimer: 0,
@@ -1801,64 +2146,109 @@ function createCarAtRoad(tx, ty, dir, speed = legacySpeed(0.3 + rng() * 0.4), co
     incidentId: null,
     eventTimer: 0,
     boostTimer: 0,
+    mood: clamp((rng() - 0.5) * 0.7, -0.3, 0.35),
+    moodTarget: clamp((rng() - 0.5) * 0.9, -0.4, 0.45),
+    moodTimer: randomDuration(320, 840),
+    temperament: 0.7 + rng() * 0.8,
+    deliveryPlan: null,
+    deliveryTimer: vehicleType === 'delivery' ? randomDuration(480, 1080) : 0,
     sirenKind: null,
     sirenEmitter: null,
     flashPhase: rngInt(0, 60),
   };
 }
 
+function updateCarMood(car, dtSec) {
+  car.moodTimer = Math.max(0, (car.moodTimer || 0) - dtSec);
+  if (car.moodTimer <= 0) {
+    const baseBias = car.vehicleType === 'delivery' ? 0.03 : car.vehicleType === 'hijacked' ? 0.3 : 0;
+    car.moodTarget = clamp(baseBias + (rng() - 0.5) * 1.05, -0.45, 0.5);
+    car.moodTimer = randomDuration(260, 900);
+  }
+  if (!Number.isFinite(car.mood)) car.mood = 0;
+  car.mood += ((car.moodTarget || 0) - car.mood) * legacyBlend(0.07 * (car.temperament || 1), dtSec);
+}
+
+function getCarLaneSpeedBonus(car) {
+  return getCarLaneIndex(car) === getInnerLaneIndex() ? legacySpeed(0.04) : 0;
+}
+
+function getCarMoodSpeedBonus(car, baseSpeed) {
+  const mood = clamp(car.mood || 0, -0.45, 0.5);
+  return baseSpeed * mood * 0.16;
+}
+
 function getCarDesiredSpeed(car) {
   const base = Number.isFinite(car.baseSpeed) ? car.baseSpeed : legacySpeed(0.42);
+  let desired;
   switch (car.mode) {
     case 'pull-over':
     case 'medical-on-scene':
     case 'fire-on-scene':
+    case 'delivery-stopped':
       return 0;
     case 'escape':
-      return legacySpeed(0.72);
+      desired = legacySpeed(0.72);
+      break;
     case 'pursuit':
-      return legacySpeed(0.78);
+      desired = legacySpeed(0.92);
+      break;
     case 'medical-response':
-      return legacySpeed(0.74);
+      desired = legacySpeed(0.74);
+      break;
     case 'medical-arriving':
-      return legacySpeed(0.42);
+      desired = legacySpeed(0.42);
+      break;
     case 'medical-departing':
-      return legacySpeed(0.48);
+      desired = legacySpeed(0.48);
+      break;
     case 'service-return':
-      return legacySpeed(0.46);
+      desired = legacySpeed(0.46);
+      break;
     case 'fire-response':
-      return legacySpeed(0.68);
+      desired = legacySpeed(0.68);
+      break;
     case 'fire-arriving':
-      return legacySpeed(0.4);
+      desired = legacySpeed(0.4);
+      break;
     case 'intercept':
-      return legacySpeed(0.48);
+      desired = legacySpeed(0.84);
+      break;
+    case 'delivery-arriving':
+      desired = Math.max(base, legacySpeed(0.34));
+      break;
     default:
-      return base;
+      desired = base;
+      break;
   }
+  if (desired <= 0) return 0;
+  return Math.max(0, desired + getCarLaneSpeedBonus(car) + getCarMoodSpeedBonus(car, desired));
 }
 
 function getCarSpeedCap(car) {
+  const laneBonus = getCarLaneIndex(car) === getInnerLaneIndex() ? legacySpeed(0.04) : 0;
+  const moodBonus = Math.max(0, getCarMoodSpeedBonus(car, Number.isFinite(car.baseSpeed) ? car.baseSpeed : legacySpeed(0.42)));
   switch (car.mode) {
     case 'escape':
-      return legacySpeed(0.82);
+      return legacySpeed(0.82) + laneBonus + moodBonus;
     case 'pursuit':
-      return legacySpeed(0.86);
+      return legacySpeed(1.02) + laneBonus + moodBonus;
     case 'medical-response':
-      return legacySpeed(0.8);
+      return legacySpeed(0.8) + laneBonus + moodBonus;
     case 'medical-arriving':
-      return legacySpeed(0.52);
+      return legacySpeed(0.52) + laneBonus + moodBonus;
     case 'medical-departing':
-      return legacySpeed(0.6);
+      return legacySpeed(0.6) + laneBonus + moodBonus;
     case 'service-return':
-      return legacySpeed(0.58);
+      return legacySpeed(0.58) + laneBonus + moodBonus;
     case 'fire-response':
-      return legacySpeed(0.76);
+      return legacySpeed(0.76) + laneBonus + moodBonus;
     case 'fire-arriving':
-      return legacySpeed(0.5);
+      return legacySpeed(0.5) + laneBonus + moodBonus;
     case 'intercept':
-      return legacySpeed(0.56);
+      return legacySpeed(0.94) + laneBonus + moodBonus;
     default:
-      return legacySpeed(0.66);
+      return legacySpeed(0.66) + laneBonus + moodBonus;
   }
 }
 
@@ -1866,6 +2256,7 @@ function normalizeCarSpeed(car, dtSec) {
   if (!Number.isFinite(car.baseSpeed)) {
     car.baseSpeed = getVehicleBaseSpeed(car.vehicleType || 'civilian', legacySpeed(0.42));
   }
+  updateCarMood(car, dtSec);
   const boost = car.boostTimer > 0 ? legacySpeed(0.12) : 0;
   const desired = getCarDesiredSpeed(car) + boost;
   if (!Number.isFinite(car.speed)) {
@@ -2002,7 +2393,11 @@ function getPersonRouteArrivalRadius(purpose) {
       return 6;
     case 'police-officer':
     case 'perp':
+    case 'delivery-rear':
+    case 'delivery-cab':
       return 5;
+    case 'delivery-door':
+      return 4.5;
     default:
       return 5.5;
   }
@@ -2558,6 +2953,23 @@ function planPersonGoal(person) {
 }
 
 function onPersonPathArrival(person) {
+  if (person.purpose === 'delivery-door') {
+    person.state = 'idle';
+    person.stateTimer = framesToSeconds(60);
+    person.path = null;
+    person.pathIndex = 0;
+    effects.push({ x: person.x, y: person.y - 6, type: 'door', age: 0, maxAge: 18 });
+    return;
+  }
+
+  if (person.purpose === 'delivery-rear' || person.purpose === 'delivery-cab') {
+    person.state = 'idle';
+    person.stateTimer = framesToSeconds(45);
+    person.path = null;
+    person.pathIndex = 0;
+    return;
+  }
+
   if (person.purpose === 'run-errand' && person.goalBuilding) {
     person.state = 'inside';
     person.stateTimer = randomDuration(120, 260);
@@ -2667,25 +3079,190 @@ function canDriveDirection(tx, ty, dir) {
 
 function getQueuedCarDistance(car) {
   let best = Infinity;
+  const laneIndex = getCarLaneIndex(car);
   for (const other of cars) {
-    if (other === car || other.dir !== car.dir) continue;
+    if (other === car || other.dir !== car.dir || getCarLaneIndex(other) !== laneIndex) continue;
     if (car.dir === 0 || car.dir === 2) {
-      if (Math.abs(other.y - car.y) > 2) continue;
+      const lateralLimit = getCarHalfExtents(car).y + getCarHalfExtents(other).y + 0.6;
+      if (Math.abs(other.y - car.y) > lateralLimit) continue;
       const delta = car.dir === 0 ? other.x - car.x : car.x - other.x;
-      if (delta > 0 && delta < best) best = delta;
+      const edgeGap = delta - getCarHalfExtents(car).x - getCarHalfExtents(other).x;
+      if (edgeGap > 0 && edgeGap < best) best = edgeGap;
       continue;
     }
-    if (Math.abs(other.x - car.x) > 2) continue;
+    const lateralLimit = getCarHalfExtents(car).x + getCarHalfExtents(other).x + 0.6;
+    if (Math.abs(other.x - car.x) > lateralLimit) continue;
     const delta = car.dir === 1 ? other.y - car.y : car.y - other.y;
-    if (delta > 0 && delta < best) best = delta;
+    const edgeGap = delta - getCarHalfExtents(car).y - getCarHalfExtents(other).y;
+    if (edgeGap > 0 && edgeGap < best) best = edgeGap;
   }
   return best;
 }
 
+function getCarHalfExtents(car, dir = car.dir) {
+  const delivery = car.vehicleType === 'delivery';
+  if (dir === 0 || dir === 2) {
+    return delivery ? { x: 5.2, y: 3.1 } : { x: 4.2, y: 2.7 };
+  }
+  return delivery ? { x: 3.1, y: 5.2 } : { x: 2.7, y: 4.2 };
+}
+
+function carsOverlapAtPoints(firstCar, firstPoint, secondCar, secondPoint) {
+  const firstExtents = getCarHalfExtents(firstCar);
+  const secondExtents = getCarHalfExtents(secondCar);
+  return Math.abs(firstPoint.x - secondPoint.x) < firstExtents.x + secondExtents.x - 0.2 &&
+    Math.abs(firstPoint.y - secondPoint.y) < firstExtents.y + secondExtents.y - 0.2;
+}
+
+function isCarInIntersection(car) {
+  const anchor = getCarAnchorTile(car);
+  return !!anchor && map[anchor.y]?.[anchor.x] === T.ROAD_X;
+}
+
+function getTrafficPriorityScore(car) {
+  let score = 0;
+  if (getResponderPhase(car)) score += 100;
+  if (car.vehicleType === 'police' || car.vehicleType === 'ambulance' || car.vehicleType === 'fire') score += 40;
+  if (isCarInIntersection(car)) score += 20;
+  score += Math.min(20, Math.floor((car.waiting || 0) / framesToSeconds(15)));
+  return score;
+}
+
+function carHasConflictPriority(car, other) {
+  if (!other) return true;
+  if (other.stopReason === 'scene' || other.mode === 'delivery-stopped') return false;
+
+  const carScore = getTrafficPriorityScore(car);
+  const otherScore = getTrafficPriorityScore(other);
+  if (carScore !== otherScore) return carScore > otherScore;
+
+  const carWaiting = car.waiting || 0;
+  const otherWaiting = other.waiting || 0;
+  if (Math.abs(carWaiting - otherWaiting) > framesToSeconds(12)) {
+    return carWaiting > otherWaiting;
+  }
+
+  return (car.id || 0) < (other.id || 0);
+}
+
+function compareCarMovementOrder(first, second) {
+  if (first === second) return 0;
+  const firstScore = getTrafficPriorityScore(first);
+  const secondScore = getTrafficPriorityScore(second);
+  if (firstScore !== secondScore) return secondScore - firstScore;
+
+  const firstWaiting = first.waiting || 0;
+  const secondWaiting = second.waiting || 0;
+  if (Math.abs(firstWaiting - secondWaiting) > framesToSeconds(4)) {
+    return secondWaiting - firstWaiting;
+  }
+
+  return (first.id || 0) - (second.id || 0);
+}
+
+function getRoadTileKey(tx, ty) {
+  return `${tx},${ty}`;
+}
+
+function getPendingIntersectionKey(car, anchor) {
+  if (!anchor) return null;
+  if ((!car.waypoints || !car.waypoints.length) && !planCarWaypoints(car)) return null;
+  if (!Number.isInteger(car.pendingRoadTx) || !Number.isInteger(car.pendingRoadTy)) return null;
+  if (map[anchor.y]?.[anchor.x] === T.ROAD_X) return null;
+  return map[car.pendingRoadTy]?.[car.pendingRoadTx] === T.ROAD_X ? getRoadTileKey(car.pendingRoadTx, car.pendingRoadTy) : null;
+}
+
+function resolveCarOverlaps() {
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < cars.length; i++) {
+      const first = cars[i];
+      for (let j = i + 1; j < cars.length; j++) {
+        const second = cars[j];
+        if (!carsOverlapAtPoints(first, first, second, second)) continue;
+        const favored = carHasConflictPriority(first, second) ? first : second;
+        const displaced = favored === first ? second : first;
+        const displacedExtents = getCarHalfExtents(displaced);
+        const favoredExtents = getCarHalfExtents(favored);
+        let push = 1.6;
+        if (displaced.dir === 0 || displaced.dir === 2) {
+          const overlap = displacedExtents.x + favoredExtents.x - Math.abs(displaced.x - favored.x);
+          push = Math.max(push, overlap + 0.8);
+          if (displaced.dir === 0) displaced.x -= push;
+          else displaced.x += push;
+        } else {
+          const overlap = displacedExtents.y + favoredExtents.y - Math.abs(displaced.y - favored.y);
+          push = Math.max(push, overlap + 0.8);
+          if (displaced.dir === 1) displaced.y -= push;
+          else displaced.y += push;
+        }
+        displaced.stopped = true;
+        displaced.stopReason = 'traffic';
+        displaced.waiting = Math.max(displaced.waiting || 0, framesToSeconds(6));
+        clearCarWaypoints(displaced);
+      }
+    }
+  }
+}
+
+function getProjectedCarPoint(car, distance) {
+  if (distance <= 0) return { x: car.x, y: car.y };
+  if ((!car.waypoints || !car.waypoints.length) && !planCarWaypoints(car)) {
+    return { x: car.x, y: car.y };
+  }
+
+  let px = car.x;
+  let py = car.y;
+  let remaining = distance;
+  for (const target of car.waypoints || []) {
+    if (remaining <= 0.0001) break;
+    const dx = target.x - px;
+    const dy = target.y - py;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist <= remaining + 0.0001) {
+      px = target.x;
+      py = target.y;
+      remaining -= dist;
+      continue;
+    }
+    px += dx / dist * remaining;
+    py += dy / dist * remaining;
+    remaining = 0;
+  }
+  return { x: px, y: py };
+}
+
+function getProjectedCarConflict(car, travel) {
+  if (!(travel > 0.0001)) return null;
+  const sampleCount = Math.max(2, Math.min(6, Math.ceil(travel / 3.5)));
+  let bestDistance = Infinity;
+  let bestOther = null;
+
+  for (let sample = 1; sample <= sampleCount; sample++) {
+    const sampleDistance = travel * (sample / sampleCount);
+    const projectedPoint = getProjectedCarPoint(car, sampleDistance);
+    for (const other of cars) {
+      if (other === car) continue;
+      if (carsOverlapAtPoints(car, projectedPoint, other, other)) {
+        if (carHasConflictPriority(car, other)) continue;
+        if (sampleDistance < bestDistance) {
+          bestDistance = sampleDistance;
+          bestOther = other;
+        }
+      }
+    }
+  }
+
+  if (!Number.isFinite(bestDistance)) return null;
+  return {
+    other: bestOther,
+    safeDistance: Math.max(0, bestDistance - Math.max(0.8, travel / sampleCount)),
+  };
+}
+
 function getCarSafeGap(car) {
-  if (car.mode === 'intercept' && car.targetCar) return 4.5;
-  if (car.mode === 'pursuit' && car.targetCar) return 6.5;
-  return 10;
+  if (car.mode === 'intercept' && car.targetCar) return 0.8;
+  if (car.mode === 'pursuit' && car.targetCar) return 1.2;
+  return car.vehicleType === 'delivery' ? 2.8 : 2.2;
 }
 
 function getCarSteeringIntent(car) {
@@ -2701,7 +3278,7 @@ function getCarSteeringIntent(car) {
     targetPoint = { x: car.targetCar.x, y: car.targetCar.y };
     targetTile = getCarRoadTile(car.targetCar);
     useRoute = true;
-  } else if ((car.mode === 'pursuit' || car.mode === 'intercept' || car.mode === 'medical-response' || car.mode === 'medical-arriving' || car.mode === 'medical-departing' || car.mode === 'fire-response' || car.mode === 'fire-arriving' || car.mode === 'service-return' || (car.mode === 'patrol' && car.targetPoint)) && car.targetPoint) {
+  } else if ((car.mode === 'pursuit' || car.mode === 'intercept' || car.mode === 'medical-response' || car.mode === 'medical-arriving' || car.mode === 'medical-departing' || car.mode === 'fire-response' || car.mode === 'fire-arriving' || car.mode === 'service-return' || car.mode === 'delivery-arriving' || (car.mode === 'patrol' && car.targetPoint)) && car.targetPoint) {
     strategy = 'toward';
     targetPoint = car.targetPoint;
     targetTile = findNearestRoad(targetPoint.x, targetPoint.y);
@@ -2819,6 +3396,211 @@ function getVehicleDoorPoint(car, side = 1, foreOffset = 0) {
   }
 }
 
+function getVehicleSideTowardPoint(car, point) {
+  const rightSide = getVehicleDoorPoint(car, 1);
+  const leftSide = getVehicleDoorPoint(car, -1);
+  return distanceSq(rightSide, point) <= distanceSq(leftSide, point) ? 1 : -1;
+}
+
+function getDeliveryRearAccessPoint(car, point) {
+  const side = getVehicleSideTowardPoint(car, point);
+  const lateral = 5 * side;
+  switch (car.dir) {
+    case 0:
+      return { x: car.x - 8, y: car.y + lateral };
+    case 2:
+      return { x: car.x + 8, y: car.y - lateral };
+    case 1:
+      return { x: car.x - lateral, y: car.y - 8 };
+    default:
+      return { x: car.x + lateral, y: car.y + 8 };
+  }
+}
+
+function getDeliveryCabPoint(car, point) {
+  return getVehicleDoorPoint(car, getVehicleSideTowardPoint(car, point), 1);
+}
+
+function getDeliveryDriver(car) {
+  const driverId = car.deliveryPlan?.driverId;
+  return Number.isInteger(driverId) ? people.find(person => person.id === driverId) || null : null;
+}
+
+function resetDeliveryCruise(car) {
+  const driver = getDeliveryDriver(car);
+  if (driver && driver.tempActor) removeTemporaryPerson(driver);
+  car.deliveryPlan = null;
+  car.mode = 'delivery-cruising';
+  car.targetPoint = null;
+  car.deliveryTimer = randomDuration(720, 1440);
+  car.stopped = false;
+  car.stopReason = null;
+  clearCarWaypoints(car);
+  clearCarRoute(car);
+}
+
+function routeDeliveryDriver(driver, point, purpose, stateTimer = framesToSeconds(1200)) {
+  if (!driver || !point) return false;
+  return assignPersonRoute(driver, point, purpose, {
+    state: 'walking',
+    targetPoint: point,
+    arrivalRadius: purpose === 'delivery-door' ? 4.5 : 5,
+    stateTimer,
+  });
+}
+
+function updateDeliveryVehicle(car, dtSec, anchor) {
+  if (car.vehicleType !== 'delivery' || car.incidentId) return false;
+
+  car.deliveryTimer = Math.max(0, (car.deliveryTimer || 0) - dtSec);
+
+  if (car.mode === 'delivery-cruising') {
+    if (!car.deliveryPlan && car.deliveryTimer <= 0) {
+      const plan = planDeliveryStop(car);
+      if (plan) {
+        car.deliveryPlan = plan;
+        car.mode = 'delivery-arriving';
+        car.targetPoint = plan.stopPoint;
+        car.preferredLaneIndex = plan.laneIndex;
+        clearCarWaypoints(car);
+        clearCarRoute(car);
+      } else {
+        car.deliveryTimer = randomDuration(360, 720);
+      }
+    }
+    return false;
+  }
+
+  const plan = car.deliveryPlan;
+  if (!plan) {
+    resetDeliveryCruise(car);
+    return false;
+  }
+
+  car.preferredLaneIndex = plan.laneIndex;
+
+  if (car.mode === 'delivery-arriving') {
+    car.targetPoint = plan.stopPoint;
+    const nearStopRoad = anchor && getRoadDistanceBetweenTiles(anchor, plan.roadTile) <= 1 && distanceSq(car, plan.stopPoint) < 26 * 26;
+    if (nearStopRoad) {
+      const dx = plan.stopPoint.x - car.x;
+      const dy = plan.stopPoint.y - car.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      car.dir = plan.stopDir;
+      car.laneDir = plan.stopDir;
+      car.laneIndex = plan.laneIndex;
+      if (dist <= 2.2) {
+        car.x = plan.stopPoint.x;
+        car.y = plan.stopPoint.y;
+        car.mode = 'delivery-stopped';
+        car.targetPoint = null;
+        car.stopped = true;
+        car.stopReason = 'delivery';
+        car.speed = 0;
+        plan.phase = 'exit-cab';
+        plan.phaseTimer = framesToSeconds(18);
+        clearCarWaypoints(car);
+        clearCarRoute(car);
+      } else {
+        const step = Math.min(car.speed * dtSec, dist);
+        car.x += dx / dist * step;
+        car.y += dy / dist * step;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  if (car.mode !== 'delivery-stopped') return false;
+
+  car.targetPoint = null;
+  car.stopped = true;
+  car.stopReason = 'delivery';
+  car.speed = 0;
+
+  let driver = getDeliveryDriver(car);
+  if (!driver && plan.phase !== 'exit-cab') {
+    plan.phase = 'exit-cab';
+    plan.phaseTimer = framesToSeconds(18);
+  }
+
+  const rearPoint = getDeliveryRearAccessPoint(car, plan.doorPoint);
+  const cabPoint = getDeliveryCabPoint(car, plan.doorPoint);
+
+  switch (plan.phase) {
+    case 'exit-cab': {
+      plan.phaseTimer -= dtSec;
+      if (plan.phaseTimer > 0) return true;
+      driver = createPerson(cabPoint.x, cabPoint.y, {
+        shirt: pick(['#6d4c41', '#455a64', '#7a5b3e']),
+        state: 'walking',
+        purpose: 'delivery-cab',
+        stateTimer: framesToSeconds(1400),
+        tempActor: true,
+      });
+      people.push(driver);
+      plan.driverId = driver.id;
+      if (!routeDeliveryDriver(driver, rearPoint, 'delivery-rear')) {
+        driver.x = rearPoint.x;
+        driver.y = rearPoint.y;
+        driver.state = 'idle';
+      }
+      plan.phase = 'to-rear';
+      return true;
+    }
+    case 'to-rear':
+      if (driver && !driver.path && distanceSq(driver, rearPoint) < 6 * 6) {
+        driver.state = 'idle';
+        driver.stateTimer = framesToSeconds(55);
+        plan.phase = 'unloading';
+        plan.phaseTimer = framesToSeconds(55);
+        effects.push({ x: rearPoint.x, y: rearPoint.y - 6, type: 'click', age: 0, maxAge: 18 });
+      }
+      return true;
+    case 'unloading':
+      plan.phaseTimer -= dtSec;
+      if (plan.phaseTimer <= 0 && driver) {
+        routeDeliveryDriver(driver, plan.doorPoint, 'delivery-door');
+        plan.phase = 'to-door';
+      }
+      return true;
+    case 'to-door':
+      if (driver && !driver.path && distanceSq(driver, plan.doorPoint) < 6 * 6) {
+        driver.state = 'idle';
+        driver.stateTimer = framesToSeconds(70);
+        plan.phase = 'dropoff';
+        plan.phaseTimer = framesToSeconds(75);
+        effects.push({ x: plan.doorPoint.x, y: plan.doorPoint.y, type: 'door', age: 0, maxAge: 20 });
+      }
+      return true;
+    case 'dropoff':
+      plan.phaseTimer -= dtSec;
+      if (plan.phaseTimer <= 0 && driver) {
+        routeDeliveryDriver(driver, rearPoint, 'delivery-rear');
+        plan.phase = 'to-rear-return';
+      }
+      return true;
+    case 'to-rear-return':
+      if (driver && !driver.path && distanceSq(driver, rearPoint) < 6 * 6) {
+        driver.state = 'idle';
+        driver.stateTimer = framesToSeconds(40);
+        routeDeliveryDriver(driver, cabPoint, 'delivery-cab');
+        plan.phase = 'to-cab';
+      }
+      return true;
+    case 'to-cab':
+      if (driver && !driver.path && distanceSq(driver, cabPoint) < 6 * 6) {
+        removeTemporaryPerson(driver);
+        resetDeliveryCruise(car);
+      }
+      return true;
+    default:
+      plan.phase = 'exit-cab';
+      plan.phaseTimer = framesToSeconds(18);
+      return true;
+  }
+}
+
 function getPoliceEscortPoint(policeCar) {
   return getVehicleDoorPoint(policeCar, 1, 2);
 }
@@ -2862,6 +3644,58 @@ function removeTemporaryPerson(person) {
   if (index >= 0) people.splice(index, 1);
 }
 
+function removeCarFromWorld(car) {
+  if (!car) return false;
+  for (const other of cars) {
+    if (other.targetCar === car) other.targetCar = null;
+  }
+  if (car.sirenEmitter) {
+    removeAudioEmitter(car.sirenEmitter);
+    car.sirenEmitter = null;
+  }
+  if (car.deliveryPlan) {
+    const driver = getDeliveryDriver(car);
+    if (driver && driver.tempActor) removeTemporaryPerson(driver);
+    car.deliveryPlan = null;
+  }
+  const index = cars.indexOf(car);
+  if (index < 0) return false;
+  cars.splice(index, 1);
+  return true;
+}
+
+function pickCarSaleVehicleType() {
+  return pick(['civilian', 'delivery', 'police', 'ambulance', 'fire']);
+}
+
+function spawnCarForSale(building) {
+  const vehicleType = pickCarSaleVehicleType();
+  const spawn = findRoadSpawnNearBuilding(building, countVehiclesByType(vehicleType));
+  if (!spawn) return null;
+  const dir = pickDirectionForRoadTile(map[spawn.y][spawn.x]);
+  const car = createCarAtRoad(spawn.x, spawn.y, dir, undefined, undefined, vehicleType);
+  car.boostTimer = framesToSeconds(45);
+  car.eventTimer = framesToSeconds(180);
+  cars.push(car);
+  return car;
+}
+
+function findNearestScrappableCar(building) {
+  if (!building || !cars.length) return null;
+  const anchor = getBuildingServiceStagePoint(building);
+  let best = null;
+  let bestDist = Infinity;
+  for (const car of cars) {
+    if (car.incidentId) continue;
+    const dist = distanceSq(car, anchor);
+    if (dist < bestDist) {
+      best = car;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
 function resumePoliceCars(incident) {
   const { suspectCar, policeCar } = incident;
   if (suspectCar) {
@@ -2896,10 +3730,11 @@ function resumePoliceCars(incident) {
 
 function beginPoliceArrestSequence(incident) {
   const { policeCar, suspectCar } = incident;
-  if (!policeCar || !suspectCar || incident.phase === 'vehicle-stop' || incident.phase === 'officer-approach' || incident.phase === 'escorting' || incident.phase === 'boarding') return;
+  if (!policeCar || !suspectCar || incident.phase === 'vehicle-stop' || incident.phase === 'officer-approach' || incident.phase === 'escorting' || incident.phase === 'rights-read' || incident.phase === 'boarding') return;
 
   incident.phase = 'vehicle-stop';
   incident.phaseTimer = framesToSeconds(40);
+  incident.rightsFxTimer = 0;
   policeCar.mode = 'pull-over';
   policeCar.stopped = true;
   policeCar.stopReason = 'scene';
@@ -3006,6 +3841,7 @@ function tryStartPoliceIncident() {
     timer: framesToSeconds(1380),
     phase: 'dispatch',
     phaseTimer: 0,
+    rightsFxTimer: 0,
     suspectCar,
     policeCar,
     hijacker,
@@ -3070,7 +3906,7 @@ function updatePoliceIncident(dtSec) {
   if ((incident.phase === 'chase' || incident.phase === 'dispatch') && chaseDistance < 44) {
     incident.phase = 'intercept';
     policeCar.mode = 'intercept';
-  } else if (!['vehicle-stop', 'officer-approach', 'escorting', 'boarding', 'arrest'].includes(incident.phase)) {
+  } else if (!['vehicle-stop', 'officer-approach', 'escorting', 'rights-read', 'boarding', 'arrest'].includes(incident.phase)) {
     policeCar.mode = 'pursuit';
   }
 
@@ -3134,6 +3970,38 @@ function updatePoliceIncident(dtSec) {
     const perpReady = distanceSq(incident.hijacker, escortPoint) < 12 * 12;
     const officerReady = distanceSq(incident.officer, escortPoint) < 12 * 12;
     if ((perpReady && officerReady) || incident.phaseTimer <= 0) {
+      incident.phase = 'rights-read';
+      incident.phaseTimer = framesToSeconds(150);
+      incident.rightsFxTimer = 0;
+      incident.hijacker.state = 'idle';
+      incident.hijacker.stateTimer = framesToSeconds(160);
+      incident.hijacker.dx = 0;
+      incident.hijacker.dy = 0;
+      clearPersonRoute(incident.hijacker);
+      incident.officer.state = 'idle';
+      incident.officer.stateTimer = framesToSeconds(160);
+      incident.officer.dx = 0;
+      incident.officer.dy = 0;
+      clearPersonRoute(incident.officer);
+      effects.push({ x: escortPoint.x, y: escortPoint.y - 10, type: 'rights', age: 0, maxAge: 44, emoji: '⚖' });
+    }
+  } else if (incident.phase === 'rights-read') {
+    const center = incident.officer && incident.hijacker
+      ? { x: (incident.officer.x + incident.hijacker.x) / 2, y: (incident.officer.y + incident.hijacker.y) / 2 }
+      : getPoliceEscortPoint(policeCar);
+    incident.rightsFxTimer = Math.max(0, (incident.rightsFxTimer || 0) - dtSec);
+    if (incident.rightsFxTimer <= 0) {
+      incident.rightsFxTimer = framesToSeconds(28);
+      effects.push({
+        x: center.x + (rng() - 0.5) * 8,
+        y: center.y - 12 + (rng() - 0.5) * 4,
+        type: 'rights',
+        age: 0,
+        maxAge: 42,
+        emoji: rng() < 0.5 ? '⚖' : '📜'
+      });
+    }
+    if (incident.phaseTimer <= 0) {
       incident.phase = 'boarding';
       incident.phaseTimer = framesToSeconds(90);
       incident.hijacker.state = 'inside';
@@ -3142,7 +4010,7 @@ function updatePoliceIncident(dtSec) {
       incident.officer.state = 'inside';
       incident.officer.stateTimer = framesToSeconds(1200);
       incident.officer.purpose = 'police-officer';
-      effects.push({ x: escortPoint.x, y: escortPoint.y, type: 'door', age: 0, maxAge: 24 });
+      effects.push({ x: center.x, y: center.y, type: 'door', age: 0, maxAge: 24 });
     }
   } else if (incident.phase === 'boarding') {
     if (incident.phaseTimer <= 0) {
@@ -3260,11 +4128,12 @@ function updateMedicalIncident(dtSec) {
   if (incident.phase === 'dispatch' || incident.phase === 'arriving') {
     ambulance.targetPoint = { x: patient.x, y: patient.y };
     const distSqToPatient = distanceSq(ambulance, patient);
+    const reachedPatientRoad = isCarNearTargetRoad(ambulance, patient, 1, 40);
     if (incident.phase === 'dispatch' && distSqToPatient < 120 * 120) {
       incident.phase = 'arriving';
       ambulance.mode = 'medical-arriving';
     }
-    if (distSqToPatient < 24 * 24 || incident.timer <= framesToSeconds(1100)) {
+    if (distSqToPatient < 24 * 24 || reachedPatientRoad || incident.timer <= framesToSeconds(1100)) {
       incident.phase = 'triage';
       incident.phaseTimer = framesToSeconds(300);
       ambulance.mode = 'medical-on-scene';
@@ -3322,7 +4191,7 @@ function updateMedicalIncident(dtSec) {
   } else {
     ambulance.mode = 'medical-departing';
     ambulance.targetPoint = incident.departPoint;
-    if (incident.phaseTimer <= 0 || distanceSq(ambulance, incident.departPoint) < 28 * 28) {
+    if (incident.phaseTimer <= 0 || distanceSq(ambulance, incident.departPoint) < 28 * 28 || isCarNearTargetRoad(ambulance, incident.departPoint, 1, 40)) {
       endMedicalIncident();
     }
   }
@@ -3494,12 +4363,16 @@ function spawnInitialCars() {
       const ty = rngInt(0, MAP_H - 1);
       const tile = map[ty][tx];
       if (tile === T.ROAD_H || tile === T.ROAD_V || tile === T.ROAD_X) {
-        cars.push(createCarAtRoad(tx, ty, pickDirectionForRoadTile(tile)));
+        cars.push(createCarAtRoad(tx, ty, pickDirectionForRoadTile(tile), undefined, undefined, pickAmbientVehicleType()));
         break;
       }
     }
   }
   ensureServiceFleet();
+}
+
+function pickAmbientVehicleType() {
+  return rng() < 0.12 ? 'delivery' : 'civilian';
 }
 
 function spawnInitialPeople() {
@@ -3528,21 +4401,21 @@ function update(dt) {
   worldTime += dtSec;
   updateTrackpadZoom(dtSec);
 
-  // Traffic lights
-  for (const tl of trafficLights) {
-    tl.timer -= dtSec;
-    if (tl.timer <= 0) {
-      tl.state = tl.state === 'red' ? 'green' : 'red';
-      tl.timer = randomDuration(120, 300);
-    }
-  }
+  updateTrafficLights(dtSec);
 
   updateCivicRally(dtSec);
   updateStreetGathering(dtSec);
   updateEmergencyIncidents(dtSec);
 
   // Cars
+  const intersectionReservations = new Map();
   for (const car of cars) {
+    const anchor = getCarAnchorTile(car);
+    if (anchor && map[anchor.y]?.[anchor.x] === T.ROAD_X) {
+      intersectionReservations.set(getRoadTileKey(anchor.x, anchor.y), car);
+    }
+  }
+  for (const car of [...cars].sort(compareCarMovementOrder)) {
     if (car.sirenKind && !car.sirenEmitter && audioState.unlocked) {
       car.sirenEmitter = createSirenEmitter(() => (cars.includes(car) && car.sirenKind ? { x: car.x, y: car.y } : null), car.sirenKind);
     }
@@ -3556,6 +4429,10 @@ function update(dt) {
     car.overtakeTimer = Math.max(0, (car.overtakeTimer || 0) - dtSec);
     car.routeRefreshTimer = Math.max(0, (car.routeRefreshTimer || 0) - dtSec);
     normalizeCarSpeed(car, dtSec);
+
+    if (updateDeliveryVehicle(car, dtSec, anchor)) {
+      continue;
+    }
 
     if (car.mode === 'pull-over' || car.mode === 'medical-on-scene' || car.mode === 'fire-on-scene') {
       car.stopReason = 'scene';
@@ -3590,25 +4467,26 @@ function update(dt) {
     let travel = car.speed * dtSec;
     const ignoresLights = car.mode === 'escape' || car.mode === 'pursuit' || car.mode === 'intercept' || car.mode === 'medical-response' || car.mode === 'medical-arriving' || car.mode === 'fire-response' || car.mode === 'fire-arriving';
     if (!ignoresLights) {
-      for (const tl of trafficLights) {
-        const dx = tl.x - car.x, dy = tl.y - car.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 20 && tl.state === 'red') {
-          if ((car.dir === 0 && dx > 0 && dx < 20) ||
-              (car.dir === 2 && dx < 0 && dx > -20) ||
-              (car.dir === 1 && dy > 0 && dy < 20) ||
-              (car.dir === 3 && dy < 0 && dy > -20)) {
+      const blockingLight = getBlockingTrafficLight(car, anchor);
+      if (blockingLight) {
+        const stopDistance = getTrafficLightStopDistance(blockingLight, car);
+        if (Number.isFinite(stopDistance)) {
+          travel = Math.min(travel, Math.max(0, stopDistance));
+          if (stopDistance <= 1.2 || travel <= 0.0001) {
             stopReason = 'light';
-            break;
           }
         }
       }
     }
 
     const queuedDistance = getQueuedCarDistance(car);
-    if (Number.isFinite(queuedDistance) && stopReason !== 'light' && car.overtakeTimer <= 0 && canResponderOvertake(car, anchor.x, anchor.y) && queuedDistance < 18) {
-      car.overtakeTimer = framesToSeconds(90);
-      clearCarWaypoints(car);
+    if (Number.isFinite(queuedDistance) && stopReason !== 'light' && car.overtakeTimer <= 0 && canUseAdjacentOvertakeLane(car, anchor.x, anchor.y)) {
+      const responderOvertake = getResponderPhase(car) && queuedDistance < 18;
+      const civilianOvertake = !getResponderPhase(car) && queuedDistance < 12 && legacyChance(0.35, dtSec);
+      if (responderOvertake || civilianOvertake) {
+        car.overtakeTimer = responderOvertake ? framesToSeconds(90) : framesToSeconds(60);
+        clearCarWaypoints(car);
+      }
     }
 
     if (Number.isFinite(queuedDistance) && car.overtakeTimer <= 0) {
@@ -3616,6 +4494,27 @@ function update(dt) {
       travel = Math.min(travel, Math.max(0, queuedDistance - safeGap));
       if (queuedDistance <= safeGap + 0.5) {
         stopReason = stopReason || 'queue';
+      }
+    }
+
+    if (!stopReason && travel > 0.0001) {
+      const intersectionKey = getPendingIntersectionKey(car, anchor);
+      if (intersectionKey) {
+        const reservedBy = intersectionReservations.get(intersectionKey);
+        if (reservedBy && reservedBy !== car && !carHasConflictPriority(car, reservedBy)) {
+          stopReason = 'traffic';
+          travel = 0;
+        }
+      }
+    }
+
+    if (!stopReason && travel > 0.0001) {
+      const conflict = getProjectedCarConflict(car, travel);
+      if (conflict) {
+        travel = Math.min(travel, conflict.safeDistance);
+        if (travel <= 0.0001) {
+          stopReason = 'traffic';
+        }
       }
     }
 
@@ -3636,7 +4535,7 @@ function update(dt) {
       continue;
     }
 
-    if (car.overtakeTimer <= 0 && getCarLaneDir(car) !== car.dir && (!car.waypoints || !car.waypoints.length)) {
+    if (car.overtakeTimer <= 0 && getCarLaneIndex(car) !== getCarPreferredLaneIndex(car) && (!car.waypoints || !car.waypoints.length)) {
       clearCarWaypoints(car);
     }
 
@@ -3649,6 +4548,12 @@ function update(dt) {
       car.stopReason = 'route';
       clearCarWaypoints(car);
       clearCarRoute(car);
+      continue;
+    }
+
+    const newAnchor = getCarAnchorTile(car);
+    if (newAnchor && map[newAnchor.y]?.[newAnchor.x] === T.ROAD_X) {
+      intersectionReservations.set(getRoadTileKey(newAnchor.x, newAnchor.y), car);
     }
 
     if (car.honking) {
@@ -3656,6 +4561,7 @@ function update(dt) {
       if (car.honkTimer <= 0) car.honking = false;
     }
   }
+  resolveCarOverlaps();
 
   // People
   for (const p of people) {
@@ -3886,7 +4792,7 @@ function update(dt) {
         const ty = rngInt(0, MAP_H - 1);
         const tile = map[ty][tx];
         if (tile >= T.ROAD_H && tile <= T.ROAD_X) {
-          cars.push(createCarAtRoad(tx, ty, pickDirectionForRoadTile(tile)));
+          cars.push(createCarAtRoad(tx, ty, pickDirectionForRoadTile(tile), undefined, undefined, pickAmbientVehicleType()));
           break;
         }
       }
@@ -4031,26 +4937,11 @@ function interact(worldX, worldY) {
 }
 
 function interactTrafficLight(tl) {
-  tl.state = tl.state === 'red' ? 'green' : 'red';
-  tl.timer = randomDuration(180, 400);
+  const currentAxis = getTrafficLightActiveAxis(tl);
+  const nextAxis = currentAxis === 'horizontal' ? 'vertical' : 'horizontal';
+  setTrafficLightState(tl, `${nextAxis}-green`, nextAxis === 'horizontal' ? 'vertical' : 'horizontal');
   effects.push({ x: tl.x, y: tl.y - 12, type: 'click', age: 0, maxAge: 20 });
-  showToast(tl.state === 'green' ? 'Light turned green — traffic flows!' : 'Light turned red — cars queue up');
-
-  // Chain: nearby cars react
-  for (const car of cars) {
-    const dist = Math.sqrt((car.x - tl.x) ** 2 + (car.y - tl.y) ** 2);
-    if (dist < 48) {
-      if (tl.state === 'green') {
-        car.stopped = false;
-        car.stopReason = null;
-        car.waiting = 0;
-      } else {
-        car.stopped = true;
-        car.stopReason = 'light';
-        car.waiting = 0;
-      }
-    }
-  }
+  showToast(`Signal changed: ${getTrafficLightStateLabel(tl)}`);
 }
 
 function interactCar(car) {
@@ -4180,6 +5071,31 @@ function interactBuilding(b) {
       effects.push({ x: sp.ex, y: sp.ey, type: 'door', age: 0, maxAge: 20 });
     }
     showToast('🚒 Fire station drill! The crew rallies around the engine bay');
+  } else if (b.type === 'car-sales') {
+    const car = spawnCarForSale(b);
+    if (!car) {
+      showToast('AUTO has no road access for a test drive');
+      return;
+    }
+    effects.push({ x: car.x, y: car.y - 6, type: 'spark', age: 0, maxAge: 32 });
+    const labels = {
+      civilian: 'car',
+      delivery: 'delivery van',
+      police: 'police cruiser',
+      ambulance: 'ambulance',
+      fire: 'fire engine'
+    };
+    showToast(`🚗 AUTO rolls out a new ${labels[car.vehicleType] || 'vehicle'} for the city`);
+  } else if (b.type === 'scrapyard') {
+    const car = findNearestScrappableCar(b);
+    if (!car) {
+      showToast('SCRAP is waiting for the next old vehicle');
+      return;
+    }
+    effects.push({ x: car.x, y: car.y - 8, type: 'smoke', age: 0, maxAge: 40 });
+    effects.push({ x: car.x + 4, y: car.y - 4, type: 'spark', age: 0, maxAge: 28 });
+    const removed = removeCarFromWorld(car);
+    showToast(removed ? '🛠️ SCRAP hauls away the nearest vehicle' : 'SCRAP crew could not hook the vehicle');
   } else if (b.type === 'bank') {
     const attracted = attractPeopleToBuilding(b, 104, 8);
     showToast(attracted > 0 ? '💰 Bank activated! Customers rush in and a money truck is dispatched' : '💰 Bank activated! Money truck dispatched');
@@ -4224,13 +5140,7 @@ function interactBuilding(b) {
 
 function getExitSpawn(b) {
   const door = getDoorPoint(b);
-  const side = b.exitSide || 'bottom';
-  switch (side) {
-    case 'bottom': return { x: door.x + rngInt(-2, 2), y: door.y, dx: legacySpeed((rng()-0.5)*0.18), dy: legacySpeed(0.2), ex: door.x, ey: door.y };
-    case 'top':    return { x: door.x + rngInt(-2, 2), y: door.y, dx: legacySpeed((rng()-0.5)*0.18), dy: legacySpeed(-0.2), ex: door.x, ey: door.y };
-    case 'right':  return { x: door.x, y: door.y + rngInt(-2, 2), dx: legacySpeed(0.2), dy: legacySpeed((rng()-0.5)*0.18), ex: door.x, ey: door.y };
-    case 'left':   return { x: door.x, y: door.y + rngInt(-2, 2), dx: legacySpeed(-0.2), dy: legacySpeed((rng()-0.5)*0.18), ex: door.x, ey: door.y };
-  }
+  return { x: door.x + rngInt(-2, 2), y: door.y, dx: legacySpeed((rng()-0.5)*0.18), dy: legacySpeed(0.2), ex: door.x, ey: door.y };
 }
 
 function interactTree(t) {
@@ -4686,7 +5596,21 @@ function drawTree(t) {
 
 function drawCar(car) {
   ctx.fillStyle = car.color;
-  if (car.dir === 0 || car.dir === 2) {
+  if (car.vehicleType === 'delivery') {
+    if (car.dir === 0 || car.dir === 2) {
+      ctx.fillRect(car.x - 5, car.y - 3, 10, 6);
+      ctx.fillStyle = '#a0c8e0';
+      ctx.fillRect(car.dir === 0 ? car.x + 2 : car.x - 4, car.y - 2, 3, 4);
+      ctx.fillStyle = 'rgba(60,40,20,0.18)';
+      ctx.fillRect(car.x - 1, car.y - 3, 1, 6);
+    } else {
+      ctx.fillRect(car.x - 3, car.y - 5, 6, 10);
+      ctx.fillStyle = '#a0c8e0';
+      ctx.fillRect(car.x - 2, car.dir === 1 ? car.y + 2 : car.y - 4, 4, 3);
+      ctx.fillStyle = 'rgba(60,40,20,0.18)';
+      ctx.fillRect(car.x - 3, car.y - 1, 6, 1);
+    }
+  } else if (car.dir === 0 || car.dir === 2) {
     // Horizontal car
     ctx.fillRect(car.x - 4, car.y - 2, 8, 5);
     // Windshield
@@ -4785,13 +5709,21 @@ function drawTrafficLight(tl) {
   ctx.fillRect(tl.x - 1, tl.y - 8, 2, 10);
   // Light housing
   ctx.fillStyle = '#2a2a2a';
-  ctx.fillRect(tl.x - 2, tl.y - 10, 4, 6);
-  // Light
-  ctx.fillStyle = tl.state === 'red' ? '#ff3030' : '#30ff30';
-  ctx.fillRect(tl.x - 1, tl.y - (tl.state === 'red' ? 9 : 7), 2, 2);
-  // Glow
-  ctx.fillStyle = tl.state === 'red' ? 'rgba(255,48,48,0.15)' : 'rgba(48,255,48,0.15)';
-  ctx.fillRect(tl.x - 4, tl.y - 12, 8, 8);
+  ctx.fillRect(tl.x - 4, tl.y - 10, 8, 8);
+  const horizontalColor = tl.state === 'horizontal-green' ? '#30ff30' : tl.state === 'horizontal-amber' ? '#ffb030' : '#ff3030';
+  const verticalColor = tl.state === 'vertical-green' ? '#30ff30' : tl.state === 'vertical-amber' ? '#ffb030' : '#ff3030';
+  ctx.fillStyle = horizontalColor;
+  ctx.fillRect(tl.x - 4, tl.y - 7, 2, 2);
+  ctx.fillRect(tl.x + 2, tl.y - 7, 2, 2);
+  ctx.fillStyle = verticalColor;
+  ctx.fillRect(tl.x - 1, tl.y - 10, 2, 2);
+  ctx.fillRect(tl.x - 1, tl.y - 4, 2, 2);
+  const glow = tl.state === 'horizontal-green' ? 'rgba(48,255,48,0.12)'
+    : tl.state === 'vertical-green' ? 'rgba(48,255,48,0.12)'
+    : tl.state.endsWith('amber') ? 'rgba(255,176,48,0.14)'
+    : 'rgba(255,48,48,0.12)';
+  ctx.fillStyle = glow;
+  ctx.fillRect(tl.x - 7, tl.y - 10, 14, 8);
 }
 
 function drawEffect(e) {
@@ -4879,6 +5811,17 @@ function drawEffect(e) {
       ctx.fillRect(e.x, ny, 2, 4);
       ctx.fillRect(e.x - 1, ny, 1, 2);
       break;
+
+    case 'rights': {
+      const glyph = e.emoji || '⚖';
+      ctx.font = '12px "Segoe UI Emoji", "Apple Color Emoji", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(glyph, e.x, e.y - progress * 14);
+      ctx.textAlign = 'start';
+      ctx.textBaseline = 'alphabetic';
+      break;
+    }
 
     case 'door':
       ctx.fillStyle = '#c0a060';
@@ -5163,7 +6106,7 @@ function updateStatusBar(wx, wy, tx, ty) {
   }
   for (const tl of trafficLights) {
     if (Math.abs(tl.x - wx) < 10 && Math.abs(tl.y - wy) < 10) {
-      document.getElementById('status-text').textContent = `Traffic light (${tl.state}) — click to toggle`;
+      document.getElementById('status-text').textContent = `Traffic light (${getTrafficLightStateLabel(tl)}) — click to toggle`;
       return;
     }
   }
