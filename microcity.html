@@ -187,6 +187,9 @@ const PAL = {
   sidewalk:  '#a8a498',
   brickRed:  ['#b03030','#a02828','#c03838'],
   brickDark: '#701818',
+  wallNeutral:['#8b8177','#968a7d','#7d756d','#a49788'],
+  wallCool:  ['#7b8793','#6f7a86','#9099a4','#5e6873'],
+  wallWarm:  ['#9f7663','#ad816d','#8d6757','#b98d77'],
   roofGrey:  ['#888880','#787870'],
   roofTan:   ['#b0a890','#a09880'],
   window:    ['#c8d8e8','#fffff0','#e8e0d0'],
@@ -215,6 +218,7 @@ let W = 0, H = 0; // canvas device pixels
 const cam = { x: PX_W / 2, y: PX_H / 2, zoom: 2, minZoom: 0.5, maxZoom: 8 };
 const drag = { active: false, startX: 0, startY: 0, camStartX: 0, camStartY: 0 };
 const pinch = { active: false, startZoom: 0 };
+const trackpadZoom = { velocity: 0, x: 0, y: 0, active: false };
 
 let map = [];        // 2D tile array [y][x]
 let buildings = [];   // { x, y, w, h, type, color, roofColor, hasSign, signText, floors, ... }
@@ -256,6 +260,16 @@ const CIVIC_BUILDING_SPECS = {
     roofColor: '#f0cdc4',
     preferredTypes: ['brick', 'shop', 'office']
   }
+};
+const BUILDING_STYLE_PRESETS = {
+  brick: { wallPalette: PAL.brickRed, roofPalette: PAL.roofGrey, roofRatio: [0.38, 0.48], signChance: 0.18, brandMode: 'civic-block', rooftopDensity: 1.15 },
+  office: { wallPalette: PAL.wallCool, roofPalette: PAL.roofGrey, roofRatio: [0.42, 0.52], signChance: 0.32, brandMode: 'tower', rooftopDensity: 1.45 },
+  shop: { wallPalette: PAL.wallWarm, roofPalette: PAL.roofTan, roofRatio: [0.34, 0.42], signChance: 1, brandMode: 'retail', rooftopDensity: 0.9 },
+  bank: { wallPalette: ['#a89878', '#9c8e73', '#b2a184'], roofPalette: PAL.roofGrey, roofRatio: [0.4, 0.48], signChance: 1, brandMode: 'bank', rooftopDensity: 1.1 },
+  house: { wallPalette: ['#b98d77', '#c79c84', '#a97d68', '#8f6d5c'], roofPalette: ['#8b8276', '#7c756b', '#9a8f80'], roofRatio: [0.3, 0.38], signChance: 0, brandMode: 'residential', rooftopDensity: 0.45 },
+  hospital: { wallPalette: ['#d8dde6'], roofPalette: ['#f4f7fb'], roofRatio: [0.42, 0.5], signChance: 1, brandMode: 'hospital', rooftopDensity: 1.35 },
+  'police-station': { wallPalette: ['#6d7f93'], roofPalette: ['#c7d7e7'], roofRatio: [0.4, 0.48], signChance: 1, brandMode: 'police', rooftopDensity: 1.2 },
+  'fire-station': { wallPalette: ['#b94a3a'], roofPalette: ['#f0cdc4'], roofRatio: [0.38, 0.44], signChance: 1, brandMode: 'fire', rooftopDensity: 1.1 },
 };
 const civicBuildings = { hospital: null, policeStation: null, fireStation: null };
 const ACTION_CAM_SLOTS = [
@@ -477,7 +491,75 @@ function playChatterAt(x, y, intensity = 1) {
 }
 
 function playHonkAt(x, y) {
-  playToneAt(x, y, { frequency: 370, endFrequency: 320, duration: 0.16, baseVolume: 0.16, falloff: 260 });
+  const ctx = initAudioContext();
+  if (!ctx || !audioState.unlocked) return;
+  const gainValue = getSoundGainAt(x, y, 0.18, 280);
+  if (gainValue <= 0.0005) return;
+
+  const now = ctx.currentTime;
+  const pressDuration = 0.16 + rng() * 0.28;
+  const releaseDuration = 0.08 + rng() * 0.08;
+  const totalDuration = pressDuration + releaseDuration;
+  const masterGain = ctx.createGain();
+  const lowpass = ctx.createBiquadFilter();
+  const bandpass = ctx.createBiquadFilter();
+  const lfo = ctx.createOscillator();
+  const lfoGain = ctx.createGain();
+  const voices = [
+    { type: 'square', frequency: 392 + rng() * 12, endFrequency: 378 + rng() * 10, gain: 0.68 },
+    { type: 'sawtooth', frequency: 494 + rng() * 12, endFrequency: 476 + rng() * 10, gain: 0.26 },
+    { type: 'triangle', frequency: 588 + rng() * 10, endFrequency: 570 + rng() * 8, gain: 0.12 },
+  ];
+
+  lowpass.type = 'lowpass';
+  lowpass.frequency.setValueAtTime(1180, now);
+  lowpass.Q.value = 0.8;
+  bandpass.type = 'bandpass';
+  bandpass.frequency.setValueAtTime(720, now);
+  bandpass.Q.value = 0.45;
+
+  masterGain.gain.setValueAtTime(0.0001, now);
+  masterGain.gain.exponentialRampToValueAtTime(gainValue, now + 0.018);
+  masterGain.gain.setTargetAtTime(gainValue * (0.76 + rng() * 0.1), now + 0.04, 0.06);
+  masterGain.gain.setValueAtTime(gainValue * (0.62 + rng() * 0.14), now + pressDuration);
+  masterGain.gain.exponentialRampToValueAtTime(0.0001, now + totalDuration);
+
+  lfo.type = 'sine';
+  lfo.frequency.setValueAtTime(6.5 + rng() * 1.5, now);
+  lfoGain.gain.setValueAtTime(24, now);
+  lfo.connect(lfoGain).connect(lowpass.frequency);
+
+  lowpass.connect(bandpass).connect(masterGain).connect(audioState.master);
+  lfo.start(now);
+  lfo.stop(now + totalDuration + 0.04);
+
+  for (const voice of voices) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = voice.type;
+    osc.frequency.setValueAtTime(voice.frequency, now);
+    osc.frequency.linearRampToValueAtTime(voice.endFrequency, now + pressDuration);
+    gain.gain.setValueAtTime(voice.gain, now);
+    osc.connect(gain).connect(lowpass);
+    osc.start(now);
+    osc.stop(now + totalDuration + 0.02);
+  }
+
+  if (audioState.noiseBuffer && rng() < 0.65) {
+    const noise = ctx.createBufferSource();
+    const noiseFilter = ctx.createBiquadFilter();
+    const noiseGain = ctx.createGain();
+    noise.buffer = audioState.noiseBuffer;
+    noiseFilter.type = 'bandpass';
+    noiseFilter.frequency.setValueAtTime(1400, now);
+    noiseFilter.Q.value = 0.8;
+    noiseGain.gain.setValueAtTime(0.0001, now);
+    noiseGain.gain.exponentialRampToValueAtTime(gainValue * 0.06, now + 0.01);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + Math.min(0.18, pressDuration * 0.55));
+    noise.connect(noiseFilter).connect(noiseGain).connect(audioState.master);
+    noise.start(now);
+    noise.stop(now + Math.min(0.2, pressDuration * 0.6) + 0.02);
+  }
 }
 
 function playScreechAt(x, y) {
@@ -1032,7 +1114,91 @@ function generateMap() {
   updateStats();
 }
 
+function generateBuildingBrandName(mode) {
+  if (mode === 'bank') return 'BANK';
+  if (mode === 'hospital') return 'HOSP';
+  if (mode === 'police') return 'POLICE';
+  if (mode === 'fire') return 'FIRE';
+  if (mode === 'retail') return pick(['BODEGA', 'METRO', 'CAFE', 'MARKET', 'VIDEO', 'DINER', 'CORNER']);
+  if (mode === 'residential') return '';
+
+  const prefixes = mode === 'tower'
+    ? ['METRO', 'CIVIC', 'UNION', 'NOVA', 'SKY', 'GRAND']
+    : ['EAST', 'WEST', 'CITY', 'RIVER', 'PARK', 'SUN'];
+  const suffixes = mode === 'tower'
+    ? ['GROUP', 'WORKS', 'PLAZA', 'POINT', 'LABS', 'CENTER']
+    : ['BLOCK', 'MART', 'DEPOT', 'HOUSE', 'PLACE', 'HALL'];
+  return `${pick(prefixes)} ${pick(suffixes)}`;
+}
+
+function generateRoofFeatures(building, roofHeight, density) {
+  const usableWidth = Math.max(8, building.w - 8);
+  const usableHeight = Math.max(4, roofHeight - 5);
+  const featureCount = Math.max(1, Math.min(4, Math.round((building.tw * building.th) / 4 * density)));
+  const features = [];
+  for (let i = 0; i < featureCount; i++) {
+    const kind = pick(['vent', 'ac', 'duct']);
+    const width = kind === 'duct' ? rngInt(6, Math.max(6, Math.min(usableWidth - 2, 10))) : rngInt(4, 6);
+    const height = kind === 'ac' ? rngInt(3, 4) : rngInt(2, 3);
+    const x = building.x + 3 + rngInt(0, Math.max(0, usableWidth - width));
+    const y = building.y + 2 + rngInt(0, Math.max(0, usableHeight - height));
+    features.push({ kind, x, y, w: width, h: height, tone: rngInt(-12, 12) });
+  }
+  return features;
+}
+
+function applyBuildingVisualStyle(building, overrides = {}) {
+  const resolvedType = overrides.type || building.type;
+  const preset = BUILDING_STYLE_PRESETS[resolvedType] || BUILDING_STYLE_PRESETS.brick;
+  const wallColor = overrides.color || pick(preset.wallPalette);
+  const roofColor = overrides.roofColor || pick(preset.roofPalette);
+  const roofMin = preset.roofRatio[0];
+  const roofMax = preset.roofRatio[1];
+  const roofHeight = clamp(Math.round(building.h * (roofMin + rng() * (roofMax - roofMin))), 6, Math.max(6, building.h - 8));
+  const faceHeight = Math.max(8, building.h - roofHeight);
+  const floors = overrides.floors ?? Math.max(1, Math.min(4, Math.round(faceHeight / 8)));
+  const windowRows = overrides.windowRows ?? Math.max(1, Math.min(4, floors));
+  const windowCols = overrides.windowCols ?? Math.max(1, Math.floor((building.w - 8) / 7));
+  const hasSign = overrides.forceSign ?? (overrides.signText ? true : rng() < preset.signChance);
+  const signText = hasSign ? (overrides.signText || generateBuildingBrandName(preset.brandMode)) : '';
+
+  building.type = resolvedType;
+  building.color = wallColor;
+  building.roofColor = roofColor;
+  building.floors = floors;
+  building.hasSign = !!signText;
+  building.signText = signText;
+  building.windowRows = windowRows;
+  building.windowCols = windowCols;
+  building.roomOccupied = Array.from({ length: windowRows * windowCols }, () => rng() < 0.6);
+  building.roomTint = Array.from({ length: windowRows * windowCols }, () => rngInt(0, PAL.window.length - 1));
+  building.roomTimer = building.roomTimer || randomDuration(80, 220);
+  building.visualStyle = {
+    wallColor,
+    wallShadow: darkenColor(wallColor, 22),
+    wallHighlight: lightenColor(wallColor, 20),
+    roofColor,
+    roofShade: darkenColor(roofColor, 18),
+    roofHighlight: lightenColor(roofColor, 16),
+    sillColor: darkenColor(wallColor, 28),
+    frameColor: darkenColor(wallColor, 38),
+    signPanel: resolvedType === 'bank'
+      ? PAL.bankSign
+      : resolvedType === 'hospital'
+        ? '#eef7ff'
+        : resolvedType === 'police-station'
+          ? '#c7dbef'
+          : resolvedType === 'fire-station'
+            ? '#ffd8cc'
+            : '#e0ddd4',
+    signBorder: darkenColor(resolvedType === 'bank' ? PAL.bankSign : wallColor, 26),
+    roofHeight,
+    roofFeatures: generateRoofFeatures(building, roofHeight, preset.rooftopDensity),
+  };
+}
+
 function placeBuildings(roadCols, roadRows) {
+
   for (let y = 0; y < MAP_H; y++) {
     for (let x = 0; x < MAP_W; x++) {
       if (map[y][x] !== T.GRASS) continue;
@@ -1046,25 +1212,17 @@ function placeBuildings(roadCols, roadRows) {
         if (exits.length === 0) continue;
 
         const type = pick(['brick', 'office', 'shop', 'bank', 'house']);
-        const color = type === 'bank' ? '#a89878' : type === 'office' ? pick(PAL.roofGrey) : pick(PAL.brickRed);
-        const roofColor = type === 'office' ? pick(PAL.roofGrey) : pick(PAL.roofTan);
-        const hasSign = type === 'bank' || type === 'shop' || rng() < 0.3;
-        const signText = type === 'bank' ? 'BANK' : type === 'shop' ? pick(['SHOP', 'CAFE', 'FOOD', 'NEWS', 'MART']) : '';
-        const floors = rngInt(1, 3);
-        const windowRows = Math.max(1, floors);
-        const windowCols = Math.max(1, Math.floor(bw * 0.8));
-        const roomOccupied = Array.from({ length: windowRows * windowCols }, () => rng() < 0.6);
-        const roomTint = Array.from({ length: windowRows * windowCols }, () => rngInt(0, PAL.window.length - 1));
-
-        buildings.push({
+        const building = {
           x: x * TILE, y: y * TILE,
           w: bw * TILE, h: bh * TILE,
           tw: bw, th: bh,
-          type, color, roofColor, hasSign, signText, floors,
+          type,
           exitSide: pick(exits),
-          windowRows, windowCols, roomOccupied, roomTint, roomTimer: randomDuration(80, 220),
+          roomTimer: randomDuration(80, 220),
           active: false, glowing: false, glowTimer: 0
-        });
+        };
+        applyBuildingVisualStyle(building);
+        buildings.push(building);
 
         for (let dy = 0; dy < bh; dy++) {
           for (let dx = 0; dx < bw; dx++) {
@@ -1087,12 +1245,8 @@ function scoreCivicBuildingCandidate(building, preferredTypes) {
 function applyCivicBuildingSpec(building, civicKey, spec) {
   if (!building) return;
   building.originalType = building.originalType || building.type;
-  building.type = spec.type;
   building.civicKey = civicKey;
-  building.color = spec.color;
-  building.roofColor = spec.roofColor;
-  building.hasSign = true;
-  building.signText = spec.signText;
+  applyBuildingVisualStyle(building, { type: spec.type, color: spec.color, roofColor: spec.roofColor, signText: spec.signText, forceSign: true });
   building.sceneRoad = null;
   civicBuildings[civicKey] = building;
 }
@@ -3364,6 +3518,7 @@ function update(dt) {
   const dtSec = dt / 1000;
   if (dtSec <= 0) return;
   worldTime += dtSec;
+  updateTrackpadZoom(dtSec);
 
   // Traffic lights
   for (const tl of trafficLights) {
@@ -4366,59 +4521,112 @@ function render() {
 }
 
 function drawBuilding(b) {
+  const style = b.visualStyle || {};
+  const wallColor = b.glowing ? lightenColor(style.wallColor || b.color, 34) : (style.wallColor || b.color);
+  const roofColor = b.glowing ? lightenColor(style.roofColor || b.roofColor, 20) : (style.roofColor || b.roofColor);
+  const roofHeight = clamp(style.roofHeight || Math.round(b.h * 0.42), 6, Math.max(6, b.h - 8));
+  const faceY = b.y + roofHeight;
+  const faceH = Math.max(8, b.h - roofHeight);
+  const frontDoorW = Math.max(6, Math.min(10, b.w - 8));
+  const frontDoorH = Math.max(6, Math.min(faceH - 2, 10));
+  const frontDoorX = b.x + Math.floor((b.w - frontDoorW) / 2);
+  const frontDoorY = b.y + b.h - frontDoorH;
   const shadowOff = 2;
 
-  // Shadow
   ctx.fillStyle = 'rgba(0,0,0,0.2)';
   ctx.fillRect(b.x + shadowOff, b.y + shadowOff, b.w, b.h);
 
-  // Wall
-  ctx.fillStyle = b.glowing ? lightenColor(b.color, 40) : b.color;
-  ctx.fillRect(b.x, b.y, b.w, b.h);
+  ctx.fillStyle = wallColor;
+  ctx.fillRect(b.x, faceY, b.w, faceH);
+  ctx.fillStyle = style.wallHighlight || lightenColor(wallColor, 18);
+  ctx.fillRect(b.x, faceY, 2, faceH);
+  ctx.fillStyle = style.wallShadow || darkenColor(wallColor, 22);
+  ctx.fillRect(b.x + b.w - 2, faceY, 2, faceH);
 
-  // Roof overhang (top 3px)
-  ctx.fillStyle = b.roofColor;
-  ctx.fillRect(b.x - 1, b.y - 2, b.w + 2, 3);
+  ctx.fillStyle = roofColor;
+  ctx.fillRect(b.x - 1, b.y, b.w + 2, roofHeight + 1);
+  ctx.fillStyle = style.roofHighlight || lightenColor(roofColor, 14);
+  ctx.fillRect(b.x - 1, b.y, b.w + 2, 2);
+  ctx.fillStyle = style.roofShade || darkenColor(roofColor, 18);
+  ctx.fillRect(b.x - 1, faceY - 2, b.w + 2, 3);
 
-  // Windows
-  const wRows = b.windowRows || Math.max(1, b.floors);
-  const wCols = b.windowCols || Math.max(1, Math.floor(b.tw * 0.8));
-  for (let wy = 0; wy < wRows; wy++) {
-    for (let wx = 0; wx < wCols; wx++) {
-      const winX = b.x + 3 + wx * Math.floor((b.w - 6) / Math.max(1, wCols));
-      const winY = b.y + 4 + wy * Math.floor((b.h - 10) / Math.max(1, wRows));
-      const roomIdx = wy * wCols + wx;
-      const occupied = b.roomOccupied ? b.roomOccupied[roomIdx] : true;
-      const tint = b.roomTint ? b.roomTint[roomIdx] : 0;
-      ctx.fillStyle = occupied ? PAL.window[tint % PAL.window.length] : PAL.windowDark;
-      ctx.fillRect(winX, winY, 3, 3);
+  for (let stripeY = b.y + 3; stripeY < faceY - 3; stripeY += 4) {
+    ctx.fillStyle = stripeY % 8 === 3 ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.05)';
+    ctx.fillRect(b.x + 1, stripeY, b.w - 2, 1);
+  }
+
+  for (const feature of style.roofFeatures || []) {
+    const toneBase = '#8e8f92';
+    const bodyColor = feature.tone >= 0 ? lightenColor(toneBase, feature.tone) : darkenColor(toneBase, -feature.tone);
+    ctx.fillStyle = bodyColor;
+    ctx.fillRect(feature.x, feature.y, feature.w, feature.h);
+    ctx.fillStyle = lightenColor(bodyColor, 14);
+    ctx.fillRect(feature.x, feature.y, feature.w, 1);
+    ctx.fillStyle = darkenColor(bodyColor, 18);
+    if (feature.kind === 'vent') {
+      for (let slat = feature.x + 1; slat < feature.x + feature.w - 1; slat += 2) {
+        ctx.fillRect(slat, feature.y + 1, 1, Math.max(1, feature.h - 2));
+      }
+    } else if (feature.kind === 'ac') {
+      ctx.fillRect(feature.x + 1, feature.y + feature.h - 1, feature.w - 2, 1);
+      ctx.fillStyle = '#50565c';
+      ctx.fillRect(feature.x + 1, feature.y + 1, Math.max(1, feature.w - 2), 1);
+    } else {
+      ctx.fillRect(feature.x + 1, feature.y + 1, feature.w - 2, 1);
+      ctx.fillRect(feature.x + feature.w - 2, feature.y + 1, 1, feature.h - 1);
     }
   }
 
-  // Door — placed on exit side
-  ctx.fillStyle = PAL.door;
-  const doorRect = getDoorRect(b);
-  ctx.fillRect(doorRect.x, doorRect.y, doorRect.w, doorRect.h);
-
-  // Sign
-  if (b.hasSign && b.signText) {
-    const signW = b.signText.length * 4 + 4;
-    const signX = b.x + Math.floor(b.w / 2) - Math.floor(signW / 2);
-    const signY = b.y + 2;
-    ctx.fillStyle = b.type === 'bank'
-      ? PAL.bankSign
-      : b.type === 'hospital'
-        ? '#eef7ff'
-        : b.type === 'police-station'
-          ? '#c7dbef'
-          : b.type === 'fire-station'
-            ? '#ffd8cc'
-            : '#e0e0d0';
-    ctx.fillRect(signX, signY, signW, 6);
-    ctx.fillStyle = '#1a1a1a';
-    // Tiny pixel text
-    drawPixelText(b.signText, signX + 2, signY + 1);
+  const wRows = b.windowRows || Math.max(1, b.floors);
+  const wCols = b.windowCols || Math.max(1, Math.floor((b.w - 8) / 7));
+  const windowBandTop = faceY + 4;
+  const windowBandHeight = Math.max(5, faceH - 10);
+  const slotWidth = Math.max(6, Math.floor((b.w - 6) / Math.max(1, wCols)));
+  const slotHeight = Math.max(6, Math.floor(windowBandHeight / Math.max(1, wRows)));
+  for (let wy = 0; wy < wRows; wy++) {
+    for (let wx = 0; wx < wCols; wx++) {
+      const winX = b.x + 3 + wx * slotWidth;
+      const winY = windowBandTop + wy * slotHeight;
+      const roomIdx = wy * wCols + wx;
+      const occupied = b.roomOccupied ? b.roomOccupied[roomIdx] : true;
+      const tint = b.roomTint ? b.roomTint[roomIdx] : 0;
+      ctx.fillStyle = style.frameColor || darkenColor(wallColor, 36);
+      ctx.fillRect(winX - 1, winY - 1, 5, 5);
+      ctx.fillStyle = occupied ? PAL.window[tint % PAL.window.length] : PAL.windowDark;
+      ctx.fillRect(winX, winY, 3, 3);
+      ctx.fillStyle = style.sillColor || darkenColor(wallColor, 24);
+      ctx.fillRect(winX - 1, winY + 3, 5, 1);
+    }
   }
+
+  ctx.fillStyle = '#2b1e15';
+  ctx.fillRect(frontDoorX, frontDoorY, frontDoorW, frontDoorH);
+  ctx.fillStyle = '#5f4430';
+  ctx.fillRect(frontDoorX + 1, frontDoorY + 1, Math.max(1, Math.floor(frontDoorW / 2) - 1), frontDoorH - 1);
+  ctx.fillRect(frontDoorX + Math.floor(frontDoorW / 2), frontDoorY + 1, Math.max(1, Math.floor(frontDoorW / 2) - 1), frontDoorH - 1);
+  ctx.fillStyle = '#cab39a';
+  ctx.fillRect(frontDoorX + Math.floor(frontDoorW / 2) - 1, frontDoorY + 1, 1, frontDoorH - 2);
+
+  if (b.hasSign && b.signText) {
+    const signW = Math.min(b.w - 6, Math.max(18, b.signText.length * 4 + 8));
+    const signX = b.x + Math.floor((b.w - signW) / 2);
+    const signY = faceY + 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.16)';
+    ctx.fillRect(signX + 1, signY + 1, signW, 8);
+    ctx.fillStyle = style.signBorder || darkenColor(wallColor, 26);
+    ctx.fillRect(signX - 1, signY - 1, signW + 2, 8);
+    ctx.fillStyle = style.signPanel || '#e0ddd4';
+    ctx.fillRect(signX, signY, signW, 6);
+    ctx.fillStyle = style.signBorder || darkenColor(wallColor, 26);
+    ctx.fillRect(signX + 2, signY + 6, 1, 3);
+    ctx.fillRect(signX + signW - 3, signY + 6, 1, 3);
+    ctx.fillStyle = '#1a1a1a';
+    drawPixelText(b.signText, signX + Math.max(2, Math.floor((signW - b.signText.length * 4) / 2)), signY + 1);
+  }
+
+  const doorRect = getDoorRect(b);
+  ctx.fillStyle = PAL.door;
+  ctx.fillRect(doorRect.x, doorRect.y, doorRect.w, doorRect.h);
 }
 
 function drawPixelText(text, x, y) {
@@ -4704,6 +4912,14 @@ function lightenColor(hex, amt) {
   return `rgb(${r},${g},${b})`;
 }
 
+function darkenColor(hex, amt) {
+  const num = parseInt(hex.replace('#', ''), 16);
+  const r = Math.max(0, (num >> 16) - amt);
+  const g = Math.max(0, ((num >> 8) & 0xff) - amt);
+  const b = Math.max(0, (num & 0xff) - amt);
+  return `rgb(${r},${g},${b})`;
+}
+
 // ═══════════════════════════════════════════════════════
 // CAMERA & INPUT
 // ═══════════════════════════════════════════════════════
@@ -4731,6 +4947,10 @@ function clampCam() {
   cam.zoom = Math.max(cam.minZoom, Math.min(cam.maxZoom, cam.zoom));
 }
 
+function isTrackpadWheelEvent(event) {
+  return event.deltaMode === 0 && (Math.abs(event.deltaY) < 80 || Math.abs(event.deltaX) > 0.01);
+}
+
 function zoomAt(sx, sy, factor) {
   const before = screenToWorld(sx, sy);
   cam.zoom *= factor;
@@ -4739,6 +4959,22 @@ function zoomAt(sx, sy, factor) {
   cam.x -= (after.x - before.x);
   cam.y -= (after.y - before.y);
   clampCam();
+}
+
+function resetZoom() {
+  zoomAt(window.innerWidth / 2, window.innerHeight / 2, 2 / cam.zoom);
+}
+
+function updateTrackpadZoom(dtSec) {
+  if (!trackpadZoom.active) return;
+  if (Math.abs(trackpadZoom.velocity) < 0.001) {
+    trackpadZoom.velocity = 0;
+    trackpadZoom.active = false;
+    return;
+  }
+
+  zoomAt(trackpadZoom.x, trackpadZoom.y, Math.exp(trackpadZoom.velocity * dtSec));
+  trackpadZoom.velocity += (0 - trackpadZoom.velocity) * legacyBlend(0.22, dtSec);
 }
 
 // Pointer events (unified mouse + touch)
@@ -4806,6 +5042,13 @@ canvas.addEventListener('pointercancel', () => {
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   clearActionCam();
+  if (isTrackpadWheelEvent(e)) {
+    trackpadZoom.x = e.clientX;
+    trackpadZoom.y = e.clientY;
+    trackpadZoom.velocity += clamp(-e.deltaY * 0.02, -0.8, 0.8);
+    trackpadZoom.active = true;
+    return;
+  }
   const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
   zoomAt(e.clientX, e.clientY, factor);
 }, { passive: false });
@@ -4868,6 +5111,7 @@ document.addEventListener('keydown', (e) => {
     case 'ArrowDown': case 's': clearActionCam(); e.preventDefault(); break;
     case '+': case '=': clearActionCam(); zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.2); e.preventDefault(); break;
     case '-': case '_': clearActionCam(); zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.2); e.preventDefault(); break;
+    case '0': clearActionCam(); resetZoom(); e.preventDefault(); break;
     case 'r': case 'R':
       clearActionCam();
       cam.x = PX_W / 2; cam.y = PX_H / 2; cam.zoom = 2; e.preventDefault(); break;
