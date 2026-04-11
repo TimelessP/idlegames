@@ -37,7 +37,7 @@ await fs.writeFile(versionModulePath, versionModuleContent, 'utf8');
 await cleanDist();
 await fs.mkdir(distDir, { recursive: true });
 
-const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.github', '.vscode', '.venv', 'venv', '__pycache__', 'scripts']);
+const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.github', '.vscode', '.venv', 'venv', '__pycache__', 'scripts', 'tests']);
 const EXCLUDED_FILES = new Set(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'pnpm-lock.yml', 'yarn.lock', 'requirements.txt', '.python-version']);
 const EXCLUDED_FILE_EXTENSIONS = new Set(['.py', '.pyc', '.pyo']);
 

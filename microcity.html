@@ -158,7 +158,44 @@ canvas.dragging{cursor:grabbing}
   Pinch to zoom on mobile
 </div>
 
-<script>
+<script type="module">
+import {
+  applyVehicleMotionReset as applyVehicleMotionResetPure,
+  buildRoadRoutingSubtiles as buildRoadRoutingSubtilesPure,
+  buildIntersectionTraversalPlan as buildIntersectionTraversalPlanPure,
+  carHasCommittedTrafficLightRightOfWay as carHasCommittedTrafficLightRightOfWayPure,
+  carIsClearingTrafficLightIntersection as carIsClearingTrafficLightIntersectionPure,
+  carHasConflictPriority as carHasConflictPriorityPure,
+  compareCarMovementOrder as compareCarMovementOrderPure,
+  canUseAdjacentOvertakeLane as canUseAdjacentOvertakeLanePure,
+  findDirectedRoadPathTiles as findDirectedRoadPathTilesPure,
+  getPlannedRouteDirection as getPlannedRouteDirectionPure,
+  getBlockingTrafficLight as getBlockingTrafficLightPure,
+  getBlockingIntersectionReservation as getBlockingIntersectionReservationPure,
+  getCarIntentTrafficLight as getCarIntentTrafficLightPure,
+  getPendingIntersectionKeys as getPendingIntersectionKeysPure,
+  getProjectedCarConflict as getProjectedCarConflictPure,
+  getProjectedCarPoint as getProjectedCarPointPure,
+  getQueuedCarDistance as getQueuedCarDistancePure,
+  getIntentLaneIndex as getIntentLaneIndexPure,
+  getOvertakeLaneIndex as getOvertakeLaneIndexPure,
+  isCommittedIntersectionTurn as isCommittedIntersectionTurnPure,
+  getRemainingIntersectionReservationKeys as getRemainingIntersectionReservationKeysPure,
+  getTrafficLightKey as getTrafficLightKeyPure,
+  getTrafficPriorityScore as getTrafficPriorityScorePure,
+  getTrafficLightClearanceDistance as getTrafficLightClearanceDistancePure,
+  getTrafficLightClearanceThreshold as getTrafficLightClearanceThresholdPure,
+  getTrafficLightStopDistance as getTrafficLightStopDistancePure,
+  getTurnRelation as getTurnRelationPure,
+  recoverFireTruckFlow as recoverFireTruckFlowPure,
+  refreshCarTrafficLightCommitment as refreshCarTrafficLightCommitmentPure,
+  releaseMedicalAmbulanceFlow as releaseMedicalAmbulanceFlowPure,
+  resolveVehicleRoadAnchor as resolveVehicleRoadAnchorPure,
+  reserveIntersectionIntent as reserveIntersectionIntentPure,
+  resetDeliveryCruiseFlow as resetDeliveryCruiseFlowPure,
+  resumePoliceCarsFlow as resumePoliceCarsFlowPure,
+} from './assets/js/microcity-traffic.js';
+
 'use strict';
 (() => {
 // ═══════════════════════════════════════════════════════
@@ -169,6 +206,8 @@ const MAP_W = 96; // tiles wide
 const MAP_H = 96; // tiles tall
 const PX_W = MAP_W * TILE;
 const PX_H = MAP_H * TILE;
+const TRAFFIC_SPATIAL_CELL = TILE * 4;
+const TRAFFIC_QUERY_RADIUS = TILE * 6;
 
 // Tile types
 const T = {
@@ -222,12 +261,14 @@ const trackpadZoom = { velocity: 0, x: 0, y: 0, active: false };
 
 let map = [];        // 2D tile array [y][x]
 let buildings = [];   // { x, y, w, h, type, color, roofColor, hasSign, signText, floors, ... }
+let buildingsByY = [];
 let cars = [];        // { x, y, dir, speed, color, waiting, destX, destY }
 let people = [];      // { x, y, dx, dy, skin, shirt, state }
 let trees = [];       // { x, y, size, color, hasbird }
 let birds = [];       // { x, y, dx, dy, fromTree, settling, targetX, targetY }
 let effects = [];     // { x, y, type, age, maxAge, ... }
 let trafficLights = []; // { x, y, state:'red'|'green', timer }
+let carSpatialIndex = null;
 
 let stats = { pop: 0, buildings: 0, cars: 0, trees: 0, happy: 50 };
 let worldTime = 0;
@@ -285,10 +326,9 @@ const ACTION_CAM_SLOTS = [
   { id: 'gathering', label: 'Cam: Gathering' },
 ];
 const actionCam = { incidentId: null, uiKey: '', buttons: new Map() };
+const TRAFFIC_DRIVE_SIDE = 'right';
 const cadenceIntervals = {
-  carSpawn: 300 / 60,
   personSpawn: 500 / 60,
-  serviceFleet: 180 / 60,
   stats: 60 / 60,
 };
 const cadence = { ...cadenceIntervals };
@@ -336,6 +376,13 @@ function legacyChance(probPerFrame, dtSec) {
 function legacyBlend(frameFactor, dtSec) {
   return 1 - Math.pow(1 - frameFactor, dtSec * LEGACY_FPS);
 }
+const AUTO_SCRAP_WAIT_THRESHOLD = framesToSeconds(60);
+const CAR_HONK_WAIT_THRESHOLD = AUTO_SCRAP_WAIT_THRESHOLD;
+const SERVICE_FLEET_TARGETS = Object.freeze({
+  police: 3,
+  ambulance: 1,
+  fire: 2,
+});
 function getEffectMaxAge(effect) {
   if (!Number.isFinite(effect.maxAgeSec)) effect.maxAgeSec = framesToSeconds(effect.maxAge ?? 60);
   return effect.maxAgeSec;
@@ -879,18 +926,91 @@ function pickRoadPatrolTarget(car, minRoadDistance = 18) {
   return best ? tileCenter(best.x, best.y) : null;
 }
 
-function assignFirePatrolTarget(car, minRoadDistance = 18) {
-  if (!car || car.vehicleType !== 'fire' || car.incidentId) return false;
+function usesAmbientRouteTarget(car) {
+  return !!car && !car.incidentId && (car.mode === 'cruising' || car.mode === 'delivery-cruising' || car.mode === 'patrol');
+}
+
+function getAmbientRouteMinRoadDistance(car, mode = car?.mode) {
+  if (mode === 'patrol') return car?.vehicleType === 'fire' ? 22 : 18;
+  if (mode === 'delivery-cruising') return 12;
+  return 12;
+}
+
+function getAmbientRouteRefreshInterval(car) {
+  if (car.vehicleType === 'delivery') return randomDuration(720, 1320);
+  if (car.mode === 'patrol') return randomDuration(900, 1800);
+  return randomDuration(780, 1560);
+}
+
+function assignAmbientRouteTarget(car, anchor, minRoadDistance = getAmbientRouteMinRoadDistance(car)) {
+  if (!usesAmbientRouteTarget(car)) return false;
   const point = pickRoadPatrolTarget(car, minRoadDistance);
   if (!point) return false;
-  car.mode = 'patrol';
   car.targetPoint = point;
-  car.eventTimer = randomDuration(900, 1800);
-  car.stopped = false;
-  car.stopReason = null;
-  clearCarWaypoints(car);
-  clearCarRoute(car);
+  car.ambientRouteTimer = getAmbientRouteRefreshInterval(car);
+  if (anchor && map[anchor.y]?.[anchor.x] !== T.ROAD_X) {
+    clearCarWaypoints(car);
+    clearCarRoute(car);
+  }
   return true;
+}
+
+function refreshAmbientRouteTarget(car, dtSec, anchor) {
+  if (!usesAmbientRouteTarget(car)) return;
+  if (!anchor || map[anchor.y]?.[anchor.x] === T.ROAD_X) return;
+
+  car.ambientRouteTimer = Math.max(0, (car.ambientRouteTimer || 0) - dtSec);
+  const reachedTarget = car.targetPoint && isCarNearTargetRoad(car, car.targetPoint, 1, 28);
+  if (reachedTarget || !car.targetPoint || car.ambientRouteTimer <= 0) {
+    assignAmbientRouteTarget(car, anchor, reachedTarget ? Math.max(18, getAmbientRouteMinRoadDistance(car)) : undefined);
+  }
+}
+
+function resetVehicleMotionState(car, {
+  mode = car?.mode,
+  targetPoint = null,
+  targetCar = null,
+  clearIncident = false,
+  clearDeliveryPlan = false,
+  baseSpeed = null,
+  preferredLaneIndex = null,
+  assignAmbientTarget = false,
+  ambientMinRoadDistance = null,
+  anchor = null,
+} = {}) {
+  return applyVehicleMotionResetPure(car, {
+    mode,
+    targetPoint,
+    targetCar,
+    clearIncident,
+    clearDeliveryPlan,
+    baseSpeed,
+    preferredLaneIndex,
+    assignAmbientTarget,
+    ambientMinRoadDistance,
+    anchor,
+  }, {
+    getDeliveryDriver,
+    removeTemporaryPerson,
+    getDefaultBaseSpeed: currentCar => getVehicleBaseSpeed(currentCar.vehicleType || 'civilian', legacySpeed(0.42)),
+    clampLaneIndex,
+    pickPreferredLaneIndex,
+    clearCarWaypoints,
+    clearCarRoute,
+    getCarRoadTile,
+    usesAmbientRouteTarget,
+    assignAmbientRouteTarget,
+    getAmbientRouteMinRoadDistance,
+  });
+}
+
+function assignFirePatrolTarget(car, minRoadDistance = 18) {
+  if (!car || car.vehicleType !== 'fire' || car.incidentId) return false;
+  return resetVehicleMotionState(car, {
+    mode: 'patrol',
+    assignAmbientTarget: true,
+    ambientMinRoadDistance: minRoadDistance,
+  });
 }
 
 function findRoadSpawnNearBuilding(building, preferredIndex = 0) {
@@ -924,11 +1044,18 @@ function getDeliveryStopPlanForBuilding(building) {
     for (const lane of getRoadLaneCandidatesForTile(roadTile.x, roadTile.y, getOuterLaneIndex())) {
       const score = distanceSq(lane.point, doorPoint) + roadTile.distance * 0.35;
       if (score < bestScore) {
+        const [approachDx, approachDy] = getDirectionDelta(lane.dir);
+        const approachTile = { x: roadTile.x - approachDx, y: roadTile.y - approachDy };
+        const hasApproachTile = approachTile.x >= 0 && approachTile.x < MAP_W &&
+          approachTile.y >= 0 && approachTile.y < MAP_H &&
+          isRoadTile(map[approachTile.y]?.[approachTile.x]) &&
+          canDriveDirection(approachTile.x, approachTile.y, lane.dir);
         bestScore = score;
         best = {
           building,
           doorPoint,
           roadTile: { x: roadTile.x, y: roadTile.y },
+          approachTile: hasApproachTile ? approachTile : { x: roadTile.x, y: roadTile.y },
           stopDir: lane.dir,
           laneIndex: lane.laneIndex,
           stopPoint: lane.point,
@@ -962,9 +1089,9 @@ function planDeliveryStop(car) {
   return best;
 }
 
-function getEmergencyVehicleSpawn(type) {
+function getEmergencyVehicleSpawn(type, preferredIndex = countVehiclesByType(type)) {
   const building = getCivicBuildingForVehicleType(type);
-  return building ? findRoadSpawnNearBuilding(building, countVehiclesByType(type)) || findRoadSpawn() : findRoadSpawn();
+  return building ? findRoadSpawnNearBuilding(building, preferredIndex) || findRoadSpawn() : findRoadSpawn();
 }
 
 function getServiceReturnPoint(vehicleType) {
@@ -976,13 +1103,11 @@ function sendVehicleToServiceBase(vehicle) {
   if (!vehicle) return false;
   const point = getServiceReturnPoint(vehicle.vehicleType);
   if (!point) return false;
-  vehicle.mode = 'service-return';
-  vehicle.targetPoint = point;
-  vehicle.stopped = false;
-  vehicle.stopReason = null;
-  clearCarWaypoints(vehicle);
-  clearCarRoute(vehicle);
-  return true;
+  return resetVehicleMotionState(vehicle, {
+    mode: 'service-return',
+    targetPoint: point,
+    targetCar: null,
+  });
 }
 
 function stopBuildingFire(building) {
@@ -1010,14 +1135,9 @@ function pickReachableCandidate(vehicle, candidates, getTile, maxDistanceTiles) 
 }
 
 function getActionCamIncidents() {
-  const incidents = [];
-  if (emergencies.police) incidents.push({ id: 'police', label: 'Cam: Chase' });
-  if (emergencies.medical) incidents.push({ id: 'medical', label: 'Cam: Ambulance' });
-  if (emergencies.fire) incidents.push({ id: 'fire', label: 'Cam: Fire' });
-  if (cars.some(car => car.vehicleType === 'delivery')) incidents.push({ id: 'delivery', label: 'Cam: Delivery' });
-  if (civicRally.active) incidents.push({ id: 'rally', label: 'Cam: Rally' });
-  if (getActiveGatheringTarget()) incidents.push({ id: 'gathering', label: 'Cam: Gathering' });
-  return incidents;
+  return ACTION_CAM_SLOTS
+    .filter(slot => !!getIncidentTarget(slot.id))
+    .map(slot => ({ id: slot.id, label: slot.label }));
 }
 
 function clearActionCam() {
@@ -1078,6 +1198,19 @@ function syncActionCamButtons() {
 
 function signalContainsTile(signal, tx, ty) {
   return !!signal && tx >= signal.minX && tx <= signal.maxX && ty >= signal.minY && ty <= signal.maxY && signal.tileKeys.has(`${tx},${ty}`);
+}
+
+function carOverlapsTrafficLightIntersection(car, tl) {
+  if (!car || !tl) return false;
+  const extents = getCarHalfExtents(car);
+  const minX = tl.minX * TILE;
+  const maxX = (tl.maxX + 1) * TILE;
+  const minY = tl.minY * TILE;
+  const maxY = (tl.maxY + 1) * TILE;
+  return car.x + extents.x > minX &&
+    car.x - extents.x < maxX &&
+    car.y + extents.y > minY &&
+    car.y - extents.y < maxY;
 }
 
 function getTrafficLightActiveAxis(tl) {
@@ -1158,18 +1291,19 @@ function buildTrafficLights() {
 
       const centerX = ((minX + maxX + 1) * TILE) / 2;
       const centerY = ((minY + maxY + 1) * TILE) / 2;
-      const phaseDuration = framesToSeconds(192);
-      const phaseAge = rng() * framesToSeconds(90);
+      const basePhaseDuration = framesToSeconds(192);
+      const greenPhaseDuration = basePhaseDuration * 4;
+      const phaseAge = rng() * greenPhaseDuration;
       signals.push({
         x: centerX,
         y: centerY,
         state: rng() < 0.5 ? 'horizontal-green' : 'vertical-green',
-        timer: phaseDuration - Math.min(phaseAge, phaseDuration),
+        timer: greenPhaseDuration - Math.min(phaseAge, greenPhaseDuration),
         phaseAge,
-        minGreen: phaseDuration,
-        maxGreen: phaseDuration,
-        amberDuration: phaseDuration,
-        clearanceDuration: phaseDuration,
+        minGreen: greenPhaseDuration,
+        maxGreen: greenPhaseDuration,
+        amberDuration: basePhaseDuration,
+        clearanceDuration: basePhaseDuration,
         nextGreenAxis: rng() < 0.5 ? 'vertical' : 'horizontal',
         minX,
         maxX,
@@ -1190,9 +1324,19 @@ function getTrafficLightQueues(tl) {
   let horizontal = 0;
   let vertical = 0;
   let occupancy = 0;
+  const queryPadding = TILE * 5;
 
-  for (const car of cars) {
+  for (const car of getCarsNearRect(
+    tl.minX * TILE - queryPadding,
+    tl.minY * TILE - queryPadding,
+    (tl.maxX + 1) * TILE + queryPadding,
+    (tl.maxY + 1) * TILE + queryPadding,
+  )) {
     const anchor = getCarRoadTile(car);
+    if (carIsClearingTrafficLightIntersection(car, tl, anchor)) {
+      occupancy++;
+      continue;
+    }
     if (!anchor) continue;
 
     if (signalContainsTile(tl, anchor.x, anchor.y)) {
@@ -1254,31 +1398,156 @@ function updateTrafficLights(dtSec) {
   }
 }
 
-function getBlockingTrafficLight(car, anchor) {
-  if (!anchor || map[anchor.y]?.[anchor.x] === T.ROAD_X) return null;
-  if ((!car.waypoints || !car.waypoints.length) && !planCarWaypoints(car)) return null;
-  if (!Number.isInteger(car.pendingRoadTx) || !Number.isInteger(car.pendingRoadTy)) return null;
+function getTrafficLightKey(tl) {
+  return getTrafficLightKeyPure(tl);
+}
 
-  for (const tl of trafficLights) {
-    if (!signalContainsTile(tl, car.pendingRoadTx, car.pendingRoadTy)) continue;
-    if (isTrafficLightGreenForDir(tl, car.dir)) return null;
-    return tl;
+function getTrafficLightByKey(lightKey) {
+  if (!lightKey) return null;
+  return trafficLights.find(tl => getTrafficLightKey(tl) === lightKey) || null;
+}
+
+function getTrafficLightClearanceDistance(tl, car, dir = car.dir) {
+  return getTrafficLightClearanceDistancePure({ tl, car, tileSize: TILE, dir });
+}
+
+function getTrafficLightClearanceThreshold(car, dir = car.dir) {
+  return getTrafficLightClearanceThresholdPure({ car, dir, getCarHalfExtents });
+}
+
+function carIsClearingTrafficLightIntersection(car, tl, anchor = null) {
+  return carIsClearingTrafficLightIntersectionPure({
+    car,
+    tl,
+    anchor,
+    tileSize: TILE,
+    getCarHalfExtents,
+    carOverlapsTrafficLightIntersection,
+    signalContainsTile,
+  });
+}
+
+function getCarIntentTrafficLight(car, anchor) {
+  return getCarIntentTrafficLightPure({
+    car,
+    anchor,
+    trafficLights,
+    getCarDriverIntent,
+    signalContainsTile,
+  });
+}
+
+function carHasCommittedTrafficLightRightOfWay(car, tl, anchor) {
+  return carHasCommittedTrafficLightRightOfWayPure({
+    car,
+    tl,
+    anchor,
+    trafficLights,
+    tileSize: TILE,
+    getCarHalfExtents,
+    getCarDriverIntent,
+    signalContainsTile,
+    getLightKey: getTrafficLightKey,
+    carOverlapsTrafficLightIntersection,
+  });
+}
+
+function refreshCarTrafficLightCommitment(car, anchor) {
+  return refreshCarTrafficLightCommitmentPure({
+    car,
+    anchor,
+    trafficLights,
+    tileSize: TILE,
+    getCarHalfExtents,
+    getCarDriverIntent,
+    signalContainsTile,
+    isTrafficLightGreenForDir,
+    getLightKey: getTrafficLightKey,
+    carOverlapsTrafficLightIntersection,
+  });
+}
+
+function getTrafficLightExitWaypoint(car, tl) {
+  const exitWaypoint = (car.waypoints || []).find(waypoint => (
+    Number.isInteger(waypoint?.roadTx) &&
+    Number.isInteger(waypoint?.roadTy) &&
+    !signalContainsTile(tl, waypoint.roadTx, waypoint.roadTy)
+  ));
+  if (exitWaypoint) return exitWaypoint;
+
+  if (
+    Number.isInteger(car.pendingRoadTx) &&
+    Number.isInteger(car.pendingRoadTy) &&
+    !signalContainsTile(tl, car.pendingRoadTx, car.pendingRoadTy)
+  ) {
+    const exitDir = Number.isInteger(car.pendingDir) ? car.pendingDir : car.dir;
+    const exitLaneIndex = Number.isInteger(car.pendingLaneIndex) ? car.pendingLaneIndex : getCarLaneIndex(car);
+    const lanePoint = getLaneCenterForRoad(car.pendingRoadTx, car.pendingRoadTy, exitDir, exitLaneIndex);
+    return {
+      x: lanePoint.x,
+      y: lanePoint.y,
+      exitDir,
+      exitLaneIndex,
+      roadTx: car.pendingRoadTx,
+      roadTy: car.pendingRoadTy,
+    };
   }
+
   return null;
 }
 
-function getTrafficLightStopDistance(tl, car) {
-  if (!tl || !car) return Infinity;
-  switch (car.dir) {
-    case 0:
-      return tl.minX * TILE - 6 - car.x;
-    case 1:
-      return tl.minY * TILE - 6 - car.y;
-    case 2:
-      return car.x - ((tl.maxX + 1) * TILE + 6);
-    default:
-      return car.y - ((tl.maxY + 1) * TILE + 6);
+function hasTrafficLightExitRoom(car, tl) {
+  const exitWaypoint = getTrafficLightExitWaypoint(car, tl);
+  if (!exitWaypoint) return true;
+
+  const exitDir = Number.isInteger(exitWaypoint.exitDir) ? exitWaypoint.exitDir : (Number.isInteger(car.pendingDir) ? car.pendingDir : car.dir);
+  const exitExtents = getCarHalfExtents(car, exitDir);
+  const safeGap = getCarSafeGap(car);
+
+  for (const other of getCarsNearPoint(exitWaypoint.x, exitWaypoint.y, TILE * 4)) {
+    if (other === car) continue;
+    if (carsOverlapAtPoints(car, exitWaypoint, other, other)) return false;
+
+    const otherExtents = getCarHalfExtents(other);
+    if (exitDir === 0 || exitDir === 2) {
+      const lateralLimit = exitExtents.y + otherExtents.y + 0.8;
+      if (Math.abs(other.y - exitWaypoint.y) > lateralLimit) continue;
+      const delta = exitDir === 0 ? other.x - exitWaypoint.x : exitWaypoint.x - other.x;
+      const frontClearance = exitExtents.x + otherExtents.x + safeGap + 3;
+      if (delta > -otherExtents.x && delta < frontClearance) return false;
+      continue;
+    }
+
+    const lateralLimit = exitExtents.x + otherExtents.x + 0.8;
+    if (Math.abs(other.x - exitWaypoint.x) > lateralLimit) continue;
+    const delta = exitDir === 1 ? other.y - exitWaypoint.y : exitWaypoint.y - other.y;
+    const frontClearance = exitExtents.y + otherExtents.y + safeGap + 3;
+    if (delta > -otherExtents.y && delta < frontClearance) return false;
   }
+
+  return true;
+}
+
+function getBlockingTrafficLight(car, anchor) {
+  return getBlockingTrafficLightPure({
+    car,
+    anchor,
+    currentTile: anchor ? map[anchor.y]?.[anchor.x] : null,
+    roadX: T.ROAD_X,
+    trafficLights,
+    tileSize: TILE,
+    getCarHalfExtents,
+    getCarDriverIntent,
+    signalContainsTile,
+    isTrafficLightGreenForDir,
+    getLightKey: getTrafficLightKey,
+    hasTrafficLightExitRoom: ({ car: currentCar, tl }) => hasTrafficLightExitRoom(currentCar, tl),
+    carOverlapsTrafficLightIntersection,
+  });
+}
+
+function getTrafficLightStopDistance(tl, car) {
+  return getTrafficLightStopDistancePure({ tl, car, tileSize: TILE, dir: car?.dir });
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1336,6 +1605,7 @@ function generateMap() {
   // Place buildings in blocks
   placeBuildings(roadCols, roadRows);
   assignCivicBuildings();
+  buildingsByY = [...buildings].sort((first, second) => first.y - second.y);
 
   // Scatter trees on remaining grass
   for (let y = 0; y < MAP_H; y++) {
@@ -1518,6 +1788,23 @@ function scoreCivicBuildingCandidate(building, preferredTypes) {
   return score;
 }
 
+function pickBuildingAssignmentCandidate(used, preferredTypes = [], { preferLarge = false } = {}) {
+  const tiers = [
+    building => !used.has(building) && (!preferLarge || (building.tw >= 3 && building.th >= 2)) && !!getBuildingSceneRoadTile(building),
+    building => !used.has(building) && !!getBuildingSceneRoadTile(building),
+    building => !used.has(building) && (!preferLarge || (building.tw >= 3 && building.th >= 2)),
+    building => !used.has(building),
+  ];
+
+  for (const tier of tiers) {
+    const best = buildings
+      .filter(tier)
+      .sort((a, b) => scoreCivicBuildingCandidate(b, preferredTypes) - scoreCivicBuildingCandidate(a, preferredTypes))[0];
+    if (best) return best;
+  }
+  return null;
+}
+
 function applyCivicBuildingSpec(building, civicKey, spec) {
   if (!building) return;
   building.originalType = building.originalType || building.type;
@@ -1534,21 +1821,9 @@ function assignCivicBuildings() {
   specialBuildings.carSales = null;
   specialBuildings.scrapyard = null;
 
-  const candidates = buildings.filter(building => building.tw >= 3 && building.th >= 2);
   const used = new Set();
 
-  for (const [civicKey, spec] of Object.entries(CIVIC_BUILDING_SPECS)) {
-    const best = candidates
-      .filter(building => !used.has(building))
-      .sort((a, b) => scoreCivicBuildingCandidate(b, spec.preferredTypes) - scoreCivicBuildingCandidate(a, spec.preferredTypes))[0];
-    if (!best) continue;
-    used.add(best);
-    applyCivicBuildingSpec(best, civicKey, spec);
-  }
-
-  const carSales = candidates
-    .filter(building => !used.has(building))
-    .sort((a, b) => scoreCivicBuildingCandidate(b, ['shop', 'office', 'bank']) - scoreCivicBuildingCandidate(a, ['shop', 'office', 'bank']))[0];
+  const carSales = pickBuildingAssignmentCandidate(used, ['shop', 'office', 'bank'], { preferLarge: true });
   if (carSales) {
     used.add(carSales);
     applyBuildingVisualStyle(carSales, { type: 'car-sales', signText: 'AUTO', forceSign: true });
@@ -1557,15 +1832,20 @@ function assignCivicBuildings() {
     specialBuildings.carSales = carSales;
   }
 
-  const scrapyard = candidates
-    .filter(building => !used.has(building))
-    .sort((a, b) => scoreCivicBuildingCandidate(b, ['brick', 'shop', 'office']) - scoreCivicBuildingCandidate(a, ['brick', 'shop', 'office']))[0];
+  const scrapyard = pickBuildingAssignmentCandidate(used, ['brick', 'shop', 'office'], { preferLarge: true });
   if (scrapyard) {
     used.add(scrapyard);
     applyBuildingVisualStyle(scrapyard, { type: 'scrapyard', signText: 'SCRAP', forceSign: true });
     scrapyard.specialKey = 'scrapyard';
     scrapyard.sceneRoad = null;
     specialBuildings.scrapyard = scrapyard;
+  }
+
+  for (const [civicKey, spec] of Object.entries(CIVIC_BUILDING_SPECS)) {
+    const best = pickBuildingAssignmentCandidate(used, spec.preferredTypes, { preferLarge: true });
+    if (!best) continue;
+    used.add(best);
+    applyCivicBuildingSpec(best, civicKey, spec);
   }
 }
 
@@ -1715,47 +1995,16 @@ function findPathTiles(start, goal, maxVisited = MAP_W * MAP_H) {
   return path;
 }
 
-function findRoadPathTiles(start, goal, maxVisited = MAP_W * MAP_H) {
-  if (!start || !goal) return null;
-  if (start.x === goal.x && start.y === goal.y) return [start];
-
-  const q = [start];
-  const key = (x, y) => `${x},${y}`;
-  const prev = new Map();
-  const seen = new Set([key(start.x, start.y)]);
-  let qi = 0;
-  let visited = 0;
-
-  while (qi < q.length && visited < maxVisited) {
-    const cur = q[qi++];
-    visited++;
-    if (cur.x === goal.x && cur.y === goal.y) break;
-
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const nx = cur.x + dx;
-      const ny = cur.y + dy;
-      const k = key(nx, ny);
-      if (seen.has(k)) continue;
-      if (!(nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H)) continue;
-      if (!isRoadTile(map[ny][nx])) continue;
-      seen.add(k);
-      prev.set(k, cur);
-      q.push({ x: nx, y: ny });
-    }
-  }
-
-  const goalKey = key(goal.x, goal.y);
-  if (!seen.has(goalKey)) return null;
-
-  const path = [];
-  let cur = goal;
-  while (cur) {
-    path.push(cur);
-    if (cur.x === start.x && cur.y === start.y) break;
-    cur = prev.get(key(cur.x, cur.y));
-  }
-  path.reverse();
-  return path;
+function findRoadPathTiles(start, goal, maxVisited = MAP_W * MAP_H, startDir = null) {
+  return findDirectedRoadPathTilesPure({
+    start,
+    goal,
+    startDir,
+    maxVisited,
+    getTileSubtiles: getRoadRouteSubtiles,
+    normalizeTile: normalizeRoadRouteTile,
+    getRoadTileKey,
+  });
 }
 
 function getDirectionBetweenTiles(from, to) {
@@ -1826,6 +2075,32 @@ function getVerticalRoadBaseCol(tx, ty) {
   return tx;
 }
 
+function normalizeRoadRouteTile(tile) {
+  if (!tile) return null;
+  const currentTile = map[tile.y]?.[tile.x];
+  if (currentTile === T.ROAD_H) {
+    return { x: tile.x, y: getHorizontalRoadBaseRow(tile.x, tile.y) };
+  }
+  if (currentTile === T.ROAD_V) {
+    return { x: getVerticalRoadBaseCol(tile.x, tile.y), y: tile.y };
+  }
+  return currentTile === T.ROAD_X ? { x: tile.x, y: tile.y } : null;
+}
+
+function getRoadRouteSubtiles(tx, ty) {
+  return buildRoadRoutingSubtilesPure({
+    tx,
+    ty,
+    tile: map[ty]?.[tx],
+    roadH: T.ROAD_H,
+    roadV: T.ROAD_V,
+    roadX: T.ROAD_X,
+    map,
+    driveSide: TRAFFIC_DRIVE_SIDE,
+    canDriveDirection,
+  });
+}
+
 function clampLaneIndex(index) {
   return index === 1 ? 1 : 0;
 }
@@ -1839,25 +2114,34 @@ function getOuterLaneIndex() {
 }
 
 function pickPreferredLaneIndex(vehicleType = 'civilian') {
-  if (vehicleType === 'delivery') return getOuterLaneIndex();
-  if (vehicleType === 'police' || vehicleType === 'ambulance' || vehicleType === 'fire') {
-    return rng() < 0.6 ? getInnerLaneIndex() : getOuterLaneIndex();
-  }
-  return rng() < 0.3 ? getInnerLaneIndex() : getOuterLaneIndex();
+  return getOuterLaneIndex();
 }
 
 function getDirectionalLaneOffset(dir, laneIndex = 0) {
   const idx = clampLaneIndex(laneIndex);
-  if (dir === 0) return idx === 0 ? 5 : 11;
-  if (dir === 2) return idx === 0 ? 11 : 5;
-  if (dir === 1) return idx === 0 ? 5 : 11;
-  return idx === 0 ? 11 : 5;
+  const rightHandOffsets = {
+    0: [5, 11],
+    1: [11, 5],
+    2: [11, 5],
+    3: [5, 11],
+  };
+  const leftHandOffsets = {
+    0: [11, 5],
+    1: [5, 11],
+    2: [5, 11],
+    3: [11, 5],
+  };
+  const offsets = TRAFFIC_DRIVE_SIDE === 'left' ? leftHandOffsets : rightHandOffsets;
+  return offsets[dir]?.[idx] ?? rightHandOffsets[dir][idx];
 }
 
 function getLaneCenterForRoad(tx, ty, dir, laneIndex = 0) {
   if (dir === 0 || dir === 2) {
     const baseRow = getHorizontalRoadBaseRow(tx, ty);
-    const laneY = (dir === 0 ? baseRow + 1 : baseRow) * TILE + getDirectionalLaneOffset(dir, laneIndex);
+    const rowIndex = TRAFFIC_DRIVE_SIDE === 'left'
+      ? (dir === 0 ? 0 : 1)
+      : (dir === 0 ? 1 : 0);
+    const laneY = (baseRow + rowIndex) * TILE + getDirectionalLaneOffset(dir, laneIndex);
     if (dir === 0) {
       return { x: tx * TILE + 8, y: laneY };
     }
@@ -1865,19 +2149,18 @@ function getLaneCenterForRoad(tx, ty, dir, laneIndex = 0) {
   }
 
   const baseCol = getVerticalRoadBaseCol(tx, ty);
-  const laneX = (dir === 1 ? baseCol + 1 : baseCol) * TILE + getDirectionalLaneOffset(dir, laneIndex);
+  const colIndex = TRAFFIC_DRIVE_SIDE === 'left'
+    ? (dir === 1 ? 1 : 0)
+    : (dir === 1 ? 0 : 1);
+  const laneX = (baseCol + colIndex) * TILE + getDirectionalLaneOffset(dir, laneIndex);
   if (dir === 1) {
     return { x: laneX, y: ty * TILE + 8 };
   }
   return { x: laneX, y: ty * TILE + 8 };
 }
 
-function getCarLaneDir(car) {
-  return Number.isInteger(car.laneDir) ? car.laneDir : car.dir;
-}
-
 function getCarPreferredLaneIndex(car) {
-  return Number.isInteger(car.preferredLaneIndex) ? clampLaneIndex(car.preferredLaneIndex) : 0;
+  return Number.isInteger(car.preferredLaneIndex) ? clampLaneIndex(car.preferredLaneIndex) : getOuterLaneIndex();
 }
 
 function getCarLaneIndex(car) {
@@ -1897,6 +2180,8 @@ function clearCarRoute(car) {
 
 function clearCarWaypoints(car) {
   car.waypoints = [];
+  car.driverIntent = null;
+  car.navigationBlockReason = null;
   car.pendingRoadTx = null;
   car.pendingRoadTy = null;
   car.pendingDir = null;
@@ -1908,32 +2193,81 @@ function getResponderPhase(car) {
   return car.mode === 'pursuit' || car.mode === 'intercept' || car.mode === 'medical-response' || car.mode === 'medical-arriving' || car.mode === 'fire-response' || car.mode === 'fire-arriving';
 }
 
-function canUseAdjacentOvertakeLane(car, originTx, originTy) {
-  const tile = map[originTy]?.[originTx];
-  if (!(tile === T.ROAD_H || tile === T.ROAD_V)) return false;
-  const altLaneIndex = getAdjacentLaneIndex(getCarPreferredLaneIndex(car));
-  const altLane = getLaneCenterForRoad(originTx, originTy, car.dir, altLaneIndex);
-  const carExtents = getCarHalfExtents(car);
-  for (const other of cars) {
-    if (other === car) continue;
-    const otherExtents = getCarHalfExtents(other);
-    if (car.dir === 0 || car.dir === 2) {
-      const lateralLimit = carExtents.y + otherExtents.y + 0.7;
-      if (Math.abs(other.y - altLane.y) > lateralLimit) continue;
-      const delta = car.dir === 0 ? other.x - car.x : car.x - other.x;
-      const backClearance = carExtents.x + otherExtents.x + 2.5;
-      const frontClearance = carExtents.x + otherExtents.x + 16;
-      if (delta > -backClearance && delta < frontClearance) return false;
-      continue;
-    }
-    const lateralLimit = carExtents.x + otherExtents.x + 0.7;
-    if (Math.abs(other.x - altLane.x) > lateralLimit) continue;
-    const delta = car.dir === 1 ? other.y - car.y : car.y - other.y;
-    const backClearance = carExtents.y + otherExtents.y + 2.5;
-    const frontClearance = carExtents.y + otherExtents.y + 16;
-    if (delta > -backClearance && delta < frontClearance) return false;
+function hasStraightOvertakeLookahead(originTx, originTy, dir, requiredTiles = 3) {
+  let tx = originTx;
+  let ty = originTy;
+  for (let step = 0; step < requiredTiles; step++) {
+    if (!canDriveDirection(tx, ty, dir)) return false;
+    const [dx, dy] = getDirectionDelta(dir);
+    tx += dx;
+    ty += dy;
+    const tile = map[ty]?.[tx];
+    if (!isRoadTile(tile) || tile === T.ROAD_X) return false;
   }
   return true;
+}
+
+function canUseAdjacentOvertakeLane(car, originTx, originTy, previewDistance = TILE * 3) {
+  const tile = map[originTy]?.[originTx];
+  if (!(tile === T.ROAD_H || tile === T.ROAD_V)) return false;
+  if (!hasStraightOvertakeLookahead(originTx, originTy, car.dir, 3)) return false;
+  const altLaneIndex = getOvertakeLaneIndexPure({
+    currentLaneIndex: getCarLaneIndex(car),
+    preferredLaneIndex: getCarPreferredLaneIndex(car),
+    activeLaneIndex: car.overtakeTimer > 0 ? car.overtakeLaneIndex : null,
+    getAdjacentLaneIndexFn: getAdjacentLaneIndex,
+  });
+  if (!Number.isInteger(altLaneIndex)) return false;
+  const altLane = getLaneCenterForRoad(originTx, originTy, car.dir, altLaneIndex);
+  const [dx, dy] = getDirectionDelta(car.dir);
+  const nearbyCars = car.dir === 0 || car.dir === 2
+    ? getCarsNearSegment(car.x, altLane.y, car.x + dx * previewDistance, altLane.y, TILE * 2)
+    : getCarsNearSegment(altLane.x, car.y, altLane.x, car.y + dy * previewDistance, TILE * 2);
+  return canUseAdjacentOvertakeLanePure({
+    car,
+    cars: nearbyCars,
+    altLaneCenter: altLane,
+    getCarHalfExtents,
+    previewDistance,
+  });
+}
+
+function canUseLaneAssistGap(car, originTx, originTy, targetLaneIndex, previewDistance = TILE * 2.25) {
+  const tile = map[originTy]?.[originTx];
+  if (!(tile === T.ROAD_H || tile === T.ROAD_V)) return false;
+  if (getCarLaneIndex(car) === targetLaneIndex) return true;
+
+  const targetLaneCenter = getLaneCenterForRoad(originTx, originTy, car.dir, targetLaneIndex);
+  const [dx, dy] = getDirectionDelta(car.dir);
+  const previewX = targetLaneCenter.x + dx * previewDistance;
+  const previewY = targetLaneCenter.y + dy * previewDistance;
+  const laneAlignmentTolerance = 3.25;
+  const nearbyCars = getCarsNearSegment(car.x, car.y, previewX, previewY, TILE * 2)
+    .filter(other => {
+      if (other === car) return true;
+      if (other.dir !== car.dir) return false;
+      if (car.dir === 0 || car.dir === 2) {
+        return Math.abs(other.y - targetLaneCenter.y) <= laneAlignmentTolerance;
+      }
+      return Math.abs(other.x - targetLaneCenter.x) <= laneAlignmentTolerance;
+    });
+  return canUseAdjacentOvertakeLanePure({
+    car,
+    cars: nearbyCars,
+    altLaneCenter: targetLaneCenter,
+    getCarHalfExtents,
+    previewDistance,
+    lateralPadding: 0.25,
+    backClearancePadding: 3,
+    frontClearancePadding: 6,
+  });
+}
+
+function hasBlockedPendingLaneAssistShift(car, anchor, targetLaneIndex = car?.pendingLaneIndex) {
+  if (!car || !anchor || !Number.isInteger(targetLaneIndex)) return false;
+  if (!Number.isInteger(car.pendingDir) || car.pendingDir === car.dir) return false;
+  if (getCarLaneIndex(car) === targetLaneIndex) return false;
+  return !canUseLaneAssistGap(car, anchor.x, anchor.y, targetLaneIndex);
 }
 
 function getCarSteeringChance(car, tile) {
@@ -1948,28 +2282,156 @@ function getCarRouteRefreshInterval(car) {
   return framesToSeconds(90);
 }
 
+const BLOCKED_LANE_ASSIST_INTENT = Symbol('blocked-lane-assist-intent');
+
+function hasCommittedIntersectionIntent(car) {
+  return !!(car?.waypoints?.length && car?.driverIntent?.intersectionEntryTile && Number.isInteger(car?.pendingDir));
+}
+
+function getCarDesiredLaneIndex(car, tile, nextDir = Number.isInteger(car?.pendingDir) ? car.pendingDir : car.dir) {
+  const preferredLaneIndex = getCarPreferredLaneIndex(car);
+  const overtakeLaneIndex = tile !== T.ROAD_X && car.overtakeTimer > 0
+    ? getOvertakeLaneIndexPure({
+      currentLaneIndex: getCarLaneIndex(car),
+      preferredLaneIndex,
+      activeLaneIndex: car.overtakeLaneIndex,
+      getAdjacentLaneIndexFn: getAdjacentLaneIndex,
+    })
+    : null;
+  return getIntentLaneIndexPure({
+    currentDir: car.dir,
+    nextDir,
+    preferredLaneIndex,
+    outerLaneIndex: getOuterLaneIndex(),
+    innerLaneIndex: getInnerLaneIndex(),
+    overtakeLaneIndex,
+  });
+}
+
+function getCarDesiredGoalKey(car) {
+  const { targetTile, useRoute } = getCarSteeringIntent(car);
+  const routeTile = useRoute && targetTile ? normalizeRoadRouteTile(targetTile) : null;
+  return routeTile ? `${routeTile.x},${routeTile.y}` : null;
+}
+
+function getDirectionDelta(dir) {
+  return [[1, 0], [0, 1], [-1, 0], [0, -1]][dir] || [0, 0];
+}
+
+function getCarTurnCandidates(car, originTx = Math.floor(car.x / TILE), originTy = Math.floor(car.y / TILE)) {
+  return [car.dir, (car.dir + 1) % 4, (car.dir + 3) % 4, (car.dir + 2) % 4]
+    .filter((dir, index, dirs) => dirs.indexOf(dir) === index && canDriveDirection(originTx, originTy, dir));
+}
+
+function getCarTurnDirectionScore(car, dir, targetPoint, strategy, originTx, originTy) {
+  const [dx, dy] = getDirectionDelta(dir);
+  const lane = getLaneCenterForRoad(originTx + dx, originTy + dy, dir, getCarPreferredLaneIndex(car));
+  const score = (lane.x - targetPoint.x) ** 2 + (lane.y - targetPoint.y) ** 2;
+  return strategy === 'away' ? -score : score;
+}
+
+function getCarTurnDirectionPriority(car, targetPoint, strategy = 'random', originTx = Math.floor(car.x / TILE), originTy = Math.floor(car.y / TILE)) {
+  const candidates = getCarTurnCandidates(car, originTx, originTy);
+  if (!candidates.length) return [];
+
+  if (strategy === 'random' || !targetPoint) {
+    const remaining = [...candidates];
+    const ordered = [];
+    while (remaining.length) {
+      const index = rngInt(0, remaining.length - 1);
+      ordered.push(remaining.splice(index, 1)[0]);
+    }
+    return ordered;
+  }
+
+  return [...candidates].sort((first, second) => (
+    getCarTurnDirectionScore(car, first, targetPoint, strategy, originTx, originTy) -
+    getCarTurnDirectionScore(car, second, targetPoint, strategy, originTx, originTy)
+  ));
+}
+
+function getIntersectionTraversalPlan(car, anchor, tile, exitDir) {
+  const laneIndex = tile === T.ROAD_X ? getCarLaneIndex(car) : getCarDesiredLaneIndex(car, tile, exitDir);
+  return buildIntersectionTraversalPlanPure({
+    map,
+    anchor,
+    tile,
+    currentDir: car.dir,
+    exitDir,
+    laneIndex,
+    roadX: T.ROAD_X,
+    driveSide: TRAFFIC_DRIVE_SIDE,
+    isRoadTile,
+    canDriveDirection,
+    getRoadTileKey,
+    getDirectionDelta,
+    getLaneCenterForRoad,
+    getIntersectionTurnWaypoint,
+    makeWaypoint: makeCarWaypoint,
+  });
+}
+
+function refreshCarNavigationPlan(car, anchor) {
+  if (!anchor) return;
+  const tile = map[anchor.y]?.[anchor.x];
+
+  if (tile === T.ROAD_X) return;
+  if (hasCommittedIntersectionIntent(car)) return;
+
+  const desiredGoalKey = getCarDesiredGoalKey(car);
+  if (car.routeGoalKey !== desiredGoalKey) {
+    clearCarWaypoints(car);
+    clearCarRoute(car);
+  }
+
+  const desiredLaneIndex = getCarDesiredLaneIndex(car, tile);
+  if (car.waypoints?.length && Number.isInteger(car.pendingLaneIndex) && car.pendingLaneIndex !== desiredLaneIndex) {
+    clearCarWaypoints(car);
+    return;
+  }
+
+  if (car.waypoints?.length && hasBlockedPendingLaneAssistShift(car, anchor)) {
+    clearCarWaypoints(car);
+  }
+}
+
 function getCarRouteNextTile(car, anchor, targetTile) {
   if (!targetTile) {
     clearCarRoute(car);
     return null;
   }
 
-  const goalKey = `${targetTile.x},${targetTile.y}`;
+  const routeAnchor = normalizeRoadRouteTile(anchor);
+  const routeGoal = normalizeRoadRouteTile(targetTile);
+  if (!routeAnchor || !routeGoal) {
+    clearCarRoute(car);
+    return null;
+  }
+
+  const goalKey = `${routeGoal.x},${routeGoal.y}`;
   const needsRefresh = !car.routeTiles ||
     car.routeGoalKey !== goalKey ||
     car.routeRefreshTimer <= 0 ||
-    !car.routeTiles.some(tile => tile.x === anchor.x && tile.y === anchor.y);
+    !car.routeTiles.some(tile => tile.x === routeAnchor.x && tile.y === routeAnchor.y);
 
   if (needsRefresh) {
-    car.routeTiles = findRoadPathTiles(anchor, targetTile);
+    car.routeTiles = findRoadPathTiles(routeAnchor, routeGoal, MAP_W * MAP_H, car.dir);
     car.routeGoalKey = goalKey;
     car.routeRefreshTimer = getCarRouteRefreshInterval(car);
   }
 
-  if (!car.routeTiles || car.routeTiles.length < 2) return null;
-  const routeIndex = car.routeTiles.findIndex(tile => tile.x === anchor.x && tile.y === anchor.y);
-  if (routeIndex < 0 || routeIndex >= car.routeTiles.length - 1) return null;
-  return car.routeTiles[routeIndex + 1];
+  if (!car.routeTiles?.length) return null;
+  const routeIndex = car.routeTiles.findIndex(tile => tile.x === routeAnchor.x && tile.y === routeAnchor.y);
+  if (routeIndex < 0) return null;
+  const routeStep = car.routeTiles[routeIndex];
+  const plannedDir = getPlannedRouteDirectionPure({
+    routeTiles: car.routeTiles,
+    routeIndex,
+    map,
+    roadX: T.ROAD_X,
+    currentTile: map[anchor.y]?.[anchor.x],
+  });
+  return Number.isInteger(plannedDir) ? { ...routeStep, nextDir: plannedDir } : null;
 }
 
 function getIntersectionTurnWaypoint(tx, ty, fromDir, toDir, fromLaneIndex = 0, toLaneIndex = 0) {
@@ -1989,65 +2451,202 @@ function makeCarWaypoint(x, y, exitDir, exitLaneDir, exitLaneIndex, roadTx = nul
   return { x, y, exitDir, exitLaneDir, exitLaneIndex, roadTx, roadTy };
 }
 
-function planCarWaypoints(car) {
-  const anchor = getCarAnchorTile(car);
-  if (!anchor) return false;
-  const tile = map[anchor.y]?.[anchor.x];
-  let nextDir = car.dir;
-  const { strategy, targetPoint, targetTile, useRoute } = getCarSteeringIntent(car);
-  let hasRouteStep = false;
-  if (useRoute) {
-    const routeStep = getCarRouteNextTile(car, anchor, targetTile);
-    const routedDir = routeStep ? getDirectionBetweenTiles(anchor, routeStep) : null;
-    if (routedDir !== null) {
-      nextDir = routedDir;
-      hasRouteStep = true;
-    }
-  } else {
-    clearCarRoute(car);
+function buildDeliveryStopIntent(car, anchor) {
+  const plan = car.deliveryPlan;
+  if (car.mode !== 'delivery-arriving' || !plan || !anchor) return null;
+  if (anchor.x !== plan.roadTile.x || anchor.y !== plan.roadTile.y) return null;
+  if (car.dir !== plan.stopDir) return null;
+
+  const laneIndex = plan.laneIndex;
+  const waypoints = [];
+  if (getCarLaneIndex(car) !== laneIndex) {
+    const lanePoint = getLaneCenterForRoad(anchor.x, anchor.y, plan.stopDir, laneIndex);
+    waypoints.push(makeCarWaypoint(
+      lanePoint.x,
+      lanePoint.y,
+      plan.stopDir,
+      plan.stopDir,
+      laneIndex,
+      anchor.x,
+      anchor.y
+    ));
   }
 
-  if (!hasRouteStep && tile === T.ROAD_X && (targetPoint || rng() < getCarSteeringChance(car, tile))) {
-    nextDir = chooseCarTurn(car, targetPoint, strategy, anchor.x, anchor.y);
-  } else if (!canDriveDirection(anchor.x, anchor.y, nextDir)) {
-    nextDir = chooseCarTurn(car, targetPoint, strategy, anchor.x, anchor.y);
+  const lastWaypoint = waypoints[waypoints.length - 1];
+  if (!lastWaypoint || Math.abs(lastWaypoint.x - plan.stopPoint.x) > 0.001 || Math.abs(lastWaypoint.y - plan.stopPoint.y) > 0.001) {
+    waypoints.push(makeCarWaypoint(
+      plan.stopPoint.x,
+      plan.stopPoint.y,
+      plan.stopDir,
+      plan.stopDir,
+      laneIndex,
+      anchor.x,
+      anchor.y
+    ));
   }
 
-  const laneDir = car.dir;
-  const preferredLaneIndex = getCarPreferredLaneIndex(car);
-  const currentLaneIndex = getCarLaneIndex(car);
-  let laneIndex = preferredLaneIndex;
-  if (car.overtakeTimer > 0 && tile !== T.ROAD_X && nextDir === car.dir) {
-    laneIndex = getAdjacentLaneIndex(preferredLaneIndex);
-  }
+  return {
+    approachDir: plan.stopDir,
+    waypoints,
+    pendingRoadTx: anchor.x,
+    pendingRoadTy: anchor.y,
+    pendingDir: plan.stopDir,
+    pendingLaneDir: plan.stopDir,
+    pendingLaneIndex: laneIndex,
+    intersectionEntryTile: null,
+    intersectionReservationKeys: [],
+  };
+}
 
-  const [dx, dy] = [[1, 0], [0, 1], [-1, 0], [0, -1]][nextDir];
-  const nextTx = anchor.x + dx;
-  const nextTy = anchor.y + dy;
-  if (!(nextTx >= 0 && nextTx < MAP_W && nextTy >= 0 && nextTy < MAP_H && isRoadTile(map[nextTy][nextTx]))) {
-    return false;
+function buildCarDriverIntentForDirection(car, anchor, tile, nextDir, currentLaneIndex, laneIndex) {
+  const needsLaneAssistShift = tile !== T.ROAD_X && currentLaneIndex !== laneIndex && nextDir !== car.dir;
+  if (needsLaneAssistShift && !canUseLaneAssistGap(car, anchor.x, anchor.y, laneIndex)) {
+    return BLOCKED_LANE_ASSIST_INTENT;
   }
 
   const points = [];
+  const laneDir = car.dir;
   const laneShiftOnly = currentLaneIndex !== laneIndex && nextDir === car.dir;
   if (currentLaneIndex !== laneIndex && !laneShiftOnly) {
     const lanePoint = getLaneCenterForRoad(anchor.x, anchor.y, laneDir, laneIndex);
     points.push(makeCarWaypoint(lanePoint.x, lanePoint.y, car.dir, laneDir, laneIndex));
   }
-  if (nextDir !== car.dir) {
-    const turnPoint = getIntersectionTurnWaypoint(anchor.x, anchor.y, laneDir, nextDir, laneIndex, preferredLaneIndex);
-    if (turnPoint) points.push(makeCarWaypoint(turnPoint.x, turnPoint.y, nextDir, nextDir, preferredLaneIndex));
-    laneIndex = preferredLaneIndex;
+
+  const intersectionTraversal = getIntersectionTraversalPlan(car, anchor, tile, nextDir);
+  if (intersectionTraversal) {
+    points.push(...intersectionTraversal.waypoints);
+    return {
+      approachDir: car.dir,
+      waypoints: points,
+      pendingRoadTx: intersectionTraversal.exitTile.x,
+      pendingRoadTy: intersectionTraversal.exitTile.y,
+      pendingDir: intersectionTraversal.exitDir,
+      pendingLaneDir: intersectionTraversal.exitDir,
+      pendingLaneIndex: intersectionTraversal.laneIndex,
+      intersectionEntryTile: intersectionTraversal.entryTile,
+      intersectionReservationKeys: intersectionTraversal.intersectionTiles.map(tilePoint => getRoadTileKey(tilePoint.x, tilePoint.y)),
+    };
   }
+
+  const [dx, dy] = getDirectionDelta(nextDir);
+  const nextTx = anchor.x + dx;
+  const nextTy = anchor.y + dy;
+  if (!(nextTx >= 0 && nextTx < MAP_W && nextTy >= 0 && nextTy < MAP_H && isRoadTile(map[nextTy][nextTx]))) {
+    return null;
+  }
+
+  if (nextDir !== car.dir) {
+    const turnLaneIndex = tile === T.ROAD_X ? currentLaneIndex : laneIndex;
+    const turnPoint = getIntersectionTurnWaypoint(anchor.x, anchor.y, laneDir, nextDir, turnLaneIndex, turnLaneIndex);
+    if (turnPoint) points.push(makeCarWaypoint(turnPoint.x, turnPoint.y, nextDir, nextDir, turnLaneIndex));
+    laneIndex = turnLaneIndex;
+  }
+
   const nextLanePoint = getLaneCenterForRoad(nextTx, nextTy, nextDir, laneIndex);
   points.push(makeCarWaypoint(nextLanePoint.x, nextLanePoint.y, nextDir, nextDir, laneIndex, nextTx, nextTy));
-  car.waypoints = points;
-  car.pendingRoadTx = nextTx;
-  car.pendingRoadTy = nextTy;
-  car.pendingDir = nextDir;
-  car.pendingLaneDir = nextDir;
-  car.pendingLaneIndex = laneIndex;
+
+  const entryTile = map[nextTy]?.[nextTx] === T.ROAD_X ? { x: nextTx, y: nextTy } : null;
+  return {
+    approachDir: car.dir,
+    waypoints: points,
+    pendingRoadTx: nextTx,
+    pendingRoadTy: nextTy,
+    pendingDir: nextDir,
+    pendingLaneDir: nextDir,
+    pendingLaneIndex: laneIndex,
+    intersectionEntryTile: entryTile,
+    intersectionReservationKeys: entryTile ? [getRoadTileKey(entryTile.x, entryTile.y)] : [],
+  };
+}
+
+function buildCarDriverIntent(car, anchor) {
+  if (!anchor) return null;
+
+  const deliveryStopIntent = buildDeliveryStopIntent(car, anchor);
+  if (deliveryStopIntent) return deliveryStopIntent;
+
+  const tile = map[anchor.y]?.[anchor.x];
+  const { strategy, targetPoint, targetTile, useRoute } = getCarSteeringIntent(car);
+  let routedDir = null;
+  if (useRoute) {
+    const routeStep = getCarRouteNextTile(car, anchor, targetTile);
+    routedDir = Number.isInteger(routeStep?.nextDir) ? routeStep.nextDir : null;
+  } else {
+    clearCarRoute(car);
+  }
+
+  const directionPriority = [];
+  if (Number.isInteger(routedDir)) directionPriority.push(routedDir);
+
+  const shouldChooseTurn = tile === T.ROAD_X && !Number.isInteger(routedDir) && (targetPoint || rng() < getCarSteeringChance(car, tile));
+  const mustTurn = !Number.isInteger(routedDir) && !canDriveDirection(anchor.x, anchor.y, car.dir);
+  if (shouldChooseTurn || mustTurn) {
+    directionPriority.push(...getCarTurnDirectionPriority(car, targetPoint, strategy, anchor.x, anchor.y));
+  } else if (!Number.isInteger(routedDir)) {
+    directionPriority.push(car.dir);
+  }
+
+  directionPriority.push(...getCarTurnDirectionPriority(car, targetPoint, strategy, anchor.x, anchor.y));
+
+  if (!directionPriority.length) {
+    directionPriority.push(...getCarTurnDirectionPriority(car, targetPoint, strategy, anchor.x, anchor.y));
+  }
+
+  const rankedDirections = [];
+  for (const dir of directionPriority) {
+    if (Number.isInteger(dir) && !rankedDirections.includes(dir)) rankedDirections.push(dir);
+  }
+  if (!rankedDirections.length) rankedDirections.push(car.dir);
+
+  const currentLaneIndex = getCarLaneIndex(car);
+  for (const nextDir of rankedDirections) {
+    const desiredLaneIndex = tile === T.ROAD_X ? currentLaneIndex : getCarDesiredLaneIndex(car, tile, nextDir);
+    const intent = buildCarDriverIntentForDirection(car, anchor, tile, nextDir, currentLaneIndex, desiredLaneIndex);
+    if (intent === BLOCKED_LANE_ASSIST_INTENT) {
+      if (Number.isInteger(routedDir) && nextDir === routedDir) {
+        return { blocked: 'lane-assist' };
+      }
+      continue;
+    }
+    if (intent) return intent;
+  }
+
+  return null;
+}
+
+function setCarDriverIntent(car, intent) {
+  if (!intent) return false;
+  car.waypoints = intent.waypoints;
+  car.navigationBlockReason = null;
+  car.pendingRoadTx = intent.pendingRoadTx;
+  car.pendingRoadTy = intent.pendingRoadTy;
+  car.pendingDir = intent.pendingDir;
+  car.pendingLaneDir = intent.pendingLaneDir;
+  car.pendingLaneIndex = intent.pendingLaneIndex;
+  car.driverIntent = {
+    approachDir: intent.approachDir,
+    intersectionEntryTile: intent.intersectionEntryTile ? { ...intent.intersectionEntryTile } : null,
+    intersectionReservationKeys: [...(intent.intersectionReservationKeys || [])],
+  };
   return true;
+}
+
+function getCarDriverIntent(car, anchor) {
+  if (!anchor) return null;
+  if ((!car.waypoints || !car.waypoints.length || !car.driverIntent) && !planCarWaypoints(car)) return null;
+  return car.driverIntent;
+}
+
+function planCarWaypoints(car) {
+  const anchor = getCarAnchorTile(car);
+  if (!anchor) return false;
+  const intent = buildCarDriverIntent(car, anchor);
+  if (intent?.blocked) {
+    car.navigationBlockReason = intent.blocked;
+    return false;
+  }
+  if (!intent) return false;
+  return setCarDriverIntent(car, intent);
 }
 
 function advanceCarAlongRoad(car, distance) {
@@ -2127,22 +2726,28 @@ function createCarAtRoad(tx, ty, dir, speed = legacySpeed(0.3 + rng() * 0.4), co
     vehicleType,
     mode: getVehicleDefaultMode(vehicleType),
     waiting: 0,
+    autoScrapTimer: 0,
     stopped: false,
     stopReason: null,
     honking: false,
     honkTimer: 0,
     overtakeTimer: 0,
     waypoints: [],
+    driverIntent: null,
     pendingRoadTx: null,
     pendingRoadTy: null,
     pendingDir: null,
     pendingLaneDir: null,
     pendingLaneIndex: null,
+    overtakeLaneIndex: null,
     routeTiles: null,
     routeGoalKey: null,
     routeRefreshTimer: 0,
+    trafficLightCommitKey: null,
     targetCar: null,
     targetPoint: null,
+    ambientRouteTimer: 0,
+    navigationBlockReason: null,
     incidentId: null,
     eventTimer: 0,
     boostTimer: 0,
@@ -2156,6 +2761,19 @@ function createCarAtRoad(tx, ty, dir, speed = legacySpeed(0.3 + rng() * 0.4), co
     sirenEmitter: null,
     flashPhase: rngInt(0, 60),
   };
+}
+
+function canPlaceCarWithoutOverlap(candidate, ignoredCar = null) {
+  for (const other of cars) {
+    if (other === ignoredCar) continue;
+    if (carsOverlapAtPoints(candidate, candidate, other, other)) return false;
+  }
+  return true;
+}
+
+function createCarAtRoadIfClear(tx, ty, dir, speed = legacySpeed(0.3 + rng() * 0.4), color = pick(PAL.car), vehicleType = 'civilian') {
+  const candidate = createCarAtRoad(tx, ty, dir, speed, color, vehicleType);
+  return canPlaceCarWithoutOverlap(candidate) ? candidate : null;
 }
 
 function updateCarMood(car, dtSec) {
@@ -2280,10 +2898,13 @@ function findRoadSpawn() {
 }
 
 function ensureServiceVehicles(type, desiredCount) {
-  while (countVehiclesByType(type) < desiredCount) {
-    const spawn = getEmergencyVehicleSpawn(type);
+  let attempts = 0;
+  while (countVehiclesByType(type) < desiredCount && attempts < 20) {
+    const spawn = getEmergencyVehicleSpawn(type, countVehiclesByType(type) + attempts);
     if (!spawn) break;
-    const vehicle = createCarAtRoad(spawn.x, spawn.y, pickDirectionForRoadTile(map[spawn.y][spawn.x]), undefined, undefined, type);
+    const vehicle = createCarAtRoadIfClear(spawn.x, spawn.y, pickDirectionForRoadTile(map[spawn.y][spawn.x]), undefined, undefined, type);
+    attempts++;
+    if (!vehicle) continue;
     cars.push(vehicle);
     if (type === 'fire') {
       assignFirePatrolTarget(vehicle, 22);
@@ -2291,10 +2912,14 @@ function ensureServiceVehicles(type, desiredCount) {
   }
 }
 
+function getServiceVehicleTargetCount(type) {
+  return SERVICE_FLEET_TARGETS[type] || 0;
+}
+
 function ensureServiceFleet() {
-  ensureServiceVehicles('police', 3);
-  ensureServiceVehicles('ambulance', 1);
-  ensureServiceVehicles('fire', 2);
+  for (const [type, desiredCount] of Object.entries(SERVICE_FLEET_TARGETS)) {
+    ensureServiceVehicles(type, desiredCount);
+  }
 }
 
 function createPerson(x, y, overrides = {}) {
@@ -3070,41 +3695,154 @@ function distanceSq(a, b) {
   return dx * dx + dy * dy;
 }
 
+function getCarSpatialBucketKey(cellX, cellY) {
+  return `${cellX},${cellY}`;
+}
+
+function updateCarSpatialIndexPosition(index, car, x = car?.x, y = car?.y) {
+  if (!index || !car || !Number.isFinite(x) || !Number.isFinite(y)) return;
+  const cellX = Math.floor(x / index.cellSize);
+  const cellY = Math.floor(y / index.cellSize);
+  const nextKey = getCarSpatialBucketKey(cellX, cellY);
+  const previousKey = index.memberships.get(car);
+  if (previousKey === nextKey) return;
+
+  if (previousKey) {
+    const previousBucket = index.buckets.get(previousKey);
+    if (previousBucket) {
+      const previousIndex = previousBucket.indexOf(car);
+      if (previousIndex >= 0) previousBucket.splice(previousIndex, 1);
+      if (!previousBucket.length) index.buckets.delete(previousKey);
+    }
+  }
+
+  let bucket = index.buckets.get(nextKey);
+  if (!bucket) {
+    bucket = [];
+    index.buckets.set(nextKey, bucket);
+  }
+  bucket.push(car);
+  index.memberships.set(car, nextKey);
+}
+
+function removeCarFromSpatialIndex(car) {
+  if (!carSpatialIndex || !car) return;
+  const previousKey = carSpatialIndex.memberships.get(car);
+  if (!previousKey) return;
+  const bucket = carSpatialIndex.buckets.get(previousKey);
+  if (bucket) {
+    const bucketIndex = bucket.indexOf(car);
+    if (bucketIndex >= 0) bucket.splice(bucketIndex, 1);
+    if (!bucket.length) carSpatialIndex.buckets.delete(previousKey);
+  }
+  carSpatialIndex.memberships.delete(car);
+}
+
+function rebuildCarSpatialIndex() {
+  const index = { cellSize: TRAFFIC_SPATIAL_CELL, buckets: new Map(), memberships: new Map() };
+  for (const car of cars) updateCarSpatialIndexPosition(index, car);
+  carSpatialIndex = index;
+}
+
+function getCarsNearRect(minX, minY, maxX, maxY) {
+  if (!carSpatialIndex) return cars;
+  const { cellSize, buckets } = carSpatialIndex;
+  const minCellX = Math.floor(minX / cellSize);
+  const maxCellX = Math.floor(maxX / cellSize);
+  const minCellY = Math.floor(minY / cellSize);
+  const maxCellY = Math.floor(maxY / cellSize);
+  const nearby = [];
+  for (let cellY = minCellY; cellY <= maxCellY; cellY++) {
+    for (let cellX = minCellX; cellX <= maxCellX; cellX++) {
+      const bucket = buckets.get(getCarSpatialBucketKey(cellX, cellY));
+      if (!bucket) continue;
+      nearby.push(...bucket);
+    }
+  }
+  return nearby;
+}
+
+function getCarsNearPoint(x, y, radius = TRAFFIC_QUERY_RADIUS) {
+  return getCarsNearRect(x - radius, y - radius, x + radius, y + radius);
+}
+
+function getCarsNearSegment(x0, y0, x1, y1, padding = TRAFFIC_QUERY_RADIUS) {
+  return getCarsNearRect(
+    Math.min(x0, x1) - padding,
+    Math.min(y0, y1) - padding,
+    Math.max(x0, x1) + padding,
+    Math.max(y0, y1) + padding,
+  );
+}
+
 function canDriveDirection(tx, ty, dir) {
-  const deltas = [[1, 0], [0, 1], [-1, 0], [0, -1]][dir];
-  const nx = tx + deltas[0];
-  const ny = ty + deltas[1];
-  return nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H && isRoadTile(map[ny][nx]);
+  const currentTile = map[ty]?.[tx];
+  const supportsDirection = dir === 0 || dir === 2 ? supportsHorizontalLaneTile : supportsVerticalLaneTile;
+  if (!supportsDirection(currentTile)) return false;
+  const [dx, dy] = getDirectionDelta(dir);
+  const nx = tx + dx;
+  const ny = ty + dy;
+  return nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H && supportsDirection(map[ny]?.[nx]);
 }
 
 function getQueuedCarDistance(car) {
-  let best = Infinity;
+  return getQueuedCarState(car).distance;
+}
+
+function getQueuedCarState(car) {
+  const queueLookahead = TILE * 12;
+  const [dx, dy] = getDirectionDelta(car.dir);
+  const lookaheadX = car.x + dx * queueLookahead;
+  const lookaheadY = car.y + dy * queueLookahead;
+  const candidates = getCarsNearSegment(car.x, car.y, lookaheadX, lookaheadY, TILE * 2);
+  const distance = getQueuedCarDistancePure({
+    car,
+    cars: candidates,
+    getCarLaneIndex,
+    getCarHalfExtents,
+  });
+  if (!Number.isFinite(distance)) {
+    return { distance, leadCar: null };
+  }
+
   const laneIndex = getCarLaneIndex(car);
-  for (const other of cars) {
+  const carExtents = getCarHalfExtents(car);
+  let leadCar = null;
+  let bestDistance = Infinity;
+
+  for (const other of candidates) {
     if (other === car || other.dir !== car.dir || getCarLaneIndex(other) !== laneIndex) continue;
+    const otherExtents = getCarHalfExtents(other);
     if (car.dir === 0 || car.dir === 2) {
-      const lateralLimit = getCarHalfExtents(car).y + getCarHalfExtents(other).y + 0.6;
+      const lateralLimit = carExtents.y + otherExtents.y + 0.6;
       if (Math.abs(other.y - car.y) > lateralLimit) continue;
       const delta = car.dir === 0 ? other.x - car.x : car.x - other.x;
-      const edgeGap = delta - getCarHalfExtents(car).x - getCarHalfExtents(other).x;
-      if (edgeGap > 0 && edgeGap < best) best = edgeGap;
+      const edgeGap = delta - carExtents.x - otherExtents.x;
+      if (edgeGap > 0 && edgeGap < bestDistance) {
+        bestDistance = edgeGap;
+        leadCar = other;
+      }
       continue;
     }
-    const lateralLimit = getCarHalfExtents(car).x + getCarHalfExtents(other).x + 0.6;
+
+    const lateralLimit = carExtents.x + otherExtents.x + 0.6;
     if (Math.abs(other.x - car.x) > lateralLimit) continue;
     const delta = car.dir === 1 ? other.y - car.y : car.y - other.y;
-    const edgeGap = delta - getCarHalfExtents(car).y - getCarHalfExtents(other).y;
-    if (edgeGap > 0 && edgeGap < best) best = edgeGap;
+    const edgeGap = delta - carExtents.y - otherExtents.y;
+    if (edgeGap > 0 && edgeGap < bestDistance) {
+      bestDistance = edgeGap;
+      leadCar = other;
+    }
   }
-  return best;
+
+  return { distance, leadCar };
 }
 
 function getCarHalfExtents(car, dir = car.dir) {
-  const delivery = car.vehicleType === 'delivery';
   if (dir === 0 || dir === 2) {
-    return delivery ? { x: 5.2, y: 3.1 } : { x: 4.2, y: 2.7 };
+    return { x: 4.2, y: 2.7 };
   }
-  return delivery ? { x: 3.1, y: 5.2 } : { x: 2.7, y: 4.2 };
+  return { x: 2.7, y: 4.2 };
 }
 
 function carsOverlapAtPoints(firstCar, firstPoint, secondCar, secondPoint) {
@@ -3120,149 +3858,123 @@ function isCarInIntersection(car) {
 }
 
 function getTrafficPriorityScore(car) {
-  let score = 0;
-  if (getResponderPhase(car)) score += 100;
-  if (car.vehicleType === 'police' || car.vehicleType === 'ambulance' || car.vehicleType === 'fire') score += 40;
-  if (isCarInIntersection(car)) score += 20;
-  score += Math.min(20, Math.floor((car.waiting || 0) / framesToSeconds(15)));
-  return score;
+  return getTrafficPriorityScorePure({
+    car,
+    getResponderPhase,
+    isCarInIntersection,
+    framesToSeconds,
+  });
 }
 
 function carHasConflictPriority(car, other) {
-  if (!other) return true;
-  if (other.stopReason === 'scene' || other.mode === 'delivery-stopped') return false;
-
-  const carScore = getTrafficPriorityScore(car);
-  const otherScore = getTrafficPriorityScore(other);
-  if (carScore !== otherScore) return carScore > otherScore;
-
-  const carWaiting = car.waiting || 0;
-  const otherWaiting = other.waiting || 0;
-  if (Math.abs(carWaiting - otherWaiting) > framesToSeconds(12)) {
-    return carWaiting > otherWaiting;
-  }
-
-  return (car.id || 0) < (other.id || 0);
+  return carHasConflictPriorityPure({
+    car,
+    other,
+    getResponderPhase,
+    isCarInIntersection,
+    framesToSeconds,
+  });
 }
 
 function compareCarMovementOrder(first, second) {
-  if (first === second) return 0;
-  const firstScore = getTrafficPriorityScore(first);
-  const secondScore = getTrafficPriorityScore(second);
-  if (firstScore !== secondScore) return secondScore - firstScore;
-
-  const firstWaiting = first.waiting || 0;
-  const secondWaiting = second.waiting || 0;
-  if (Math.abs(firstWaiting - secondWaiting) > framesToSeconds(4)) {
-    return secondWaiting - firstWaiting;
-  }
-
-  return (first.id || 0) - (second.id || 0);
+  return compareCarMovementOrderPure({
+    first,
+    second,
+    getResponderPhase,
+    isCarInIntersection,
+    framesToSeconds,
+  });
 }
 
 function getRoadTileKey(tx, ty) {
   return `${tx},${ty}`;
 }
 
-function getPendingIntersectionKey(car, anchor) {
-  if (!anchor) return null;
-  if ((!car.waypoints || !car.waypoints.length) && !planCarWaypoints(car)) return null;
-  if (!Number.isInteger(car.pendingRoadTx) || !Number.isInteger(car.pendingRoadTy)) return null;
-  if (map[anchor.y]?.[anchor.x] === T.ROAD_X) return null;
-  return map[car.pendingRoadTy]?.[car.pendingRoadTx] === T.ROAD_X ? getRoadTileKey(car.pendingRoadTx, car.pendingRoadTy) : null;
+function getRemainingIntersectionReservationKeys(car, anchor = null) {
+  return getRemainingIntersectionReservationKeysPure({
+    map,
+    roadX: T.ROAD_X,
+    waypoints: car?.waypoints,
+    anchor,
+    getRoadTileKey,
+  });
 }
 
-function resolveCarOverlaps() {
-  for (let pass = 0; pass < 2; pass++) {
-    for (let i = 0; i < cars.length; i++) {
-      const first = cars[i];
-      for (let j = i + 1; j < cars.length; j++) {
-        const second = cars[j];
-        if (!carsOverlapAtPoints(first, first, second, second)) continue;
-        const favored = carHasConflictPriority(first, second) ? first : second;
-        const displaced = favored === first ? second : first;
-        const displacedExtents = getCarHalfExtents(displaced);
-        const favoredExtents = getCarHalfExtents(favored);
-        let push = 1.6;
-        if (displaced.dir === 0 || displaced.dir === 2) {
-          const overlap = displacedExtents.x + favoredExtents.x - Math.abs(displaced.x - favored.x);
-          push = Math.max(push, overlap + 0.8);
-          if (displaced.dir === 0) displaced.x -= push;
-          else displaced.x += push;
-        } else {
-          const overlap = displacedExtents.y + favoredExtents.y - Math.abs(displaced.y - favored.y);
-          push = Math.max(push, overlap + 0.8);
-          if (displaced.dir === 1) displaced.y -= push;
-          else displaced.y += push;
-        }
-        displaced.stopped = true;
-        displaced.stopReason = 'traffic';
-        displaced.waiting = Math.max(displaced.waiting || 0, framesToSeconds(6));
-        clearCarWaypoints(displaced);
-      }
+function getPendingIntersectionKeys(car, anchor) {
+  return getPendingIntersectionKeysPure({
+    map,
+    roadX: T.ROAD_X,
+    car,
+    anchor,
+    ensureWaypoints: planCarWaypoints,
+    getRoadTileKey,
+  });
+}
+
+function getBlockingIntersectionReservation(car, anchor, intersectionReservations) {
+  return getBlockingIntersectionReservationPure({
+    map,
+    roadX: T.ROAD_X,
+    car,
+    anchor,
+    intersectionReservations,
+    ensureWaypoints: planCarWaypoints,
+    getRoadTileKey,
+  });
+}
+
+function reserveCarIntersectionIntent(intersectionReservations, car, anchor) {
+  return reserveIntersectionIntentPure({
+    map,
+    roadX: T.ROAD_X,
+    intersectionReservations,
+    car,
+    anchor,
+    getRoadTileKey,
+  });
+}
+
+function claimCarIntersectionIntent(intersectionReservations, car, anchor) {
+  for (const key of getPendingIntersectionKeys(car, anchor)) {
+    const reservedBy = intersectionReservations.get(key);
+    if (!reservedBy || reservedBy === car) {
+      intersectionReservations.set(key, car);
     }
   }
+  return intersectionReservations;
 }
 
 function getProjectedCarPoint(car, distance) {
-  if (distance <= 0) return { x: car.x, y: car.y };
-  if ((!car.waypoints || !car.waypoints.length) && !planCarWaypoints(car)) {
-    return { x: car.x, y: car.y };
-  }
-
-  let px = car.x;
-  let py = car.y;
-  let remaining = distance;
-  for (const target of car.waypoints || []) {
-    if (remaining <= 0.0001) break;
-    const dx = target.x - px;
-    const dy = target.y - py;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist <= remaining + 0.0001) {
-      px = target.x;
-      py = target.y;
-      remaining -= dist;
-      continue;
-    }
-    px += dx / dist * remaining;
-    py += dy / dist * remaining;
-    remaining = 0;
-  }
-  return { x: px, y: py };
+  return getProjectedCarPointPure({
+    car,
+    distance,
+    ensureWaypoints: planCarWaypoints,
+  });
 }
 
 function getProjectedCarConflict(car, travel) {
-  if (!(travel > 0.0001)) return null;
-  const sampleCount = Math.max(2, Math.min(6, Math.ceil(travel / 3.5)));
-  let bestDistance = Infinity;
-  let bestOther = null;
-
-  for (let sample = 1; sample <= sampleCount; sample++) {
-    const sampleDistance = travel * (sample / sampleCount);
-    const projectedPoint = getProjectedCarPoint(car, sampleDistance);
-    for (const other of cars) {
-      if (other === car) continue;
-      if (carsOverlapAtPoints(car, projectedPoint, other, other)) {
-        if (carHasConflictPriority(car, other)) continue;
-        if (sampleDistance < bestDistance) {
-          bestDistance = sampleDistance;
-          bestOther = other;
-        }
-      }
+  const getProjectedPointWithLaneAssistBlock = ({ car: projectedCar, distance }) => {
+    const projectedAnchor = getCarAnchorTile(projectedCar);
+    if (hasBlockedPendingLaneAssistShift(projectedCar, projectedAnchor)) {
+      return { x: projectedCar.x, y: projectedCar.y };
     }
-  }
-
-  if (!Number.isFinite(bestDistance)) return null;
-  return {
-    other: bestOther,
-    safeDistance: Math.max(0, bestDistance - Math.max(0.8, travel / sampleCount)),
+    return getProjectedCarPoint(projectedCar, distance);
   };
+  const projectedPoint = getProjectedPointWithLaneAssistBlock({ car, distance: travel });
+  return getProjectedCarConflictPure({
+    car,
+    travel,
+    cars: getCarsNearSegment(car.x, car.y, projectedPoint.x, projectedPoint.y, TILE * 4),
+    carsOverlapAtPoints,
+    carHasConflictPriority,
+    getProjectedPoint: getProjectedPointWithLaneAssistBlock,
+  });
 }
 
 function getCarSafeGap(car) {
   if (car.mode === 'intercept' && car.targetCar) return 0.8;
   if (car.mode === 'pursuit' && car.targetCar) return 1.2;
-  return car.vehicleType === 'delivery' ? 2.8 : 2.2;
+  return 2.2;
 }
 
 function getCarSteeringIntent(car) {
@@ -3278,7 +3990,17 @@ function getCarSteeringIntent(car) {
     targetPoint = { x: car.targetCar.x, y: car.targetCar.y };
     targetTile = getCarRoadTile(car.targetCar);
     useRoute = true;
+  } else if (car.mode === 'delivery-arriving' && car.deliveryPlan) {
+    strategy = 'toward';
+    targetPoint = car.deliveryPlan.stopPoint;
+    targetTile = car.deliveryPlan.approachTile || car.deliveryPlan.roadTile;
+    useRoute = true;
   } else if ((car.mode === 'pursuit' || car.mode === 'intercept' || car.mode === 'medical-response' || car.mode === 'medical-arriving' || car.mode === 'medical-departing' || car.mode === 'fire-response' || car.mode === 'fire-arriving' || car.mode === 'service-return' || car.mode === 'delivery-arriving' || (car.mode === 'patrol' && car.targetPoint)) && car.targetPoint) {
+    strategy = 'toward';
+    targetPoint = car.targetPoint;
+    targetTile = findNearestRoad(targetPoint.x, targetPoint.y);
+    useRoute = true;
+  } else if ((car.mode === 'cruising' || car.mode === 'delivery-cruising') && car.targetPoint) {
     strategy = 'toward';
     targetPoint = car.targetPoint;
     targetTile = findNearestRoad(targetPoint.x, targetPoint.y);
@@ -3288,41 +4010,13 @@ function getCarSteeringIntent(car) {
 }
 
 function getCarAnchorTile(car) {
-  if (Number.isInteger(car.roadTx) && Number.isInteger(car.roadTy) && car.roadTx >= 0 && car.roadTx < MAP_W && car.roadTy >= 0 && car.roadTy < MAP_H && isRoadTile(map[car.roadTy][car.roadTx])) {
-    return { x: car.roadTx, y: car.roadTy };
-  }
-  const currentTx = Math.floor(car.x / TILE);
-  const currentTy = Math.floor(car.y / TILE);
-  if (currentTx >= 0 && currentTx < MAP_W && currentTy >= 0 && currentTy < MAP_H && isRoadTile(map[currentTy][currentTx])) {
-    return { x: currentTx, y: currentTy };
-  }
-  return findNearestRoad(car.x, car.y);
-}
-
-function chooseCarTurn(car, targetPoint, strategy = 'random', originTx = Math.floor(car.x / TILE), originTy = Math.floor(car.y / TILE)) {
-  const tx = originTx;
-  const ty = originTy;
-  const candidates = [car.dir, (car.dir + 1) % 4, (car.dir + 3) % 4].filter((dir, idx, arr) => arr.indexOf(dir) === idx && canDriveDirection(tx, ty, dir));
-  if (!candidates.length) {
-    const reverse = (car.dir + 2) % 4;
-    if (canDriveDirection(tx, ty, reverse)) return reverse;
-    const anyRoadDir = [0, 1, 2, 3].filter(dir => canDriveDirection(tx, ty, dir));
-    return anyRoadDir.length ? pick(anyRoadDir) : car.dir;
-  }
-  if (strategy === 'random' || !targetPoint) return pick(candidates);
-
-  let bestDir = candidates[0];
-  let bestScore = strategy === 'away' ? -Infinity : Infinity;
-  for (const dir of candidates) {
-    const [dx, dy] = [[1, 0], [0, 1], [-1, 0], [0, -1]][dir];
-    const lane = getLaneCenterForRoad(tx + dx, ty + dy, dir);
-    const score = (lane.x - targetPoint.x) ** 2 + (lane.y - targetPoint.y) ** 2;
-    if ((strategy === 'toward' && score < bestScore) || (strategy === 'away' && score > bestScore)) {
-      bestScore = score;
-      bestDir = dir;
-    }
-  }
-  return bestDir;
+  return resolveVehicleRoadAnchorPure({
+    car,
+    map,
+    tileSize: TILE,
+    isRoadTile,
+    findNearestRoad,
+  });
 }
 
 function setCarSiren(car, kind = null) {
@@ -3358,15 +4052,7 @@ function takeEmergencyVehicle(type, targetPoint = null) {
     }
     return best;
   }
-
-  const spawn = getEmergencyVehicleSpawn(type);
-  if (!spawn) return null;
-  const vehicle = createCarAtRoad(spawn.x, spawn.y, pickDirectionForRoadTile(map[spawn.y][spawn.x]), undefined, undefined, type);
-  cars.push(vehicle);
-  if (type === 'fire') {
-    assignFirePatrolTarget(vehicle, 22);
-  }
-  return vehicle;
+  return null;
 }
 
 function findNearbyPedestrian(point, radius = 56) {
@@ -3427,16 +4113,11 @@ function getDeliveryDriver(car) {
 }
 
 function resetDeliveryCruise(car) {
-  const driver = getDeliveryDriver(car);
-  if (driver && driver.tempActor) removeTemporaryPerson(driver);
-  car.deliveryPlan = null;
-  car.mode = 'delivery-cruising';
-  car.targetPoint = null;
-  car.deliveryTimer = randomDuration(720, 1440);
-  car.stopped = false;
-  car.stopReason = null;
-  clearCarWaypoints(car);
-  clearCarRoute(car);
+  return resetDeliveryCruiseFlowPure(car, {
+    resetVehicleMotionState,
+    getAmbientRouteMinRoadDistance,
+    randomDuration,
+  });
 }
 
 function routeDeliveryDriver(driver, point, purpose, stateTimer = framesToSeconds(1200)) {
@@ -3459,11 +4140,12 @@ function updateDeliveryVehicle(car, dtSec, anchor) {
       const plan = planDeliveryStop(car);
       if (plan) {
         car.deliveryPlan = plan;
-        car.mode = 'delivery-arriving';
-        car.targetPoint = plan.stopPoint;
-        car.preferredLaneIndex = plan.laneIndex;
-        clearCarWaypoints(car);
-        clearCarRoute(car);
+        resetVehicleMotionState(car, {
+          mode: 'delivery-arriving',
+          targetPoint: plan.stopPoint,
+          preferredLaneIndex: plan.laneIndex,
+          anchor,
+        });
       } else {
         car.deliveryTimer = randomDuration(360, 720);
       }
@@ -3481,31 +4163,24 @@ function updateDeliveryVehicle(car, dtSec, anchor) {
 
   if (car.mode === 'delivery-arriving') {
     car.targetPoint = plan.stopPoint;
-    const nearStopRoad = anchor && getRoadDistanceBetweenTiles(anchor, plan.roadTile) <= 1 && distanceSq(car, plan.stopPoint) < 26 * 26;
-    if (nearStopRoad) {
-      const dx = plan.stopPoint.x - car.x;
-      const dy = plan.stopPoint.y - car.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      car.dir = plan.stopDir;
-      car.laneDir = plan.stopDir;
-      car.laneIndex = plan.laneIndex;
-      if (dist <= 2.2) {
-        car.x = plan.stopPoint.x;
-        car.y = plan.stopPoint.y;
-        car.mode = 'delivery-stopped';
-        car.targetPoint = null;
-        car.stopped = true;
-        car.stopReason = 'delivery';
-        car.speed = 0;
-        plan.phase = 'exit-cab';
-        plan.phaseTimer = framesToSeconds(18);
-        clearCarWaypoints(car);
-        clearCarRoute(car);
-      } else {
-        const step = Math.min(car.speed * dtSec, dist);
-        car.x += dx / dist * step;
-        car.y += dy / dist * step;
-      }
+    const dockedAtStop = anchor &&
+      anchor.x === plan.roadTile.x &&
+      anchor.y === plan.roadTile.y &&
+      car.dir === plan.stopDir &&
+      getCarLaneIndex(car) === plan.laneIndex &&
+      distanceSq(car, plan.stopPoint) <= 2.2 * 2.2;
+    if (dockedAtStop) {
+      car.x = plan.stopPoint.x;
+      car.y = plan.stopPoint.y;
+      car.mode = 'delivery-stopped';
+      car.targetPoint = null;
+      car.stopped = true;
+      car.stopReason = 'delivery';
+      car.speed = 0;
+      plan.phase = 'exit-cab';
+      plan.phaseTimer = framesToSeconds(18);
+      clearCarWaypoints(car);
+      clearCarRoute(car);
       return true;
     }
     return false;
@@ -3660,7 +4335,24 @@ function removeCarFromWorld(car) {
   }
   const index = cars.indexOf(car);
   if (index < 0) return false;
+  removeCarFromSpatialIndex(car);
   cars.splice(index, 1);
+  return true;
+}
+
+function scrapCarFromWorld(car, { emitSmoke = false } = {}) {
+  if (!car || car.incidentId) return false;
+  const { x, y, vehicleType } = car;
+  const removed = removeCarFromWorld(car);
+  if (!removed) return false;
+  if (emitSmoke) {
+    effects.push({ x, y: y - 8, type: 'smoke', age: 0, maxAge: 40 });
+  }
+  effects.push({ x: x + 4, y: y - 4, type: 'spark', age: 0, maxAge: 28 });
+  const serviceTargetCount = getServiceVehicleTargetCount(vehicleType);
+  if (serviceTargetCount > 0) {
+    ensureServiceVehicles(vehicleType, serviceTargetCount);
+  }
   return true;
 }
 
@@ -3670,62 +4362,56 @@ function pickCarSaleVehicleType() {
 
 function spawnCarForSale(building) {
   const vehicleType = pickCarSaleVehicleType();
-  const spawn = findRoadSpawnNearBuilding(building, countVehiclesByType(vehicleType));
-  if (!spawn) return null;
-  const dir = pickDirectionForRoadTile(map[spawn.y][spawn.x]);
-  const car = createCarAtRoad(spawn.x, spawn.y, dir, undefined, undefined, vehicleType);
-  car.boostTimer = framesToSeconds(45);
-  car.eventTimer = framesToSeconds(180);
-  cars.push(car);
-  return car;
+  const baseIndex = countVehiclesByType(vehicleType);
+  for (let offset = 0; offset < 12; offset++) {
+    const spawn = findRoadSpawnNearBuilding(building, baseIndex + offset);
+    if (!spawn) continue;
+    const dir = pickDirectionForRoadTile(map[spawn.y][spawn.x]);
+    const car = createCarAtRoadIfClear(spawn.x, spawn.y, dir, undefined, undefined, vehicleType);
+    if (!car) continue;
+    car.boostTimer = framesToSeconds(45);
+    car.eventTimer = framesToSeconds(180);
+    cars.push(car);
+    return car;
+  }
+  return null;
 }
 
 function findNearestScrappableCar(building) {
   if (!building || !cars.length) return null;
   const anchor = getBuildingServiceStagePoint(building);
+  const stuckThreshold = framesToSeconds(240);
+  let bestStuck = null;
+  let bestWaiting = stuckThreshold;
+  let bestStuckDist = Infinity;
   let best = null;
   let bestDist = Infinity;
   for (const car of cars) {
     if (car.incidentId) continue;
     const dist = distanceSq(car, anchor);
+    if ((car.waiting || 0) >= stuckThreshold) {
+      const waiting = car.waiting || 0;
+      if (waiting > bestWaiting || (Math.abs(waiting - bestWaiting) < 0.0001 && dist < bestStuckDist)) {
+        bestWaiting = waiting;
+        bestStuckDist = dist;
+        bestStuck = car;
+      }
+    }
     if (dist < bestDist) {
       best = car;
       bestDist = dist;
     }
   }
-  return best;
+  return bestStuck || best;
 }
 
 function resumePoliceCars(incident) {
-  const { suspectCar, policeCar } = incident;
-  if (suspectCar) {
-    suspectCar.vehicleType = 'civilian';
-    suspectCar.color = getVehicleColor('civilian');
-    suspectCar.mode = 'cruising';
-    suspectCar.incidentId = null;
-    suspectCar.stopped = false;
-    suspectCar.stopReason = null;
-    suspectCar.targetCar = null;
-    suspectCar.targetPoint = null;
-    suspectCar.baseSpeed = legacySpeed(0.3 + rng() * 0.4);
-    suspectCar.speed = suspectCar.baseSpeed;
-    suspectCar.waiting = 0;
-    clearCarWaypoints(suspectCar);
-    clearCarRoute(suspectCar);
-  }
-  if (policeCar) {
-    policeCar.mode = 'patrol';
-    policeCar.incidentId = null;
-    policeCar.targetCar = null;
-    policeCar.targetPoint = null;
-    policeCar.speed = policeCar.baseSpeed;
-    policeCar.stopReason = null;
-    policeCar.stopped = false;
-    policeCar.waiting = 0;
-    clearCarWaypoints(policeCar);
-    clearCarRoute(policeCar);
-    setCarSiren(policeCar, null);
-  }
+  return resumePoliceCarsFlowPure(incident, {
+    resetVehicleMotionState,
+    getVehicleColor,
+    setCarSiren,
+    getSuspectBaseSpeed: () => legacySpeed(0.3 + rng() * 0.4),
+  });
 }
 
 function beginPoliceArrestSequence(incident) {
@@ -4094,15 +4780,10 @@ function endMedicalIncident() {
     patient.escortTarget = null;
   }
   if (ambulance) {
-    ambulance.mode = 'patrol';
-    ambulance.incidentId = null;
-    ambulance.targetPoint = null;
-    ambulance.speed = ambulance.baseSpeed;
-    ambulance.stopReason = null;
-    ambulance.stopped = false;
-    clearCarWaypoints(ambulance);
-    clearCarRoute(ambulance);
-    setCarSiren(ambulance, null);
+    releaseMedicalAmbulanceFlowPure(ambulance, {
+      resetVehicleMotionState,
+      setCarSiren,
+    });
   }
   showToast(civicBuildings.hospital ? 'The ambulance brings the patient to the hospital and returns to service' : 'The ambulance stabilizes the patient and returns to patrol');
   emergencies.medical = null;
@@ -4261,15 +4942,11 @@ function endFireIncident() {
     stopBuildingFire(building);
   }
   if (fireTruck) {
-    fireTruck.incidentId = null;
-    fireTruck.speed = fireTruck.baseSpeed;
-    fireTruck.stopped = false;
-    fireTruck.stopReason = null;
-    setCarSiren(fireTruck, null);
-    if (!sendVehicleToServiceBase(fireTruck)) {
-      fireTruck.mode = 'patrol';
-      fireTruck.targetPoint = null;
-    }
+    recoverFireTruckFlowPure(fireTruck, {
+      sendVehicleToServiceBase,
+      resetVehicleMotionState,
+      setCarSiren,
+    });
   }
   showToast(civicBuildings.fireStation ? 'The fire truck knocks down the blaze and heads back to the station' : 'The fire truck knocks down the blaze and clears the scene');
   emergencies.fire = null;
@@ -4363,7 +5040,9 @@ function spawnInitialCars() {
       const ty = rngInt(0, MAP_H - 1);
       const tile = map[ty][tx];
       if (tile === T.ROAD_H || tile === T.ROAD_V || tile === T.ROAD_X) {
-        cars.push(createCarAtRoad(tx, ty, pickDirectionForRoadTile(tile), undefined, undefined, pickAmbientVehicleType()));
+        const car = createCarAtRoadIfClear(tx, ty, pickDirectionForRoadTile(tile), undefined, undefined, pickAmbientVehicleType());
+        if (!car) continue;
+        cars.push(car);
         break;
       }
     }
@@ -4400,6 +5079,7 @@ function update(dt) {
   if (dtSec <= 0) return;
   worldTime += dtSec;
   updateTrackpadZoom(dtSec);
+  rebuildCarSpatialIndex();
 
   updateTrafficLights(dtSec);
 
@@ -4412,7 +5092,7 @@ function update(dt) {
   for (const car of cars) {
     const anchor = getCarAnchorTile(car);
     if (anchor && map[anchor.y]?.[anchor.x] === T.ROAD_X) {
-      intersectionReservations.set(getRoadTileKey(anchor.x, anchor.y), car);
+      reserveCarIntersectionIntent(intersectionReservations, car, anchor);
     }
   }
   for (const car of [...cars].sort(compareCarMovementOrder)) {
@@ -4427,10 +5107,14 @@ function update(dt) {
 
     car.boostTimer = Math.max(0, (car.boostTimer || 0) - dtSec);
     car.overtakeTimer = Math.max(0, (car.overtakeTimer || 0) - dtSec);
+    if (car.overtakeTimer <= 0) car.overtakeLaneIndex = null;
     car.routeRefreshTimer = Math.max(0, (car.routeRefreshTimer || 0) - dtSec);
     normalizeCarSpeed(car, dtSec);
+    refreshAmbientRouteTarget(car, dtSec, anchor);
+    refreshCarNavigationPlan(car, anchor);
 
     if (updateDeliveryVehicle(car, dtSec, anchor)) {
+      updateCarSpatialIndexPosition(carSpatialIndex, car);
       continue;
     }
 
@@ -4444,27 +5128,22 @@ function update(dt) {
     }
 
     if (car.mode === 'service-return' && car.targetPoint && distanceSq(car, car.targetPoint) < 20 * 20) {
-      car.mode = 'patrol';
-      car.targetPoint = null;
-      car.eventTimer = framesToSeconds(30);
-      clearCarWaypoints(car);
-      clearCarRoute(car);
-    }
-
-    if (car.mode === 'patrol' && car.vehicleType === 'fire' && !car.incidentId) {
-      car.eventTimer = Math.max(0, (car.eventTimer || 0) - dtSec);
-      if (car.targetPoint && distanceSq(car, car.targetPoint) < 24 * 24) {
-        car.targetPoint = null;
-        clearCarWaypoints(car);
-        clearCarRoute(car);
-      }
-      if (!car.targetPoint || car.eventTimer <= 0) {
-        assignFirePatrolTarget(car, car.targetPoint ? 14 : 22);
-      }
+      resetVehicleMotionState(car, {
+        mode: 'patrol',
+        assignAmbientTarget: true,
+        ambientMinRoadDistance: getAmbientRouteMinRoadDistance(car, 'patrol'),
+        anchor,
+      });
     }
 
     let stopReason = null;
     let travel = car.speed * dtSec;
+    const currentTile = map[anchor.y]?.[anchor.x];
+    const committedIntersectionTurn = isCommittedIntersectionTurnPure({
+      car,
+      currentTile,
+      roadX: T.ROAD_X,
+    });
     const ignoresLights = car.mode === 'escape' || car.mode === 'pursuit' || car.mode === 'intercept' || car.mode === 'medical-response' || car.mode === 'medical-arriving' || car.mode === 'fire-response' || car.mode === 'fire-arriving';
     if (!ignoresLights) {
       const blockingLight = getBlockingTrafficLight(car, anchor);
@@ -4479,11 +5158,29 @@ function update(dt) {
       }
     }
 
-    const queuedDistance = getQueuedCarDistance(car);
-    if (Number.isFinite(queuedDistance) && stopReason !== 'light' && car.overtakeTimer <= 0 && canUseAdjacentOvertakeLane(car, anchor.x, anchor.y)) {
-      const responderOvertake = getResponderPhase(car) && queuedDistance < 18;
-      const civilianOvertake = !getResponderPhase(car) && queuedDistance < 12 && legacyChance(0.35, dtSec);
+    const queuedState = committedIntersectionTurn ? { distance: Infinity, leadCar: null } : getQueuedCarState(car);
+    const queuedDistance = queuedState.distance;
+    const leadCar = queuedState.leadCar;
+    const overtakePreviewDistance = Math.max(TILE * 3, Math.min(TILE * 5, queuedDistance + TILE * 1.5));
+    const overtakeLaneIndex = getOvertakeLaneIndexPure({
+      currentLaneIndex: getCarLaneIndex(car),
+      preferredLaneIndex: getCarPreferredLaneIndex(car),
+      activeLaneIndex: car.overtakeTimer > 0 ? car.overtakeLaneIndex : null,
+      getAdjacentLaneIndexFn: getAdjacentLaneIndex,
+    });
+    if (Number.isFinite(queuedDistance) && stopReason !== 'light' && car.overtakeTimer <= 0 && canUseAdjacentOvertakeLane(car, anchor.x, anchor.y, overtakePreviewDistance)) {
+      const leadPace = leadCar ? (Number.isFinite(leadCar.speed) ? leadCar.speed : getCarDesiredSpeed(leadCar)) : 0;
+      const speedAdvantage = getCarDesiredSpeed(car) - leadPace;
+      const responderOvertake = getResponderPhase(car) && queuedDistance < 20;
+      const civilianOvertake = !getResponderPhase(car) && !!leadCar && speedAdvantage > legacySpeed(0.08) && (
+        queuedDistance < 14 ||
+        leadCar.stopped ||
+        (car.waiting || 0) > framesToSeconds(18) ||
+        speedAdvantage > legacySpeed(0.14) ||
+        legacyChance(0.22, dtSec)
+      );
       if (responderOvertake || civilianOvertake) {
+        car.overtakeLaneIndex = overtakeLaneIndex;
         car.overtakeTimer = responderOvertake ? framesToSeconds(90) : framesToSeconds(60);
         clearCarWaypoints(car);
       }
@@ -4498,13 +5195,12 @@ function update(dt) {
     }
 
     if (!stopReason && travel > 0.0001) {
-      const intersectionKey = getPendingIntersectionKey(car, anchor);
-      if (intersectionKey) {
-        const reservedBy = intersectionReservations.get(intersectionKey);
-        if (reservedBy && reservedBy !== car && !carHasConflictPriority(car, reservedBy)) {
-          stopReason = 'traffic';
-          travel = 0;
-        }
+      const reservedBy = getBlockingIntersectionReservation(car, anchor, intersectionReservations);
+      if (reservedBy) {
+        stopReason = 'traffic';
+        travel = 0;
+      } else {
+        claimCarIntersectionIntent(intersectionReservations, car, anchor);
       }
     }
 
@@ -4522,7 +5218,8 @@ function update(dt) {
       car.stopReason = stopReason || 'queue';
       car.stopped = true;
       car.waiting += dtSec;
-      if (car.waiting > framesToSeconds(60) && !car.honking && legacyChance(0.01, dtSec)) {
+      car.autoScrapTimer = 0;
+      if (car.waiting > CAR_HONK_WAIT_THRESHOLD && !car.honking && legacyChance(0.01, dtSec)) {
         car.honking = true;
         car.honkTimer = framesToSeconds(30);
         effects.push({ x: car.x, y: car.y - 6, type: 'honk', age: 0, maxAge: 30 });
@@ -4542,26 +5239,37 @@ function update(dt) {
     car.stopReason = null;
     car.stopped = false;
     car.waiting = 0;
+    car.autoScrapTimer = 0;
 
     if (!advanceCarAlongRoad(car, travel)) {
+      if (car.navigationBlockReason === 'lane-assist') {
+        car.stopped = true;
+        car.stopReason = 'traffic';
+        car.waiting += dtSec;
+        car.autoScrapTimer = 0;
+        continue;
+      }
       car.stopped = true;
       car.stopReason = 'route';
+      car.autoScrapTimer = (car.autoScrapTimer || 0) + dtSec;
+      if (!car.incidentId && car.autoScrapTimer >= AUTO_SCRAP_WAIT_THRESHOLD) {
+        if (scrapCarFromWorld(car)) continue;
+      }
       clearCarWaypoints(car);
       clearCarRoute(car);
       continue;
     }
 
+    updateCarSpatialIndexPosition(carSpatialIndex, car);
+
     const newAnchor = getCarAnchorTile(car);
-    if (newAnchor && map[newAnchor.y]?.[newAnchor.x] === T.ROAD_X) {
-      intersectionReservations.set(getRoadTileKey(newAnchor.x, newAnchor.y), car);
-    }
+    if (newAnchor) reserveCarIntersectionIntent(intersectionReservations, car, newAnchor);
 
     if (car.honking) {
       car.honkTimer -= dtSec;
       if (car.honkTimer <= 0) car.honking = false;
     }
   }
-  resolveCarOverlaps();
 
   // People
   for (const p of people) {
@@ -4783,22 +5491,6 @@ function update(dt) {
     }
   }
 
-  cadence.carSpawn -= dtSec;
-  if (cadence.carSpawn <= 0) {
-    cadence.carSpawn += cadenceIntervals.carSpawn;
-    if (cars.length < 100) {
-      for (let a = 0; a < 20; a++) {
-        const tx = rngInt(0, MAP_W - 1);
-        const ty = rngInt(0, MAP_H - 1);
-        const tile = map[ty][tx];
-        if (tile >= T.ROAD_H && tile <= T.ROAD_X) {
-          cars.push(createCarAtRoad(tx, ty, pickDirectionForRoadTile(tile), undefined, undefined, pickAmbientVehicleType()));
-          break;
-        }
-      }
-    }
-  }
-
   cadence.personSpawn -= dtSec;
   if (cadence.personSpawn <= 0) {
     cadence.personSpawn += cadenceIntervals.personSpawn;
@@ -4815,12 +5507,6 @@ function update(dt) {
         }
       }
     }
-  }
-
-  cadence.serviceFleet -= dtSec;
-  if (cadence.serviceFleet <= 0) {
-    cadence.serviceFleet += cadenceIntervals.serviceFleet;
-    ensureServiceFleet();
   }
 
   if (actionCam.incidentId) {
@@ -5032,7 +5718,11 @@ function interactBuilding(b) {
         stateTimer: randomDuration(120, 260)
       }));
     }
-    showToast(attracted > 0 ? '🏥 Hospital shift change! Staff, visitors, and the ambulance converge' : '🏥 Hospital shift change! The ambulance rolls toward the bay');
+    showToast(
+      ambulance
+        ? (attracted > 0 ? '🏥 Hospital shift change! Staff, visitors, and the ambulance converge' : '🏥 Hospital shift change! The ambulance rolls toward the bay')
+        : (attracted > 0 ? '🏥 Hospital shift change! Staff and visitors converge, but no ambulance is free' : '🏥 Hospital shift change! No ambulance is currently free')
+    );
   } else if (b.type === 'police-station') {
     const policeCar = takeEmergencyVehicle('police');
     if (policeCar && !policeCar.incidentId) {
@@ -5051,7 +5741,7 @@ function interactBuilding(b) {
       }));
       effects.push({ x: sp.ex, y: sp.ey, type: 'door', age: 0, maxAge: 20 });
     }
-    showToast('🚓 Police briefing! Patrol units regroup at the station');
+    showToast(policeCar ? '🚓 Police briefing! Patrol units regroup at the station' : '🚓 Police briefing! No patrol car is currently free');
   } else if (b.type === 'fire-station') {
     const fireTruck = takeEmergencyVehicle('fire');
     if (fireTruck && !fireTruck.incidentId) {
@@ -5070,7 +5760,7 @@ function interactBuilding(b) {
       }));
       effects.push({ x: sp.ex, y: sp.ey, type: 'door', age: 0, maxAge: 20 });
     }
-    showToast('🚒 Fire station drill! The crew rallies around the engine bay');
+    showToast(fireTruck ? '🚒 Fire station drill! The crew rallies around the engine bay' : '🚒 Fire station drill! No fire truck is currently free');
   } else if (b.type === 'car-sales') {
     const car = spawnCarForSale(b);
     if (!car) {
@@ -5092,18 +5782,11 @@ function interactBuilding(b) {
       showToast('SCRAP is waiting for the next old vehicle');
       return;
     }
-    effects.push({ x: car.x, y: car.y - 8, type: 'smoke', age: 0, maxAge: 40 });
-    effects.push({ x: car.x + 4, y: car.y - 4, type: 'spark', age: 0, maxAge: 28 });
-    const removed = removeCarFromWorld(car);
+    const removed = scrapCarFromWorld(car, { emitSmoke: true });
     showToast(removed ? '🛠️ SCRAP hauls away the nearest vehicle' : 'SCRAP crew could not hook the vehicle');
   } else if (b.type === 'bank') {
     const attracted = attractPeopleToBuilding(b, 104, 8);
-    showToast(attracted > 0 ? '💰 Bank activated! Customers rush in and a money truck is dispatched' : '💰 Bank activated! Money truck dispatched');
-    // Spawn a special gold car
-    const roadTile = findNearestRoad(b.x, b.y);
-    if (roadTile) {
-      cars.push(createCarAtRoad(roadTile.x, roadTile.y, pickDirectionForRoadTile(map[roadTile.y][roadTile.x]), legacySpeed(0.6), '#c0a020'));
-    }
+    showToast(attracted > 0 ? '💰 Bank activated! Customers rush in and the lobby gets busy' : '💰 Bank activated! The street notices the bustle');
     // People nearby get happy
     for (const p of people) {
       const dist = Math.sqrt((p.x - b.x - b.w / 2) ** 2 + (p.y - b.y - b.h / 2) ** 2);
@@ -5277,6 +5960,14 @@ function render() {
   const vy0 = Math.max(0, Math.floor((cam.y - H / 2 / cam.zoom / dpr) / TILE) - 1);
   const vx1 = Math.min(MAP_W - 1, Math.ceil((cam.x + W / 2 / cam.zoom / dpr) / TILE) + 1);
   const vy1 = Math.min(MAP_H - 1, Math.ceil((cam.y + H / 2 / cam.zoom / dpr) / TILE) + 1);
+  const minVisibleX = vx0 * TILE - 16;
+  const minVisibleY = vy0 * TILE - 16;
+  const maxVisibleX = (vx1 + 1) * TILE + 16;
+  const maxVisibleY = (vy1 + 1) * TILE + 16;
+  const isVisiblePoint = (x, y, padding = 0) => (
+    x > minVisibleX - padding && x < maxVisibleX + padding &&
+    y > minVisibleY - padding && y < maxVisibleY + padding
+  );
 
   // Draw tiles
   for (let y = vy0; y <= vy1; y++) {
@@ -5380,13 +6071,10 @@ function render() {
     }
   }
 
-  // Buildings (sorted by y for overlap)
-  const sortedBuildings = buildings.filter(b => {
-    return b.x + b.w > vx0 * TILE && b.x < (vx1 + 1) * TILE &&
-           b.y + b.h > vy0 * TILE && b.y < (vy1 + 1) * TILE;
-  }).sort((a, b) => a.y - b.y);
-
-  for (const b of sortedBuildings) {
+  // Buildings (pre-sorted by y for overlap)
+  for (const b of buildingsByY) {
+    if (b.y > maxVisibleY) break;
+    if (b.x + b.w <= minVisibleX || b.x >= maxVisibleX || b.y + b.h <= minVisibleY) continue;
     drawBuilding(b);
   }
 
@@ -5399,8 +6087,8 @@ function render() {
   }
 
   // Cars
-  const visibleCars = cars.filter(car => car.x > vx0 * TILE - 16 && car.x < (vx1 + 1) * TILE + 16 &&
-        car.y > vy0 * TILE - 16 && car.y < (vy1 + 1) * TILE + 16);
+  const visibleCars = getCarsNearRect(minVisibleX, minVisibleY, maxVisibleX, maxVisibleY)
+    .filter(car => isVisiblePoint(car.x, car.y));
   for (const car of visibleCars) {
     if (car.vehicleType === 'police' || car.vehicleType === 'ambulance' || car.vehicleType === 'fire' || car.incidentId) continue;
     drawCar(car);
@@ -5413,15 +6101,14 @@ function render() {
   // People
   for (const p of people) {
     if (p.state === 'inside') continue;
-    if (p.x > vx0 * TILE - 8 && p.x < (vx1 + 1) * TILE + 8 &&
-        p.y > vy0 * TILE - 8 && p.y < (vy1 + 1) * TILE + 8) {
+    if (isVisiblePoint(p.x, p.y, 8)) {
       drawPerson(p);
     }
   }
 
   // Birds
   for (const b of birds) {
-    drawBird(b);
+    if (isVisiblePoint(b.x, b.y, 24)) drawBird(b);
   }
 
   // Traffic lights
@@ -5434,7 +6121,7 @@ function render() {
 
   // Effects
   for (const e of effects) {
-    drawEffect(e);
+    if (isVisiblePoint(e.x, e.y, 28)) drawEffect(e);
   }
 }
 
@@ -5594,33 +6281,81 @@ function drawTree(t) {
   ctx.fillRect(t.x - 1, t.y - r - 1, 2, 2);
 }
 
+function getCarTurnRelation(fromDir, toDir) {
+  return getTurnRelationPure(fromDir, toDir);
+}
+
+function getCarIndicatorSide(car) {
+  const approachDir = car.driverIntent?.approachDir ?? car.dir;
+  const exitDir = Number.isInteger(car.pendingDir) ? car.pendingDir : null;
+  const turnRelation = getCarTurnRelation(approachDir, exitDir);
+  if (turnRelation === 'left' || turnRelation === 'right') return turnRelation;
+  if (turnRelation === 'uturn') return TRAFFIC_DRIVE_SIDE === 'left' ? 'right' : 'left';
+  return null;
+}
+
+function getCarIndicatorCorners(car) {
+  const [forwardX, forwardY] = getDirectionDelta(car.dir);
+  const leftX = forwardY;
+  const leftY = -forwardX;
+  const frontOffset = 3;
+  const rearOffset = 4;
+  const sideOffset = 2;
+  const point = (forwardAmount, sideAmount) => ({
+    x: car.x + forwardX * forwardAmount + leftX * sideAmount,
+    y: car.y + forwardY * forwardAmount + leftY * sideAmount,
+  });
+  return {
+    frontLeft: point(frontOffset, sideOffset),
+    frontRight: point(frontOffset, -sideOffset),
+    rearLeft: point(-rearOffset, sideOffset),
+    rearRight: point(-rearOffset, -sideOffset),
+  };
+}
+
+function drawCarIndicatorFlash(car) {
+  const side = getCarIndicatorSide(car);
+  if (!side) return;
+  const flashOn = Math.floor(worldTime * 5 + (car.flashPhase || 0)) % 2 === 0;
+  if (!flashOn) return;
+
+  const corners = getCarIndicatorCorners(car);
+  const activeCorners = side === 'left'
+    ? [corners.frontLeft, corners.rearLeft]
+    : [corners.frontRight, corners.rearRight];
+  const previousAlpha = ctx.globalAlpha;
+  ctx.fillStyle = '#ffb020';
+  ctx.globalAlpha = previousAlpha * 0.28;
+  for (const corner of activeCorners) {
+    ctx.fillRect(corner.x - 1, corner.y - 1, 3, 3);
+  }
+  ctx.globalAlpha = previousAlpha;
+  for (const corner of activeCorners) {
+    ctx.fillRect(corner.x, corner.y, 1, 1);
+  }
+}
+
 function drawCar(car) {
   ctx.fillStyle = car.color;
-  if (car.vehicleType === 'delivery') {
-    if (car.dir === 0 || car.dir === 2) {
-      ctx.fillRect(car.x - 5, car.y - 3, 10, 6);
-      ctx.fillStyle = '#a0c8e0';
-      ctx.fillRect(car.dir === 0 ? car.x + 2 : car.x - 4, car.y - 2, 3, 4);
-      ctx.fillStyle = 'rgba(60,40,20,0.18)';
-      ctx.fillRect(car.x - 1, car.y - 3, 1, 6);
-    } else {
-      ctx.fillRect(car.x - 3, car.y - 5, 6, 10);
-      ctx.fillStyle = '#a0c8e0';
-      ctx.fillRect(car.x - 2, car.dir === 1 ? car.y + 2 : car.y - 4, 4, 3);
-      ctx.fillStyle = 'rgba(60,40,20,0.18)';
-      ctx.fillRect(car.x - 3, car.y - 1, 6, 1);
-    }
-  } else if (car.dir === 0 || car.dir === 2) {
+  if (car.dir === 0 || car.dir === 2) {
     // Horizontal car
     ctx.fillRect(car.x - 4, car.y - 2, 8, 5);
     // Windshield
     ctx.fillStyle = '#a0c8e0';
     ctx.fillRect(car.dir === 0 ? car.x + 2 : car.x - 3, car.y - 1, 2, 3);
+    if (car.vehicleType === 'delivery') {
+      ctx.fillStyle = 'rgba(60,40,20,0.18)';
+      ctx.fillRect(car.x - 1, car.y - 2, 1, 5);
+    }
   } else {
     // Vertical car
     ctx.fillRect(car.x - 2, car.y - 4, 5, 8);
     ctx.fillStyle = '#a0c8e0';
     ctx.fillRect(car.x - 1, car.dir === 1 ? car.y + 2 : car.y - 3, 3, 2);
+    if (car.vehicleType === 'delivery') {
+      ctx.fillStyle = 'rgba(60,40,20,0.18)';
+      ctx.fillRect(car.x - 2, car.y - 1, 5, 1);
+    }
   }
 
   // Brake lights when stopped
@@ -5631,6 +6366,8 @@ function drawCar(car) {
     else if (car.dir === 1) ctx.fillRect(car.x - 1, car.y - 4, 3, 1);
     else ctx.fillRect(car.x - 1, car.y + 3, 3, 1);
   }
+
+  drawCarIndicatorFlash(car);
 
   if (car.sirenKind || car.vehicleType === 'police' || car.vehicleType === 'ambulance' || car.vehicleType === 'fire') {
     const flashFrame = Math.floor(worldTime * 8 + (car.flashPhase || 0)) % 2;
