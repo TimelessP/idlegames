@@ -68,6 +68,7 @@ DRONE_DEPLOY_COOLDOWN = SCAN_COOLDOWN
 HACK_COOLDOWN       = 36
 HACK_SPICE_REWARD   = 150
 PARADROP_COOLDOWN   = 72
+PARADROP_SCOUT_COUNT = 10
 
 # ---------------------------------------------------------------------------
 # Fighter constants (simplified for terminal; no runway animation)
@@ -382,6 +383,12 @@ SUPPORT_BUILDING_BY_ROLE = {
 }
 
 
+import base64
+import json
+import os
+import pathlib
+import tempfile
+
 from dataclasses import dataclass, field
 import heapq
 import math
@@ -458,6 +465,7 @@ class Building:
     queue: list[BuildQueueItem] = field(default_factory=list)
     research_task: ResearchTask | None = None
     reload_left: float = 0.0
+    rally_point: tuple[int, int] | None = None
 
     @property
     def is_alive(self) -> bool:
@@ -470,7 +478,18 @@ class TeamState:
     spice_capacity: float = 1200.0
     selected_unit_id: int | None = None
     selected_building_id: int | None = None
+    selected_unit_ids: set[int] = field(default_factory=set)
+    selected_building_ids: set[int] = field(default_factory=set)
+    control_groups: dict[int, set[str]] = field(
+        default_factory=lambda: {i: set() for i in range(10)}
+    )
     completed_research: set[str] = field(default_factory=set)
+    scan_cd_left: float = 0.0
+    drone_cd_left: float = 0.0
+    hack_cd_left: float = 0.0
+    paradrop_cd_left: float = 0.0
+    scan_left: float = 0.0
+    scan_center: tuple[int, int] | None = None
     explored: list[list[bool]] = field(
         default_factory=lambda: [[False] * WORLD_CELLS_X for _ in range(WORLD_CELLS_Y)]
     )
@@ -483,6 +502,76 @@ class TeamState:
 class Event:
     text: str
     ttl: float = 8.0
+
+
+# ---------------------------------------------------------------------------
+# Save / load helpers
+# ---------------------------------------------------------------------------
+
+def _bool_grid_to_b64(grid: list[list[bool]]) -> str:
+    """Pack a 2-D boolean grid into a base-64 bit-string."""
+    rows, cols = len(grid), len(grid[0]) if grid else 0
+    bits = bytearray((rows * cols + 7) // 8)
+    for r in range(rows):
+        for c in range(cols):
+            if grid[r][c]:
+                idx = r * cols + c
+                bits[idx >> 3] |= 1 << (idx & 7)
+    return base64.b64encode(bytes(bits)).decode("ascii")
+
+
+def _b64_to_bool_grid(s: str, rows: int, cols: int) -> list[list[bool]]:
+    """Unpack a base-64 bit-string back to a 2-D boolean grid."""
+    bits = bytearray(base64.b64decode(s))
+    grid: list[list[bool]] = []
+    for r in range(rows):
+        row: list[bool] = []
+        for c in range(cols):
+            idx = r * cols + c
+            row.append(bool(bits[idx >> 3] & (1 << (idx & 7))))
+        grid.append(row)
+    return grid
+
+
+def save_game(game: "SandfrontGame", save_path: str, ui_state: dict | None = None) -> bool:
+    """Atomically write full game state to *save_path*. Returns True on success."""
+    path = pathlib.Path(save_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict = {"version": 2, "game": game.to_dict()}
+    if ui_state:
+        payload["ui"] = ui_state
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".sandfront-save-")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f, separators=(",", ":"))
+            os.replace(tmp, str(path))
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        return False
+    return True
+
+
+def load_game(save_path: str) -> "tuple[SandfrontGame, dict] | None":
+    """Load game from *save_path*. Returns *(game, ui_state)* or ``None``."""
+    path = pathlib.Path(save_path).expanduser()
+    if not path.exists():
+        return None
+    try:
+        with path.open("r") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict) or payload.get("version") != 2:
+            return None
+        game = SandfrontGame.from_dict(payload["game"])
+        ui_state: dict = payload.get("ui", {})
+        return game, ui_state
+    except Exception:
+        return None
 
 
 class SandfrontGame:
@@ -538,6 +627,7 @@ class SandfrontGame:
         self._update_combat(dt)
         self._cleanup_dead_entities()
         self._update_economy(dt)
+        self._update_team_abilities(dt)
         self.recompute_visibility()
         self._check_win_conditions()
 
@@ -550,67 +640,109 @@ class SandfrontGame:
     def clamp_cell(self, x: int, y: int) -> tuple[int, int]:
         return max(0, min(WORLD_CELLS_X - 1, x)), max(0, min(WORLD_CELLS_Y - 1, y))
 
-    def select_at(self, team: int, x: int, y: int) -> None:
+    def _selected_units(self, team: int) -> list[Unit]:
         ts = self.teams[team]
-        ts.selected_unit_id = None
-        ts.selected_building_id = None
+        ids = set(ts.selected_unit_ids)
+        if ts.selected_unit_id is not None:
+            ids.add(ts.selected_unit_id)
+        result: list[Unit] = []
+        for uid in ids:
+            u = self.units.get(uid)
+            if u is not None and u.team == team and u.is_alive:
+                result.append(u)
+        return result
+
+    def _normalize_selection(self, team: int) -> None:
+        ts = self.teams[team]
+        ts.selected_unit_ids = {uid for uid in ts.selected_unit_ids if uid in self.units and self.units[uid].team == team}
+        ts.selected_building_ids = {
+            bid for bid in ts.selected_building_ids if bid in self.buildings and self.buildings[bid].team == team
+        }
+        if ts.selected_unit_id is not None and ts.selected_unit_id not in ts.selected_unit_ids:
+            ts.selected_unit_ids.add(ts.selected_unit_id)
+        if ts.selected_building_id is not None and ts.selected_building_id not in ts.selected_building_ids:
+            ts.selected_building_ids.add(ts.selected_building_id)
+        ts.selected_unit_id = min(ts.selected_unit_ids) if ts.selected_unit_ids else None
+        ts.selected_building_id = min(ts.selected_building_ids) if ts.selected_building_ids else None
+
+    def select_at(self, team: int, x: int, y: int, additive: bool = False) -> None:
+        ts = self.teams[team]
+
+        hit_unit: Unit | None = None
+        hit_bldg: Building | None = None
 
         for unit in self.units.values():
             if unit.team != team:
                 continue
             if int(round(unit.x)) == x and int(round(unit.y)) == y:
-                ts.selected_unit_id = unit.id
-                return
+                hit_unit = unit
+                break
 
-        for b in self.buildings.values():
-            if b.team != team:
-                continue
-            if b.x <= x < b.x + b.w and b.y <= y < b.y + b.h:
-                ts.selected_building_id = b.id
-                return
+        if hit_unit is None:
+            for b in self.buildings.values():
+                if b.team != team:
+                    continue
+                if b.x <= x < b.x + b.w and b.y <= y < b.y + b.h:
+                    hit_bldg = b
+                    break
+
+        if not additive:
+            ts.selected_unit_ids.clear()
+            ts.selected_building_ids.clear()
+            ts.selected_unit_id = None
+            ts.selected_building_id = None
+
+        if hit_unit is not None:
+            if additive and hit_unit.id in ts.selected_unit_ids:
+                ts.selected_unit_ids.discard(hit_unit.id)
+            else:
+                ts.selected_unit_ids.add(hit_unit.id)
+                ts.selected_unit_id = hit_unit.id
+        elif hit_bldg is not None:
+            if additive and hit_bldg.id in ts.selected_building_ids:
+                ts.selected_building_ids.discard(hit_bldg.id)
+            else:
+                ts.selected_building_ids.add(hit_bldg.id)
+                ts.selected_building_id = hit_bldg.id
+
+        self._normalize_selection(team)
 
     def issue_move_selected(self, team: int, tx: int, ty: int, attack_move: bool = False) -> bool:
-        ts = self.teams[team]
-        if ts.selected_unit_id is None:
-            return False
-        unit = self.units.get(ts.selected_unit_id)
-        if not unit or not unit.is_alive:
+        selected_units = self._selected_units(team)
+        if not selected_units:
             return False
         cx, cy = self.clamp_cell(tx, ty)
-        unit.tx = float(cx)
-        unit.ty = float(cy)
-        unit.order = "attack_move" if attack_move else "move"
-        unit.target_unit_id = None
-        unit.target_building_id = None
-        unit.target_resource_id = None
-        self._clear_unit_path(unit)
-        unit.manual_lock_left = MANUAL_ORDER_LOCK["attackMove" if attack_move else "move"]
+        for unit in selected_units:
+            unit.tx = float(cx)
+            unit.ty = float(cy)
+            unit.order = "attack_move" if attack_move else "move"
+            unit.target_unit_id = None
+            unit.target_building_id = None
+            unit.target_resource_id = None
+            self._clear_unit_path(unit)
+            unit.manual_lock_left = MANUAL_ORDER_LOCK["attackMove" if attack_move else "move"]
         return True
 
     def issue_harvest_selected(self, team: int, tx: int, ty: int) -> bool:
-        ts = self.teams[team]
-        if ts.selected_unit_id is None:
-            return False
-        unit = self.units.get(ts.selected_unit_id)
-        if not unit or unit.kind != "harvester":
-            return False
         node = self._nearest_resource(tx, ty, "spice")
         if node is None:
             return False
-        unit.target_resource_id = node.id
-        unit.order = "gather"
-        unit.tx = float(node.x)
-        unit.ty = float(node.y)
-        self._clear_unit_path(unit)
-        unit.manual_lock_left = MANUAL_ORDER_LOCK["gather"]
-        return True
+        changed = False
+        for unit in self._selected_units(team):
+            if unit.kind != "harvester":
+                continue
+            unit.target_resource_id = node.id
+            unit.order = "gather"
+            unit.tx = float(node.x)
+            unit.ty = float(node.y)
+            self._clear_unit_path(unit)
+            unit.manual_lock_left = MANUAL_ORDER_LOCK["gather"]
+            changed = True
+        return changed
 
     def issue_attack_selected(self, team: int, tx: int, ty: int) -> bool:
-        ts = self.teams[team]
-        if ts.selected_unit_id is None:
-            return False
-        unit = self.units.get(ts.selected_unit_id)
-        if not unit or not unit.is_alive:
+        selected_units = [u for u in self._selected_units(team) if u.kind not in ("harvester", "engineer")]
+        if not selected_units:
             return False
         enemy_unit = next(
             (
@@ -621,10 +753,11 @@ class SandfrontGame:
             None,
         )
         if enemy_unit is not None:
-            unit.target_unit_id = enemy_unit.id
-            unit.target_building_id = None
-            unit.order = "attack_move"
-            unit.manual_lock_left = MANUAL_ORDER_LOCK["attackMove"]
+            for unit in selected_units:
+                unit.target_unit_id = enemy_unit.id
+                unit.target_building_id = None
+                unit.order = "attack_move"
+                unit.manual_lock_left = MANUAL_ORDER_LOCK["attackMove"]
             return True
 
         enemy_bldg = next(
@@ -636,28 +769,27 @@ class SandfrontGame:
             None,
         )
         if enemy_bldg is not None:
-            unit.target_building_id = enemy_bldg.id
-            unit.target_unit_id = None
-            unit.order = "attack_move"
-            unit.manual_lock_left = MANUAL_ORDER_LOCK["attackMove"]
+            for unit in selected_units:
+                unit.target_building_id = enemy_bldg.id
+                unit.target_unit_id = None
+                unit.order = "attack_move"
+                unit.manual_lock_left = MANUAL_ORDER_LOCK["attackMove"]
             return True
         return False
 
     def issue_stop_selected(self, team: int) -> bool:
-        ts = self.teams[team]
-        if ts.selected_unit_id is None:
+        selected_units = self._selected_units(team)
+        if not selected_units:
             return False
-        unit = self.units.get(ts.selected_unit_id)
-        if not unit:
-            return False
-        unit.order = "idle"
-        unit.tx = None
-        unit.ty = None
-        unit.target_unit_id = None
-        unit.target_building_id = None
-        unit.target_resource_id = None
-        self._clear_unit_path(unit)
-        unit.manual_lock_left = 0.0
+        for unit in selected_units:
+            unit.order = "idle"
+            unit.tx = None
+            unit.ty = None
+            unit.target_unit_id = None
+            unit.target_building_id = None
+            unit.target_resource_id = None
+            self._clear_unit_path(unit)
+            unit.manual_lock_left = 0.0
         return True
 
     def queue_unit_from_selected_building(self, team: int, index: int) -> tuple[bool, str]:
@@ -734,6 +866,235 @@ class SandfrontGame:
         if len(ts.completed_research) >= len(keys):
             return False, "All lab research complete"
         return False, "No available research yet (prerequisites unmet)"
+
+    def assign_control_group_from_selection(self, team: int, group_idx: int) -> tuple[bool, str]:
+        if group_idx < 0 or group_idx >= 10:
+            return False, "Invalid control group"
+        ts = self.teams[team]
+        self._normalize_selection(team)
+        members: set[str] = set()
+        for uid in ts.selected_unit_ids:
+            if uid in self.units and self.units[uid].team == team:
+                members.add(f"u:{uid}")
+        for bid in ts.selected_building_ids:
+            if bid in self.buildings and self.buildings[bid].team == team:
+                members.add(f"b:{bid}")
+        ts.control_groups[group_idx] = members
+        if not members:
+            return True, f"Cleared group {group_idx + 1 if group_idx < 9 else 0}"
+        return True, f"Assigned group {group_idx + 1 if group_idx < 9 else 0} ({len(members)} entities)"
+
+    def append_control_group_from_selection(self, team: int, group_idx: int) -> tuple[bool, str]:
+        if group_idx < 0 or group_idx >= 10:
+            return False, "Invalid control group"
+        ts = self.teams[team]
+        self._normalize_selection(team)
+        members: set[str] = set(ts.control_groups.get(group_idx, set()))
+        before = len(members)
+        for uid in ts.selected_unit_ids:
+            if uid in self.units and self.units[uid].team == team:
+                members.add(f"u:{uid}")
+        for bid in ts.selected_building_ids:
+            if bid in self.buildings and self.buildings[bid].team == team:
+                members.add(f"b:{bid}")
+        ts.control_groups[group_idx] = members
+        added = len(members) - before
+        if added <= 0:
+            return True, f"Group {group_idx + 1 if group_idx < 9 else 0} unchanged"
+        return True, f"Appended {added} entities to group {group_idx + 1 if group_idx < 9 else 0}"
+
+    def set_rally_for_selected_buildings(self, team: int, x: int, y: int) -> tuple[bool, str]:
+        ts = self.teams[team]
+        self._normalize_selection(team)
+        building_ids = set(ts.selected_building_ids)
+        if ts.selected_building_id is not None:
+            building_ids.add(ts.selected_building_id)
+        if not building_ids:
+            return False, "No selected building"
+
+        tx, ty = self.clamp_cell(x, y)
+        rally = self._nearest_static_walkable(tx, ty, search_radius=10)
+        if rally is None:
+            return False, "Cannot set rally there"
+
+        set_count = 0
+        for bid in building_ids:
+            b = self.buildings.get(bid)
+            if b is None or b.team != team or not b.is_alive:
+                continue
+            b.rally_point = rally
+            set_count += 1
+        if set_count <= 0:
+            return False, "No selected building"
+        return True, f"Rally set to {rally[0]},{rally[1]} for {set_count} building(s)"
+
+    def recall_control_group(self, team: int, group_idx: int) -> tuple[bool, str]:
+        if group_idx < 0 or group_idx >= 10:
+            return False, "Invalid control group"
+        ts = self.teams[team]
+        group = ts.control_groups.get(group_idx, set())
+        if not group:
+            return False, f"Group {group_idx + 1 if group_idx < 9 else 0} is empty"
+
+        ts.selected_unit_ids.clear()
+        ts.selected_building_ids.clear()
+        for token in group:
+            kind, _, sid = token.partition(":")
+            if not sid.isdigit():
+                continue
+            ent_id = int(sid)
+            if kind == "u":
+                u = self.units.get(ent_id)
+                if u and u.team == team and u.is_alive:
+                    ts.selected_unit_ids.add(ent_id)
+            elif kind == "b":
+                b = self.buildings.get(ent_id)
+                if b and b.team == team and b.is_alive:
+                    ts.selected_building_ids.add(ent_id)
+
+        self._normalize_selection(team)
+        total = len(ts.selected_unit_ids) + len(ts.selected_building_ids)
+        if total <= 0:
+            return False, f"Group {group_idx + 1 if group_idx < 9 else 0} has no surviving entities"
+        return True, f"Selected group {group_idx + 1 if group_idx < 9 else 0} ({total} entities)"
+
+    def add_control_group_to_selection(self, team: int, group_idx: int) -> tuple[bool, str]:
+        if group_idx < 0 or group_idx >= 10:
+            return False, "Invalid control group"
+        ts = self.teams[team]
+        group = ts.control_groups.get(group_idx, set())
+        if not group:
+            return False, f"Group {group_idx + 1 if group_idx < 9 else 0} is empty"
+
+        for token in group:
+            kind, _, sid = token.partition(":")
+            if not sid.isdigit():
+                continue
+            ent_id = int(sid)
+            if kind == "u":
+                u = self.units.get(ent_id)
+                if u and u.team == team and u.is_alive:
+                    ts.selected_unit_ids.add(ent_id)
+            elif kind == "b":
+                b = self.buildings.get(ent_id)
+                if b and b.team == team and b.is_alive:
+                    ts.selected_building_ids.add(ent_id)
+
+        self._normalize_selection(team)
+        total = len(ts.selected_unit_ids) + len(ts.selected_building_ids)
+        if total <= 0:
+            return False, f"Group {group_idx + 1 if group_idx < 9 else 0} has no surviving entities"
+        return True, f"Added group {group_idx + 1 if group_idx < 9 else 0} ({total} selected total)"
+
+    def _primary_selected_building(self, team: int) -> Building | None:
+        ts = self.teams[team]
+        self._normalize_selection(team)
+        if ts.selected_building_id is not None:
+            b = self.buildings.get(ts.selected_building_id)
+            if b and b.team == team:
+                return b
+        if ts.selected_building_ids:
+            bid = min(ts.selected_building_ids)
+            b = self.buildings.get(bid)
+            if b and b.team == team:
+                return b
+        return None
+
+    def perform_action_slot(self, team: int, slot_index: int, cursor_x: int, cursor_y: int) -> tuple[bool, str]:
+        if slot_index < 0:
+            return False, "Invalid action slot"
+
+        b = self._primary_selected_building(team)
+        if b is not None:
+            if b.kind == "lab":
+                return self.start_research_from_selected(team, slot_index)
+
+            queue_types = BUILDING_TYPES[b.kind].get("queue", [])
+            if slot_index < len(queue_types):
+                old = self.teams[team].selected_building_id
+                self.teams[team].selected_building_id = b.id
+                try:
+                    return self.queue_unit_from_selected_building(team, slot_index)
+                finally:
+                    self.teams[team].selected_building_id = old
+
+            if b.kind == "hq":
+                hq_actions: list[str] = []
+                if "scanner" in self.teams[team].completed_research:
+                    hq_actions.append("scan")
+                if "drone-tech" in self.teams[team].completed_research:
+                    hq_actions.append("drone")
+                if "hacking" in self.teams[team].completed_research:
+                    hq_actions.append("hack")
+                if "paradrop-tech" in self.teams[team].completed_research:
+                    hq_actions.append("paradrop")
+
+                idx = slot_index - len(queue_types)
+                if 0 <= idx < len(hq_actions):
+                    return self._execute_hq_action(team, b, hq_actions[idx], cursor_x, cursor_y)
+
+            return False, f"No action in slot {slot_index + 1}"
+
+        selected_units = self._selected_units(team)
+        if not selected_units:
+            return False, "No selected units or buildings"
+        if slot_index == 0:
+            if self.issue_stop_selected(team):
+                return True, "Issued stop to selected units"
+        return False, f"No action in slot {slot_index + 1}"
+
+    def _execute_hq_action(
+        self,
+        team: int,
+        hq: Building,
+        action: str,
+        cursor_x: int,
+        cursor_y: int,
+    ) -> tuple[bool, str]:
+        ts = self.teams[team]
+        if action == "scan":
+            if ts.scan_cd_left > 0:
+                return False, f"Scan cooldown {ts.scan_cd_left:0.1f}s"
+            ts.scan_center = self.clamp_cell(cursor_x, cursor_y)
+            ts.scan_left = SCAN_DURATION
+            ts.scan_cd_left = SCAN_COOLDOWN
+            return True, f"Satellite scan active at {ts.scan_center[0]},{ts.scan_center[1]}"
+
+        if action == "drone":
+            if ts.drone_cd_left > 0:
+                return False, f"Drone cooldown {ts.drone_cd_left:0.1f}s"
+            sx, sy = self._find_spawn_cell_near_building(hq)
+            if sx is None or sy is None:
+                return False, "No free spawn near HQ"
+            self._create_unit(team, "drone", sx, sy)
+            ts.drone_cd_left = DRONE_DEPLOY_COOLDOWN
+            return True, "Drone deployed"
+
+        if action == "hack":
+            if ts.hack_cd_left > 0:
+                return False, f"Hack cooldown {ts.hack_cd_left:0.1f}s"
+            ts.spice = min(ts.spice + HACK_SPICE_REWARD, ts.spice_capacity)
+            ts.hack_cd_left = HACK_COOLDOWN
+            return True, f"Hack successful (+{HACK_SPICE_REWARD} spice)"
+
+        if action == "paradrop":
+            if ts.paradrop_cd_left > 0:
+                return False, f"Paradrop cooldown {ts.paradrop_cd_left:0.1f}s"
+            px, py = self.clamp_cell(cursor_x, cursor_y)
+            spawned = 0
+            for _ in range(PARADROP_SCOUT_COUNT):
+                rx = px + self.random.randint(-2, 2)
+                ry = py + self.random.randint(-2, 2)
+                rx, ry = self.clamp_cell(rx, ry)
+                if self._is_walkable(rx, ry):
+                    self._create_unit(team, "scout", rx, ry)
+                    spawned += 1
+            if spawned <= 0:
+                return False, "Paradrop failed: no clear landing zone"
+            ts.paradrop_cd_left = PARADROP_COOLDOWN
+            return True, f"Paradrop deployed ({spawned} scouts)"
+
+        return False, "Unknown HQ action"
 
     def build_with_selected_engineer(self, team: int, bkind: str, x: int, y: int) -> tuple[bool, str]:
         ts = self.teams[team]
@@ -894,7 +1255,13 @@ class SandfrontGame:
                     item = b.queue.pop(0)
                     sx, sy = self._find_spawn_cell_near_building(b)
                     if sx is not None and sy is not None:
-                        self._create_unit(b.team, item.kind, sx, sy)
+                        spawned = self._create_unit(b.team, item.kind, sx, sy)
+                        if b.rally_point is not None:
+                            rx, ry = b.rally_point
+                            spawned.tx = float(rx)
+                            spawned.ty = float(ry)
+                            spawned.order = "move"
+                            spawned.manual_lock_left = 3.0
                     else:
                         self.add_event(f"{self._team_name(b.team)} spawn blocked near {BUILDING_TYPES[b.kind]['label']}")
 
@@ -1117,6 +1484,9 @@ class SandfrontGame:
             for ts in self.teams.values():
                 if ts.selected_unit_id == uid:
                     ts.selected_unit_id = None
+                ts.selected_unit_ids.discard(uid)
+                for group in ts.control_groups.values():
+                    group.discard(f"u:{uid}")
 
         dead_buildings = [b.id for b in self.buildings.values() if b.hp <= 0]
         for bid in dead_buildings:
@@ -1125,6 +1495,11 @@ class SandfrontGame:
             for ts in self.teams.values():
                 if ts.selected_building_id == bid:
                     ts.selected_building_id = None
+                ts.selected_building_ids.discard(bid)
+                for group in ts.control_groups.values():
+                    group.discard(f"b:{bid}")
+        for team in (TEAM_PLAYER, TEAM_AI):
+            self._normalize_selection(team)
         if dead_buildings:
             self._refresh_storage_caps()
 
@@ -1166,6 +1541,22 @@ class SandfrontGame:
                 sight_cells = int(BUILDING_TYPES[b.kind].get("sight", 8))
                 cx, cy = self._building_center_int(b)
                 self._apply_vision_disk(ts, cx, cy, sight_cells)
+
+            if ts.scan_left > 0 and ts.scan_center is not None:
+                sx, sy = ts.scan_center
+                self._apply_vision_disk(ts, sx, sy, 13)
+
+    def _update_team_abilities(self, dt: float) -> None:
+        for team in (TEAM_PLAYER, TEAM_AI):
+            ts = self.teams[team]
+            ts.scan_cd_left = max(0.0, ts.scan_cd_left - dt)
+            ts.drone_cd_left = max(0.0, ts.drone_cd_left - dt)
+            ts.hack_cd_left = max(0.0, ts.hack_cd_left - dt)
+            ts.paradrop_cd_left = max(0.0, ts.paradrop_cd_left - dt)
+            if ts.scan_left > 0:
+                ts.scan_left = max(0.0, ts.scan_left - dt)
+                if ts.scan_left <= 0:
+                    ts.scan_center = None
 
     def _apply_vision_disk(self, ts: TeamState, cx: int, cy: int, radius: int) -> None:
         y0 = max(0, cy - radius)
@@ -1548,6 +1939,213 @@ class SandfrontGame:
         path.reverse()
         return path
 
+    # ------------------------------------------------------------------
+    # Serialisation
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Return a JSON-serialisable snapshot of the full game state."""
+        return {
+            "time_s": self.time_s,
+            "game_over": self.game_over,
+            "winner": self.winner,
+            "ai_think_left": self.ai_think_left,
+            "ai_attack_left": self.ai_attack_left,
+            "_oil_tick_left": self._oil_tick_left,
+            "_next_unit_id": self._next_unit_id,
+            "_next_building_id": self._next_building_id,
+            "_next_resource_id": self._next_resource_id,
+            "tiles": [[t.terrain for t in row] for row in self.tiles],
+            "resources": {
+                str(rid): {
+                    "id": r.id, "kind": r.kind,
+                    "x": r.x, "y": r.y, "amount": r.amount,
+                }
+                for rid, r in self.resources.items()
+            },
+            "units": {
+                str(uid): {
+                    "id": u.id, "team": u.team, "kind": u.kind,
+                    "x": u.x, "y": u.y, "hp": u.hp, "max_hp": u.max_hp,
+                    "order": u.order,
+                    "tx": u.tx, "ty": u.ty,
+                    "target_unit_id": u.target_unit_id,
+                    "target_building_id": u.target_building_id,
+                    "target_resource_id": u.target_resource_id,
+                    "reload_left": u.reload_left,
+                    "cargo": u.cargo,
+                    "manual_lock_left": u.manual_lock_left,
+                    "path": [list(p) for p in u.path],
+                    "path_index": u.path_index,
+                    "path_goal": list(u.path_goal) if u.path_goal else None,
+                    "repath_left": u.repath_left,
+                }
+                for uid, u in self.units.items()
+            },
+            "buildings": {
+                str(bid): {
+                    "id": b.id, "team": b.team, "kind": b.kind,
+                    "x": b.x, "y": b.y, "w": b.w, "h": b.h,
+                    "hp": b.hp, "max_hp": b.max_hp,
+                    "reload_left": b.reload_left,
+                    "rally_point": list(b.rally_point) if b.rally_point else None,
+                    "queue": [
+                        {"kind": q.kind, "remaining": q.remaining}
+                        for q in b.queue
+                    ],
+                    "research_task": (
+                        {"key": b.research_task.key, "remaining": b.research_task.remaining}
+                        if b.research_task else None
+                    ),
+                }
+                for bid, b in self.buildings.items()
+            },
+            "teams": {
+                str(tid): {
+                    "spice": ts.spice,
+                    "spice_capacity": ts.spice_capacity,
+                    "selected_unit_id": ts.selected_unit_id,
+                    "selected_building_id": ts.selected_building_id,
+                    "selected_unit_ids": list(ts.selected_unit_ids),
+                    "selected_building_ids": list(ts.selected_building_ids),
+                    "control_groups": {
+                        str(k): list(v) for k, v in ts.control_groups.items()
+                    },
+                    "completed_research": list(ts.completed_research),
+                    "scan_cd_left": ts.scan_cd_left,
+                    "drone_cd_left": ts.drone_cd_left,
+                    "hack_cd_left": ts.hack_cd_left,
+                    "paradrop_cd_left": ts.paradrop_cd_left,
+                    "scan_left": ts.scan_left,
+                    "scan_center": list(ts.scan_center) if ts.scan_center else None,
+                    "explored": _bool_grid_to_b64(ts.explored),
+                }
+                for tid, ts in self.teams.items()
+            },
+            "events": [{"text": ev.text, "ttl": ev.ttl} for ev in self._events],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SandfrontGame":
+        """Reconstruct a game from a ``to_dict()`` snapshot."""
+        self: SandfrontGame = cls.__new__(cls)
+        self.random = random.Random()
+        self.time_s = float(d["time_s"])
+        self.game_over = bool(d["game_over"])
+        self.winner = d.get("winner")
+        self.ai_think_left = float(d.get("ai_think_left", AI_THINK_INTERVAL))
+        self.ai_attack_left = float(d.get("ai_attack_left", AI_ATTACK_INTERVAL))
+        self._oil_tick_left = float(d.get("_oil_tick_left", OIL_TRICKLE_INTERVAL))
+        self._next_unit_id = int(d["_next_unit_id"])
+        self._next_building_id = int(d["_next_building_id"])
+        self._next_resource_id = int(d["_next_resource_id"])
+        self._events = [
+            Event(text=e["text"], ttl=float(e["ttl"])) for e in d.get("events", [])
+        ]
+
+        self.tiles = [
+            [Tile(terrain=int(t)) for t in row] for row in d["tiles"]
+        ]
+
+        self.resources = {
+            int(k): ResourceNode(
+                id=int(v["id"]), kind=str(v["kind"]),
+                x=int(v["x"]), y=int(v["y"]), amount=float(v["amount"]),
+            )
+            for k, v in d.get("resources", {}).items()
+        }
+
+        self.units = {}
+        for k, v in d.get("units", {}).items():
+            u = Unit(
+                id=int(v["id"]), team=int(v["team"]), kind=str(v["kind"]),
+                x=float(v["x"]), y=float(v["y"]),
+                hp=float(v["hp"]), max_hp=float(v["max_hp"]),
+                order=str(v.get("order", "idle")),
+                tx=float(v["tx"]) if v.get("tx") is not None else None,
+                ty=float(v["ty"]) if v.get("ty") is not None else None,
+                target_unit_id=v.get("target_unit_id"),
+                target_building_id=v.get("target_building_id"),
+                target_resource_id=v.get("target_resource_id"),
+                reload_left=float(v.get("reload_left", 0.0)),
+                cargo=float(v.get("cargo", 0.0)),
+                manual_lock_left=float(v.get("manual_lock_left", 0.0)),
+                path=[tuple(p) for p in v.get("path", [])],  # type: ignore[arg-type]
+                path_index=int(v.get("path_index", 0)),
+                path_goal=(
+                    tuple(v["path_goal"])  # type: ignore[arg-type]
+                    if v.get("path_goal") else None
+                ),
+                repath_left=float(v.get("repath_left", 0.0)),
+            )
+            self.units[int(k)] = u
+
+        self.buildings = {}
+        for k, v in d.get("buildings", {}).items():
+            b = Building(
+                id=int(v["id"]), team=int(v["team"]), kind=str(v["kind"]),
+                x=int(v["x"]), y=int(v["y"]),
+                w=int(v["w"]), h=int(v["h"]),
+                hp=float(v["hp"]), max_hp=float(v["max_hp"]),
+                reload_left=float(v.get("reload_left", 0.0)),
+                rally_point=(
+                    (int(v["rally_point"][0]), int(v["rally_point"][1]))
+                    if v.get("rally_point") else None
+                ),
+                queue=[
+                    BuildQueueItem(kind=str(q["kind"]), remaining=float(q["remaining"]))
+                    for q in v.get("queue", [])
+                ],
+                research_task=(
+                    ResearchTask(
+                        key=str(v["research_task"]["key"]),
+                        remaining=float(v["research_task"]["remaining"]),
+                    )
+                    if v.get("research_task") else None
+                ),
+            )
+            self.buildings[int(k)] = b
+
+        self.teams = {}
+        for k, v in d.get("teams", {}).items():
+            cg = {
+                int(gk): set(gv)
+                for gk, gv in v.get("control_groups", {}).items()
+            }
+            for i in range(10):
+                cg.setdefault(i, set())
+            ts = TeamState(
+                spice=float(v["spice"]),
+                spice_capacity=float(v["spice_capacity"]),
+                selected_unit_id=v.get("selected_unit_id"),
+                selected_building_id=v.get("selected_building_id"),
+                selected_unit_ids=set(v.get("selected_unit_ids", [])),
+                selected_building_ids=set(v.get("selected_building_ids", [])),
+                control_groups=cg,
+                completed_research=set(v.get("completed_research", [])),
+                scan_cd_left=float(v.get("scan_cd_left", 0.0)),
+                drone_cd_left=float(v.get("drone_cd_left", 0.0)),
+                hack_cd_left=float(v.get("hack_cd_left", 0.0)),
+                paradrop_cd_left=float(v.get("paradrop_cd_left", 0.0)),
+                scan_left=float(v.get("scan_left", 0.0)),
+                scan_center=(
+                    (int(v["scan_center"][0]), int(v["scan_center"][1]))
+                    if v.get("scan_center") else None
+                ),
+                explored=_b64_to_bool_grid(v["explored"], WORLD_CELLS_Y, WORLD_CELLS_X),
+                visible=(
+                    _b64_to_bool_grid(v["visible"], WORLD_CELLS_Y, WORLD_CELLS_X)
+                    if "visible" in v
+                    else [[False] * WORLD_CELLS_X for _ in range(WORLD_CELLS_Y)]
+                ),
+            )
+            self.teams[int(k)] = ts
+
+        # Visible cells are transient runtime data and can be recomputed.
+        self.recompute_visibility()
+
+        return self
+
     def iter_player_visible_units(self) -> Iterable[Unit]:
         vis = self.teams[TEAM_PLAYER].visible
         for u in self.units.values():
@@ -1664,8 +2262,87 @@ class Renderer:
         self._draw_bottom_panels(game, max_y, max_x, cursor_x, cursor_y)
 
         self.stdscr.noutrefresh()
-        curses.doupdate()
+        # Caller is responsible for curses.doupdate() so overlays can be drawn first.
         return map_top, map_h, map_w
+
+    # ------------------------------------------------------------------
+    # Help modal
+    # ------------------------------------------------------------------
+
+    _HELP_LINES: list[str] = [
+        "╔══════════════════ Sandfront — Key Reference ═══════════════════╗",
+        "║  ?         Close this help screen (or press ? again)          ║",
+        "║                                                                ║",
+        "║  NAVIGATION                                                    ║",
+        "║    WASD / Arrow keys    Move cursor                            ║",
+        "║    I J K L (uppercase)  Pan camera (2 cells per keypress)      ║",
+        "║                                                                ║",
+        "║  SELECTION                                                     ║",
+        "║    SPACE / ENTER        Select entity at cursor                ║",
+        "║    +  or  =             Additive select (add/toggle unit)      ║",
+        "║                                                                ║",
+        "║  ORDERS  (apply to current selection)                         ║",
+        "║    M    Move to cursor                                         ║",
+        "║    V    Attack-move to cursor                                  ║",
+        "║    G    Harvest spice  (harvesters only)                       ║",
+        "║    C    Stop / hold position                                   ║",
+        "║    . >  Set rally point for selected buildings                 ║",
+        "║                                                                ║",
+        "║  CONTROL GROUPS                                                ║",
+        "║    1 .. 0               Recall group (replaces selection)      ║",
+        "║    ! @ # $ % ^ & * ( )  Add group to current selection         ║",
+        "║                          (same as Shift+1..0)                  ║",
+        "║    z  then  1..0        Overwrite group with current selection  ║",
+        "║    Z  then  1..0        Append current selection into group     ║",
+        "║                                                                ║",
+        "║  ACTION SLOTS                                                  ║",
+        "║    Alt+1..0   Execute slot (train unit / research / HQ ability)║",
+        "║                                                                ║",
+        "║  BUILD  (select an engineer first, then press hotkey)          ║",
+        "║    H   HQ          R   Refinery      S   Sand Silo             ║",
+        "║    O   Oil Derrick  B   Barracks      L   Signal Lab           ║",
+        "║    F   Factory      Y   Airfield      T   Turret               ║",
+        "║                                                                ║",
+        "║  GAME                                                          ║",
+        "║    P    Pause / Resume                                         ║",
+        "║    N    New game  (current progress saved first)               ║",
+        "║    ?    Toggle this help screen  (pauses while open)           ║",
+        "║    Q    Quit  (game is auto-saved on exit)                     ║",
+        "║                                                                ║",
+        "║  Scroll help: W / S  or  Up / Down arrows                     ║",
+        "╚════════════════════════════════════════════════════════════════╝",
+    ]
+
+    def draw_help_modal(self, scroll: int) -> int:
+        """Overdraw a scrollable help overlay.  Returns the max valid scroll offset."""
+        lines = self._HELP_LINES
+        max_scroll = max(0, len(lines) - 1)
+        scroll = max(0, min(scroll, max_scroll))
+
+        max_y, max_x = self.stdscr.getmaxyx()
+        modal_w = min(len(lines[0]), max_x - 2)
+        modal_h = min(len(lines), max_y - 2)
+        start_x = max(0, (max_x - modal_w) // 2)
+        start_y = max(0, (max_y - modal_h) // 2)
+
+        attr_border = curses.color_pair(Colors.HUD) | curses.A_BOLD
+        attr_body   = curses.color_pair(Colors.HUD)
+
+        for i in range(modal_h):
+            idx = scroll + i
+            if idx >= len(lines):
+                break
+            line = lines[idx]
+            padded = line[:modal_w].ljust(modal_w)
+            is_border = (idx == 0 or idx == len(lines) - 1)
+            attr = attr_border if is_border else attr_body
+            try:
+                self.stdscr.addstr(start_y + i, start_x, padded, attr)
+            except curses.error:
+                pass
+
+        self.stdscr.noutrefresh()
+        return max_scroll
 
     def _draw_top_bar(self, game: SandfrontGame, max_x: int, paused: bool, fps: float) -> None:
         p = game.teams[TEAM_PLAYER]
@@ -1677,7 +2354,7 @@ class Renderer:
             f" | FPS {fps:4.1f}"
         )
         self._addstr_clipped(0, 0, line.ljust(max_x), curses.color_pair(Colors.HUD) | curses.A_BOLD)
-        controls = " Arrows/WASD cursor  Shift+IJKL camera  SPACE select  M move  V atk-move  G gather  C stop  1-9 queue  U research-next  Alt+1..9 research-slot  H/R/S/O/B/L/F/Y/T build  Q quit"
+        controls = " Arrows/WASD cursor  Shift+IJKL camera  SPACE select  Alt+SPACE (or +) add/toggle select  M move  V atk-move  G gather  C stop  . rally  Alt+1..0 action  1..0 recall group  Shift+1..0 add group  Ctrl+1..0 assign group  z1..0 replace group  Z1..0 append group  H/R/S/O/B/L/F/Y/T build  Q quit"
         self._addstr_clipped(1, 0, controls.ljust(max_x), curses.A_DIM)
 
     def _draw_map(self, game: SandfrontGame, cam_x: int, cam_y: int, map_top: int, map_h: int, map_w: int) -> None:
@@ -1764,13 +2441,22 @@ class Renderer:
             return
 
         p = game.teams[TEAM_PLAYER]
+        game._normalize_selection(TEAM_PLAYER)
         selected = "Selection: none"
         if p.selected_unit_id is not None and p.selected_unit_id in game.units:
             u = game.units[p.selected_unit_id]
-            selected = f"Selection Unit {u.id}: {u.kind} HP {int(u.hp)}/{int(u.max_hp)} Order {u.order}"
+            selected = (
+                f"Selection Units {len(p.selected_unit_ids)} | Primary {u.id}:{u.kind} "
+                f"HP {int(u.hp)}/{int(u.max_hp)} Order {u.order}"
+            )
         elif p.selected_building_id is not None and p.selected_building_id in game.buildings:
             b = game.buildings[p.selected_building_id]
-            selected = f"Selection Building {b.id}: {b.kind} HP {int(b.hp)}/{int(b.max_hp)}"
+            selected = (
+                f"Selection Buildings {len(p.selected_building_ids)} | Primary {b.id}:{b.kind} "
+                f"HP {int(b.hp)}/{int(b.max_hp)}"
+            )
+            if b.rally_point is not None:
+                selected += f" Rally {b.rally_point[0]},{b.rally_point[1]}"
         self._addstr_clipped(y, 0, selected.ljust(max_x), curses.A_BOLD)
 
         unit, bldg, res = game.entities_at(cursor_x, cursor_y)
@@ -1783,8 +2469,8 @@ class Renderer:
             hover += f" | Resource {res.kind} {int(res.amount)}"
         self._addstr_clipped(y + 1, 0, hover.ljust(max_x), curses.A_DIM)
 
-        queue_info = self._queue_panel(game)
-        self._addstr_clipped(y + 2, 0, queue_info.ljust(max_x), curses.color_pair(Colors.PLAYER_BLDG))
+        action_info = self._action_panel(game)
+        self._addstr_clipped(y + 2, 0, action_info.ljust(max_x), curses.color_pair(Colors.PLAYER_BLDG))
 
         research_info = self._research_panel(game)
         self._addstr_clipped(y + 3, 0, research_info.ljust(max_x), curses.color_pair(Colors.PLAYER_UNIT))
@@ -1815,7 +2501,7 @@ class Renderer:
     def _research_panel(self, game: SandfrontGame) -> str:
         ts = game.teams[TEAM_PLAYER]
         if ts.selected_building_id is None or ts.selected_building_id not in game.buildings:
-            return "Research: select Signal Lab. U starts next available; Alt+1..9 chooses a specific slot."
+            return "Research: select Signal Lab, then use Alt+slot for exact item."
         b = game.buildings[ts.selected_building_id]
         if b.kind != "lab":
             return "Research: selected building is not a Signal Lab."
@@ -1823,6 +2509,39 @@ class Renderer:
             return f"Research in progress: {b.research_task.key} ({b.research_task.remaining:0.1f}s)"
         completed = ", ".join(sorted(ts.completed_research)) or "none"
         return f"Research complete: {completed}"
+
+    def _action_panel(self, game: SandfrontGame) -> str:
+        ts = game.teams[TEAM_PLAYER]
+        game._normalize_selection(TEAM_PLAYER)
+        if ts.selected_building_id is not None and ts.selected_building_id in game.buildings:
+            b = game.buildings[ts.selected_building_id]
+            labels: list[str] = []
+            for uk in BUILDING_TYPES[b.kind].get("queue", []):
+                labels.append(f"Train {UNIT_TYPES[uk]['label']}")
+            if b.kind == "lab":
+                for rk in BUILDING_TYPES["lab"].get("research", []):
+                    labels.append(f"Research {RESEARCH[rk]['label']}")
+            if b.kind == "hq":
+                if "scanner" in ts.completed_research:
+                    labels.append("Scan")
+                if "drone-tech" in ts.completed_research:
+                    labels.append("Deploy Drone")
+                if "hacking" in ts.completed_research:
+                    labels.append("Hack")
+                if "paradrop-tech" in ts.completed_research:
+                    labels.append("Paradrop")
+            if not labels:
+                return "Actions: selected building has no slot actions."
+            entries = []
+            for i, label in enumerate(labels[:10]):
+                key = str(i + 1) if i < 9 else "0"
+                entries.append(f"{key}:{label}")
+            return "Alt Actions " + "  ".join(entries)
+
+        if ts.selected_unit_ids:
+            return "Alt Actions 1:Stop selected units"
+
+        return "Actions: select units/buildings. Alt+1..0 executes slot actions."
 
     def _putch(self, y: int, x: int, ch: str, attr: int = 0) -> None:
         try:
@@ -1849,6 +2568,8 @@ import curses
 class InputAction:
     quit: bool = False
     pause_toggle: bool = False
+    help_toggle: bool = False
+    new_game: bool = False
     camera_dx: int = 0
     camera_dy: int = 0
     cursor_dx: int = 0
@@ -1858,9 +2579,14 @@ class InputAction:
     attack_move: bool = False
     harvest: bool = False
     stop: bool = False
-    queue_slot: int | None = None
-    research_slot: int | None = None
-    research_next: bool = False
+    set_rally: bool = False
+    select_additive: bool = False
+    action_slot: int | None = None
+    group_recall: int | None = None
+    group_add: int | None = None
+    group_assign: int | None = None
+    group_assign_append: bool = False
+    group_assign_prefix_mode: str | None = None
     build_hotkey: str | None = None
     mouse_left: tuple[int, int] | None = None
     mouse_right: tuple[int, int] | None = None
@@ -1871,13 +2597,17 @@ class InputHandler:
 
     def __init__(self) -> None:
         self._build_hotkeys = {"h", "r", "s", "o", "b", "l", "f", "y", "t"}
-        self._queue_hotkeys = {
+        self._group_recall_hotkeys = {
             "1": 0, "2": 1, "3": 2, "4": 3, "5": 4,
-            "6": 5, "7": 6, "8": 7, "9": 8,
+            "6": 5, "7": 6, "8": 7, "9": 8, "0": 9,
+        }
+        # Shift+number adds a group to current selection.
+        self._group_add_hotkeys = {
             "!": 0, "@": 1, "#": 2, "$": 3, "%": 4,
-            "^": 5, "&": 6, "*": 7, "(": 8,
+            "^": 5, "&": 6, "*": 7, "(": 8, ")": 9,
         }
         self._pending_alt = False
+        self._pending_group_assign_mode: str | None = None
 
     def poll(self, stdscr: curses.window) -> InputAction:
         action = InputAction()
@@ -1890,19 +2620,73 @@ class InputHandler:
 
     def _consume_key(self, stdscr: curses.window, ch: int, action: InputAction) -> None:
         if ch == 27:
+            seq = self._read_escape_sequence(stdscr)
+            if seq and self._consume_escape_sequence(seq, action):
+                self._pending_alt = False
+                return
+            if seq:
+                self._pending_alt = True
+                for code in seq:
+                    self._consume_key(stdscr, code, action)
+                return
             self._pending_alt = True
             return
 
         if ch in (ord("q"), ord("Q")):
             self._pending_alt = False
+            self._pending_group_assign_mode = None
             action.quit = True
             return
-        if ch in (ord(" "), ord("\n"), curses.KEY_ENTER):
+        if ch == ord("?"):
             self._pending_alt = False
+            self._pending_group_assign_mode = None
+            action.help_toggle = True
+            return
+        if ch in (ord("n"), ord("N")):
+            self._pending_alt = False
+            self._pending_group_assign_mode = None
+            action.new_game = True
+            return
+        # Ctrl+1..9 often arrive as ASCII control chars 1..9.
+        if 1 <= ch <= 9:
+            self._pending_alt = False
+            self._pending_group_assign_mode = None
+            action.group_assign = ch - 1
+            return
+        # Ctrl+0 is terminal-dependent; map NUL as best-effort fallback.
+        if ch == 0:
+            self._pending_alt = False
+            self._pending_group_assign_mode = None
+            action.group_assign = 9
+            return
+        if ch == ord("z"):
+            self._pending_alt = False
+            self._pending_group_assign_mode = "replace"
+            action.group_assign_prefix_mode = "replace"
+            return
+        if ch == ord("Z"):
+            self._pending_alt = False
+            self._pending_group_assign_mode = "append"
+            action.group_assign_prefix_mode = "append"
+            return
+        if ch in (ord(" "), ord("\n"), curses.KEY_ENTER):
+            if self._pending_alt:
+                action.select_additive = True
+                self._pending_alt = False
+                self._pending_group_assign_mode = None
+                return
+            self._pending_alt = False
+            self._pending_group_assign_mode = None
             action.select = True
+            return
+        if ch == getattr(curses, "KEY_SENTER", -9999):
+            self._pending_alt = False
+            self._pending_group_assign_mode = None
+            action.select_additive = True
             return
         if ch in (ord("p"), ord("P")):
             self._pending_alt = False
+            self._pending_group_assign_mode = None
             action.pause_toggle = True
             return
 
@@ -1974,13 +2758,19 @@ class InputHandler:
             action.stop = True
             return
 
-        if ch in (ord("u"), ord("U")):
+        if ch in (ord("."), ord(">")):
             self._pending_alt = False
-            action.research_next = True
+            action.set_rally = True
+            return
+
+        if ch in (ord("+"), ord("=")):
+            self._pending_alt = False
+            action.select_additive = True
             return
 
         if ch == curses.KEY_MOUSE:
             self._pending_alt = False
+            self._pending_group_assign_mode = None
             self._consume_mouse(action)
             return
 
@@ -1990,22 +2780,100 @@ class InputHandler:
             self._pending_alt = False
             return
 
-        if self._pending_alt and raw_char in self._queue_hotkeys:
-            action.research_slot = self._queue_hotkeys[raw_char]
+        if self._pending_group_assign_mode is not None and raw_char in self._group_recall_hotkeys:
+            action.group_assign = self._group_recall_hotkeys[raw_char]
+            action.group_assign_append = self._pending_group_assign_mode == "append"
+            self._pending_group_assign_mode = None
             self._pending_alt = False
             return
 
-        if raw_char in self._queue_hotkeys:
-            action.queue_slot = self._queue_hotkeys[raw_char]
+        if self._pending_alt and raw_char in self._group_recall_hotkeys:
+            action.action_slot = self._group_recall_hotkeys[raw_char]
             self._pending_alt = False
+            self._pending_group_assign_mode = None
+            return
+
+        if raw_char in self._group_add_hotkeys:
+            action.group_add = self._group_add_hotkeys[raw_char]
+            self._pending_alt = False
+            self._pending_group_assign_mode = None
+            return
+
+        if raw_char in self._group_recall_hotkeys:
+            action.group_recall = self._group_recall_hotkeys[raw_char]
+            self._pending_alt = False
+            self._pending_group_assign_mode = None
             return
 
         char = raw_char.lower()
 
         self._pending_alt = False
+        self._pending_group_assign_mode = None
 
         if char in self._build_hotkeys:
             action.build_hotkey = char
+
+    def _read_escape_sequence(self, stdscr: curses.window) -> list[int]:
+        seq: list[int] = []
+        for _ in range(12):
+            nxt = stdscr.getch()
+            if nxt == -1:
+                break
+            seq.append(nxt)
+            if 64 <= nxt <= 126:
+                break
+        return seq
+
+    def _consume_escape_sequence(self, seq: list[int], action: InputAction) -> bool:
+        if not seq:
+            return False
+
+        if len(seq) == 1:
+            try:
+                raw_char = chr(seq[0])
+            except ValueError:
+                return False
+            if raw_char in self._group_recall_hotkeys:
+                action.action_slot = self._group_recall_hotkeys[raw_char]
+                return True
+            if raw_char == " ":
+                action.select_additive = True
+                return True
+            return False
+
+        try:
+            text = "".join(chr(code) for code in seq)
+        except ValueError:
+            return False
+
+        # Common CSI-u format, e.g. ESC [ 49 ; 5 u for Ctrl+1.
+        if text.startswith("[") and text.endswith("u"):
+            body = text[1:-1]
+            parts = body.split(";")
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                codepoint = int(parts[0])
+                modifier = int(parts[1])
+                try:
+                    raw_char = chr(codepoint)
+                except ValueError:
+                    return False
+                if raw_char in self._group_recall_hotkeys:
+                    idx = self._group_recall_hotkeys[raw_char]
+                    if modifier == 5:
+                        action.group_assign_append = False
+                        action.group_assign = idx
+                        return True
+                    if modifier == 2:
+                        action.group_add = idx
+                        return True
+                    if modifier == 6:
+                        action.group_assign_append = True
+                        action.group_assign = idx
+                        return True
+                    if modifier == 3:
+                        action.action_slot = idx
+                        return True
+        return False
 
     def _consume_mouse(self, action: InputAction) -> None:
         try:
@@ -2040,7 +2908,12 @@ def run_headless(seconds: float, seed: int | None) -> int:
     return 0
 
 
-def run_curses(stdscr: curses.window, seed: int | None) -> int:
+def run_curses(
+    stdscr: curses.window,
+    seed: int | None,
+    save_path: str,
+    force_new: bool,
+) -> int:
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
@@ -2049,21 +2922,40 @@ def run_curses(stdscr: curses.window, seed: int | None) -> int:
     except curses.error:
         pass
 
-    game = SandfrontGame(seed=seed)
+    # ---- load or create game ------------------------------------------------
+    cursor_x, cursor_y = 12, 12
+    cam_x, cam_y = 0, 0
+
+    loaded = None if force_new else load_game(save_path)
+    if loaded is not None:
+        game, ui = loaded
+        cursor_x = int(ui.get("cursor_x", cursor_x))
+        cursor_y = int(ui.get("cursor_y", cursor_y))
+        cam_x    = int(ui.get("cam_x", cam_x))
+        cam_y    = int(ui.get("cam_y", cam_y))
+    else:
+        game = SandfrontGame(seed=seed)
+
     renderer = Renderer(stdscr)
     input_handler = InputHandler()
 
     ts = game.teams[TEAM_PLAYER]
-    if ts.selected_unit_id is None:
-        # Select first player unit at startup for fast command flow.
+    if ts.selected_unit_id is None and not ts.selected_unit_ids:
         first = next((u for u in game.units.values() if u.team == TEAM_PLAYER), None)
         if first:
             game.select_at(TEAM_PLAYER, int(round(first.x)), int(round(first.y)))
 
-    cursor_x, cursor_y = 12, 12
-    cam_x, cam_y = 0, 0
     paused = False
     build_by_hotkey = {k.lower(): b for b, k in BUILD_HOTKEYS.items()}
+
+    # ---- help modal state ---------------------------------------------------
+    help_active = False
+    help_scroll = 0
+    paused_before_help = False
+
+    # ---- auto-save every 90 real seconds of active gameplay -----------------
+    AUTO_SAVE_INTERVAL = 90.0
+    auto_save_left = AUTO_SAVE_INTERVAL
 
     TARGET_FPS = 20
     FRAME_TIME = 1.0 / TARGET_FPS
@@ -2071,6 +2963,7 @@ def run_curses(stdscr: curses.window, seed: int | None) -> int:
     last_t = time.perf_counter()
     fps = 0.0
     map_top, map_h, map_w = renderer.render(game, cam_x, cam_y, cursor_x, cursor_y, paused, fps)
+    curses.doupdate()
 
     while True:
         now = time.perf_counter()
@@ -2085,8 +2978,57 @@ def run_curses(stdscr: curses.window, seed: int | None) -> int:
         fps = (0.92 * fps) + (0.08 * (1.0 / max(1e-6, dt)))
 
         action = input_handler.poll(stdscr)
+
+        # ---- quit -----------------------------------------------------------
         if action.quit:
+            save_game(
+                game, save_path,
+                ui_state={"cursor_x": cursor_x, "cursor_y": cursor_y,
+                          "cam_x": cam_x, "cam_y": cam_y},
+            )
             return 0
+
+        # ---- help modal toggle ----------------------------------------------
+        if action.help_toggle:
+            if help_active:
+                help_active = False
+                paused = paused_before_help
+            else:
+                paused_before_help = paused
+                paused = True
+                help_active = True
+                help_scroll = 0
+
+        if help_active:
+            # While help is open only scroll; block all game actions.
+            help_scroll = max(0, help_scroll + action.cursor_dy)
+            map_top, map_h, map_w = renderer.render(
+                game, cam_x, cam_y, cursor_x, cursor_y, paused, fps
+            )
+            max_scroll = renderer.draw_help_modal(help_scroll)
+            help_scroll = min(help_scroll, max_scroll)
+            curses.doupdate()
+            continue
+
+        # ---- new game -------------------------------------------------------
+        if action.new_game:
+            save_game(
+                game, save_path,
+                ui_state={"cursor_x": cursor_x, "cursor_y": cursor_y,
+                          "cam_x": cam_x, "cam_y": cam_y},
+            )
+            game = SandfrontGame(seed=seed)
+            cursor_x, cursor_y = 12, 12
+            cam_x, cam_y = 0, 0
+            paused = False
+            auto_save_left = AUTO_SAVE_INTERVAL
+            first = next((u for u in game.units.values() if u.team == TEAM_PLAYER), None)
+            if first:
+                game.select_at(TEAM_PLAYER, int(round(first.x)), int(round(first.y)))
+            game.add_event("New game started — previous save kept")
+            continue
+
+        # ---- pause ----------------------------------------------------------
         if action.pause_toggle:
             paused = not paused
 
@@ -2108,13 +3050,8 @@ def run_curses(stdscr: curses.window, seed: int | None) -> int:
 
         if action.mouse_left is not None:
             world = renderer.screen_to_world(
-                action.mouse_left[0],
-                action.mouse_left[1],
-                cam_x,
-                cam_y,
-                map_top,
-                map_h,
-                map_w,
+                action.mouse_left[0], action.mouse_left[1],
+                cam_x, cam_y, map_top, map_h, map_w,
             )
             if world:
                 cursor_x, cursor_y = world
@@ -2122,13 +3059,8 @@ def run_curses(stdscr: curses.window, seed: int | None) -> int:
 
         if action.mouse_right is not None:
             world = renderer.screen_to_world(
-                action.mouse_right[0],
-                action.mouse_right[1],
-                cam_x,
-                cam_y,
-                map_top,
-                map_h,
-                map_w,
+                action.mouse_right[0], action.mouse_right[1],
+                cam_x, cam_y, map_top, map_h, map_w,
             )
             if world:
                 cursor_x, cursor_y = world
@@ -2136,6 +3068,25 @@ def run_curses(stdscr: curses.window, seed: int | None) -> int:
 
         if action.select:
             game.select_at(TEAM_PLAYER, cursor_x, cursor_y)
+        if action.select_additive:
+            game.select_at(TEAM_PLAYER, cursor_x, cursor_y, additive=True)
+
+        if action.group_recall is not None:
+            ok, msg = game.recall_control_group(TEAM_PLAYER, action.group_recall)
+            game.add_event(msg)
+        if action.group_add is not None:
+            ok, msg = game.add_control_group_to_selection(TEAM_PLAYER, action.group_add)
+            game.add_event(msg)
+        if action.group_assign_prefix_mode == "replace":
+            game.add_event("Replace group: press 1..0")
+        elif action.group_assign_prefix_mode == "append":
+            game.add_event("Append to group: press 1..0")
+        if action.group_assign is not None:
+            if action.group_assign_append:
+                ok, msg = game.append_control_group_from_selection(TEAM_PLAYER, action.group_assign)
+            else:
+                ok, msg = game.assign_control_group_from_selection(TEAM_PLAYER, action.group_assign)
+            game.add_event(msg)
 
         if action.move:
             if game.issue_move_selected(TEAM_PLAYER, cursor_x, cursor_y, attack_move=False):
@@ -2150,16 +3101,12 @@ def run_curses(stdscr: curses.window, seed: int | None) -> int:
         if action.stop:
             if game.issue_stop_selected(TEAM_PLAYER):
                 game.add_event("Unit stopped")
-
-        if action.queue_slot is not None:
-            ok, msg = game.queue_unit_from_selected_building(TEAM_PLAYER, action.queue_slot)
+        if action.set_rally:
+            ok, msg = game.set_rally_for_selected_buildings(TEAM_PLAYER, cursor_x, cursor_y)
             game.add_event(msg)
 
-        if action.research_next:
-            ok, msg = game.start_next_available_research_from_selected(TEAM_PLAYER)
-            game.add_event(msg)
-        elif action.research_slot is not None:
-            ok, msg = game.start_research_from_selected(TEAM_PLAYER, action.research_slot)
+        if action.action_slot is not None:
+            ok, msg = game.perform_action_slot(TEAM_PLAYER, action.action_slot, cursor_x, cursor_y)
             game.add_event(msg)
 
         if action.build_hotkey is not None:
@@ -2173,7 +3120,19 @@ def run_curses(stdscr: curses.window, seed: int | None) -> int:
         if not paused:
             game.tick(dt)
 
+        # ---- auto-save ------------------------------------------------------
+        if not paused:
+            auto_save_left -= dt
+            if auto_save_left <= 0:
+                auto_save_left = AUTO_SAVE_INTERVAL
+                save_game(
+                    game, save_path,
+                    ui_state={"cursor_x": cursor_x, "cursor_y": cursor_y,
+                              "cam_x": cam_x, "cam_y": cam_y},
+                )
+
         map_top, map_h, map_w = renderer.render(game, cam_x, cam_y, cursor_x, cursor_y, paused, fps)
+        curses.doupdate()
 
 
 def _issue_context_command(game: SandfrontGame, wx: int, wy: int) -> None:
@@ -2196,6 +3155,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None, help="Deterministic map seed")
     parser.add_argument("--headless", action="store_true", help="Run simulation without curses")
     parser.add_argument("--seconds", type=float, default=20.0, help="Headless runtime")
+    parser.add_argument(
+        "--save",
+        default="~/.idlegames/sandfront.json",
+        metavar="PATH",
+        help="Save file path (default: ~/.idlegames/sandfront.json)",
+    )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Start a fresh game, ignoring any existing save",
+    )
     return parser.parse_args()
 
 
@@ -2203,7 +3173,14 @@ def main() -> int:
     args = parse_args()
     if args.headless:
         return run_headless(seconds=args.seconds, seed=args.seed)
-    return curses.wrapper(lambda stdscr: run_curses(stdscr, seed=args.seed))
+    return curses.wrapper(
+        lambda stdscr: run_curses(
+            stdscr,
+            seed=args.seed,
+            save_path=args.save,
+            force_new=args.new,
+        )
+    )
 
 
 if __name__ == "__main__":
