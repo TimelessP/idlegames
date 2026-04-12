@@ -1076,7 +1076,12 @@ class SandfrontGame:
             if target_unit is None and target_bldg is None:
                 continue
 
-            tx, ty = (target_unit.x, target_unit.y) if target_unit else self._building_center(target_bldg)
+            if target_unit is not None:
+                tx, ty = target_unit.x, target_unit.y
+            else:
+                if target_bldg is None:
+                    continue
+                tx, ty = self._building_center(target_bldg)
             d = self._distance_cells(unit.x, unit.y, tx, ty) * CELL
             attack_range = float(udef["range"])
             if d > attack_range:
@@ -1280,12 +1285,13 @@ class SandfrontGame:
             if b.team != team or b.kind != "refinery":
                 continue
             adj = self._find_spawn_cell_near_building(b)
-            if adj[0] is None:
+            ax, ay = adj
+            if ax is None or ay is None:
                 continue
-            d = self._distance_cells(x, y, adj[0], adj[1])
+            d = self._distance_cells(x, y, ax, ay)
             if d < best_d:
                 best_d = d
-                best = adj
+                best = (ax, ay)
         if best is None:
             return None, None
         return best
