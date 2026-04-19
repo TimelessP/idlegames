@@ -85,6 +85,7 @@ async function rewriteBareThreeImports(filePath) {
 async function ensureVendorAssets() {
   await copyModuleFile(['qrious', 'dist', 'qrious.min.js'], ['assets', 'vendor', 'qrious', 'qrious.min.js']);
   await copyModuleFile(['jsqr', 'dist', 'jsQR.js'], ['assets', 'vendor', 'jsqr', 'jsQR.js']);
+  await copyModuleFile(['three', 'build', 'three.core.js'], ['assets', 'vendor', 'three', 'three.core.js']);
   await copyModuleFile(['three', 'build', 'three.module.js'], ['assets', 'vendor', 'three', 'three.module.js']);
 
   const exampleFiles = [
@@ -105,7 +106,7 @@ async function ensureVendorAssets() {
     await rewriteBareThreeImports(path.join(distDir, ...destination));
   }
 
-  const transformersSrc = path.join(projectRoot, 'node_modules', '@xenova', 'transformers', 'dist');
+  const transformersSrc = path.join(projectRoot, 'node_modules', '@huggingface', 'transformers', 'dist');
   const transformersDest = path.join(distDir, 'assets', 'vendor', 'transformers');
   await fs.rm(transformersDest, { recursive: true, force: true });
   await fs.cp(transformersSrc, transformersDest, { recursive: true });

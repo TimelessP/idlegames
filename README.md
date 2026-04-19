@@ -181,7 +181,7 @@ Idle Games uses plain **npm** for tooling and scripts—no bundlers or task runn
    git clone https://github.com/TimelessP/idlegames.git
    cd idlegames
    ```
-2. Install dependencies with npm (Node.js 20 LTS recommended, Node.js ≥18 supported):
+2. Install dependencies with npm (Node.js 22 LTS recommended, Node.js ≥20 supported):
    ```bash
    npm install
    ```
