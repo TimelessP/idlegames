@@ -362,7 +362,7 @@ html{
 .toast{
   position:absolute;
   left:50%;
-  bottom:140px;
+  bottom:calc(var(--toast-clearance, 140px) + env(safe-area-inset-bottom,0px));
   transform:translateX(-50%);
   padding:10px 14px;
   border-radius:999px;
@@ -441,7 +441,6 @@ html{
   .hud-bottom{grid-template-columns:1fr}
   .touch-strip{order:1;width:auto;justify-self:stretch}
   .command-wrap{order:2}
-  .toast{bottom:286px}
 }
 
 @media (max-width: 960px) {
@@ -464,7 +463,7 @@ html{
   .action-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
   .hud-right{display:none}
   .hud-top{padding-right:96px}
-  .toast{bottom:280px;max-width:calc(100vw - 24px);text-align:center}
+  .toast{max-width:calc(100vw - 24px);text-align:center}
 }
 
 @media (max-width: 1100px) and (max-height: 640px) and (orientation: landscape) {
@@ -496,7 +495,7 @@ html{
   .selection-meta .small-status{padding:3px 5px;font-size:9px;gap:4px}
   #centerSelection{padding:4px 6px}
   #centerSelection .button-label{display:none}
-  .toast{bottom:148px;font-size:11px}
+  .toast{font-size:11px}
 }
 </style>
 </head>
@@ -549,7 +548,7 @@ html{
       <div class="mini-caption">Jump camera</div>
     </div>
 
-    <div class="hud-bottom">
+    <div class="hud-bottom" id="hudBottom">
       <div class="hud-panel touch-strip" id="touchStrip">
         <button class="touch-button is-active" data-touch-mode="select" type="button" aria-label="Touch select mode"><svg class="button-icon" aria-hidden="true"><use href="#icon-select"></use></svg><span class="button-label">Sel</span></button>
         <button class="touch-button" data-touch-mode="pan" type="button" aria-label="Touch pan mode"><svg class="button-icon" aria-hidden="true"><use href="#icon-pan"></use></svg><span class="button-label">Pan</span></button>
@@ -647,6 +646,7 @@ html{
   minimapFogCtx.imageSmoothingEnabled = false;
 
   const stageShell = document.getElementById('stageShell');
+  const hudBottom = document.getElementById('hudBottom');
   const selectionBox = document.getElementById('selectionBox');
   const keyboardCursorEl = document.getElementById('keyboardCursor');
   const toastEl = document.getElementById('toast');
@@ -734,6 +734,8 @@ html{
   const AI_OIL_TURRET_COVER_RADIUS = CELL * 8;
   const AI_OIL_TURRET_ENGINEER_RANGE = CELL * 10;
   const AMBULANCE_RETREAT_MARGIN = 14;
+  const POINTER_UNIT_HIT_EXPANSION = 6;
+  const POINTER_BUILDING_HIT_EXPANSION = 8;
   const FIGHTER_MISSILES = 4;
   const FIGHTER_REPAIR_RATE = 18;
   const FIGHTER_REARM_RATE = 1.2;
@@ -3422,6 +3424,112 @@ html{
     };
   }
 
+  function getExpandedRect(rect, padding) {
+    const left = rect.left ?? rect.x;
+    const top = rect.top ?? rect.y;
+    const right = rect.right ?? (left + rect.width);
+    const bottom = rect.bottom ?? (top + rect.height);
+    return {
+      x: left - padding,
+      y: top - padding,
+      left: left - padding,
+      top: top - padding,
+      right: right + padding,
+      bottom: bottom + padding,
+      width: (right - left) + padding * 2,
+      height: (bottom - top) + padding * 2
+    };
+  }
+
+  function isPointInRect(worldX, worldY, rect) {
+    const left = rect.left ?? rect.x;
+    const top = rect.top ?? rect.y;
+    const right = rect.right ?? (left + rect.width);
+    const bottom = rect.bottom ?? (top + rect.height);
+    return worldX >= left && worldX <= right && worldY >= top && worldY <= bottom;
+  }
+
+  function getExpandedUnitHitRadius(unit) {
+    return getUnitGeometry(unit).hitRadius + POINTER_UNIT_HIT_EXPANSION;
+  }
+
+  function getEntitySelectionScore(entity, worldX, worldY, expanded = true) {
+    if (!entity) return null;
+    if (entity.kind === 'unit') {
+      const geometry = getUnitGeometry(entity);
+      const radius = geometry.hitRadius + (expanded ? POINTER_UNIT_HIT_EXPANSION : 0);
+      const distanceSquared = (worldX - entity.x) * (worldX - entity.x) + (worldY - entity.y) * (worldY - entity.y);
+      if (distanceSquared > radius * radius) return null;
+      const visualHit = expanded && isPointInRect(worldX, worldY, geometry.sprite);
+      const directHit = distanceSquared <= geometry.hitRadius * geometry.hitRadius || visualHit;
+      return {
+        entity,
+        frontY: entity.y,
+        distanceSquared,
+        strictHit: directHit,
+        visualUnitHit: visualHit
+      };
+    }
+    if (entity.kind === 'building') {
+      const geometry = getBuildingGeometry(entity);
+      const bounds = expanded ? getExpandedRect(getBuildingHitBounds(entity), POINTER_BUILDING_HIT_EXPANSION) : getBuildingHitBounds(entity);
+      if (worldX < bounds.left || worldX > bounds.right || worldY < bounds.top || worldY > bounds.bottom) return null;
+      const distanceSquared = getPointRectDistanceSquared(worldX, worldY, bounds);
+      return {
+        entity,
+        frontY: geometry.footprint.bottom,
+        distanceSquared,
+        strictHit: (() => {
+          const strictBounds = getBuildingHitBounds(entity);
+          return worldX >= strictBounds.left && worldX <= strictBounds.right && worldY >= strictBounds.top && worldY <= strictBounds.bottom;
+        })(),
+        visualUnitHit: false
+      };
+    }
+    return null;
+  }
+
+  function chooseBestSelectionCandidate(candidates) {
+    let best = null;
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      if (!best) {
+        best = candidate;
+        continue;
+      }
+      if (candidate.visualUnitHit !== best.visualUnitHit) {
+        if (candidate.visualUnitHit) best = candidate;
+        continue;
+      }
+      if (candidate.strictHit !== best.strictHit) {
+        if (candidate.strictHit) best = candidate;
+        continue;
+      }
+      if (candidate.frontY > best.frontY + 0.5) {
+        best = candidate;
+        continue;
+      }
+      if (Math.abs(candidate.frontY - best.frontY) <= 0.5 && candidate.distanceSquared < best.distanceSquared) {
+        best = candidate;
+        continue;
+      }
+    }
+    return best?.entity || null;
+  }
+
+  function findBestEntityCandidate(worldX, worldY, expanded = true) {
+    const candidates = [];
+    for (const unit of state.units) {
+      if (unit.hp <= 0 || unit.garrisonedIn) continue;
+      candidates.push(getEntitySelectionScore(unit, worldX, worldY, expanded));
+    }
+    for (const building of state.buildings) {
+      if (building.hp <= 0) continue;
+      candidates.push(getEntitySelectionScore(building, worldX, worldY, expanded));
+    }
+    return chooseBestSelectionCandidate(candidates);
+  }
+
   function getBuildingGeometryFor(typeKey, left, top, sprite = null) {
     const def = BUILDING_TYPES[typeKey];
     const geometry = def?.geometry || {};
@@ -3518,13 +3626,13 @@ html{
     return getPointRectDistanceSquared(worldX, worldY, geometry.footprint) * 1000 + centerDx * centerDx + centerDy * centerDy;
   }
 
-  function getAirfieldSelectionAtWorldPoint(teamId, worldX, worldY) {
+  function getAirfieldSelectionAtWorldPoint(teamId, worldX, worldY, expanded = true) {
     let best = null;
     let bestScore = Infinity;
     for (const building of state.buildings) {
       if (building.hp <= 0 || building.type !== 'airfield') continue;
       if (teamId !== null && teamId !== undefined && building.teamId !== teamId) continue;
-      const bounds = getBuildingHitBounds(building);
+      const bounds = expanded ? getExpandedRect(getBuildingHitBounds(building), POINTER_BUILDING_HIT_EXPANSION) : getBuildingHitBounds(building);
       if (worldX < bounds.left || worldX > bounds.right || worldY < bounds.top || worldY > bounds.bottom) continue;
       const score = getAirfieldPointScore(building, worldX, worldY);
       if (score < bestScore) {
@@ -7236,6 +7344,14 @@ html{
     state.toastTimer = 2.4;
   }
 
+  function syncToastAnchor() {
+    if (!stageShell || !hudBottom) return;
+    const stageRect = stageShell.getBoundingClientRect();
+    const hudRect = hudBottom.getBoundingClientRect();
+    const toastClearance = Math.max(72, Math.ceil(stageRect.bottom - hudRect.top + 10));
+    stageShell.style.setProperty('--toast-clearance', toastClearance + 'px');
+  }
+
   function getRootMenuId() {
     if (state.winner === 'Sun Nomads') return 'victory';
     if (state.winner === 'Dust Cartel') return 'defeat';
@@ -9126,22 +9242,11 @@ html{
     return ghost;
   }
 
-  function findEntityAt(worldX, worldY, includeAirfieldSelectionFallback = true) {
-    const selectableUnits = state.units
-      .filter((unit) => unit.hp > 0 && !unit.garrisonedIn)
-      .sort((a, b) => b.y - a.y);
-    for (const unit of selectableUnits) {
-      if (unit.hp <= 0 || unit.garrisonedIn) continue;
-      if (dist(worldX, worldY, unit.x, unit.y) <= getUnitGeometry(unit).hitRadius) return unit;
-    }
-    for (let i = state.buildings.length - 1; i >= 0; i--) {
-      const building = state.buildings[i];
-      if (building.hp <= 0) continue;
-      const bounds = getBuildingHitBounds(building);
-      if (worldX >= bounds.left && worldX <= bounds.right && worldY >= bounds.top && worldY <= bounds.bottom) return building;
-    }
+  function findEntityAt(worldX, worldY, includeAirfieldSelectionFallback = true, expanded = true) {
+    const directSelection = findBestEntityCandidate(worldX, worldY, expanded);
+    if (directSelection) return directSelection;
     if (includeAirfieldSelectionFallback) {
-      const clickedAirfield = getAirfieldSelectionAtWorldPoint(null, worldX, worldY);
+      const clickedAirfield = getAirfieldSelectionAtWorldPoint(null, worldX, worldY, expanded);
       if (clickedAirfield) return clickedAirfield;
     }
     for (let i = state.resources.length - 1; i >= 0; i--) {
@@ -9459,13 +9564,14 @@ html{
     if (state.pendingDroneHubId) setPendingDroneInputSource('pointer');
     if (state.pendingParadropHubId) setPendingParadropInputSource('pointer');
     const entity = findEntityAt(world.x, world.y);
+    const strictEntity = findEntityAt(world.x, world.y, true, false);
     if (state.touchMode === 'pan' && event.pointerType === 'touch') {
       state.drag = { mode: 'pan', startClientX: event.clientX, startClientY: event.clientY, cameraX: state.camera.x, cameraY: state.camera.y };
       return;
     }
     if (event.button === 2) {
       const hasFriendlySelection = getSelectedEntities().some((selected) => selected.teamId === TEAM_PLAYER && selected.kind !== 'resource' && selected.hp > 0);
-      if (!hasFriendlySelection && !entity) {
+      if (!hasFriendlySelection && !strictEntity) {
         state.drag = { mode: 'pan', startClientX: event.clientX, startClientY: event.clientY, cameraX: state.camera.x, cameraY: state.camera.y };
         return;
       }
@@ -9740,7 +9846,10 @@ html{
   commandWrap.addEventListener('pointermove', noteSelectionUiInteraction);
   commandWrap.addEventListener('pointerdown', noteSelectionUiInteraction);
   minimap.addEventListener('pointerdown', handleMinimapJump);
-  window.addEventListener('resize', () => syncRenderSize());
+  window.addEventListener('resize', () => {
+    syncRenderSize();
+    syncToastAnchor();
+  });
   window.addEventListener('beforeunload', () => persistGame(true));
   window.addEventListener('pagehide', () => persistGame(true));
   document.addEventListener('visibilitychange', () => {
@@ -9749,6 +9858,11 @@ html{
 
   loadPersistedSettings();
   ensureActionPanelSlots();
+  syncToastAnchor();
+  if (typeof ResizeObserver === 'function') {
+    const toastAnchorObserver = new ResizeObserver(() => syncToastAnchor());
+    toastAnchorObserver.observe(hudBottom);
+  }
   const restoredGame = loadPersistedGame();
   if (!restoredGame) resetMatch();
   openMenu(restoredGame && state.winner ? getRootMenuId() : 'main');
