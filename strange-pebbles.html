@@ -408,7 +408,9 @@
             DECELERATOR: 'decelerator',  // Slows down approaching particles
             ENLARGER: 'enlarger',     // Increases particle size
             SHRINKER: 'shrinker',      // Decreases particle size
-            COLLIMATOR: 'collimator'   // Steers particles towards weighted center
+            COLLIMATOR: 'collimator',  // Steers particles towards weighted center
+            POSITIVE: 'positive',      // Anode: source of plasma arcs through particle chains
+            NEGATIVE: 'negative'       // Cathode: sink of plasma arcs
         };
 
         const COLORS = {
@@ -425,7 +427,9 @@
             [PEBBLE_TYPES.DECELERATOR]: '#78909c',
             [PEBBLE_TYPES.ENLARGER]: '#ff9100',
             [PEBBLE_TYPES.SHRINKER]: '#3f51b5',
-            [PEBBLE_TYPES.COLLIMATOR]: '#d500f9'
+            [PEBBLE_TYPES.COLLIMATOR]: '#d500f9',
+            [PEBBLE_TYPES.POSITIVE]: '#ff5722',
+            [PEBBLE_TYPES.NEGATIVE]: '#00b0ff'
         };
 
         const PEBBLE_DESCRIPTIONS = {
@@ -442,7 +446,9 @@
             [PEBBLE_TYPES.DECELERATOR]: 'Decelerator: Slows down approaching particles.',
             [PEBBLE_TYPES.ENLARGER]: 'Enlarger: Increases particle size.',
             [PEBBLE_TYPES.SHRINKER]: 'Shrinker: Decreases particle size.',
-            [PEBBLE_TYPES.COLLIMATOR]: 'Collimator: Steers particles to align with the average direction of nearby collimators.'
+            [PEBBLE_TYPES.COLLIMATOR]: 'Collimator: Steers particles to align with the average direction of nearby collimators.',
+            [PEBBLE_TYPES.POSITIVE]: 'Positive (Anode): Plasma arcs leap from here through chains of touching particles to the nearest Negative pebble.',
+            [PEBBLE_TYPES.NEGATIVE]: 'Negative (Cathode): Plasma arcs terminate here when a chain of overlapping particles connects from a Positive pebble.'
         };
 
         // --- Utils ---
@@ -573,6 +579,23 @@
                     ctx.beginPath();
                     ctx.moveTo(-4, -6); ctx.lineTo(2, 0); ctx.lineTo(-4, 6);
                     ctx.moveTo(4, -6); ctx.lineTo(-2, 0); ctx.lineTo(4, 6);
+                    ctx.stroke();
+                } else if (this.type === PEBBLE_TYPES.POSITIVE) {
+                    // Plus sign
+                    ctx.lineWidth = 3;
+                    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+                    ctx.lineCap = 'round';
+                    ctx.beginPath();
+                    ctx.moveTo(-7, 0); ctx.lineTo(7, 0);
+                    ctx.moveTo(0, -7); ctx.lineTo(0, 7);
+                    ctx.stroke();
+                } else if (this.type === PEBBLE_TYPES.NEGATIVE) {
+                    // Minus sign
+                    ctx.lineWidth = 3;
+                    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+                    ctx.lineCap = 'round';
+                    ctx.beginPath();
+                    ctx.moveTo(-7, 0); ctx.lineTo(7, 0);
                     ctx.stroke();
                 }
                 ctx.fill();
@@ -876,6 +899,171 @@
         }
         function darken(hex, percent) { return lighten(hex, -percent); }
 
+        // --- Plasma Arcs (Positive -> Negative through touching particles) ---
+        // Arcs are recomputed on a slow cadence; per-frame we only validate that
+        // each consecutive pair on the path still has overlapping radii. Once a
+        // link breaks, the arc is hidden until the next recompute finds a new
+        // (possibly shorter) path.
+        let arcs = []; // [{ from, path: [node...], valid }]
+        let arcRecomputeTimer = 0;
+        const ARC_RECOMPUTE_INTERVAL = 0.18; // seconds
+        let arcNoiseSeed = 0; // advances each frame so arcs flicker
+
+        function radiiOverlap(a, b) {
+            const r = (a.radius || 0) + (b.radius || 0);
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            return (dx*dx + dy*dy) <= r * r;
+        }
+
+        function recomputeArcs() {
+            arcs = [];
+            const positives = [];
+            const negatives = [];
+            for (const p of pebbles) {
+                if (p.type === PEBBLE_TYPES.POSITIVE) positives.push(p);
+                else if (p.type === PEBBLE_TYPES.NEGATIVE) negatives.push(p);
+            }
+            if (!positives.length || !negatives.length) return;
+
+            // Graph nodes: positives, negatives, and all particles.
+            // Other pebbles are not conductors.
+            const nodes = positives.concat(negatives, particles);
+            const n = nodes.length;
+            const adj = new Array(n);
+            for (let i = 0; i < n; i++) adj[i] = [];
+            for (let i = 0; i < n; i++) {
+                const a = nodes[i];
+                for (let j = i + 1; j < n; j++) {
+                    const b = nodes[j];
+                    const r = (a.radius || 0) + (b.radius || 0);
+                    const dx = a.x - b.x;
+                    const dy = a.y - b.y;
+                    const d2 = dx*dx + dy*dy;
+                    if (d2 <= r * r) {
+                        const d = Math.sqrt(d2);
+                        adj[i].push({ to: j, w: d });
+                        adj[j].push({ to: i, w: d });
+                    }
+                }
+            }
+
+            // Mark negative indices for fast lookup
+            const isNegative = new Array(n);
+            for (let i = 0; i < n; i++) isNegative[i] = nodes[i].type === PEBBLE_TYPES.NEGATIVE;
+
+            for (const pos of positives) {
+                const startIdx = nodes.indexOf(pos);
+                if (startIdx < 0) continue;
+                // Dijkstra (small graphs; simple array-scan PQ is fine)
+                const dist = new Float64Array(n);
+                const prev = new Int32Array(n);
+                const visited = new Uint8Array(n);
+                for (let i = 0; i < n; i++) { dist[i] = Infinity; prev[i] = -1; }
+                dist[startIdx] = 0;
+
+                let foundNeg = -1;
+                while (true) {
+                    let u = -1;
+                    let best = Infinity;
+                    for (let i = 0; i < n; i++) {
+                        if (!visited[i] && dist[i] < best) { best = dist[i]; u = i; }
+                    }
+                    if (u === -1) break;
+                    visited[u] = 1;
+                    if (isNegative[u]) { foundNeg = u; break; }
+                    const edges = adj[u];
+                    for (let k = 0; k < edges.length; k++) {
+                        const e = edges[k];
+                        const nd = dist[u] + e.w;
+                        if (nd < dist[e.to]) {
+                            dist[e.to] = nd;
+                            prev[e.to] = u;
+                        }
+                    }
+                }
+
+                if (foundNeg !== -1) {
+                    const path = [];
+                    let cur = foundNeg;
+                    while (cur !== -1) { path.push(nodes[cur]); cur = prev[cur]; }
+                    path.reverse();
+                    arcs.push({ from: pos, path, valid: true });
+                }
+            }
+        }
+
+        function validateArcs() {
+            for (const arc of arcs) {
+                let ok = true;
+                const path = arc.path;
+                for (let i = 0; i < path.length - 1; i++) {
+                    if (!radiiOverlap(path[i], path[i+1])) { ok = false; break; }
+                }
+                arc.valid = ok;
+            }
+        }
+
+        function drawArcs() {
+            if (!arcs.length) return;
+            ctx.save();
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.globalCompositeOperation = 'lighter';
+
+            // Layered passes for bloom: wide soft halo -> mid glow -> bright core
+            const passes = [
+                { width: 14, color: 'rgba(60, 130, 255, 0.18)', jitter: 0.30, blur: 24 },
+                { width: 6,  color: 'rgba(140, 200, 255, 0.55)', jitter: 0.45, blur: 14 },
+                { width: 2,  color: 'rgba(230, 245, 255, 0.95)', jitter: 0.55, blur: 6  },
+                { width: 1,  color: 'rgba(255, 255, 255, 1)',    jitter: 0.65, blur: 0  }
+            ];
+
+            for (const arc of arcs) {
+                if (!arc.valid) continue;
+                const path = arc.path;
+                if (path.length < 2) continue;
+
+                for (let pIdx = 0; pIdx < passes.length; pIdx++) {
+                    const pass = passes[pIdx];
+                    ctx.strokeStyle = pass.color;
+                    ctx.lineWidth = pass.width;
+                    ctx.shadowColor = pIdx === 0 ? 'rgba(80, 160, 255, 0.9)' : 'rgba(180, 220, 255, 0.8)';
+                    ctx.shadowBlur = pass.blur;
+                    ctx.beginPath();
+                    for (let i = 0; i < path.length - 1; i++) {
+                        const a = path[i];
+                        const b = path[i+1];
+                        const dx = b.x - a.x;
+                        const dy = b.y - a.y;
+                        const len = Math.sqrt(dx*dx + dy*dy);
+                        if (len < 0.001) continue;
+                        const px = -dy / len;
+                        const py = dx / len;
+                        const segs = Math.max(3, Math.min(14, Math.floor(len / 6)));
+                        const maxOffset = Math.min(len * pass.jitter * 0.35, 14);
+                        ctx.moveTo(a.x, a.y);
+                        for (let s = 1; s < segs; s++) {
+                            const t = s / segs;
+                            // Smoothstep envelope so endpoints stay anchored
+                            const envelope = Math.sin(Math.PI * t);
+                            // Mix of two noise frequencies + per-frame seed for flicker
+                            const phase = arcNoiseSeed * 7.3 + i * 13.7 + s * 2.1 + pIdx * 0.9;
+                            const wob = Math.sin(phase) * 0.6 + Math.sin(phase * 2.7 + 1.3) * 0.4;
+                            const offset = wob * envelope * maxOffset;
+                            const x = a.x + dx * t + px * offset;
+                            const y = a.y + dy * t + py * offset;
+                            ctx.lineTo(x, y);
+                        }
+                        ctx.lineTo(b.x, b.y);
+                    }
+                    ctx.stroke();
+                }
+            }
+
+            ctx.restore();
+        }
+
         // --- Main Loop ---
         function resize() {
             // Size from the canvas's own rect (the visible drawing area), not the
@@ -953,6 +1141,15 @@
                     particles.splice(i, 1);
                 }
             }
+
+            // Plasma arcs: recompute occasionally, validate every frame
+            arcRecomputeTimer -= dt;
+            if (arcRecomputeTimer <= 0) {
+                recomputeArcs();
+                arcRecomputeTimer = ARC_RECOMPUTE_INTERVAL;
+            } else {
+                validateArcs();
+            }
         }
 
         function draw() {
@@ -972,6 +1169,10 @@
                 if (dragSource === 'canvas' && p === draggedPebble && dragGhost.style.display !== 'none') return;
                 p.draw(ctx);
             });
+
+            // Plasma arcs sit above pebbles for that crackling-electric look
+            arcNoiseSeed += 1;
+            drawArcs();
 
             // Draw dragged ghost
             // Ghost is now a DOM element, no canvas drawing needed
@@ -1560,6 +1761,8 @@
             pebbles = [];
             miniPebbles = [];
             particles = [];
+            arcs = [];
+            arcRecomputeTimer = 0;
             
             // Reset interaction state
             isDragging = false;
