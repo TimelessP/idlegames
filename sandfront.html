@@ -784,6 +784,8 @@ html{
   const PARATROOPER_SCATTER_RADIUS = CELL * 1.75;
   const PARATROOPER_LANDING_RADIUS = CELL * 3.5;
   const PARATROOPER_LANDING_SHOCK_DURATION = 1.15;
+  const PARADROP_RELEASE_INTERVAL = 0.18;
+  const PARADROP_RELEASE_BATCH = 2;
   const PARADROP_PLANE_SPEED = 56;
   const PARADROP_PLANE_DROP_WINDOW = 10;
   const PARADROP_PLANE_HP = 180;
@@ -1602,9 +1604,18 @@ html{
     return baseSight + (team && team.research.has('rangefinding') ? 1 : 0);
   }
 
+  function getUnitWeaponRange(unit) {
+    if (!unit || unit.range <= 0) return 0;
+    return unit.range + (teamById(unit.teamId)?.research.has('rangefinding') ? 10 : 0);
+  }
+
   function recomputeTeamResearchBonuses(teamId) {
     for (const unit of state.units) {
       if (unit.teamId !== teamId) continue;
+      if (unit.hp <= 0) {
+        unit.hp = 0;
+        continue;
+      }
       const def = UNIT_TYPES[unit.type];
       if (!def) continue;
       const previousMaxHp = unit.maxHp || def.hp;
@@ -1911,8 +1922,8 @@ html{
 
   function updateEmbarkedCombat(unit, transport) {
     if (!transport || transport.hp <= 0 || unit.range <= 0) return;
-    const range = unit.range + (teamById(unit.teamId).research.has('rangefinding') ? 10 : 0);
-    const target = findEnemyInRangeFromPoint(unit.teamId, transport.x, transport.y, range);
+    const range = getUnitWeaponRange(unit);
+    const target = findEnemyInRangeFromPoint(unit.teamId, transport.x, transport.y, range, unit, true);
     if (!target || unit.reload > 0) return;
     const targetPoint = target.kind === 'building' ? getBuildingAimPoint(target) : { x: target.x, y: target.y };
     const transportGeometry = getUnitGeometry(transport);
@@ -2846,27 +2857,46 @@ html{
     if (type === 'dropPlane') {
       const angle = (dir / 8) * Math.PI * 2;
       const thrust = frame % 2 === 0 ? 0 : 1;
+      const tailVectorX = -Math.sin(angle);
+      const tailVectorY = Math.cos(angle);
+      const sideVectorX = Math.cos(angle);
+      const sideVectorY = Math.sin(angle);
+      const tailFlashX = tailVectorX * 11;
+      const tailFlashY = tailVectorY * 11;
       ctx.translate(width * 0.5, height * 0.5);
       ctx.rotate(angle);
       ctx.fillStyle = 'rgba(0,0,0,0.26)';
-      ctx.fillRect(-8, 8, 16, 2);
+      ctx.fillRect(-9, 8, 18, 2);
       ctx.fillStyle = teamColor;
-      ctx.fillRect(-2, -9, 4, 18);
-      ctx.fillRect(-10, -2, 20, 5);
-      ctx.fillRect(-7, 2, 14, 3);
+      ctx.fillRect(-2, -8, 4, 17);
+      ctx.fillRect(-1, -10, 2, 2);
+      ctx.fillRect(-11, -2, 22, 5);
+      ctx.fillRect(-7, 5, 14, 3);
       ctx.fillStyle = accentColor;
-      ctx.fillRect(-4, -7, 8, 4);
+      ctx.fillRect(-3, -8, 6, 3);
+      ctx.fillRect(-1, 6, 2, 4);
       ctx.fillRect(-11, -1, 3, 2);
       ctx.fillRect(8, -1, 3, 2);
       ctx.fillStyle = '#d6ebff';
-      ctx.fillRect(-2, -4, 4, 4);
+      ctx.fillRect(-2, -6, 4, 3);
       ctx.fillStyle = '#4c3626';
-      ctx.fillRect(-2, 9, 4, 3);
+      ctx.fillRect(-3, 8, 6, 4);
+      ctx.restore();
       if (thrust) {
         ctx.fillStyle = '#ffd58b';
-        ctx.fillRect(-2, 12, 4, 2);
+        const flashCenterX = ox + width * 0.5 + tailFlashX;
+        const flashCenterY = oy + height * 0.5 + tailFlashY;
+        for (const tailOffset of [-1, 0]) {
+          for (const sideOffset of [-1.5, -0.5, 0.5, 1.5]) {
+            ctx.fillRect(
+              Math.round(flashCenterX + sideVectorX * sideOffset + tailVectorX * tailOffset),
+              Math.round(flashCenterY + sideVectorY * sideOffset + tailVectorY * tailOffset),
+              1,
+              1
+            );
+          }
+        }
       }
-      ctx.restore();
       return;
     }
 
@@ -3366,14 +3396,21 @@ html{
     });
     state.projectiles = (snapshot.projectiles || []).map((projectile) => ({ ...projectile }));
     state.effects = (snapshot.effects || []).map((effect) => ({ ...effect }));
-    state.airOperations = (snapshot.airOperations || []).map((operation) => ({
+    state.airOperations = (snapshot.airOperations || [])
+      .filter((operation) => (operation.hp ?? PARADROP_PLANE_HP) > 0)
+      .map((operation) => ({
       ...operation,
       kind: operation.kind || 'airOperation',
       sight: operation.sight || getSightWithResearch(operation.teamId, UNIT_TYPES.fighter.sight),
       revealRadiusMultiplier: operation.revealRadiusMultiplier || UNIT_TYPES.fighter.revealRadiusMultiplier || 1,
-      hp: operation.hp || PARADROP_PLANE_HP,
-      maxHp: operation.maxHp || PARADROP_PLANE_HP,
-      hitRadius: operation.hitRadius || PARADROP_PLANE_HIT_RADIUS
+      hp: operation.hp ?? PARADROP_PLANE_HP,
+      maxHp: operation.maxHp ?? PARADROP_PLANE_HP,
+      hitRadius: operation.hitRadius || PARADROP_PLANE_HIT_RADIUS,
+      dropped: !!operation.dropped,
+      releasing: !!operation.releasing,
+      releaseIndex: operation.releaseIndex ?? (operation.dropped ? PARADROP_SCOUT_COUNT : 0),
+      releaseTimer: operation.releaseTimer ?? 0,
+      warnedPlayer: operation.warnedPlayer ?? operation.teamId !== TEAM_PLAYER
     }));
     state.tiles.fill(0);
     state.spiceHeat.fill(0);
@@ -3976,28 +4013,16 @@ html{
     return { type: 'waypoint', x: worldX, y: worldY, nextOrder };
   }
 
-  function getFighterRedirectResumeOrder(unit, worldX, worldY) {
-    const order = unit.order || { type: 'idle' };
-    if (order.type === 'return' || order.type === 'landing') {
-      const airfieldId = order.airfieldId || getAssignedAirfield(unit)?.id || null;
-      if (airfieldId) return { type: 'return', airfieldId, nextOrder: cloneFighterResumeOrder(order.nextOrder || null) };
-    }
-    if (order.type === 'waypoint' && order.nextOrder?.type === 'return') {
-      return cloneFighterResumeOrder(order.nextOrder);
-    }
-    return makeFighterGuardOrder(worldX, worldY);
-  }
-
   function issueFighterRedirectOrder(unit, worldX, worldY) {
     if (!unit || unit.type !== 'fighter' || unit.hp <= 0) return false;
+    const guardOrder = makeFighterGuardOrder(worldX, worldY);
     if (unit.order?.type === 'landed') {
-      const guardOrder = makeFighterGuardOrder(worldX, worldY);
       queueFighterMission(unit, guardOrder);
       unit.targetId = null;
       unit.path.length = 0;
       return true;
     }
-    unit.order = makeFighterWaypointOrder(worldX, worldY, getFighterRedirectResumeOrder(unit, worldX, worldY));
+    unit.order = makeFighterWaypointOrder(worldX, worldY, guardOrder);
     unit.targetId = null;
     unit.path.length = 0;
     return true;
@@ -4816,15 +4841,21 @@ html{
     return clamp(building.queue.progress / building.queue.duration, 0, 1);
   }
 
-  function queueMinimapScanAlert(teamId) {
+  function queueMinimapAlert(teamId, x = null, y = null, life = 0.9) {
     const team = teamById(teamId);
     if (!team) return;
     state.minimapAlerts.push({
       teamId,
       color: team.color,
-      life: 0.9,
-      maxLife: 0.9
+      x,
+      y,
+      life,
+      maxLife: life
     });
+  }
+
+  function queueMinimapScanAlert(teamId) {
+    queueMinimapAlert(teamId);
   }
 
   function activateSatelliteScan(building) {
@@ -4957,28 +4988,52 @@ html{
     }
   }
 
-  function spawnParadropScouts(operation) {
-    for (let index = 0; index < PARADROP_SCOUT_COUNT; index++) {
-      const angle = (index / PARADROP_SCOUT_COUNT) * Math.PI * 2 + random() * 0.65;
-      const radius = random() * PARATROOPER_SCATTER_RADIUS;
-      const landingX = clamp(operation.dropX + Math.cos(angle) * radius, 0, WORLD_WIDTH);
-      const landingY = clamp(operation.dropY + Math.sin(angle) * radius, 0, WORLD_HEIGHT);
-      const spawnX = clamp(operation.x - operation.dirX * (index - (PARADROP_SCOUT_COUNT - 1) * 0.5) * 5, 0, WORLD_WIDTH);
-      const spawnY = clamp(operation.y - operation.dirY * (index - (PARADROP_SCOUT_COUNT - 1) * 0.5) * 5, 0, WORLD_HEIGHT);
-      const paratrooper = spawnUnit(operation.teamId, 'paratrooper', pxToCell(spawnX), pxToCell(spawnY), false);
-      if (!paratrooper) continue;
-      paratrooper.x = spawnX;
-      paratrooper.y = spawnY;
-      paratrooper.dir = operation.dir;
-      paratrooper.order = { type: 'drop' };
-      paratrooper.path.length = 0;
-      paratrooper.claimKey = null;
-      paratrooper.altitude = PARATROOPER_INITIAL_ALTITUDE + random() * 8;
-      paratrooper.landingX = landingX;
-      paratrooper.landingY = landingY;
-      paratrooper.dropTargetX = operation.dropX;
-      paratrooper.dropTargetY = operation.dropY;
-      paratrooper.dropTargetId = operation.targetId || null;
+  function spawnParadropScout(operation, index) {
+    const angle = (index / PARADROP_SCOUT_COUNT) * Math.PI * 2 + random() * 0.65;
+    const radius = random() * PARATROOPER_SCATTER_RADIUS;
+    const landingX = clamp(operation.dropX + Math.cos(angle) * radius, 0, WORLD_WIDTH);
+    const landingY = clamp(operation.dropY + Math.sin(angle) * radius, 0, WORLD_HEIGHT);
+    const spawnX = clamp(operation.x - operation.dirX * (index - (PARADROP_SCOUT_COUNT - 1) * 0.5) * 5, 0, WORLD_WIDTH);
+    const spawnY = clamp(operation.y - operation.dirY * (index - (PARADROP_SCOUT_COUNT - 1) * 0.5) * 5, 0, WORLD_HEIGHT);
+    const paratrooper = spawnUnit(operation.teamId, 'paratrooper', pxToCell(spawnX), pxToCell(spawnY), false);
+    if (!paratrooper) return false;
+    paratrooper.x = spawnX;
+    paratrooper.y = spawnY;
+    paratrooper.dir = operation.dir;
+    paratrooper.order = { type: 'drop' };
+    paratrooper.path.length = 0;
+    paratrooper.claimKey = null;
+    paratrooper.altitude = PARATROOPER_INITIAL_ALTITUDE + random() * 8;
+    paratrooper.landingX = landingX;
+    paratrooper.landingY = landingY;
+    paratrooper.dropTargetX = operation.dropX;
+    paratrooper.dropTargetY = operation.dropY;
+    paratrooper.dropTargetId = operation.targetId || null;
+    addEffect(spawnX, spawnY, '#fff1b2');
+    return true;
+  }
+
+  function startParadropRelease(operation) {
+    operation.x = operation.dropX;
+    operation.y = operation.dropY;
+    operation.releasing = true;
+    operation.releaseIndex = operation.releaseIndex || 0;
+    operation.releaseTimer = 0;
+    operation.dir = Math.atan2(operation.exitY - operation.dropY, operation.exitX - operation.dropX);
+  }
+
+  function updateParadropRelease(operation, dt) {
+    operation.releaseTimer = (operation.releaseTimer ?? 0) - dt;
+    while ((operation.releaseIndex || 0) < PARADROP_SCOUT_COUNT && operation.releaseTimer <= 0) {
+      for (let batchIndex = 0; batchIndex < PARADROP_RELEASE_BATCH && (operation.releaseIndex || 0) < PARADROP_SCOUT_COUNT; batchIndex++) {
+        spawnParadropScout(operation, operation.releaseIndex || 0);
+        operation.releaseIndex = (operation.releaseIndex || 0) + 1;
+      }
+      operation.releaseTimer += PARADROP_RELEASE_INTERVAL;
+    }
+    if ((operation.releaseIndex || 0) >= PARADROP_SCOUT_COUNT) {
+      operation.releasing = false;
+      operation.dropped = true;
     }
   }
 
@@ -4992,7 +5047,7 @@ html{
       return false;
     }
     const flight = getParadropFlightPath(building, worldX, worldY);
-    state.airOperations.push({
+    const operation = {
       id: makeId('airop'),
       kind: 'airOperation',
       type: 'paradrop',
@@ -5016,8 +5071,14 @@ html{
       dir: flight.dir,
       speed: PARADROP_PLANE_SPEED,
       dropped: false,
+      releasing: false,
+      releaseIndex: 0,
+      releaseTimer: 0,
+      warnedPlayer: building.teamId !== TEAM_PLAYER,
       targetId: null
-    });
+    };
+    state.airOperations.push(operation);
+    queueMinimapAlert(building.teamId, flight.dropX, flight.dropY, 2.4);
     building.paradropCooldownUntil = state.time + PARADROP_COOLDOWN;
     if (state.pendingParadropHubId === building.id) {
       state.pendingParadropHubId = null;
@@ -5029,6 +5090,9 @@ html{
     if (building.teamId === TEAM_PLAYER) {
       playUiCue('confirm');
       toast('Drop Inbound');
+    } else {
+      playUiCue('error');
+      toast('Enemy Drop Inbound');
     }
     return true;
   }
@@ -5037,21 +5101,20 @@ html{
     for (let index = state.airOperations.length - 1; index >= 0; index--) {
       const operation = state.airOperations[index];
       if (operation.type !== 'paradrop') continue;
-      const targetX = operation.dropped ? operation.exitX : operation.dropX;
-      const targetY = operation.dropped ? operation.exitY : operation.dropY;
+      if (operation.releasing) updateParadropRelease(operation, dt);
+      const targetX = operation.releasing || operation.dropped ? operation.exitX : operation.dropX;
+      const targetY = operation.releasing || operation.dropped ? operation.exitY : operation.dropY;
       const dx = targetX - operation.x;
       const dy = targetY - operation.y;
       const distance = Math.hypot(dx, dy);
       const step = (operation.speed || PARADROP_PLANE_SPEED) * dt;
       if (!operation.dropped && distance <= Math.max(PARADROP_PLANE_DROP_WINDOW, step)) {
-        operation.x = operation.dropX;
-        operation.y = operation.dropY;
-        spawnParadropScouts(operation);
-        operation.dropped = true;
+        startParadropRelease(operation);
+        updateParadropRelease(operation, dt);
         continue;
       }
       if (distance <= step) {
-        if (operation.dropped) {
+        if (operation.dropped && !operation.releasing) {
           state.airOperations.splice(index, 1);
           continue;
         }
@@ -5951,34 +6014,45 @@ html{
     return best;
   }
 
-  function findEnemyInRangeFromPoint(teamId, worldX, worldY, range, source = null) {
+  function getTargetRangeAllowance(target) {
+    if (!target || target.hp <= 0) return 0;
+    if (target.kind === 'unit') return getUnitGeometry(target).hitRadius;
+    if (target.kind === 'airOperation') return getAirOperationGeometry(target).hitRadius;
+    return 0;
+  }
+
+  function findEnemyInRangeFromPoint(teamId, worldX, worldY, range, source = null, includeTargetRadius = false) {
     let best = null;
     let bestDist = Infinity;
-    forEachNearbyUnit(worldX, worldY, range, (enemy) => {
+    const searchRange = includeTargetRadius ? range + CELL * 2 : range;
+    forEachNearbyUnit(worldX, worldY, searchRange, (enemy) => {
       if (enemy.hp <= 0 || enemy.teamId === teamId || enemy.garrisonedIn) return;
       if (source && !canSourceDamageTarget(source, enemy)) return;
       const distance = dist(worldX, worldY, enemy.x, enemy.y);
-      if (distance < range && distance < bestDist && canSeeWorldPoint(worldX, worldY, enemy.x, enemy.y)) {
+      const effectiveRange = range + (includeTargetRadius ? getTargetRangeAllowance(enemy) : 0);
+      if (distance <= effectiveRange && distance < bestDist && canSeeWorldPoint(worldX, worldY, enemy.x, enemy.y)) {
         best = enemy;
         bestDist = distance;
       }
     });
-    forEachNearbyBuilding(worldX, worldY, range, (building) => {
+    forEachNearbyBuilding(worldX, worldY, searchRange, (building) => {
       if (building.hp <= 0 || building.teamId === teamId) return;
       if (source && !canSourceDamageTarget(source, building)) return;
-      const bx = building.x + building.widthCells * CELL * 0.5;
-      const by = building.y + building.heightCells * CELL * 0.5;
+      const aimPoint = getBuildingAimPoint(building);
+      const bx = aimPoint.x;
+      const by = aimPoint.y;
       const distance = dist(worldX, worldY, bx, by);
-      if (distance < range && distance < bestDist && canSeeWorldPoint(worldX, worldY, bx, by)) {
+      if (distance <= range && distance < bestDist && canSeeWorldPoint(worldX, worldY, bx, by)) {
         best = building;
         bestDist = distance;
       }
     });
-    forEachNearbyAirOperation(worldX, worldY, range, (operation) => {
+    forEachNearbyAirOperation(worldX, worldY, searchRange, (operation) => {
       if (operation.hp <= 0 || operation.teamId === teamId) return;
       if (source && !canSourceDamageTarget(source, operation)) return;
       const distance = dist(worldX, worldY, operation.x, operation.y);
-      if (distance < range && distance < bestDist && canSeeWorldPoint(worldX, worldY, operation.x, operation.y)) {
+      const effectiveRange = range + (includeTargetRadius ? getTargetRangeAllowance(operation) : 0);
+      if (distance <= effectiveRange && distance < bestDist && canSeeWorldPoint(worldX, worldY, operation.x, operation.y)) {
         best = operation;
         bestDist = distance;
       }
@@ -6889,6 +6963,7 @@ html{
     drawProjectiles();
     drawEffects();
     drawFog();
+    drawActiveParadropWarnings();
     drawPlacementGhost();
     viewportCtx.clearRect(0, 0, viewport.width, viewport.height);
     viewportCtx.drawImage(backbuffer, 0, 0, viewport.width, viewport.height);
@@ -7030,7 +7105,7 @@ html{
       const team = teamById(unit.teamId);
       const atlas = team.sprites.units[unit.type];
       const dirRow = atlas.dirCount === 8
-        ? (Math.round((((unit.dir % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * 8) + 2) % 8
+        ? eightWaySpriteRowFromTravelAngle(unit.dir)
         : directionRow(unit.dir);
       const frame = Math.floor(unit.anim) % 4;
       const sx = frame * atlas.frameW;
@@ -7058,7 +7133,7 @@ html{
       const team = teamById(operation.teamId);
       if (!team) continue;
       const atlas = team.sprites.units.dropPlane;
-      const dirRow = (Math.round((((operation.dir % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * 8) + 2) % 8;
+      const dirRow = eightWaySpriteRowFromTravelAngle(operation.dir);
       const frame = Math.floor(state.time * 10) % 4;
       const sx = frame * atlas.frameW;
       const sy = dirRow * atlas.frameH;
@@ -7131,6 +7206,39 @@ html{
     backCtx.textBaseline = 'alphabetic';
   }
 
+  function drawActiveParadropWarnings() {
+    for (const operation of state.airOperations) {
+      if (operation.type !== 'paradrop' || operation.hp <= 0) continue;
+      if (operation.releasing || operation.dropped) continue;
+      if (operation.teamId !== TEAM_PLAYER && !operation.warnedPlayer) continue;
+      const color = operation.teamId === TEAM_PLAYER ? '#fff1b2' : '#ff8f63';
+      const screen = worldToScreen(operation.dropX, operation.dropY);
+      const pulse = 0.5 + Math.sin(state.time * 5.5) * 0.5;
+      const radius = Math.max(10, Math.round((13 + pulse * 5) * Math.max(0.8, state.camera.zoom)));
+      backCtx.save();
+      backCtx.globalAlpha = 0.5;
+      backCtx.fillStyle = color;
+      const pixel = Math.max(2, Math.round(3 * Math.max(1, state.camera.zoom)));
+      const step = Math.max(pixel * 2, Math.round(radius / 4));
+      for (let offset = -radius; offset <= radius; offset += step) {
+        const height = Math.round(Math.sqrt(Math.max(0, radius * radius - offset * offset)));
+        backCtx.fillRect(Math.round(screen.x + offset - pixel * 0.5), Math.round(screen.y - height - pixel * 0.5), pixel, pixel);
+        backCtx.fillRect(Math.round(screen.x + offset - pixel * 0.5), Math.round(screen.y + height - pixel * 0.5), pixel, pixel);
+      }
+      for (let offset = -radius + step; offset < radius; offset += step) {
+        const width = Math.round(Math.sqrt(Math.max(0, radius * radius - offset * offset)));
+        backCtx.fillRect(Math.round(screen.x - width - pixel * 0.5), Math.round(screen.y + offset - pixel * 0.5), pixel, pixel);
+        backCtx.fillRect(Math.round(screen.x + width - pixel * 0.5), Math.round(screen.y + offset - pixel * 0.5), pixel, pixel);
+      }
+      backCtx.globalAlpha = 0.65;
+      backCtx.fillRect(Math.round(screen.x - radius - 5), Math.round(screen.y - 1), 8, 3);
+      backCtx.fillRect(Math.round(screen.x + radius - 3), Math.round(screen.y - 1), 8, 3);
+      backCtx.fillRect(Math.round(screen.x - 1), Math.round(screen.y - radius - 5), 3, 8);
+      backCtx.fillRect(Math.round(screen.x - 1), Math.round(screen.y + radius - 3), 3, 8);
+      backCtx.restore();
+    }
+  }
+
   function drawCaptureOverlays() {
     for (const unit of state.units) {
       if (unit.hp <= 0 || unit.order?.type !== 'capture') continue;
@@ -7197,6 +7305,11 @@ html{
     if (normalized < 0.375) return 2;
     if (normalized < 0.625) return 3;
     return 0;
+  }
+
+  function eightWaySpriteRowFromTravelAngle(angle) {
+    const fullTurn = Math.PI * 2;
+    return (Math.round((((angle % fullTurn) + fullTurn) % fullTurn) / fullTurn * 8) + 2) % 8;
   }
 
   function drawEffects() {
@@ -7361,6 +7474,27 @@ html{
     for (const alert of state.minimapAlerts) {
       const t = alert.life / alert.maxLife;
       const pulse = 0.45 + (1 - t) * 0.55;
+      if (Number.isFinite(alert.x) && Number.isFinite(alert.y)) {
+        const alertX = (alert.x / CELL) * scaleX;
+        const alertY = (alert.y / CELL) * scaleY;
+        const radius = Math.round(3 + pulse * 7);
+        const block = 2;
+        minimapCtx.save();
+        minimapCtx.globalAlpha = 0.5;
+        minimapCtx.fillStyle = alert.color;
+        minimapCtx.fillRect(Math.round(alertX - radius), Math.round(alertY), block, block);
+        minimapCtx.fillRect(Math.round(alertX + radius), Math.round(alertY), block, block);
+        minimapCtx.fillRect(Math.round(alertX), Math.round(alertY - radius), block, block);
+        minimapCtx.fillRect(Math.round(alertX), Math.round(alertY + radius), block, block);
+        minimapCtx.fillRect(Math.round(alertX - radius * 0.7), Math.round(alertY - radius * 0.7), block, block);
+        minimapCtx.fillRect(Math.round(alertX + radius * 0.7), Math.round(alertY - radius * 0.7), block, block);
+        minimapCtx.fillRect(Math.round(alertX - radius * 0.7), Math.round(alertY + radius * 0.7), block, block);
+        minimapCtx.fillRect(Math.round(alertX + radius * 0.7), Math.round(alertY + radius * 0.7), block, block);
+        minimapCtx.globalAlpha = 0.75;
+        minimapCtx.fillRect(Math.round(alertX - 1), Math.round(alertY - 1), 3, 3);
+        minimapCtx.restore();
+        continue;
+      }
       minimapCtx.save();
       minimapCtx.globalAlpha = 0.1 + t * 0.16;
       minimapCtx.fillStyle = alert.color;
@@ -8586,11 +8720,11 @@ html{
       refreshSelectionHudForUnits(eligible);
       playSynth('ui', 390, 0.05, 0.03);
       toast('Service Ordered');
-      } else if (supportUnits.length === units.length) {
+    } else if (supportUnits.length === units.length) {
       playUiCue('error');
       toast('Service Not Needed');
     }
-      return { supportCount: supportUnits.length, eligibleCount: eligible.length, eligibleUnits: eligible };
+    return { supportCount: supportUnits.length, supportUnits, eligibleCount: eligible.length, eligibleUnits: eligible };
   }
 
   function issueCaptureOrder(units, building) {
@@ -9167,12 +9301,12 @@ html{
       if (!selected.length) return;
     }
     if (target && target.kind === 'building' && target.teamId === TEAM_PLAYER) {
-      const supportOrder = issueSupportServiceOrder(selected, target);
-      if (supportOrder.eligibleCount) {
-        const servicedIds = new Set(supportOrder.eligibleUnits.map((unit) => unit.id));
-        selected = selected.filter((unit) => !servicedIds.has(unit.id));
-      } else if (supportOrder.supportCount && supportOrder.supportCount === selected.length) {
-        return;
+      if (state.commandMode === 'context' || state.commandMode === 'move') {
+        const supportOrder = issueSupportServiceOrder(selected, target);
+        if (supportOrder.supportCount) {
+          const supportIds = new Set(supportOrder.supportUnits.map((unit) => unit.id));
+          selected = selected.filter((unit) => !supportIds.has(unit.id));
+        }
       }
       const returnOrder = issuedReturnOrder(selected, target);
       if (returnOrder.returnCount) {
