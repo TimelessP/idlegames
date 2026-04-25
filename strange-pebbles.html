@@ -293,11 +293,9 @@
             pointer-events: none;
             z-index: 2000;
             display: none;
-            transform: translate(-50%, -50%);
             width: 60px;
             height: 60px;
             border-radius: 50%;
-            display: flex;
             justify-content: center;
             align-items: center;
             font-size: 24px;
@@ -391,6 +389,7 @@
         let draggedPebble = null; // Can be a Pebble instance or a "ghost" from toolbox
         let dragOffset = { x: 0, y: 0 };
         let dragStartPos = { x: 0, y: 0 }; // To revert moves
+        let dragGhostSize = { width: 60, height: 60 };
         let dragSource = null; // 'canvas' or 'toolbox'
         let draggedType = null; // For toolbox dragging
         
@@ -879,7 +878,11 @@
 
         // --- Main Loop ---
         function resize() {
-            const rect = document.getElementById('game-container').getBoundingClientRect();
+            // Size from the canvas's own rect (the visible drawing area), not the
+            // container — the container includes a 12px border that would otherwise
+            // make canvas.width larger than the displayed CSS width, scaling drawn
+            // coordinates and pulling drops toward the top-left.
+            const rect = canvas.getBoundingClientRect();
             canvas.width = rect.width;
             canvas.height = rect.height;
             width = canvas.width;
@@ -965,32 +968,149 @@
             miniPebbles.forEach(p => p.draw(ctx));
 
             // Draw pebbles
-            pebbles.forEach(p => p.draw(ctx));
-            
+            pebbles.forEach(p => {
+                if (dragSource === 'canvas' && p === draggedPebble && dragGhost.style.display !== 'none') return;
+                p.draw(ctx);
+            });
+
             // Draw dragged ghost
             // Ghost is now a DOM element, no canvas drawing needed
         }
 
         // --- Input Handling ---
-        function getCanvasPos(evt) {
-            const rect = canvas.getBoundingClientRect();
-            let clientX, clientY;
-            
+        function getClientPos(evt) {
             if (evt.touches && evt.touches.length > 0) {
-                clientX = evt.touches[0].clientX;
-                clientY = evt.touches[0].clientY;
-            } else if (evt.changedTouches && evt.changedTouches.length > 0) {
-                clientX = evt.changedTouches[0].clientX;
-                clientY = evt.changedTouches[0].clientY;
-            } else {
-                clientX = evt.clientX;
-                clientY = evt.clientY;
+                return { x: evt.touches[0].clientX, y: evt.touches[0].clientY };
             }
+            if (evt.changedTouches && evt.changedTouches.length > 0) {
+                return { x: evt.changedTouches[0].clientX, y: evt.changedTouches[0].clientY };
+            }
+            return { x: evt.clientX, y: evt.clientY };
+        }
 
+        function getDraggedCanvasPos(evt) {
+            return getDraggedCanvasPosFromClient(getClientPos(evt));
+        }
+
+        function getDraggedClientCenter(client) {
             return {
-                x: clientX - rect.left,
-                y: clientY - rect.top
+                x: client.x - dragOffset.x,
+                y: client.y - dragOffset.y
             };
+        }
+
+        function clientToCanvasPos(client) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: client.x - rect.left,
+                y: client.y - rect.top
+            };
+        }
+
+        function getDraggedCanvasPosFromClient(client) {
+            return clientToCanvasPos(getDraggedClientCenter(client));
+        }
+
+        function getCanvasPos(evt) {
+            return clientToCanvasPos(getClientPos(evt));
+        }
+
+        function canvasToClientPos(pos) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: rect.left + pos.x,
+                y: rect.top + pos.y
+            };
+        }
+
+        function isClientInElement(client, element) {
+            if (!element) return false;
+            const rect = element.getBoundingClientRect();
+            return client.x >= rect.left && client.x <= rect.right &&
+                client.y >= rect.top && client.y <= rect.bottom;
+        }
+
+        function isOverOpenToolbox(client) {
+            if (!document.body.classList.contains('toolbox-open')) return false;
+            return isClientInElement(client, document.getElementById('toolbox'));
+        }
+
+        function isDraggedPointOverToolbox(evt) {
+            const client = getClientPos(evt);
+            const draggedClient = getDraggedClientCenter(client);
+            return isOverOpenToolbox(client) || isOverOpenToolbox(draggedClient);
+        }
+
+        function positionDragGhost(client) {
+            const center = getDraggedClientCenter(client);
+            dragGhost.style.left = (center.x - dragGhostSize.width / 2) + 'px';
+            dragGhost.style.top = (center.y - dragGhostSize.height / 2) + 'px';
+        }
+
+        function getDragGhostCanvasCenter() {
+            const ghostRect = dragGhost.getBoundingClientRect();
+            return clientToCanvasPos({
+                x: ghostRect.left + ghostRect.width / 2,
+                y: ghostRect.top + ghostRect.height / 2
+            });
+        }
+
+        function hideDragGhost() {
+            dragGhost.style.display = 'none';
+        }
+
+        function showPebbleDragGhost(type, radius = 30) {
+            const size = Math.max(36, radius * 2);
+            dragGhostSize.width = size;
+            dragGhostSize.height = size;
+            dragGhost.innerHTML = '';
+            dragGhost.style.display = 'flex';
+            dragGhost.style.width = size + 'px';
+            dragGhost.style.height = size + 'px';
+            dragGhost.style.background = COLORS[type];
+            dragGhost.style.boxShadow = '0 5px 15px rgba(0,0,0,0.5)';
+        }
+
+        function showEraserDragGhost() {
+            dragGhostSize.width = 60;
+            dragGhostSize.height = 60;
+            dragGhost.innerHTML = '🗑️';
+            dragGhost.style.display = 'flex';
+            dragGhost.style.width = '60px';
+            dragGhost.style.height = '60px';
+            dragGhost.style.background = 'transparent';
+            dragGhost.style.boxShadow = 'none';
+        }
+
+        function setDragOffsetFromElementCenter(client, element) {
+            const rect = element.getBoundingClientRect();
+            dragOffset.x = client.x - (rect.left + rect.width / 2);
+            dragOffset.y = client.y - (rect.top + rect.height / 2);
+        }
+
+        function isCanvasPointInBounds(pos) {
+            return pos.x >= 0 && pos.x <= width && pos.y >= 0 && pos.y <= height;
+        }
+
+        function updateBoardDragGhost(client) {
+            if (!draggedPebble) return;
+
+            const center = getDraggedClientCenter(client);
+            const shouldShowGhost = isOverOpenToolbox(client) || isOverOpenToolbox(center);
+
+            if (shouldShowGhost) {
+                if (dragGhost.style.display === 'none') {
+                    showPebbleDragGhost(draggedPebble.type, draggedPebble.radius);
+                }
+                positionDragGhost(client);
+            } else {
+                hideDragGhost();
+            }
+        }
+
+        function clearToolHoverStates() {
+            document.getElementById('toolbox-bin')?.classList.remove('drag-over');
+            document.getElementById('toolbox-info')?.classList.remove('drag-over');
         }
 
         canvas.addEventListener('mousedown', handleStart);
@@ -1004,6 +1124,7 @@
             if (e.target !== canvas) return;
             e.preventDefault();
             const pos = getCanvasPos(e);
+            const client = getClientPos(e);
             
             // Check if clicked on a pebble
             // Use a slightly larger hit area for better UX
@@ -1014,12 +1135,15 @@
                     isDragging = true;
                     dragSource = 'canvas';
                     draggedPebble = p;
-                    dragOffset.x = pos.x - p.x;
-                    dragOffset.y = pos.y - p.y;
+                    const pebbleClient = canvasToClientPos({ x: p.x, y: p.y });
+                    dragOffset.x = client.x - pebbleClient.x;
+                    dragOffset.y = client.y - pebbleClient.y;
                     
                     // Store original position
                     dragStartPos.x = p.x;
                     dragStartPos.y = p.y;
+
+                    hideDragGhost();
 
                     return;
                 }
@@ -1035,6 +1159,9 @@
                 draggedPebble = newPebble;
                 dragOffset.x = 0;
                 dragOffset.y = 0;
+                dragStartPos.x = newPebble.x;
+                dragStartPos.y = newPebble.y;
+                hideDragGhost();
             }
         }
 
@@ -1042,32 +1169,28 @@
             if (!isDragging) return;
             
             const pos = getCanvasPos(e);
-            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            const client = getClientPos(e);
             
             if (dragSource === 'canvas' && draggedPebble) {
-                draggedPebble.x = pos.x - dragOffset.x;
-                draggedPebble.y = pos.y - dragOffset.y;
-                
-                // Check waste bin hover
-                checkBinHover(clientX, clientY); // Use screen coords for DOM element check
-                checkInfoHover(clientX, clientY);
+                const dragPos = getDraggedCanvasPos(e);
+                draggedPebble.x = dragPos.x;
+                draggedPebble.y = dragPos.y;
                 
                 // Auto-open toolbox if dragging near bottom
-                if (clientY > window.innerHeight - 100) {
+                if (client.y > window.innerHeight - 100) {
                     openToolbox();
                 }
-            } else if (dragSource === 'toolbox') {
-                // Update ghost position
-                dragOffset = pos; // Reuse variable for current pos
-                
-                // Move DOM ghost
-                dragGhost.style.left = clientX + 'px';
-                dragGhost.style.top = clientY + 'px';
-                
-                checkInfoHover(clientX, clientY);
 
-                if (draggedType === 'eraser') {
+                // Check waste bin hover
+                checkBinHover(client.x, client.y); // Use screen coords for DOM element check
+                checkInfoHover(client.x, client.y);
+                updateBoardDragGhost(client);
+            } else if (dragSource === 'toolbox') {
+                checkInfoHover(client.x, client.y);
+
+                positionDragGhost(client);
+
+                if (draggedType === 'eraser' && !isOverOpenToolbox(client)) {
                     // Erase pebbles under cursor
                     for (let i = pebbles.length - 1; i >= 0; i--) {
                         const p = pebbles[i];
@@ -1086,12 +1209,12 @@
 
             const toolboxBin = document.getElementById('toolbox-bin');
             const toolboxInfo = document.getElementById('toolbox-info');
-            const toolbox = document.getElementById('toolbox');
-            const toolboxRect = toolbox.getBoundingClientRect();
-            const clientY = e.changedTouches ? e.changedTouches[0].clientY : e.clientY;
+            const client = getClientPos(e);
+            const dropPos = getDraggedCanvasPosFromClient(client);
+            const droppedOverToolbox = isDraggedPointOverToolbox(e);
             
             // Hide ghost
-            dragGhost.style.display = 'none';
+            hideDragGhost();
             
             let changed = false;
 
@@ -1115,42 +1238,43 @@
                     toolboxInfo.classList.remove('drag-over');
                     changed = true; // State changed (reverted)
                 }
-                // Drop in toolbox?
-                // Check if dropped in toolbox area (if open) or near bottom
-                else if (document.body.classList.contains('toolbox-open') && clientY > toolboxRect.top) {
-                    // Removed: addToToolbox(draggedPebble.type);
-                    const index = pebbles.indexOf(draggedPebble);
-                    if (index > -1) pebbles.splice(index, 1);
+                // Drop over toolbox area? Revert so pebbles are never hidden underneath it.
+                else if (droppedOverToolbox) {
+                    draggedPebble.x = dragStartPos.x;
+                    draggedPebble.y = dragStartPos.y;
                     changed = true;
                 } else {
                     // Just moved
+                    draggedPebble.x = dropPos.x;
+                    draggedPebble.y = dropPos.y;
                     changed = true;
                 }
             } else if (dragSource === 'toolbox' && draggedType) {
                 // Check if dropped on info
-                const rect = toolboxInfo.getBoundingClientRect();
-                const clientX = e.changedTouches ? e.changedTouches[0].clientX : e.clientX;
-                
-                if (clientX >= rect.left && clientX <= rect.right &&
-                    clientY >= rect.top && clientY <= rect.bottom) {
+                if (isClientInElement(client, toolboxInfo)) {
                     
                     showModal('Pebble Info', PEBBLE_DESCRIPTIONS[draggedType] || 'Unknown Pebble');
                     // Do nothing else (don't create pebble)
                     toolboxInfo.classList.remove('drag-over');
                     
-                } else if (draggedType !== 'eraser') {
+                } else if (draggedPebble && !droppedOverToolbox) {
                     // Drop on canvas
-                    const pos = getCanvasPos(e);
                     // Check bounds
-                    if (pos.x >= 0 && pos.x <= width && pos.y >= 0 && pos.y <= height) {
-                        pebbles.push(new Pebble(pos.x, pos.y, draggedType));
+                    if (isCanvasPointInBounds(dropPos)) {
+                        draggedPebble.x = dropPos.x;
+                        draggedPebble.y = dropPos.y;
+                        pebbles.push(draggedPebble);
                         changed = true;
                     }
                 }
             }
 
+            clearToolHoverStates();
+
             isDragging = false;
             draggedPebble = null;
+            dragOffset.x = 0;
+            dragOffset.y = 0;
             dragSource = null;
             draggedType = null;
             
@@ -1374,30 +1498,25 @@
             isDragging = true;
             dragSource = 'toolbox';
             draggedType = type;
+            draggedPebble = null;
             
             // Initial pos
-            const rect = canvas.getBoundingClientRect();
-            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-            dragOffset = {
-                x: clientX - rect.left,
-                y: clientY - rect.top
-            };
+            const client = getClientPos(e);
             
             // Setup Ghost
-            dragGhost.style.display = 'flex';
-            dragGhost.style.left = clientX + 'px';
-            dragGhost.style.top = clientY + 'px';
-            
             if (type === 'eraser') {
-                dragGhost.innerHTML = '🗑️';
-                dragGhost.style.background = 'transparent';
-                dragGhost.style.boxShadow = 'none';
+                dragOffset.x = 0;
+                dragOffset.y = 0;
+                showEraserDragGhost();
             } else {
-                dragGhost.innerHTML = '';
-                dragGhost.style.background = COLORS[type];
-                dragGhost.style.boxShadow = '0 5px 15px rgba(0,0,0,0.5)';
+                draggedPebble = new Pebble(0, 0, type);
+                // Toolbox drags: ghost centers on cursor (no grab offset). The pebble
+                // drops exactly under the cursor, matching palette-to-canvas convention.
+                dragOffset.x = 0;
+                dragOffset.y = 0;
+                showPebbleDragGhost(type, draggedPebble.radius);
             }
+            positionDragGhost(client);
         }
 
         // Toolbox toggle
