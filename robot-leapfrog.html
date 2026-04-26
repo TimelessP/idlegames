@@ -96,6 +96,25 @@
       pointer-events: auto;
     }
 
+    #resetCameraBtn {
+      align-self: flex-end;
+      margin-top: 2px;
+      padding: 6px 10px;
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      border-radius: 8px;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    #resetCameraBtn:hover { background: rgba(255,255,255,0.08); }
+    #resetCameraBtn:active { background: rgba(255,255,255,0.14); }
+
     .robot-pill {
       display: flex;
       align-items: center;
@@ -352,6 +371,7 @@
       <div class="row"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</div>
       <div class="row"><kbd>E</kbd> Action / Dock</div>
       <div class="row"><kbd>Space</kbd> Jump (R2)</div>
+      <div class="row">Drag · scroll · pinch — view <kbd>R</kbd> reset</div>
     </div>
 
     <div id="robotPanel">
@@ -371,6 +391,7 @@
         <span class="battery-track"><span class="battery-fill" style="width:100%"></span></span>
       </div>
       <div id="goalDist">— m to goal</div>
+      <button id="resetCameraBtn" type="button" aria-label="Reset camera view">Reset View</button>
     </div>
 
     <div id="toast"></div>
@@ -830,12 +851,21 @@
       followX: WORLD.START_X,
       shoulderOffset: 1.6,
       orthoZoom: 0.10,    // world units per pixel scaler — recalculated on resize
+      // User-controlled view (R to reset, drag to pan, wheel/pinch to zoom)
+      panX: 0,            // extra world X offset added to look-at target
+      panZ: 0,            // extra world Z offset added to look-at target
+      panY: 0,            // extra world Y offset added to look-at target
+      zoomMul: 1,         // multiplied into orthoZoom (smaller = more zoom-in)
+      baseOrthoZoom: 0.10,
+    };
+    const CAMERA_DEFAULTS = {
+      panX: 0, panY: 0, panZ: 0, zoomMul: 1,
     };
 
     function updateCameraProjection() {
       const w = renderer.domElement.clientWidth;
       const h = renderer.domElement.clientHeight;
-      const halfH = Math.max(4.5, h * CAMERA.orthoZoom);
+      const halfH = Math.max(2.0, h * CAMERA.orthoZoom * CAMERA.zoomMul);
       const halfW = halfH * (w / h);
       camera.left = -halfW;
       camera.right = halfW;
@@ -845,15 +875,24 @@
     }
 
     function positionCamera() {
-      const targetX = CAMERA.followX + CAMERA.shoulderOffset;
-      const targetY = 1.0;
-      const targetZ = -1.0;
+      const targetX = CAMERA.followX + CAMERA.shoulderOffset + CAMERA.panX;
+      const targetY = 1.0 + CAMERA.panY;
+      const targetZ = -1.0 + CAMERA.panZ;
       const d = CAMERA.distance;
       const cx = targetX + Math.sin(CAMERA.yaw) * Math.cos(CAMERA.pitch) * d;
       const cy = targetY + Math.sin(CAMERA.pitch) * d;
       const cz = targetZ + Math.cos(CAMERA.yaw) * Math.cos(CAMERA.pitch) * d;
       camera.position.set(cx, cy, cz);
       camera.lookAt(targetX, targetY, targetZ);
+    }
+
+    function resetCameraView() {
+      CAMERA.panX = CAMERA_DEFAULTS.panX;
+      CAMERA.panY = CAMERA_DEFAULTS.panY;
+      CAMERA.panZ = CAMERA_DEFAULTS.panZ;
+      CAMERA.zoomMul = CAMERA_DEFAULTS.zoomMul;
+      updateCameraProjection();
+      positionCamera();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1434,6 +1473,14 @@
       const emissiveTex = new THREE.CanvasTexture(ec);
       emissiveTex.colorSpace = THREE.SRGBColorSpace;
       emissiveTex.anisotropy = 4;
+      // Mobile-safe: R2 (256x48) and R3 (256x56) panels are non-power-of-two,
+      // which silently uploads as black on some Android Chrome / mobile WebGL
+      // drivers when default mipmaps are generated.
+      for (const t of [mapTex, emissiveTex]) {
+        t.generateMipmaps = false;
+        t.minFilter = THREE.LinearFilter;
+        t.magFilter = THREE.LinearFilter;
+      }
       repaint(1.0);
       return { mapTex, emissiveTex, update: repaint };
     }
@@ -2021,6 +2068,10 @@
       const tex = new THREE.CanvasTexture(c);
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.anisotropy = 4;
+      // Mobile-safe: rotor blur quad, no tiling.
+      tex.generateMipmaps = false;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
       return tex;
     }
 
@@ -2205,6 +2256,10 @@
       const tex = new THREE.CanvasTexture(c);
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.anisotropy = 4;
+      // Mobile-safe: pressure plate is a single quad, no need for mipmaps.
+      tex.generateMipmaps = false;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
       return tex;
     }
 
@@ -2221,6 +2276,11 @@
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
       tex.anisotropy = 4;
+      // Mobile-safe: rusted-metal callers pass NPOT sizes (128×256, 128×512).
+      // Repeat wrapping with NPOT requires no mipmaps on Android Chrome.
+      tex.generateMipmaps = false;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
       return tex;
     }
 
@@ -2934,6 +2994,10 @@
         paintAOVignette(sctx, 1024, 256, 0.35);
         const signTex = new THREE.CanvasTexture(signCanvas);
         signTex.colorSpace = THREE.SRGBColorSpace;
+        // Mobile-safe: single quad, no need for mipmaps.
+        signTex.generateMipmaps = false;
+        signTex.minFilter = THREE.LinearFilter;
+        signTex.magFilter = THREE.LinearFilter;
         const sign = new THREE.Mesh(
           new THREE.PlaneGeometry(5.4, 1.3),
           new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.85, emissive: 0x1a3a38, emissiveIntensity: 0.4 })
@@ -3032,6 +3096,11 @@
         setActiveRobot(parseInt(ev.key, 10));
         return;
       }
+      // Reset camera view
+      if (ev.key === 'r' || ev.key === 'R') {
+        resetCameraView();
+        return;
+      }
       const map = { ArrowUp: 'w', ArrowDown: 's', ArrowLeft: 'a', ArrowRight: 'd' };
       const k = map[ev.key] || ev.key;
       setKey(k, true);
@@ -3069,6 +3138,111 @@
     document.querySelectorAll('.robot-pill').forEach((pill) => {
       pill.addEventListener('click', () => setActiveRobot(parseInt(pill.dataset.robot, 10)));
     });
+
+    // ── Camera pan / zoom / reset ───────────────────────────────────────
+    //   • Mouse: drag to pan, wheel to zoom
+    //   • Touch: one-finger drag to pan, two-finger pinch to zoom
+    //   • Keyboard: R to reset
+    //   • Reset View button (top-right)
+    //   Pan moves the look-at target on the ground plane (X / Z). Drag in
+    //   screen-space is converted to world units using the current ortho
+    //   half-height. The camera basis at yaw=34°, pitch=28° means screen-X
+    //   maps mostly to world-X (cos yaw) and a little world-Z, screen-Y
+    //   maps to world-Z (and some world-Y, but we ignore that for clean
+    //   ground-plane panning).
+    (function setupCameraControls() {
+      const activePointers = new Map(); // pointerId -> {x, y}
+      let pinchStartDist = 0;
+      let pinchStartZoom = 1;
+      let dragLast = null;
+      const sinY = Math.sin(CAMERA.yaw), cosY = Math.cos(CAMERA.yaw);
+
+      function worldPerPixel() {
+        const h = renderer.domElement.clientHeight;
+        const halfH = Math.max(2.0, h * CAMERA.orthoZoom * CAMERA.zoomMul);
+        return (2 * halfH) / h;
+      }
+      function panByScreenDelta(dx, dy) {
+        const wpp = worldPerPixel();
+        const wx = dx * wpp;     // screen-x in world units
+        const wy = dy * wpp;     // screen-y in world units (down = +)
+        // Ground-plane pan: screen-x → -(cosY*X + sinY*Z); screen-y → +(sinY*X - cosY*Z)*invCosPitch
+        // Simplified: map screen drag directly to world X/Z so that scene
+        // visibly moves with the cursor.
+        CAMERA.panX -= wx * cosY - wy * sinY;
+        CAMERA.panZ -= wx * sinY + wy * cosY;
+        positionCamera();
+      }
+      function zoomBy(factor, focusX, focusY) {
+        const before = CAMERA.zoomMul;
+        CAMERA.zoomMul = Math.min(2.5, Math.max(0.25, CAMERA.zoomMul * factor));
+        updateCameraProjection();
+        positionCamera();
+      }
+
+      const cv = renderer.domElement;
+      cv.style.touchAction = 'none';
+      cv.addEventListener('contextmenu', (e) => e.preventDefault());
+      cv.addEventListener('pointerdown', (e) => {
+        // Don't hijack pointer events that started on UI overlays
+        if (e.target !== cv) return;
+        cv.setPointerCapture(e.pointerId);
+        activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (activePointers.size === 1) {
+          dragLast = { x: e.clientX, y: e.clientY };
+        } else if (activePointers.size === 2) {
+          const pts = [...activePointers.values()];
+          pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+          pinchStartZoom = CAMERA.zoomMul;
+          dragLast = null;
+        }
+      });
+      cv.addEventListener('pointermove', (e) => {
+        if (!activePointers.has(e.pointerId)) return;
+        activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (activePointers.size === 1 && dragLast) {
+          const dx = e.clientX - dragLast.x;
+          const dy = e.clientY - dragLast.y;
+          dragLast = { x: e.clientX, y: e.clientY };
+          panByScreenDelta(dx, dy);
+        } else if (activePointers.size === 2) {
+          const pts = [...activePointers.values()];
+          const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+          if (pinchStartDist > 0) {
+            // pinch out → zoom in (smaller zoomMul)
+            const factor = pinchStartDist / d;
+            CAMERA.zoomMul = Math.min(2.5, Math.max(0.25, pinchStartZoom * factor));
+            updateCameraProjection();
+            positionCamera();
+          }
+        }
+      });
+      const endPointer = (e) => {
+        if (!activePointers.has(e.pointerId)) return;
+        activePointers.delete(e.pointerId);
+        if (activePointers.size < 2) pinchStartDist = 0;
+        if (activePointers.size === 1) {
+          const p = [...activePointers.values()][0];
+          dragLast = { x: p.x, y: p.y };
+        } else if (activePointers.size === 0) {
+          dragLast = null;
+        }
+        try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+      };
+      cv.addEventListener('pointerup', endPointer);
+      cv.addEventListener('pointercancel', endPointer);
+      cv.addEventListener('pointerleave', endPointer);
+
+      cv.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        // Wheel up → zoom in (smaller zoomMul)
+        const factor = Math.exp(e.deltaY * 0.0015);
+        zoomBy(factor, e.clientX, e.clientY);
+      }, { passive: false });
+
+      const resetBtn = document.getElementById('resetCameraBtn');
+      if (resetBtn) resetBtn.addEventListener('click', () => resetCameraView());
+    })();
 
     function setActiveRobot(n) {
       if (n < 1 || n > 3) return;
@@ -3498,6 +3672,7 @@
       renderer.setSize(w, h, false);
       // Adjust ortho zoom by viewport size so smaller screens see less area
       CAMERA.orthoZoom = (h < 600) ? 0.014 : (h < 900 ? 0.012 : 0.010);
+      CAMERA.baseOrthoZoom = CAMERA.orthoZoom;
       updateCameraProjection();
       positionCamera();
     }
