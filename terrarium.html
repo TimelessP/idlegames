@@ -169,6 +169,100 @@
   #floater .name.magical { color: var(--magical); }
   #floater .activity { color: var(--muted); font-style: italic; }
 
+  /* Journal modal */
+  #journal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(8, 12, 10, 0.55);
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    padding: 16px;
+  }
+  #journal-overlay.open { display: flex; }
+  #journal {
+    position: relative;
+    width: min(440px, 100%);
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    background:
+      repeating-linear-gradient(transparent 0 26px, rgba(120, 90, 60, 0.10) 26px 27px),
+      linear-gradient(180deg, #f6ecd6 0%, #ecdfc2 100%);
+    color: #2a2014;
+    border: 1px solid #c8a878;
+    border-radius: 4px;
+    box-shadow:
+      0 24px 48px rgba(0, 0, 0, 0.55),
+      0 0 0 1px rgba(0, 0, 0, 0.15) inset,
+      0 60px 0 -52px rgba(120, 90, 50, 0.4) inset;
+    padding: 22px 28px 28px;
+    font-family: 'Bradley Hand', 'Brush Script MT', 'Marker Felt', 'Segoe Script', 'Comic Sans MS', cursive;
+    transform: rotate(-0.4deg);
+  }
+  #journal::before {
+    content: '';
+    position: absolute; left: 36px; top: 0; bottom: 0;
+    width: 1.5px;
+    background: rgba(200, 80, 80, 0.35);
+  }
+  #journal-close {
+    position: absolute; top: 6px; right: 8px;
+    background: transparent; border: none;
+    color: #6a4828;
+    font-size: 22px;
+    cursor: pointer;
+    line-height: 1;
+    padding: 4px 8px;
+    font-family: inherit;
+  }
+  #journal-close:hover { color: #2a2014; }
+  #journal h3 {
+    margin: 0 0 4px;
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  #journal h3.magical { color: #6a3a8a; }
+  #journal .subtitle {
+    font-size: 14px;
+    color: #6a4828;
+    font-style: italic;
+    margin-bottom: 10px;
+  }
+  #journal-canvas-wrap {
+    display: flex;
+    justify-content: center;
+    margin: 8px 0 14px;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.35);
+    border: 1px dashed rgba(120, 90, 60, 0.45);
+    border-radius: 4px;
+    transform: rotate(0.6deg);
+  }
+  #journal-canvas { display: block; }
+  #journal .notes {
+    font-size: 17px;
+    line-height: 1.55;
+    margin: 0 0 14px;
+    color: #2a2014;
+  }
+  #journal .count {
+    font-size: 15px;
+    color: #6a3a20;
+    border-top: 1px dashed rgba(120, 90, 60, 0.4);
+    padding-top: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  #journal .count .num {
+    font-size: 22px;
+    color: #2a2014;
+    font-weight: 600;
+  }
+
   /* Toast */
   #toast {
     position: absolute; left: 50%; top: 70px; transform: translateX(-50%);
@@ -257,6 +351,22 @@
       </div>
     </aside>
   </main>
+</div>
+
+<div id="journal-overlay" role="dialog" aria-modal="true" aria-labelledby="journal-title">
+  <div id="journal">
+    <button id="journal-close" aria-label="Close journal">×</button>
+    <h3 id="journal-title"></h3>
+    <div class="subtitle" id="journal-subtitle"></div>
+    <div id="journal-canvas-wrap">
+      <canvas id="journal-canvas" width="220" height="160"></canvas>
+    </div>
+    <p class="notes" id="journal-notes"></p>
+    <div class="count">
+      <span id="journal-count-label">Spotted</span>
+      <span class="num" id="journal-count-num">0</span>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -467,11 +577,13 @@ const state = {
   worldTime: 0,      // seconds — drives day/night
   toastUntil: 0,
   lens: { active: false, x: 0, y: 0, hasPos: false, radius: 90, zoom: 5 },
+  journal: { creatures: {}, props: {} },
 };
 
 // ── Canvas + DPR scaling ────────────────────────────────────────────
 const canvas = document.getElementById('tank');
-const ctx = canvas.getContext('2d');
+let ctx = canvas.getContext('2d');
+const tankCtx = ctx; // keep a reference so we can swap during preview rendering
 let W = 800, H = 500, DPR = 1;
 
 function resizeCanvas() {
@@ -1918,6 +2030,7 @@ function saveState() {
     const slim = {
       biome: state.biome,
       worldTime: state.worldTime,
+      journal: state.journal,
       creatures: state.creatures.map(c => ({
         type: c.type, x: c.x, y: c.y, age: c.age, mood: c.mood,
       })),
@@ -1932,6 +2045,10 @@ function loadState() {
     const slim = JSON.parse(raw);
     if (slim.biome && BIOMES[slim.biome]) state.biome = slim.biome;
     state.worldTime = slim.worldTime || 0;
+    if (slim.journal && typeof slim.journal === 'object') {
+      state.journal.creatures = Object.assign({}, slim.journal.creatures || {});
+      state.journal.props     = Object.assign({}, slim.journal.props     || {});
+    }
     state.creatures = [];
     for (const c of (slim.creatures || [])) {
       if (!CREATURES[c.type]) continue;
@@ -2027,6 +2144,145 @@ function pickCreatureAt(px, py) {
   return null;
 }
 
+function pickPropAt(px, py) {
+  const b = BIOMES[state.biome];
+  let best = null;
+  let bestDist = Infinity;
+  for (const d of b.decorations) {
+    const dx = d.x * W;
+    const dy = groundY(dx);
+    // Most decorations occupy ~14 * scale px wide and ~20 * scale tall above the anchor.
+    const radius = 14 * d.scale;
+    if (px < dx - radius || px > dx + radius) continue;
+    if (py > dy + 6) continue;
+    if (py < dy - 28 * d.scale) continue;
+    const dist = Math.hypot(px - dx, py - (dy - 8 * d.scale));
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = d;
+    }
+  }
+  return best;
+}
+
+// ── Journal ─────────────────────────────────────────────────────────
+const PROP_INFO = {
+  mushroom:  { emoji: '🍄', name: 'Mushroom',     note: "Soft cap, springy stem. Smells faintly of earth after rain. The beetles like to nap in its shade." },
+  toadstool: { emoji: '🍄', name: 'Toadstool',    note: "White flecks on a scarlet cap — pretty, but I would not nibble. Folklore says fae perch on these at dusk." },
+  log:       { emoji: '🪵', name: 'Mossy Log',    note: "An old log, going gentle back to the forest. Moss has claimed the top, fungi the underside." },
+  fern:      { emoji: '🌿', name: 'Curling Fern', note: "Fronds unspooling like pocket watches. New growth is tightly coiled and impossibly green." },
+  clover:    { emoji: '☘️', name: 'Clover Patch',  note: "Three leaves apiece, today. I keep checking for a fourth. One day, perhaps." },
+  twig:      { emoji: '🪵', name: 'Twig',          note: "Fallen branchlet, dry and brittle. Useful for small creatures making small homes." },
+  berry:     { emoji: '🫐', name: 'Berry Bush',   note: "Tart little jewels among dark leaves. The birds know which ones are ready before I do." },
+  cactus:    { emoji: '🌵', name: 'Cactus',       note: "Patient and prickly. Holds water like a secret through the long dry months." },
+  rock:      { emoji: '🪨', name: 'Rock',         note: "Older than anything else here. Warm on the side facing the sun, cool on the other." },
+  dunegrass: { emoji: '🌾', name: 'Dune Grass',   note: "Tough blades that whisper in the slightest breeze. Their roots hold the dunes together." },
+  bone:      { emoji: '🦴', name: 'Sun-bleached Bone', note: "Picked clean by time and wind. A reminder, gentle as the desert ever gets." },
+  palm:      { emoji: '🌴', name: 'Little Palm',  note: "A young palmetto, fan leaves stiff and bright. It will outgrow this tank one day." },
+  tinyrock:  { emoji: '🪨', name: 'Pebble Cluster', note: "Smooth stones, sorted by some long-ago flood. The middle one is striped pink." },
+  kelp:      { emoji: '🌿', name: 'Kelp',         note: "Sways in time with currents I cannot feel. Tiny things shelter where it meets the floor." },
+  shell:     { emoji: '🐚', name: 'Spiral Shell', note: "Empty now. If you hold it close, it sounds like the inside of your own listening." },
+  coral:     { emoji: '🪸', name: 'Branching Coral', note: "Pink filigree, alive in the patient way of stones. Each tip flowers when the lights are low." },
+  urchin:    { emoji: '🦔', name: 'Sea Urchin',   note: "A tide-pool hedgehog. Spines look fierce but it only ever wants to be left in peace." },
+  anemone:   { emoji: '🌸', name: 'Anemone',      note: "Tendrils dance in the slow clock of the tide. Bright as a spring meadow if you look slowly." },
+};
+
+function openJournalForCreature(type) {
+  const def = CREATURES[type];
+  if (!def) return;
+  const count = state.journal.creatures[type] || 0;
+  document.getElementById('journal-title').textContent = `${def.emoji} ${def.name}`;
+  document.getElementById('journal-title').className = def.magical ? 'magical' : '';
+  document.getElementById('journal-subtitle').textContent =
+    def.magical ? '— a curious magical visitor —' : `— a small ${def.habit === 'air' ? 'flying' : def.habit === 'amphib' ? 'tide-pool' : 'ground'} creature —`;
+  document.getElementById('journal-notes').textContent = def.quip;
+  document.getElementById('journal-count-label').textContent = 'Spotted';
+  document.getElementById('journal-count-num').textContent =
+    count + (count === 1 ? ' time' : ' times');
+  renderJournalCreature(type);
+  showJournal();
+}
+
+function openJournalForProp(type) {
+  const info = PROP_INFO[type] || { emoji: '✿', name: type, note: 'Something small and quiet.' };
+  const count = state.journal.props[type] || 0;
+  document.getElementById('journal-title').textContent = `${info.emoji} ${info.name}`;
+  document.getElementById('journal-title').className = '';
+  document.getElementById('journal-subtitle').textContent = '— a feature of the tank —';
+  document.getElementById('journal-notes').textContent = info.note;
+  document.getElementById('journal-count-label').textContent = 'Examined';
+  document.getElementById('journal-count-num').textContent =
+    count + (count === 1 ? ' time' : ' times');
+  renderJournalProp(type);
+  showJournal();
+}
+
+function renderJournalCreature(type) {
+  const def = CREATURES[type];
+  const target = document.getElementById('journal-canvas');
+  const tctx = prepareJournalCanvas(target);
+  const w = parseInt(target.style.width, 10);
+  const h = parseInt(target.style.height, 10);
+
+  const fakeC = {
+    type, x: w / 2, y: h * 0.62,
+    facing: 1, age: state.worldTime, bobPhase: state.worldTime * 2.5,
+    activity: 'wander', sparkles: [],
+  };
+  const prev = ctx;
+  ctx = tctx;
+  ctx.save();
+  // Scale up small creatures so they fill the page nicely.
+  const targetSize = 58;
+  const k = targetSize / def.size;
+  ctx.translate(fakeC.x, fakeC.y);
+  ctx.scale(k, k);
+  ctx.translate(-fakeC.x, -fakeC.y);
+  drawCreature(fakeC);
+  ctx.restore();
+  ctx = prev;
+}
+
+function renderJournalProp(type) {
+  const target = document.getElementById('journal-canvas');
+  const tctx = prepareJournalCanvas(target);
+  const w = parseInt(target.style.width, 10);
+  const h = parseInt(target.style.height, 10);
+  // Faint ground line
+  tctx.strokeStyle = 'rgba(120, 90, 60, 0.35)';
+  tctx.lineWidth = 1;
+  tctx.beginPath();
+  tctx.moveTo(20, h - 24);
+  tctx.lineTo(w - 20, h - 24);
+  tctx.stroke();
+
+  const prev = ctx;
+  ctx = tctx;
+  drawDecoration(type, w / 2, h - 24, 3.5);
+  ctx = prev;
+}
+
+function prepareJournalCanvas(target) {
+  const cssW = 220, cssH = 160;
+  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  target.width = cssW * dpr;
+  target.height = cssH * dpr;
+  target.style.width = cssW + 'px';
+  target.style.height = cssH + 'px';
+  const tctx = target.getContext('2d');
+  tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  tctx.fillStyle = 'rgba(255, 250, 235, 0.6)';
+  tctx.fillRect(0, 0, cssW, cssH);
+  return tctx;
+}
+
+function showJournal() {
+  document.getElementById('journal-overlay').classList.add('open');
+}
+function closeJournal() {
+  document.getElementById('journal-overlay').classList.remove('open');
+}
+
 function showFloater(c) {
   const def = CREATURES[c.type];
   const f = document.getElementById('floater');
@@ -2068,6 +2324,7 @@ function activityDescription(c) {
 }
 
 canvas.addEventListener('click', (ev) => {
+  if (state.lens.active) return; // magnifier consumes clicks
   const r = canvas.getBoundingClientRect();
   const px = (ev.clientX - r.left);
   const py = (ev.clientY - r.top);
@@ -2079,9 +2336,20 @@ canvas.addEventListener('click', (ev) => {
       showToast(`${def.name} drifts away.`);
       hideFloater();
     }
+    return;
+  }
+  hideFloater();
+  if (c) {
+    state.journal.creatures[c.type] = (state.journal.creatures[c.type] || 0) + 1;
+    saveState();
+    openJournalForCreature(c.type);
   } else {
-    if (c) showFloater(c);
-    else hideFloater();
+    const prop = pickPropAt(px, py);
+    if (prop) {
+      state.journal.props[prop.type] = (state.journal.props[prop.type] || 0) + 1;
+      saveState();
+      openJournalForProp(prop.type);
+    }
   }
 });
 
@@ -2130,6 +2398,14 @@ function boot() {
     addCreature('glowmoth');
   }
   refreshChips();
+  // Journal close wiring
+  document.getElementById('journal-close').addEventListener('click', closeJournal);
+  document.getElementById('journal-overlay').addEventListener('click', (ev) => {
+    if (ev.target.id === 'journal-overlay') closeJournal();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeJournal();
+  });
   // Persist every few seconds
   setInterval(saveState, 5000);
   requestAnimationFrame((t) => { lastT = t; loop(t); });
