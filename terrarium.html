@@ -855,10 +855,129 @@ function spawnSparkle(c, count) {
 
 state.farewells = [];
 state.ripples = [];
+state.puffs = [];
+state.sun = { x: 0, y: 0, radius: 18, visible: false };
+state.beam = null; // { chordA, chordB, focal, dx, dy, cover }
 function spawnRipple(c) {
   const wy = waterY();
   if (wy == null) return;
   state.ripples.push({ x: c.x, y: wy, r: 4, max: 60, life: 1.2, maxLife: 1.2 });
+}
+
+function spawnPuff(x, y) {
+  for (let i = 0; i < 16; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 18 + Math.random() * 36;
+    state.puffs.push({
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp - 30,
+      life: 1.0 + Math.random() * 0.8,
+      max: 1.6,
+      r: 4 + Math.random() * 5,
+    });
+  }
+}
+
+// ── Magnifier sun-beam easter egg ───────────────────────────────────
+function computeSunBeam() {
+  if (!state.lens.active || !state.lens.hasPos) return null;
+  if (state.biome !== 'desert') return null;
+  if (!state.sun.visible) return null;
+  const lx = state.lens.x, ly = state.lens.y, r = state.lens.radius;
+  const sx = state.sun.x,  sy = state.sun.y,  sr = state.sun.radius;
+  const distSL = Math.hypot(lx - sx, ly - sy);
+  if (distSL > r + sr || distSL < 0.001) return null;
+  // Direction from sun to lens (the beam direction)
+  const dx = (lx - sx) / distSL;
+  const dy = (ly - sy) / distSL;
+  if (dy <= 0) return null; // beam aims upward — no ground to hit
+  // Perpendicular for the chord (diameter perpendicular to beam direction)
+  const px = -dy, py = dx;
+  const chordA = { x: lx - px * r, y: ly - py * r };
+  const chordB = { x: lx + px * r, y: ly + py * r };
+  // March from lens centre in beam direction until we hit ground or escape
+  let fx = lx, fy = ly;
+  let safety = 0;
+  while (safety++ < 600) {
+    fx += dx * 3;
+    fy += dy * 3;
+    if (fx < -20 || fx > W + 20 || fy > H + 20) break;
+    if (fy >= groundY(fx)) { fy = groundY(fx); break; }
+  }
+  // Coverage: 0 = lens just grazing sun, 1 = lens fully past the sun's centre
+  const cover = clamp((r + sr - distSL) / (sr * 2), 0, 1);
+  return { chordA, chordB, focal: { x: fx, y: fy }, dx, dy, cover };
+}
+
+function drawSunBeam(beam) {
+  if (!beam) return;
+  const lx = state.lens.x, ly = state.lens.y;
+  const peak = 0.5 * beam.cover;
+  ctx.save();
+  // Soft outer halo via shadowBlur on the wedge fill
+  ctx.shadowColor = 'rgba(255, 220, 140, 0.55)';
+  ctx.shadowBlur = 22;
+  const grad = ctx.createLinearGradient(lx, ly, beam.focal.x, beam.focal.y);
+  grad.addColorStop(0,   'rgba(255, 240, 180, 0)');
+  grad.addColorStop(0.55, `rgba(255, 232, 160, ${peak * 0.55})`);
+  grad.addColorStop(1,   `rgba(255, 244, 200, ${peak})`);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(beam.chordA.x, beam.chordA.y);
+  ctx.lineTo(beam.chordB.x, beam.chordB.y);
+  ctx.lineTo(beam.focal.x,  beam.focal.y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  // Additive bloom hot-spot at focal point
+  ctx.globalCompositeOperation = 'lighter';
+  const rg = ctx.createRadialGradient(
+    beam.focal.x, beam.focal.y, 0,
+    beam.focal.x, beam.focal.y, 42);
+  rg.addColorStop(0,   `rgba(255, 248, 210, ${0.85 * beam.cover})`);
+  rg.addColorStop(0.4, `rgba(255, 210, 130, ${0.35 * beam.cover})`);
+  rg.addColorStop(1,   'rgba(255, 200, 120, 0)');
+  ctx.fillStyle = rg;
+  ctx.beginPath();
+  ctx.arc(beam.focal.x, beam.focal.y, 42, 0, Math.PI * 2);
+  ctx.fill();
+  // A second tighter bright core
+  const rg2 = ctx.createRadialGradient(
+    beam.focal.x, beam.focal.y, 0,
+    beam.focal.x, beam.focal.y, 14);
+  rg2.addColorStop(0, `rgba(255, 255, 240, ${0.9 * beam.cover})`);
+  rg2.addColorStop(1, 'rgba(255, 240, 180, 0)');
+  ctx.fillStyle = rg2;
+  ctx.beginPath();
+  ctx.arc(beam.focal.x, beam.focal.y, 14, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function updateSunBeam(dt) {
+  const beam = computeSunBeam();
+  state.beam = beam;
+  if (!beam) {
+    for (const c of state.creatures) c.scorch = 0;
+    return;
+  }
+  for (let i = state.creatures.length - 1; i >= 0; i--) {
+    const c = state.creatures[i];
+    const def = CREATURES[c.type];
+    const d = Math.hypot(c.x - beam.focal.x, c.y - beam.focal.y);
+    const hitR = def.size * 0.7 + 10;
+    if (d < hitR) {
+      c.scorch = (c.scorch || 0) + dt * beam.cover;
+      if (c.scorch >= 0.7) {
+        spawnPuff(c.x, c.y);
+        showToast(`${def.name} vanishes in a puff of smoke!`);
+        removeCreature(c);
+      }
+    } else {
+      c.scorch = Math.max(0, (c.scorch || 0) - dt * 0.6);
+    }
+  }
 }
 
 // ── Rendering ──────────────────────────────────────────────────────
@@ -929,6 +1048,20 @@ function render() {
     ctx.globalAlpha = 1;
   }
 
+  // Smoke puffs (creature dispatched by focused sun-beam)
+  for (const p of state.puffs) {
+    const a = Math.max(0, p.life / p.max);
+    const r = p.r * (1 + (1 - a) * 1.2);
+    ctx.fillStyle = `rgba(180, 180, 180, ${a * 0.55})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = `rgba(240, 240, 240, ${a * 0.35})`;
+    ctx.beginPath();
+    ctx.arc(p.x - r * 0.3, p.y - r * 0.2, r * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   // Glass overlay tint at night
   if (light < 0.7) {
     ctx.fillStyle = `rgba(40, 60, 80, ${(0.7 - light) * 0.18})`;
@@ -947,7 +1080,10 @@ function render() {
   ctx.fillRect(0, 0, W, H * 0.25);
 
   // Magnifier lens (drawn last, sampling everything beneath)
-  if (state.lens.active && state.lens.hasPos) drawLens();
+  if (state.lens.active && state.lens.hasPos) {
+    drawSunBeam(state.beam);
+    drawLens();
+  }
 }
 
 function drawLens() {
@@ -1062,12 +1198,18 @@ function drawCelestial(light) {
   const localT = dayPart ? (t - 0.20) / 0.60 : ((t < 0.20) ? (t + 0.20) / 0.40 : (t - 0.80) / 0.40);
   const arcX = lerp(W * 0.10, W * 0.90, localT);
   const arcY = H * 0.18 - Math.sin(localT * Math.PI) * H * 0.10;
+  const radius = dayPart ? 18 : 14;
+  // Stash position so other systems (e.g. magnifier beam) can read it
+  state.sun.x = arcX;
+  state.sun.y = arcY;
+  state.sun.radius = radius;
+  state.sun.visible = dayPart;
   ctx.save();
   ctx.shadowColor = dayPart ? 'rgba(255, 220, 130, 0.85)' : 'rgba(220, 230, 255, 0.7)';
   ctx.shadowBlur = 24;
   ctx.fillStyle = dayPart ? '#fff0b0' : '#e0e7f0';
   ctx.beginPath();
-  ctx.arc(arcX, arcY, dayPart ? 18 : 14, 0, Math.PI * 2);
+  ctx.arc(arcX, arcY, radius, 0, Math.PI * 2);
   ctx.fill();
   if (!dayPart) {
     // crescent shadow
@@ -1996,6 +2138,9 @@ function loop(now) {
 
   for (const c of state.creatures) updateCreature(c, dt);
 
+  // Magnifier sun-beam (desert easter egg)
+  updateSunBeam(dt);
+
   // Decay farewells
   for (let i = state.farewells.length - 1; i >= 0; i--) {
     const f = state.farewells[i];
@@ -2011,6 +2156,16 @@ function loop(now) {
     r.life -= dt;
     r.r = lerp(r.r, r.max, dt * 1.5);
     if (r.life <= 0) state.ripples.splice(i, 1);
+  }
+  // Decay smoke puffs
+  for (let i = state.puffs.length - 1; i >= 0; i--) {
+    const p = state.puffs[i];
+    p.life -= dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy -= 18 * dt; // smoke rises
+    p.vx *= (1 - dt * 0.6);
+    if (p.life <= 0) state.puffs.splice(i, 1);
   }
 
   render();
