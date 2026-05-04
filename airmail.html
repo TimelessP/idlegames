@@ -31,6 +31,7 @@
       top: 14px; left: 50%; transform: translateX(-50%);
       width: 140px; height: 140px;
       cursor: pointer;
+      pointer-events: auto;
     }
     #compass-canvas {
       width: 100%; height: 100%;
@@ -42,6 +43,7 @@
       top: 14px; right: 14px;
       width: 140px; height: 140px;
       cursor: pointer;
+      pointer-events: auto;
     }
     #clock-canvas {
       width: 100%; height: 100%;
@@ -315,6 +317,34 @@
       background: #cda85a; color: #1a1108; border: none; border-radius: 4px;
       cursor: pointer; font-weight: 700; letter-spacing: 1px;
     }
+    #pause-modal {
+      position: fixed; inset: 0; z-index: 95;
+      display: none; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.68);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+    }
+    #pause-modal.show { display: flex; }
+    .pause-body {
+      min-width: min(360px, 88vw);
+      background: #161c29; color: #f4ead0;
+      border: 1px solid #cda85a; border-radius: 10px;
+      padding: 24px 24px 18px;
+      box-shadow: 0 18px 44px rgba(0,0,0,0.55);
+      text-align: center;
+    }
+    .pause-body h2 { color: #cda85a; margin-bottom: 10px; font-size: 22px; letter-spacing: 1px; }
+    .pause-body p { margin-bottom: 14px; font-size: 14px; line-height: 1.45; }
+    .pause-actions {
+      display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
+    }
+    .pause-actions button {
+      min-width: 120px;
+      padding: 10px 18px;
+      background: #cda85a; color: #1a1108;
+      border: none; border-radius: 5px;
+      cursor: pointer; font-weight: 700; letter-spacing: 1px;
+    }
 
     /* Zoom modal for mail / clock / compass */
     .zoom-modal {
@@ -394,12 +424,23 @@
       <kbd>Q</kbd>/<kbd>E</kbd> yaw<br>
       <kbd>Shift</kbd> or <kbd>]</kbd> throttle up &nbsp;
       <kbd>[</kbd> throttle down (and brakes at idle)<br>
-      <kbd>Space</kbd> transmit on the radio
+      <kbd>Space</kbd> transmit on the radio &nbsp;
+      <kbd>?</kbd> help &nbsp;
+      <kbd>Esc</kbd> pause
     </p>
     <p><b>Touch:</b> left stick = pitch/roll. Tap the brass radio dial to call ahead for a heading.</p>
     <p><b>Delivering:</b> Fly to your destination airfield, land on the runway, and come to a full stop. Mail is then dispatched and a fresh parcel drops in.</p>
+    <p><b>Clock:</b> tap the clock to enlarge it. In the enlarged view, tap the centre to return to local wallclock time, tap the middle ring for AM hours, or tap the outer ring for PM hours.</p>
     <p style="opacity:0.7; font-size:12px; margin-top:14px;">No bearings here, just compass directions. The miniature world is procedurally generated from a fixed seed, so airfields stay in the same places every flight.</p>
     <button id="help-close">CLOSE</button>
+  </div></div>
+  <div id="pause-modal"><div class="pause-body">
+    <h2>PAUSED</h2>
+    <p>Press <kbd>Esc</kbd> to resume, or review the controls before taking off again.</p>
+    <div class="pause-actions">
+      <button id="pause-resume">RESUME</button>
+      <button id="pause-help">HELP</button>
+    </div>
   </div></div>
 
   <div id="touch">
@@ -606,6 +647,31 @@
     }
     const AIRFIELDS = placeAirfields();
 
+    function getAirfieldLocalPosition(af, x, z) {
+      const dx = x - af.x;
+      const dz = z - af.z;
+      const c = Math.cos(af.heading);
+      const s = Math.sin(af.heading);
+      return {
+        lx: dx * c - dz * s,
+        lz: dx * s + dz * c,
+      };
+    }
+    function isWithinRunwayBounds(af, lx, lz, marginX = 0, marginZ = marginX) {
+      return Math.abs(lx) <= af.length / 2 + marginX && Math.abs(lz) <= af.width / 2 + marginZ;
+    }
+    function getRunwayContact(x, z, marginX = 0, marginZ = marginX) {
+      let best = null;
+      for (const af of AIRFIELDS) {
+        const local = getAirfieldLocalPosition(af, x, z);
+        if (!isWithinRunwayBounds(af, local.lx, local.lz, marginX, marginZ)) continue;
+        const centerBias = Math.abs(local.lx) / (af.length / 2 + Math.max(1, marginX))
+          + Math.abs(local.lz) / (af.width / 2 + Math.max(1, marginZ));
+        if (!best || centerBias < best.centerBias) best = { af, local, centerBias };
+      }
+      return best;
+    }
+
     // The flattened pad height under an airfield (used by terrain too).
     // The "pad" is an apron rectangle wider than the runway itself so that
     // the runway, hangar, tower and wind sock all sit on perfectly flat
@@ -616,11 +682,7 @@
       // returns {affect: 0..1, target: y, af} or null
       let best = null;
       for (const af of AIRFIELDS) {
-        const dx = x - af.x, dz = z - af.z;
-        // rotate into runway-local
-        const c = Math.cos(-af.heading), s = Math.sin(-af.heading);
-        const lx = dx * c - dz * s;
-        const lz = dx * s + dz * c;
+        const { lx, lz } = getAirfieldLocalPosition(af, x, z);
         // Apron half-extents — generous enough to clear every building plus
         // a margin so the chunk grid (≈ 9 m vertex spacing) always has at
         // least one fully-clamped vertex beyond every visual element.
@@ -959,18 +1021,27 @@
       pole.position.set(af.length/2 + 2, 3, af.width/2 + 2);
       pole.castShadow = true;
       g.add(pole);
-      const sockMat = new THREE.MeshStandardMaterial({ color: 0xd8523a, roughness: 0.7 });
-      const sockGeo = new THREE.ConeGeometry(0.7, 2.4, 8, 1, true);
+      const sockLength = 2.5;
+      const sockMouthRadius = 0.58;
+      const sockTailRadius = 0.12;
+      const sockMat = new THREE.MeshStandardMaterial({ color: 0xd8523a, roughness: 0.7, side: THREE.DoubleSide });
+      const sockGeo = new THREE.CylinderGeometry(sockTailRadius, sockMouthRadius, sockLength, 14, 1, true);
+      sockGeo.translate(0, sockLength / 2, 0);
       const sockYaw = new THREE.Group();
-      sockYaw.position.set(af.length/2 + 4, 5.7, af.width/2 + 2);
+      sockYaw.position.set(af.length/2 + 2, 5.85, af.width/2 + 2);
       g.add(sockYaw);
       const sockPitch = new THREE.Group();
       sockYaw.add(sockPitch);
       const sock = new THREE.Mesh(sockGeo, sockMat);
-      sock.rotation.z = -Math.PI / 2;
+      sock.rotation.z = Math.PI / 2;
       sockPitch.add(sock);
-      // Inner cone: slightly darker and rendered only on the inner faces so the
-      // windsock interior isn't fully transparent when viewed from inside.
+      const cuffLen = 0.42;
+      const cuffGeo = new THREE.CylinderGeometry(0.42, sockMouthRadius, cuffLen, 14, 1, true);
+      cuffGeo.translate(0, cuffLen / 2, 0);
+      const cuff = new THREE.Mesh(cuffGeo, new THREE.MeshStandardMaterial({ color: 0xf4ead0, roughness: 0.85, side: THREE.DoubleSide }));
+      cuff.rotation.z = sock.rotation.z;
+      sockPitch.add(cuff);
+      // Inner shell: slightly darker so the sock still reads as cloth from inside.
       const innerMat = new THREE.MeshStandardMaterial({ color: 0xb43f2e, roughness: 0.7, side: THREE.BackSide });
       const innerSock = new THREE.Mesh(sockGeo, innerMat);
       innerSock.rotation.z = sock.rotation.z;
@@ -1024,8 +1095,8 @@
       for (const af of AIRFIELDS) {
         if (!af.windVisual) continue;
         const wind = getAirfieldWind(af, timeSec);
-        af.windVisual.yaw.rotation.y = bearingDegToYawRad(wind.toDeg) - af.heading;
-        af.windVisual.pitch.rotation.z = -0.22 - Math.min(0.55, wind.speedKnots / 26) + wind.flutter * 0.08;
+        af.windVisual.yaw.rotation.y = bearingDegToYawRad(wind.fromDeg) - af.heading;
+        af.windVisual.pitch.rotation.z = 0.22 + Math.min(0.55, wind.speedKnots / 26) + wind.flutter * 0.08;
       }
     }
 
@@ -1405,7 +1476,7 @@
         flight.velocity.y = Math.max(0, vy);
         // Are we on a runway? check airfield flatten
         const onPad = airfieldFlatten(flight.position.x, flight.position.z);
-        const onRunway = onPad && onPad.affect > 0.9;
+        const onRunway = !!getRunwayContact(flight.position.x, flight.position.z, 1.5, 1.5);
         // Pitch/roll near level?
         tmpUp.set(0,1,0).applyQuaternion(flight.quat);
         const levelness = tmpUp.y; // 1 == perfectly level
@@ -1670,9 +1741,17 @@
     function pickBestRunway(af, fromX, fromZ) {
       // Inbound desired course from current position toward the airfield.
       const inbound = bearingDegFromRad(Math.atan2(af.x - fromX, -(af.z - fromZ)));
+      const wind = getAirfieldWind(af);
       return runwayCandidates(af)
-        .map(candidate => ({ candidate, diff: smallestAngleDiffDeg(candidate.courseDeg, inbound) }))
-        .sort((a, b) => a.diff - b.diff)[0].candidate;
+        .map(candidate => {
+          const inboundScore = 1 - smallestAngleDiffDeg(candidate.courseDeg, inbound) / 180;
+          const headwindScore = 1 - smallestAngleDiffDeg(candidate.courseDeg, wind.fromDeg) / 180;
+          return {
+            candidate,
+            score: inboundScore * 0.65 + headwindScore * 0.35,
+          };
+        })
+        .sort((a, b) => b.score - a.score)[0].candidate;
     }
 
     function pickRunwayByHeading(af, headingDeg) {
@@ -1980,11 +2059,7 @@
         const horiz = Math.hypot(flight.velocity.x, flight.velocity.z);
         let onRunway = false;
         try {
-          if (currentMail && currentMail.to) onRunway = isOnRunway(currentMail.to, flight.position.x, flight.position.z, 4);
-          if (!currentMail) {
-            const nf = nearestAirfield(flight.position.x, flight.position.z);
-            if (nf) onRunway = isOnRunway(nf, flight.position.x, flight.position.z, 4);
-          }
+          onRunway = !!getRunwayContact(flight.position.x, flight.position.z, 10, 5);
         } catch (e) { onRunway = false; }
         const stopped = horiz < 0.7 && flight.onGround;
 
@@ -2165,9 +2240,40 @@
       return best;
     }
 
-    function buildRadioExchange({ callsign, currentAirfield, destinationAirfield, fromCompassLong, toCompassLong, planeHeadingDeg, onGround, stopped }) {
-      const offRunwayGroundCall = onGround && stopped && !isOnRunway(currentAirfield, flight.position.x, flight.position.z, 4);
-      if (!offRunwayGroundCall && onGround) {
+    function buildRadioExchange({
+      callsign,
+      currentAirfield,
+      destinationAirfield,
+      currentRelativeLong,
+      destinationRelativeLong,
+      courseToDestinationLong,
+      planeHeadingDeg,
+      onGround,
+      stopped,
+    }) {
+      const runwayHere = getRunwayContact(flight.position.x, flight.position.z, 10, 5);
+      const onCurrentRunway = runwayHere && runwayHere.af.id === currentAirfield.id;
+      const onDestinationRunway = runwayHere && runwayHere.af.id === destinationAirfield.id;
+      const distToDestination = Math.hypot(destinationAirfield.x - flight.position.x, destinationAirfield.z - flight.position.z);
+      if (onGround && onDestinationRunway && stopped) {
+        const wind = getAirfieldWind(destinationAirfield);
+        return {
+          responses: [
+            {
+              who: callsign.toUpperCase(),
+              text: `${destinationAirfield.tower}, ${callsign} is down and stopped on the runway at ${destinationAirfield.name} with the mail aboard.`,
+              tower: false,
+            },
+            {
+              who: destinationAirfield.tower.toUpperCase(),
+              text: `${callsign}, ${destinationAirfield.tower}, roger. Mail received. Taxi clear when able. ${formatWindCall(wind)}`,
+              tower: true,
+            },
+          ],
+        };
+      }
+
+      if (onGround && onCurrentRunway) {
         const wind = getAirfieldWind(currentAirfield);
         const departureDirection = bearingDegToCompassLong(planeHeadingDeg);
         const departurePhrase = formatDepartureDirection(departureDirection);
@@ -2176,12 +2282,12 @@
           responses: [
             {
               who: callsign.toUpperCase(),
-              text: `This is ${callsign}, on the ground at ${currentAirfield.name}, ready to depart for ${destinationAirfield.name}. Request departure runway for departure ${departurePhrase}.`,
+              text: `${currentAirfield.tower}, ${callsign} at ${currentAirfield.name}, ready for departure to ${destinationAirfield.name}, departing ${departurePhrase}. Request departure runway.`,
               tower: false,
             },
             {
               who: currentAirfield.tower.toUpperCase(),
-              text: `Roger ${callsign}, this is ${currentAirfield.tower}. Depart runway ${depart.runway} for departure ${departurePhrase}. ${formatWindCall(wind)}`,
+              text: `${callsign}, ${currentAirfield.tower}, roger. Depart Runway ${depart.runway}, departure ${departurePhrase}. ${formatWindCall(wind)}`,
               tower: true,
             },
           ],
@@ -2189,16 +2295,22 @@
       }
 
       const landing = pickBestRunway(destinationAirfield, flight.position.x, flight.position.z);
+      const arrivalWind = getAirfieldWind(destinationAirfield);
+      const nearPattern = distToDestination < 1400;
       return {
         responses: [
           {
             who: callsign.toUpperCase(),
-            text: `This is ${callsign}, I'm just ${fromCompassLong} of ${currentAirfield.name}, can I get a direction for ${destinationAirfield.name}?`,
+            text: nearPattern
+              ? `${destinationAirfield.tower}, ${callsign}, ${destinationRelativeLong} of ${destinationAirfield.name}, joining the pattern. Request landing runway.`
+              : `${destinationAirfield.tower}, ${callsign}, currently ${currentRelativeLong} of ${currentAirfield.name}, inbound to ${destinationAirfield.name}. Request vectors or suggested heading.`,
             tower: false,
           },
           {
             who: destinationAirfield.tower.toUpperCase(),
-            text: `Roger ${callsign}, this is ${destinationAirfield.tower}. Head ${toCompassLong}, expect Runway ${landing.runway} for landing.`,
+            text: nearPattern
+              ? `${callsign}, ${destinationAirfield.tower}, roger. Join from the ${destinationRelativeLong} side for Runway ${landing.runway}. ${formatWindCall(arrivalWind)}`
+              : `${callsign}, ${destinationAirfield.tower}, roger. Fly ${courseToDestinationLong} toward ${destinationAirfield.name}, expect Runway ${landing.runway}. ${formatWindCall(arrivalWind)}`,
             tower: true,
           },
         ],
@@ -2227,13 +2339,10 @@
 
       const callsign = 'Yellow-Tail Niner';
       const me = nearestAirfield(flight.position.x, flight.position.z);
-      // direction from airfield to me → e.g. "South South West of Hawthorne Field"
-      const fromCompass = compassBetween(me.x, me.z, flight.position.x, flight.position.z);
-      const fromCompassLong = COMPASS_LONG[fromCompass];
-      // direction toward destination
-      const toCompass = compassBetween(flight.position.x, flight.position.z, currentMail.to.x, currentMail.to.z);
-      const toCompassLong = COMPASS_LONG[toCompass];
       const dest = currentMail.to;
+      const currentRelativeLong = COMPASS_LONG[compassBetween(me.x, me.z, flight.position.x, flight.position.z)];
+      const destinationRelativeLong = COMPASS_LONG[compassBetween(dest.x, dest.z, flight.position.x, flight.position.z)];
+      const courseToDestinationLong = COMPASS_LONG[compassBetween(flight.position.x, flight.position.z, dest.x, dest.z)];
       const stopped = Math.hypot(flight.velocity.x, flight.velocity.z) < 0.7;
       tmpForward.set(1, 0, 0).applyQuaternion(flight.quat);
       const planeHeadingDeg = bearingDegFromRad(Math.atan2(tmpForward.x, -tmpForward.z));
@@ -2241,8 +2350,9 @@
         callsign,
         currentAirfield: me,
         destinationAirfield: dest,
-        fromCompassLong,
-        toCompassLong,
+        currentRelativeLong,
+        destinationRelativeLong,
+        courseToDestinationLong,
         planeHeadingDeg,
         onGround: flight.onGround,
         stopped,
@@ -2271,11 +2381,61 @@
       'arrowup','arrowdown','arrowleft','arrowright',
       'shift',' ','spacebar','[',']','/'
     ]);
+    let paused = false;
+    function isHelpOpen() {
+      return document.getElementById('help-modal').classList.contains('show');
+    }
+    function isPauseOpen() {
+      return document.getElementById('pause-modal').classList.contains('show');
+    }
+    function openHelp() {
+      closePauseMenu();
+      document.getElementById('help-modal').classList.add('show');
+    }
+    function closeHelp() {
+      document.getElementById('help-modal').classList.remove('show');
+    }
+    function openPauseMenu() {
+      closeHelp();
+      closeAllZoom();
+      paused = true;
+      keys.clear();
+      document.getElementById('pause-modal').classList.add('show');
+    }
+    function closePauseMenu() {
+      paused = false;
+      lastT = performance.now();
+      document.getElementById('pause-modal').classList.remove('show');
+    }
+    function togglePauseMenu() {
+      if (isPauseOpen()) closePauseMenu();
+      else openPauseMenu();
+    }
     addEventListener('keydown', e => {
       const k = e.key.toLowerCase();
       const isGameplay = GAMEPLAY_KEYS.has(k) || e.code === 'Space';
-      if (isGameplay) e.preventDefault();
+      const isHelpShortcut = e.key === '?';
+      const isEscape = e.key === 'Escape';
+      if (isGameplay || isHelpShortcut || isEscape) e.preventDefault();
       if (e.repeat) return;
+      if (isHelpShortcut) {
+        if (isHelpOpen()) closeHelp();
+        else openHelp();
+        return;
+      }
+      if (isEscape) {
+        if (isHelpOpen()) {
+          closeHelp();
+          return;
+        }
+        if (Object.values(zoomState).some(Boolean)) {
+          closeAllZoom();
+          return;
+        }
+        togglePauseMenu();
+        return;
+      }
+      if (paused || isHelpOpen() || isPauseOpen()) return;
       keys.add(k);
       if (e.code === 'Space') { transmit(); }
     });
@@ -2439,17 +2599,6 @@
       glass.addColorStop(1, 'rgba(255,255,255,0)');
       ctx.fillStyle = glass;
       ctx.beginPath(); ctx.arc(cx, cy, r * 0.9, 0, Math.PI * 2); ctx.fill();
-      // Numeric heading badge at the bottom
-      const deg = ((headingRad * 180 / Math.PI) % 360 + 360) % 360;
-      const card16 = COMPASS_16[Math.round(deg / 22.5) % 16];
-      ctx.fillStyle = 'rgba(28,17,8,0.85)';
-      const badgeW = r * 0.7, badgeH = r * 0.22;
-      ctx.beginPath();
-      ctx.roundRect(cx - badgeW / 2, cy + r * 0.5, badgeW, badgeH, 6);
-      ctx.fill();
-      ctx.fillStyle = '#fbe6a8';
-      ctx.font = `bold ${Math.round(r * 0.13)}px "Courier New", monospace`;
-      ctx.fillText(`${String(Math.round(deg)).padStart(3, '0')}°  ${card16}`, cx, cy + r * 0.5 + badgeH / 2 + 1);
     }
     function drawCompass(headingRad) {
       drawCompassFace(compassCtx, compassCnv.width, compassCnv.height, headingRad);
@@ -2457,6 +2606,25 @@
 
     const clockCnv = document.getElementById('clock-canvas');
     const clockCtx = clockCnv.getContext('2d');
+    let gameTimeOffsetMs = 0;
+    function getGameDate(baseMs = Date.now()) {
+      return new Date(baseMs + gameTimeOffsetMs);
+    }
+    function formatClockLabel(date) {
+      return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    }
+    function resetGameTimeOffset() {
+      gameTimeOffsetMs = 0;
+      setStatus(`Clock synced to local time ${formatClockLabel(getGameDate())}.`, 1800);
+    }
+    function setGameClockHour(hour24) {
+      const wallNow = Date.now();
+      const current = getGameDate(wallNow);
+      const target = new Date(current.getTime());
+      target.setHours(hour24, 0, 0, 0);
+      gameTimeOffsetMs = target.getTime() - wallNow;
+      setStatus(`Clock set to ${formatClockLabel(target)}.`, 1800);
+    }
     function drawClockFace(ctx, w, h, date) {
       const cx = w/2, cy = h/2, r = Math.min(w, h)/2 - 8;
       ctx.clearRect(0, 0, w, h);
@@ -2517,6 +2685,28 @@
     }
     function drawClock(date) {
       drawClockFace(clockCtx, clockCnv.width, clockCnv.height, date);
+    }
+    function handleZoomClockSet(clientX, clientY) {
+      const rect = zoomClockCnv.getBoundingClientRect();
+      const x = ((clientX - rect.left) / rect.width) * zoomClockCnv.width;
+      const y = ((clientY - rect.top) / rect.height) * zoomClockCnv.height;
+      const cx = zoomClockCnv.width / 2;
+      const cy = zoomClockCnv.height / 2;
+      const dx = x - cx;
+      const dy = y - cy;
+      const dist = Math.hypot(dx, dy);
+      const r = Math.min(zoomClockCnv.width, zoomClockCnv.height) / 2 - 8;
+      if (dist < r / 3) {
+        resetGameTimeOffset();
+        return;
+      }
+      if (dist > r * 0.86) return;
+      const ang = Math.atan2(dy, dx);
+      const normalized = (ang + Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
+      const hour12 = ((Math.round(normalized / (Math.PI * 2 / 12)) + 11) % 12) + 1;
+      const isPmRing = dist >= (r * 2) / 3;
+      const hour24 = isPmRing ? (hour12 % 12) + 12 : (hour12 % 12);
+      setGameClockHour(hour24);
     }
 
     // ----- Throttle quadrant (vertical brass lever) -----
@@ -2653,11 +2843,8 @@
     // ======================================================================
     let deliveryInProgress = false;
     function isOnRunway(af, x, z, margin = 3) {
-      const dx = x - af.x, dz = z - af.z;
-      const c = Math.cos(-af.heading), s = Math.sin(-af.heading);
-      const lx = dx * c - dz * s;
-      const lz = dx * s + dz * c;
-      return Math.abs(lx) <= af.length / 2 + margin && Math.abs(lz) <= af.width / 2 + margin;
+      const local = getAirfieldLocalPosition(af, x, z);
+      return isWithinRunwayBounds(af, local.lx, local.lz, margin, margin * 0.65);
     }
     async function playDeliveryAnimation() {
       const mailWrap = document.getElementById('mail-wrap');
@@ -2680,7 +2867,8 @@
       const stopped = Math.hypot(flight.velocity.x, flight.velocity.z) < 1.0;
       if (!stopped) return;
       const dest = currentMail.to;
-      if (!isOnRunway(dest, flight.position.x, flight.position.z, 8)) return;
+      const runwayContact = getRunwayContact(flight.position.x, flight.position.z, 12, 6);
+      if (!runwayContact || runwayContact.af.id !== dest.id) return;
       deliveryInProgress = true;
       setStatus(`✉  Delivered to ${dest.name}!`, 3500);
       playDeliveryAnimation().finally(() => {
@@ -2715,6 +2903,12 @@
       let dt = (now - lastT) / 1000;
       if (dt > 0.05) dt = 0.05; // cap big jumps
       lastT = now;
+
+      if (paused) {
+        composer.render();
+        requestAnimationFrame(frame);
+        return;
+      }
 
       // Inputs (raw target from keys/touch)
       const targetPitch = (keys.has('s') || keys.has('arrowdown') ? 1 : 0)
@@ -2772,7 +2966,7 @@
       });
 
       // Sun follows real time
-      const now2 = new Date();
+      const now2 = getGameDate();
       updateSun(now2);
 
       // Heading for compass: forward direction in world
@@ -2816,14 +3010,15 @@
     try { const wrap = document.getElementById('status-wrap'); if (wrap) wrap.style.display = 'none'; } catch (e) { /* noop */ }
 
     // Help modal wiring
-    document.getElementById('help-btn').addEventListener('click', () => {
-      document.getElementById('help-modal').classList.add('show');
-    });
-    document.getElementById('help-close').addEventListener('click', () => {
-      document.getElementById('help-modal').classList.remove('show');
-    });
+    document.getElementById('help-btn').addEventListener('click', openHelp);
+    document.getElementById('help-close').addEventListener('click', closeHelp);
     document.getElementById('help-modal').addEventListener('click', (e) => {
-      if (e.target.id === 'help-modal') e.currentTarget.classList.remove('show');
+      if (e.target.id === 'help-modal') closeHelp();
+    });
+    document.getElementById('pause-resume').addEventListener('click', closePauseMenu);
+    document.getElementById('pause-help').addEventListener('click', openHelp);
+    document.getElementById('pause-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'pause-modal') closePauseMenu();
     });
 
     // First user gesture resumes/creates audio and starts deferred oscillators
@@ -2877,6 +3072,9 @@
     document.getElementById('mail-wrap').addEventListener('click', () => openZoom('mail'));
     document.getElementById('clock-wrap').addEventListener('click', () => openZoom('clock'));
     document.getElementById('compass-wrap').addEventListener('click', () => openZoom('compass'));
+    zoomClockCnv.addEventListener('click', (e) => {
+      handleZoomClockSet(e.clientX, e.clientY);
+    });
     for (const m of document.querySelectorAll('.zoom-modal')) {
       m.addEventListener('click', (e) => {
         if (e.target === m || e.target.classList.contains('zoom-close') || e.target.dataset.close) {
@@ -2885,9 +3083,6 @@
         }
       });
     }
-    addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeAllZoom();
-    });
   </script>
   <script src="parental.js" defer></script>
 </body>
