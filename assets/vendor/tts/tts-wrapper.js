@@ -179,7 +179,7 @@
       // Prefer browser TTS first when available.
       try {
         await speakWithBrowser(text);
-        return null;
+        return { handled: true, mode: 'browser' };
       } catch (e) {
         // Fall through to eSpeak/tone fallback.
       }
