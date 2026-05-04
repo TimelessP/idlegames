@@ -52,6 +52,38 @@ function handleTimerCancel(id) {
   clearTimerSchedule(String(id));
 }
 
+async function precacheUrl(cache, url) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (!response || !response.ok) {
+        throw new Error(`HTTP ${response ? response.status : 'no-response'}`);
+      }
+      await cache.put(url, response.clone());
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`${url}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+async function precacheAll(cache, urls) {
+  const failures = [];
+  for (const url of urls) {
+    try {
+      await precacheUrl(cache, url);
+    } catch (error) {
+      failures.push(String(error));
+    }
+  }
+  if (failures.length) {
+    console.error('IdleGames precache failed:', failures);
+    throw new Error(`Precache failed for ${failures.length} URL(s)`);
+  }
+}
+
 async function fireTimer(id) {
   const timer = timerData.get(id);
   if (!timer) {
@@ -89,7 +121,7 @@ async function notifyTimerCompletion(timer) {
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS))
+    caches.open(CACHE_NAME).then((cache) => precacheAll(cache, PRECACHE_URLS))
   );
   self.skipWaiting();
 });

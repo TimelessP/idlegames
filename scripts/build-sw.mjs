@@ -165,6 +165,9 @@ async function collectPrecache(currentDir) {
   for (const entry of entries) {
     const absPath = path.join(currentDir, entry.name);
     const relPath = path.relative(distDir, absPath).split(path.sep).join('/');
+    if (relPath === '.well-known' || relPath.startsWith('.well-known/')) {
+      continue;
+    }
     if (entry.isDirectory()) {
       await collectPrecache(absPath);
     } else {
