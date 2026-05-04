@@ -6,7 +6,7 @@
   if (window.ESPEAK_TTS) return;
   if (typeof EspeakModule === 'undefined' && typeof window.EspeakModule === 'undefined') return;
   const ModuleFactory = window.EspeakModule || EspeakModule;
-  const loaderBase = window.__ESPEAK_LOADER_BASE || '/assets/vendor/tts/';
+  const loaderBase = window.__ESPEAK_LOADER_BASE || new URL('./', document.currentScript?.src || window.location.href).toString();
   window.ESPEAK_TTS_READY = ModuleFactory({
     locateFile: function(path) {
       return loaderBase + path;

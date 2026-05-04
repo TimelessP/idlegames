@@ -61,6 +61,18 @@ async function copyTree(from, to) {
 
 await copyTree(projectRoot, distDir);
 
+async function removeIfExists(target) {
+  if (await fileExists(target)) {
+    await fs.rm(target, { recursive: true, force: true });
+  }
+}
+
+await removeIfExists(path.join(distDir, 'README.md'));
+await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'build.log'));
+await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'README.md'));
+await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'espeak-build'));
+await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'assets'));
+
 async function copyModuleFile(moduleSegments, destinationSegments) {
   const src = path.join(projectRoot, 'node_modules', ...moduleSegments);
   const dest = path.join(distDir, ...destinationSegments);

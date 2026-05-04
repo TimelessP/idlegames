@@ -19,6 +19,8 @@
   let _espeakTried = false;
   let _espeakLoaderFound = false;
   let _lastEspeakError = null;
+  const currentScriptSrc = document.currentScript?.src || new URL('./tts-wrapper.js', window.location.href).toString();
+  const wrapperBaseUrl = new URL('./', currentScriptSrc);
 
   function utf8ByteLength(text) {
     return new TextEncoder().encode(text).length;
@@ -65,10 +67,10 @@
       // but the current build writes the canonical loader pair at the top level
       // alongside espeak-loader.data.
       const loaderCandidates = [
-        '/assets/vendor/tts/espeak-loader.js',
-        '/assets/vendor/tts/assets/vendor/tts/assets/vendor/tts/espeak-loader.js'
+        new URL('espeak-loader.js', wrapperBaseUrl).toString(),
+        new URL('assets/vendor/tts/assets/vendor/tts/espeak-loader.js', wrapperBaseUrl).toString()
       ];
-      const shimUrl = '/assets/vendor/tts/espeak-loader-shim.js';
+      const shimUrl = new URL('espeak-loader-shim.js', wrapperBaseUrl).toString();
       const loadScript = (src) => new Promise((resolve) => {
         const s = document.createElement('script');
         s.src = src;
