@@ -15,6 +15,107 @@
 
 (function(){
   if (window.TTS_WASM) return; // don't override
+  let _espeakApi = null;
+  let _espeakTried = false;
+  let _espeakLoaderFound = false;
+  let _lastEspeakError = null;
+
+  function utf8ByteLength(text) {
+    return new TextEncoder().encode(text).length;
+  }
+
+  function writeUtf8ToHeap(Module, text, ptr, maxBytes) {
+    const bytes = new TextEncoder().encode(text);
+    const writable = Math.max(0, maxBytes - 1);
+    const count = Math.min(bytes.length, writable);
+    Module.HEAPU8.set(bytes.subarray(0, count), ptr);
+    Module.HEAPU8[ptr + count] = 0;
+    return count;
+  }
+
+  function createEspeakApiFromModule(Module) {
+    return {
+      speak: async function(text) {
+        if (!text) return { pcm: new Int16Array(0), sampleRate: 22050 };
+        const len = utf8ByteLength(text) + 1;
+        const ptr = Module._malloc(len);
+        writeUtf8ToHeap(Module, text, ptr, len);
+        const samples = Module._speak_text(ptr);
+        Module._free(ptr);
+        if (!samples || samples <= 0) {
+          return {
+            pcm: new Int16Array(0),
+            sampleRate: Module._get_sample_rate ? Module._get_sample_rate() : 22050,
+          };
+        }
+        const pcmPtr = Module._get_pcm_ptr();
+        const pcm = new Int16Array(Module.HEAP16.buffer, pcmPtr, samples).slice();
+        const sampleRate = Module._get_sample_rate ? Module._get_sample_rate() : 22050;
+        return { pcm: pcm, sampleRate };
+      }
+    };
+  }
+
+  async function tryLoadEspeak() {
+    if (_espeakTried) return _espeakApi;
+    _espeakTried = true;
+    try {
+      // Prefer the top-level Emscripten build first. Older runs left an extra
+      // nested bundle under assets/vendor/tts/assets/vendor/tts/assets/vendor/tts/,
+      // but the current build writes the canonical loader pair at the top level
+      // alongside espeak-loader.data.
+      const loaderCandidates = [
+        '/assets/vendor/tts/espeak-loader.js',
+        '/assets/vendor/tts/assets/vendor/tts/assets/vendor/tts/espeak-loader.js'
+      ];
+      const shimUrl = '/assets/vendor/tts/espeak-loader-shim.js';
+      const loadScript = (src) => new Promise((resolve) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = () => resolve(true);
+        s.onerror = () => resolve(false);
+        document.head.appendChild(s);
+      });
+      let loaderUrl = null;
+      for (const candidate of loaderCandidates) {
+        const head = await fetch(candidate, { method: 'HEAD' });
+        if (head.ok) {
+          loaderUrl = candidate;
+          _espeakLoaderFound = true;
+          break;
+        }
+      }
+      if (!loaderUrl) return null;
+      window.__ESPEAK_LOADER_BASE = loaderUrl.slice(0, loaderUrl.lastIndexOf('/') + 1);
+      const loaderOk = await loadScript(loaderUrl);
+      if (!loaderOk) return null;
+      const moduleFactory = window.EspeakModule || window.ESPEAK_MODULE || null;
+      if (typeof moduleFactory === 'function') {
+        const Module = await moduleFactory({
+          locateFile: function(path) {
+            return window.__ESPEAK_LOADER_BASE + path;
+          }
+        });
+        _lastEspeakError = null;
+        _espeakApi = createEspeakApiFromModule(Module);
+        window.ESPEAK_TTS = _espeakApi;
+        return _espeakApi;
+      }
+      if (!window.ESPEAK_TTS) {
+        const shimOk = await loadScript(shimUrl);
+        if (!shimOk) return null;
+      }
+      if (window.ESPEAK_TTS_READY) {
+        await window.ESPEAK_TTS_READY;
+      }
+      _espeakApi = window.ESPEAK_TTS || null;
+      if (!_espeakApi) _lastEspeakError = new Error('ESPEAK_TTS was not created after loader init');
+      return _espeakApi;
+    } catch (e) {
+      _lastEspeakError = e;
+      return null;
+    }
+  }
 
   async function speakWithBrowser(text) {
     return new Promise((resolve, reject) => {
@@ -61,18 +162,49 @@
   }
 
   window.TTS_WASM = {
+    probe: async function() {
+      const api = await tryLoadEspeak();
+      return !!(api && typeof api.speak === 'function');
+    },
+    getState: function() {
+      return {
+        loaderFound: _espeakLoaderFound,
+        espeakReady: !!(_espeakApi && typeof _espeakApi.speak === 'function'),
+        lastError: _lastEspeakError ? String(_lastEspeakError) : null,
+      };
+    },
     speak: async function(text) {
-      // Prefer browser TTS if available
+      // Try espeak WASM loader first (if present)
+      try {
+        const api = await tryLoadEspeak();
+        if (api && typeof api.speak === 'function') {
+          // espeak-loader should return { pcm: Int16Array|ArrayBuffer, sampleRate }
+          const res = await api.speak(text);
+          if (res && res.pcm) return { pcm: (res.pcm instanceof Int16Array) ? res.pcm : new Int16Array(res.pcm), sampleRate: res.sampleRate || 22050 };
+        }
+      } catch (e) {
+        _lastEspeakError = e;
+      }
+
+      // Prefer browser TTS next
       try {
         await speakWithBrowser(text);
         return null;
       } catch (e) {
-        // Fall back to tiny JS synth that returns Int16 PCM
-        try {
-          return synthToPcmInt16(text, 22050);
-        } catch (err) {
-          return null;
+        // Only use the tiny synth when no real WASM loader assets exist at all.
+        // If espeak assets exist but failed to initialize, tones mask the routing bug.
+        if (!_espeakLoaderFound) {
+          try {
+            return synthToPcmInt16(text, 22050);
+          } catch (err) {
+            return null;
+          }
         }
+        console.warn('TTS routing: espeak loader present but unavailable; refusing tone fallback', {
+          lastEspeakError: _lastEspeakError ? String(_lastEspeakError) : null,
+          browserTtsError: String(e),
+        });
+        return null;
       }
     }
   };

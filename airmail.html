@@ -961,10 +961,23 @@
       g.add(pole);
       const sockMat = new THREE.MeshStandardMaterial({ color: 0xd8523a, roughness: 0.7 });
       const sockGeo = new THREE.ConeGeometry(0.7, 2.4, 8, 1, true);
+      const sockYaw = new THREE.Group();
+      sockYaw.position.set(af.length/2 + 4, 5.7, af.width/2 + 2);
+      g.add(sockYaw);
+      const sockPitch = new THREE.Group();
+      sockYaw.add(sockPitch);
       const sock = new THREE.Mesh(sockGeo, sockMat);
       sock.rotation.z = -Math.PI / 2;
-      sock.position.set(af.length/2 + 4, 5.7, af.width/2 + 2);
-      g.add(sock);
+      sockPitch.add(sock);
+      // Inner cone: slightly darker and rendered only on the inner faces so the
+      // windsock interior isn't fully transparent when viewed from inside.
+      const innerMat = new THREE.MeshStandardMaterial({ color: 0xb43f2e, roughness: 0.7, side: THREE.BackSide });
+      const innerSock = new THREE.Mesh(sockGeo, innerMat);
+      innerSock.rotation.z = sock.rotation.z;
+      // Slightly scale down to avoid z-fighting with outer shell
+      innerSock.scale.set(0.995, 0.995, 0.995);
+      sockPitch.add(innerSock);
+      af.windVisual = { yaw: sockYaw, pitch: sockPitch };
 
       // Hangar (a small barn)
       const hangarG = new THREE.Group();
@@ -1006,6 +1019,15 @@
       return g;
     }
     for (const af of AIRFIELDS) scene.add(buildAirfieldVisual(af));
+
+    function updateAirfieldWinds(timeSec) {
+      for (const af of AIRFIELDS) {
+        if (!af.windVisual) continue;
+        const wind = getAirfieldWind(af, timeSec);
+        af.windVisual.yaw.rotation.y = bearingDegToYawRad(wind.toDeg) - af.heading;
+        af.windVisual.pitch.rotation.z = -0.22 - Math.min(0.55, wind.speedKnots / 26) + wind.flutter * 0.08;
+      }
+    }
 
     // ======================================================================
     // BIPLANE — built from primitives, yellow with painted decals
@@ -1620,26 +1642,75 @@
     function bearingDegFromRad(rad) {
       return normalizeBearingDeg(rad * 180 / Math.PI);
     }
+    function bearingDegToYawRad(deg) {
+      const rad = THREE.MathUtils.degToRad(normalizeBearingDeg(deg));
+      const dx = Math.sin(rad);
+      const dz = -Math.cos(rad);
+      return Math.atan2(dz, dx);
+    }
+    function bearingDegToCompassLong(deg) {
+      const idx = Math.round(normalizeBearingDeg(deg) / 22.5) % 16;
+      return COMPASS_LONG[COMPASS_LABELS[idx]];
+    }
     function runwayNumberFromBearingDeg(deg) {
       let n = Math.round(normalizeBearingDeg(deg) / 10) % 36;
       if (n === 0) n = 36;
       return String(n).padStart(2, '0');
     }
-    function pickBestRunway(af, fromX, fromZ) {
-      // Runway axis points along local +X after af.heading transform.
+    function runwayCandidates(af) {
       const axisX = Math.cos(af.heading);
       const axisZ = -Math.sin(af.heading);
       const courseA = bearingDegFromRad(Math.atan2(axisX, -axisZ));
       const courseB = normalizeBearingDeg(courseA + 180);
+      return [courseA, courseB].map(courseDeg => ({
+        runway: runwayNumberFromBearingDeg(courseDeg),
+        courseDeg,
+      }));
+    }
+    function pickBestRunway(af, fromX, fromZ) {
       // Inbound desired course from current position toward the airfield.
       const inbound = bearingDegFromRad(Math.atan2(af.x - fromX, -(af.z - fromZ)));
-      const diffA = smallestAngleDiffDeg(courseA, inbound);
-      const diffB = smallestAngleDiffDeg(courseB, inbound);
-      const chosenCourse = diffA <= diffB ? courseA : courseB;
+      return runwayCandidates(af)
+        .map(candidate => ({ candidate, diff: smallestAngleDiffDeg(candidate.courseDeg, inbound) }))
+        .sort((a, b) => a.diff - b.diff)[0].candidate;
+    }
+
+    function pickRunwayByHeading(af, headingDeg) {
+      return runwayCandidates(af)
+        .map(candidate => ({ candidate, diff: smallestAngleDiffDeg(candidate.courseDeg, headingDeg) }))
+        .sort((a, b) => a.diff - b.diff)[0].candidate;
+    }
+    function pickDepartureRunway(af, departureDeg, windFromDeg) {
+      return runwayCandidates(af)
+        .map(candidate => {
+          const departureScore = 1 - smallestAngleDiffDeg(candidate.courseDeg, departureDeg) / 180;
+          const headwindScore = 1 - smallestAngleDiffDeg(candidate.courseDeg, windFromDeg) / 180;
+          return {
+            candidate,
+            score: departureScore * 0.7 + headwindScore * 0.3,
+          };
+        })
+        .sort((a, b) => b.score - a.score)[0].candidate;
+    }
+    function getAirfieldWind(af, timeSec = performance.now() * 0.001) {
+      const dirX = fbm(af.x * 0.0023 + timeSec * 0.017, af.z * 0.0021 - 37.4) - 0.5;
+      const dirZ = fbm(af.x * 0.0021 - 19.7, af.z * 0.0024 + timeSec * 0.015) - 0.5;
+      const dirScale = Math.max(0.0001, Math.hypot(dirX, dirZ));
+      const fromDeg = bearingDegFromRad(Math.atan2(dirX / dirScale, -(dirZ / dirScale)));
+      const speedKnots = 5 + fbm(af.x * 0.0037 + 71.2, af.z * 0.0033 + timeSec * 0.024) * 10;
+      const gust = fbm(af.x * 0.011 + timeSec * 0.12, af.z * 0.011 - 12.8) - 0.5;
       return {
-        runway: runwayNumberFromBearingDeg(chosenCourse),
-        courseDeg: chosenCourse,
+        fromDeg,
+        toDeg: normalizeBearingDeg(fromDeg + 180),
+        speedKnots: Math.round(speedKnots),
+        flutter: gust,
       };
+    }
+    function formatWindCall(wind) {
+      return `Wind ${bearingDegToCompassLong(wind.fromDeg)} at ${wind.speedKnots} knots.`;
+    }
+    function formatDepartureDirection(direction) {
+      return `toward the ${direction}`;
     }
 
     // TTS — Web Speech API. Try to pick two distinct English voices:
@@ -1695,7 +1766,20 @@
     // Kick off WASM loader (non-blocking). If you want to test offline TTS,
     // drop a wrapper at `/assets/vendor/tts/tts-wrapper.js` that sets
     // `window.TTS_WASM.speak = async (text) => ({ pcm: Int16Array, sampleRate: 22050 })`.
-    loadWasmTts().then(ok => { if (ok) console.log('WASM TTS loader: available'); });
+    loadWasmTts().then(async ok => {
+      if (!ok) return;
+      if (window.TTS_WASM && typeof window.TTS_WASM.probe === 'function') {
+        const ready = await window.TTS_WASM.probe();
+        const state = (typeof window.TTS_WASM.getState === 'function') ? window.TTS_WASM.getState() : null;
+        if (ready) {
+          console.log('WASM TTS loader: ready');
+        } else {
+          console.warn('WASM TTS loader: wrapper loaded, espeak unavailable', state);
+        }
+        return;
+      }
+      console.log('WASM TTS loader: available');
+    });
 
     function speak(text, opts = {}) {
       const minMs = Math.max(2200, text.length * 70);
@@ -2081,6 +2165,57 @@
       return best;
     }
 
+    function buildRadioExchange({ callsign, currentAirfield, destinationAirfield, fromCompassLong, toCompassLong, planeHeadingDeg, onGround, stopped }) {
+      const offRunwayGroundCall = onGround && stopped && !isOnRunway(currentAirfield, flight.position.x, flight.position.z, 4);
+      if (!offRunwayGroundCall && onGround) {
+        const wind = getAirfieldWind(currentAirfield);
+        const departureDirection = bearingDegToCompassLong(planeHeadingDeg);
+        const departurePhrase = formatDepartureDirection(departureDirection);
+        const depart = pickDepartureRunway(currentAirfield, planeHeadingDeg, wind.fromDeg);
+        return {
+          responses: [
+            {
+              who: callsign.toUpperCase(),
+              text: `This is ${callsign}, on the ground at ${currentAirfield.name}, ready to depart for ${destinationAirfield.name}. Request departure runway for departure ${departurePhrase}.`,
+              tower: false,
+            },
+            {
+              who: currentAirfield.tower.toUpperCase(),
+              text: `Roger ${callsign}, this is ${currentAirfield.tower}. Depart runway ${depart.runway} for departure ${departurePhrase}. ${formatWindCall(wind)}`,
+              tower: true,
+            },
+          ],
+        };
+      }
+
+      const landing = pickBestRunway(destinationAirfield, flight.position.x, flight.position.z);
+      return {
+        responses: [
+          {
+            who: callsign.toUpperCase(),
+            text: `This is ${callsign}, I'm just ${fromCompassLong} of ${currentAirfield.name}, can I get a direction for ${destinationAirfield.name}?`,
+            tower: false,
+          },
+          {
+            who: destinationAirfield.tower.toUpperCase(),
+            text: `Roger ${callsign}, this is ${destinationAirfield.tower}. Head ${toCompassLong}, expect Runway ${landing.runway} for landing.`,
+            tower: true,
+          },
+        ],
+      };
+    }
+
+    async function playRadioExchange(exchange) {
+      for (let i = 0; i < exchange.responses.length; i++) {
+        const entry = exchange.responses[i];
+        staticBurst(i === exchange.responses.length - 1 ? 0.60 : 0.56, 0.12);
+        showRadio(entry.who, entry.text);
+        await speak(entry.text, { tower: entry.tower, pitch: entry.tower ? 0.85 : 1.0, rate: 1.0 });
+        await new Promise(r => setTimeout(r, i === exchange.responses.length - 1 ? 600 : 250));
+      }
+      staticBurst(0.44, 0.09);
+    }
+
     let transmitting = false;
     async function transmit() {
       if (transmitting) return;
@@ -2099,22 +2234,23 @@
       const toCompass = compassBetween(flight.position.x, flight.position.z, currentMail.to.x, currentMail.to.z);
       const toCompassLong = COMPASS_LONG[toCompass];
       const dest = currentMail.to;
-      const landing = pickBestRunway(dest, flight.position.x, flight.position.z);
-
-      const line1 = `This is ${callsign}, I'm just ${fromCompassLong} of ${me.name}, can I get a direction for ${dest.name}?`;
-      const line2 = `Roger ${callsign}, this is ${dest.tower}. Head ${toCompassLong}, expect Runway ${landing.runway} for landing.`;
+      const stopped = Math.hypot(flight.velocity.x, flight.velocity.z) < 0.7;
+      tmpForward.set(1, 0, 0).applyQuaternion(flight.quat);
+      const planeHeadingDeg = bearingDegFromRad(Math.atan2(tmpForward.x, -tmpForward.z));
+      const exchange = buildRadioExchange({
+        callsign,
+        currentAirfield: me,
+        destinationAirfield: dest,
+        fromCompassLong,
+        toCompassLong,
+        planeHeadingDeg,
+        onGround: flight.onGround,
+        stopped,
+      });
 
       try {
         if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume();
-        staticBurst(0.56, 0.12);
-        showRadio(callsign.toUpperCase(), line1);
-        await speak(line1, { tower: false });
-        await new Promise(r => setTimeout(r, 250));
-        staticBurst(0.60, 0.12);
-        showRadio(dest.tower.toUpperCase(), line2);
-        await speak(line2, { tower: true, pitch: 0.85, rate: 1.0 });
-        await new Promise(r => setTimeout(r, 600));
-        staticBurst(0.44, 0.09);
+        await playRadioExchange(exchange);
       } finally {
         hideRadio();
         btn.classList.remove('transmitting');
@@ -2541,10 +2677,10 @@
     function checkDelivery() {
       if (!flight.onGround || deliveryInProgress) return;
       if (!currentMail) return;
-      const stopped = Math.hypot(flight.velocity.x, flight.velocity.z) < 0.7;
+      const stopped = Math.hypot(flight.velocity.x, flight.velocity.z) < 1.0;
       if (!stopped) return;
       const dest = currentMail.to;
-      if (!isOnRunway(dest, flight.position.x, flight.position.z, 4)) return;
+      if (!isOnRunway(dest, flight.position.x, flight.position.z, 8)) return;
       deliveryInProgress = true;
       setStatus(`✉  Delivered to ${dest.name}!`, 3500);
       playDeliveryAnimation().finally(() => {
@@ -2645,6 +2781,7 @@
       drawCompass(heading);
       drawClock(now2);
       drawThrottle(flight.throttle);
+      updateAirfieldWinds(now2.getTime() * 0.001);
 
       // Update propeller audio each frame
       try { if (propSound && typeof propSound.update === 'function') propSound.update(dt); } catch (e) { /* noop */ }
