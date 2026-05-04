@@ -176,7 +176,15 @@
       };
     },
     speak: async function(text) {
-      // Try espeak WASM loader first (if present)
+      // Prefer browser TTS first when available.
+      try {
+        await speakWithBrowser(text);
+        return null;
+      } catch (e) {
+        // Fall through to eSpeak/tone fallback.
+      }
+
+      // Try espeak WASM loader next (if present).
       try {
         const api = await tryLoadEspeak();
         if (api && typeof api.speak === 'function') {
@@ -188,23 +196,14 @@
         _lastEspeakError = e;
       }
 
-      // Prefer browser TTS next
+      // Last resort: synthesize a tiny offline tone-based voice.
       try {
-        await speakWithBrowser(text);
-        return null;
+        return synthToPcmInt16(text, 22050);
       } catch (e) {
-        // Only use the tiny synth when no real WASM loader assets exist at all.
-        // If espeak assets exist but failed to initialize, tones mask the routing bug.
-        if (!_espeakLoaderFound) {
-          try {
-            return synthToPcmInt16(text, 22050);
-          } catch (err) {
-            return null;
-          }
-        }
-        console.warn('TTS routing: espeak loader present but unavailable; refusing tone fallback', {
+        console.warn('TTS routing failed across browser, eSpeak, and tone fallback', {
+          loaderFound: _espeakLoaderFound,
           lastEspeakError: _lastEspeakError ? String(_lastEspeakError) : null,
-          browserTtsError: String(e),
+          toneError: String(e),
         });
         return null;
       }
