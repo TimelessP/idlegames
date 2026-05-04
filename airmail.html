@@ -747,6 +747,7 @@
     const WORLD_SCALE = 1;           // miniature feel: small numbers
     const HEIGHT_AMP = 38;
     const SEA_LEVEL = -2;
+    const MOBILE_TERRAIN_SHADOW_RECEIVE_DISTANCE = 260;
 
     // ======================================================================
     // SEEDED RNG (mulberry32)
@@ -966,10 +967,9 @@
     renderer.setSize(innerWidth, innerHeight);
     renderer.shadowMap.enabled = true;
     // PCFSoftShadowMap was deprecated in r182; PCFShadowMap is now the soft
-    // PCF path. Keep VSM on desktop for the softer runway shadow, but fall
-    // back to PCF on coarse-pointer/mobile devices where VSM has produced
-    // over-dark aircraft self-shadowing.
-    renderer.shadowMap.type = prefersMobileUI ? THREE.PCFShadowMap : THREE.VSMShadowMap;
+    // PCF path. Use PCF on desktop as well, since VSM was producing a terrain
+    // moire/shadow-acne pattern at distance.
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.3;
@@ -1064,9 +1064,11 @@
     const sunLight = new THREE.DirectionalLight(0xfff1cc, 2.4);
     sunLight.castShadow = true;
     sunLight.shadow.mapSize.set(2048, 2048);
-    sunLight.shadow.camera.near = 1;
-    sunLight.shadow.camera.far = 600;
-    const sd = 220;
+    const shadowHalfSpan = prefersMobileUI ? 360 : 220;
+    const shadowDistance = prefersMobileUI ? 260 : 200;
+    sunLight.shadow.camera.near = prefersMobileUI ? 20 : 1;
+    sunLight.shadow.camera.far = prefersMobileUI ? 420 : 600;
+    const sd = shadowHalfSpan;
     sunLight.shadow.camera.left = -sd;
     sunLight.shadow.camera.right = sd;
     sunLight.shadow.camera.top = sd;
@@ -1079,10 +1081,9 @@
       sunLight.shadow.normalBias = 0.12;
       sunLight.shadow.radius = 1;
     } else {
-      sunLight.shadow.bias = -0.0004;
-      sunLight.shadow.normalBias = 0.02;
-      sunLight.shadow.radius = 4;     // VSM softness on desktop
-      sunLight.shadow.blurSamples = 8;
+      sunLight.shadow.bias = 0.0001;
+      sunLight.shadow.normalBias = 0.04;
+      sunLight.shadow.radius = 2;
     }
     scene.add(sunLight);
     scene.add(sunLight.target);
@@ -1218,8 +1219,22 @@
       geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
       const mesh = new THREE.Mesh(geo, terrainMat);
       mesh.position.set(ox, 0, oz);
-      mesh.receiveShadow = true;
+      mesh.receiveShadow = lod !== 'far';
+      mesh.userData.chunkLod = lod;
       return mesh;
+    }
+
+    function updateTerrainShadowReceivers(centerX, centerZ) {
+      if (!prefersMobileUI) return;
+      const maxDistSq = MOBILE_TERRAIN_SHADOW_RECEIVE_DISTANCE * MOBILE_TERRAIN_SHADOW_RECEIVE_DISTANCE;
+      for (const mesh of terrainChunks.values()) {
+        const dx = mesh.position.x - centerX;
+        const dz = mesh.position.z - centerZ;
+        mesh.receiveShadow = (dx * dx + dz * dz) <= maxDistSq;
+      }
+      for (const mesh of farChunks.values()) {
+        mesh.receiveShadow = false;
+      }
     }
 
     const farChunks = new Map(); // far-LOD chunks (key uses double size)
@@ -1275,6 +1290,7 @@
           farChunks.set(k, m);
         }
       }
+      updateTerrainShadowReceivers(centreX, centreZ);
     }
 
     // ======================================================================
@@ -2435,6 +2451,8 @@
       masterGain: null,
       effectsGain: null,
     };
+    let pauseAudioMuted = false;
+    let synthPausedByMenu = false;
     function ensureAudioMix() {
       if (!audioCtx || audioMix.masterGain) return;
       audioMix.masterGain = audioCtx.createGain();
@@ -2449,8 +2467,24 @@
     function applyAudioSettings() {
       if (!audioCtx) return;
       ensureAudioMix();
-      if (audioMix.masterGain) audioMix.masterGain.gain.value = gameSettings.masterVolume;
+      if (audioMix.masterGain) audioMix.masterGain.gain.value = pauseAudioMuted ? 0 : gameSettings.masterVolume;
       if (audioMix.effectsGain) audioMix.effectsGain.gain.value = gameSettings.effectsVolume;
+    }
+    function syncPausedAudioState(isPaused) {
+      pauseAudioMuted = isPaused;
+      applyAudioSettings();
+      if (!synth) return;
+      if (isPaused) {
+        if (synth.speaking && !synth.paused) {
+          synth.pause();
+          synthPausedByMenu = true;
+        }
+        return;
+      }
+      if (synthPausedByMenu && synth.paused) {
+        synth.resume();
+      }
+      synthPausedByMenu = false;
     }
     function kickAudioFromGesture() {
       if (!audioCtx) return;
@@ -2917,6 +2951,7 @@
     function openPauseMenu(panel = 'main') {
       closeAllZoom();
       paused = true;
+      syncPausedAudioState(true);
       keys.clear();
       showPausePanel(panel);
       syncSettingsUI();
@@ -2924,6 +2959,7 @@
     }
     function closePauseMenu() {
       paused = false;
+      syncPausedAudioState(false);
       lastT = performance.now();
       document.getElementById('pause-modal').classList.remove('show');
       showPausePanel('main');
@@ -3477,6 +3513,7 @@
     // SUN POSITION (based on real local time)
     // ======================================================================
     const sunDir = new THREE.Vector3();
+    const shadowAnchor = new THREE.Vector3();
     function updateSun(date) {
       const hours = date.getHours() + date.getMinutes()/60 + date.getSeconds()/3600;
       // Map 0..24 -> sun arc. Daylight ~6..20.
@@ -3490,9 +3527,12 @@
       const z = -0.3;                          // tilt south slightly
       sunDir.set(x, y, z).normalize();
       skyUniforms.uSunDir.value.copy(sunDir);
-      // light position relative to plane
-      sunLight.position.copy(plane.position).addScaledVector(sunDir, 200);
-      sunLight.target.position.copy(plane.position);
+      // Keep the shadow box centered on the active gameplay view rather than
+      // hard-locking it to the plane origin. On Android Chrome the tighter,
+      // plane-centered box could present as a moving sunlight/shadow frustum.
+      shadowAnchor.copy(plane.position).lerp(camLook, prefersMobileUI ? 0.45 : 0.25);
+      sunLight.position.copy(shadowAnchor).addScaledVector(sunDir, shadowDistance);
+      sunLight.target.position.copy(shadowAnchor);
       // night dim
       const dayness = Math.max(0, sunDir.y);
       sunLight.intensity = 0.6 + dayness * 3.2;
@@ -3626,6 +3666,7 @@
       updateFlight(dt);
       updateCamera(dt);
       ensureChunks(flight.position.x, flight.position.z);
+      updateTerrainShadowReceivers(flight.position.x, flight.position.z);
 
       // Sky dome and sea follow the camera so the world feels endless
       sky.position.copy(camera.position);
