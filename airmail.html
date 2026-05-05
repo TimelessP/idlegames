@@ -1487,59 +1487,334 @@
       clearcoat: 0.6,
       clearcoatRoughness: 0.18,
     });
+    const cockpitMat = createMatteStandardMaterial({
+      color: 0x5b4027, roughness: 0.92,
+    });
+
+    function mergeBufferGeometries(geometries) {
+      const positions = [];
+      const normals = [];
+      const uvs = [];
+      let hasNormals = true;
+      for (const source of geometries) {
+        const geo = source.index ? source.toNonIndexed() : source.clone();
+        const pos = geo.getAttribute('position');
+        const norm = geo.getAttribute('normal');
+        const uv = geo.getAttribute('uv');
+        positions.push(...pos.array);
+        if (norm) {
+          normals.push(...norm.array);
+        } else {
+          hasNormals = false;
+        }
+        if (uv) {
+          uvs.push(...uv.array);
+        } else {
+          for (let i = 0; i < pos.count; i++) uvs.push(0, 0);
+        }
+      }
+      const merged = new THREE.BufferGeometry();
+      merged.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      merged.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+      if (hasNormals && normals.length === positions.length) {
+        merged.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+      } else {
+        merged.computeVertexNormals();
+      }
+      return merged;
+    }
+
+    function buildLoftGeometry(sections, contourFn, { closed = false } = {}) {
+      const contours = sections.map(contourFn);
+      const pointCount = contours[0].length;
+      const positions = [];
+      const uvs = [];
+      const indices = [];
+      for (let si = 0; si < sections.length; si++) {
+        const contour = contours[si];
+        const v = sections.length > 1 ? si / (sections.length - 1) : 0;
+        for (let pi = 0; pi < pointCount; pi++) {
+          const p = contour[pi];
+          positions.push(sections[si].x, p.y, p.x);
+          uvs.push(pointCount > 1 ? pi / (pointCount - 1) : 0, v);
+        }
+      }
+      const contourSegments = closed ? pointCount : pointCount - 1;
+      for (let si = 0; si < sections.length - 1; si++) {
+        const base = si * pointCount;
+        const next = (si + 1) * pointCount;
+        for (let pi = 0; pi < contourSegments; pi++) {
+          const ni = (pi + 1) % pointCount;
+          const a = base + pi;
+          const b = base + ni;
+          const c = next + pi;
+          const d = next + ni;
+          indices.push(a, c, b, b, c, d);
+        }
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setIndex(indices);
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+      geometry.computeVertexNormals();
+      return geometry;
+    }
+
+    function flipGeometryWinding(geometry) {
+      const flipped = geometry.clone();
+      if (flipped.index) {
+        const index = flipped.index.array;
+        for (let i = 0; i < index.length; i += 3) {
+          const tmp = index[i + 1];
+          index[i + 1] = index[i + 2];
+          index[i + 2] = tmp;
+        }
+        flipped.index.needsUpdate = true;
+      } else {
+        const pos = flipped.getAttribute('position');
+        for (let i = 0; i < pos.count; i += 3) {
+          for (let item = 0; item < pos.itemSize; item++) {
+            const tmp = pos.array[(i + 1) * pos.itemSize + item];
+            pos.array[(i + 1) * pos.itemSize + item] = pos.array[(i + 2) * pos.itemSize + item];
+            pos.array[(i + 2) * pos.itemSize + item] = tmp;
+          }
+        }
+        pos.needsUpdate = true;
+      }
+      const normal = flipped.getAttribute('normal');
+      if (normal) {
+        for (let i = 0; i < normal.array.length; i++) normal.array[i] *= -1;
+        normal.needsUpdate = true;
+      } else {
+        flipped.computeVertexNormals();
+      }
+      flipped.computeBoundingBox();
+      flipped.computeBoundingSphere();
+      return flipped;
+    }
+
+    function makeFuselageSection(x, halfWidth, topY, bottomY) {
+      return { x, halfWidth, topY, bottomY };
+    }
+
+    function fuselageShellContour(section) {
+      const shoulder = section.halfWidth;
+      const mid = shoulder * 0.82;
+      const low = shoulder * 0.6;
+      const upper = shoulder * 0.64;
+      const rim = shoulder * 0.3;
+      const crown = section.topY;
+      const rimY = THREE.MathUtils.lerp(section.bottomY, crown, 0.8);
+      const upperY = THREE.MathUtils.lerp(section.bottomY, crown, 0.88);
+      const shoulderY = THREE.MathUtils.lerp(section.bottomY, crown, 0.57);
+      const midY = THREE.MathUtils.lerp(section.bottomY, crown, 0.34);
+      const lowY = THREE.MathUtils.lerp(section.bottomY, crown, 0.11);
+      return [
+        new THREE.Vector2(-rim, rimY),
+        new THREE.Vector2(-upper, upperY),
+        new THREE.Vector2(-shoulder, shoulderY),
+        new THREE.Vector2(-mid, midY),
+        new THREE.Vector2(-low, lowY),
+        new THREE.Vector2(0, section.bottomY),
+        new THREE.Vector2(low, lowY),
+        new THREE.Vector2(mid, midY),
+        new THREE.Vector2(shoulder, shoulderY),
+        new THREE.Vector2(upper, upperY),
+        new THREE.Vector2(rim, rimY),
+      ];
+    }
+
+    function fuselageDeckContour(section, widthScale = 1) {
+      const rim = section.halfWidth * 0.58 * widthScale;
+      const crown = section.topY;
+      const rimY = THREE.MathUtils.lerp(section.bottomY, crown, 0.8);
+      return [
+        new THREE.Vector2(-rim, rimY),
+        new THREE.Vector2(-rim * 0.34, crown * 0.94),
+        new THREE.Vector2(0, crown * 0.96),
+        new THREE.Vector2(rim * 0.34, crown * 0.94),
+        new THREE.Vector2(rim, rimY),
+      ];
+    }
+
+    function createPlanformSurfaceGeometry({ halfSpan, chordRoot, chordTip, thickness, sweep = 0, tipInset = 0.12 }) {
+      const leadRoot = -chordRoot * 0.32;
+      const trailRoot = chordRoot * 0.68;
+      const leadTip = leadRoot + sweep;
+      const trailTip = leadTip + chordTip;
+      const shape = new THREE.Shape();
+      shape.moveTo(trailRoot, 0);
+      shape.lineTo(leadRoot + chordRoot * 0.18, 0);
+      shape.quadraticCurveTo(leadRoot - chordRoot * 0.04, halfSpan * 0.34, leadTip, halfSpan);
+      shape.lineTo(trailTip - chordTip * tipInset, halfSpan);
+      shape.quadraticCurveTo(trailTip + chordTip * 0.08, halfSpan * 0.46, trailRoot, 0);
+      shape.lineTo(trailTip + chordTip * 0.08, -halfSpan * 0.46);
+      shape.lineTo(trailTip - chordTip * tipInset, -halfSpan);
+      shape.lineTo(leadTip, -halfSpan);
+      shape.quadraticCurveTo(leadRoot - chordRoot * 0.04, -halfSpan * 0.34, leadRoot + chordRoot * 0.18, 0);
+      const geometry = new THREE.ExtrudeGeometry(shape, {
+        depth: thickness,
+        bevelEnabled: false,
+        steps: 1,
+        curveSegments: 8,
+      });
+      geometry.translate(0, 0, -thickness / 2);
+      geometry.rotateX(-Math.PI / 2);
+      geometry.computeVertexNormals();
+      return geometry;
+    }
+
+    function createTailplaneGeometry({
+      halfSpan,
+      chordRoot,
+      chordTip,
+      thickness,
+      sweep = 0,
+      tipInset = 0.16,
+      notchDepth = 0.22,
+      notchHalfSpan = 0.14,
+    }) {
+      const leadRoot = -chordRoot * 0.32;
+      const trailRoot = chordRoot * 0.68;
+      const leadTip = leadRoot + sweep;
+      const trailTip = leadTip + chordTip;
+      const notchApex = trailRoot - notchDepth;
+      const shape = new THREE.Shape();
+      shape.moveTo(notchApex, 0);
+      shape.lineTo(leadRoot + chordRoot * 0.16, 0);
+      shape.quadraticCurveTo(leadRoot - chordRoot * 0.04, halfSpan * 0.36, leadTip, halfSpan);
+      shape.lineTo(trailTip - chordTip * tipInset, halfSpan);
+      shape.quadraticCurveTo(trailTip + chordTip * 0.06, halfSpan * 0.46, trailRoot, notchHalfSpan);
+      shape.lineTo(notchApex, 0);
+      shape.lineTo(trailRoot, -notchHalfSpan);
+      shape.quadraticCurveTo(trailTip + chordTip * 0.06, -halfSpan * 0.46, trailTip - chordTip * tipInset, -halfSpan);
+      shape.lineTo(leadTip, -halfSpan);
+      shape.quadraticCurveTo(leadRoot - chordRoot * 0.04, -halfSpan * 0.36, leadRoot + chordRoot * 0.16, 0);
+      const geometry = new THREE.ExtrudeGeometry(shape, {
+        depth: thickness,
+        bevelEnabled: false,
+        steps: 1,
+        curveSegments: 8,
+      });
+      geometry.translate(0, 0, -thickness / 2);
+      geometry.rotateX(-Math.PI / 2);
+      geometry.computeVertexNormals();
+      return geometry;
+    }
 
     function buildBiplane() {
       const g = new THREE.Group();
-      // Fuselage — capsule from cylinder + nose cone + tail cone
-      const fuse = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.26, 2.4, 12), fuselageMat);
-      fuse.rotation.z = Math.PI / 2;
-      fuse.castShadow = true;
-      g.add(fuse);
-      const nose = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 8, 0, Math.PI*2, 0, Math.PI/2), fuselageMat);
-      nose.rotation.z = -Math.PI / 2;
-      nose.position.x = 1.2;
-      nose.castShadow = true;
-      g.add(nose);
-      const tailCone = new THREE.Mesh(new THREE.ConeGeometry(0.31, 0.6, 12), fuselageMat);
-      tailCone.rotation.z = Math.PI / 2;
-      tailCone.position.x = -1.495;
-      tailCone.castShadow = true;
-      g.add(tailCone);
+      const fuselageSections = [
+        makeFuselageSection(1.18, 0.08, 0.06, -0.07),
+        makeFuselageSection(0.96, 0.31, 0.26, -0.27),
+        makeFuselageSection(0.62, 0.37, 0.32, -0.31),
+        makeFuselageSection(0.32, 0.36, 0.34, -0.32),
+        makeFuselageSection(0.08, 0.35, 0.33, -0.32),
+        makeFuselageSection(-0.18, 0.34, 0.32, -0.3),
+        makeFuselageSection(-0.46, 0.32, 0.3, -0.28),
+        makeFuselageSection(-0.82, 0.29, 0.26, -0.24),
+        makeFuselageSection(-1.18, 0.25, 0.22, -0.19),
+        makeFuselageSection(-1.42, 0.23, 0.19, -0.15),
+        makeFuselageSection(-1.62, 0.16, 0.14, -0.1),
+        makeFuselageSection(-1.8, 0.06, 0.06, -0.05),
+      ];
+      const fuselageShell = flipGeometryWinding(buildLoftGeometry(fuselageSections, fuselageShellContour, { closed: false }));
+      const noseDeck = buildLoftGeometry(
+        fuselageSections.slice(0, 4),
+        section => fuselageDeckContour(section),
+        { closed: false },
+      );
+      const bridgeDeckSections = [
+        makeFuselageSection(-0.22, 0.33, 0.315, -0.29),
+        makeFuselageSection(-0.12, 0.34, 0.325, -0.3),
+      ];
+      const bridgeDeck = buildLoftGeometry(
+        bridgeDeckSections,
+        section => fuselageDeckContour(section, 1.05),
+        { closed: false },
+      );
+      const rearDeckSections = [
+        makeFuselageSection(-0.66, 0.305, 0.285, -0.265),
+        ...fuselageSections.slice(7),
+      ];
+      const rearDeck = buildLoftGeometry(
+        rearDeckSections,
+        section => fuselageDeckContour(section),
+        { closed: false },
+      );
+      const fuselage = new THREE.Mesh(
+        mergeBufferGeometries([fuselageShell, noseDeck, bridgeDeck, rearDeck]),
+        fuselageMat,
+      );
+      fuselage.castShadow = true;
+      fuselage.receiveShadow = true;
+      g.add(fuselage);
+
+      const frontTubWall = new THREE.CylinderGeometry(0.21, 0.24, 0.42, 10, 1, true);
+      frontTubWall.scale(1.15, 1, 1);
+      frontTubWall.translate(0.12, 0.1, 0);
+      const frontTubFloor = new THREE.CircleGeometry(0.205, 10);
+      frontTubFloor.rotateX(-Math.PI / 2);
+      frontTubFloor.scale(1.15, 1, 1);
+      frontTubFloor.translate(0.12, -0.11, 0);
+      const rearTubWall = new THREE.CylinderGeometry(0.19, 0.22, 0.42, 10, 1, true);
+      rearTubWall.scale(1.08, 1, 1);
+      rearTubWall.translate(-0.44, 0.08, 0);
+      const rearTubFloor = new THREE.CircleGeometry(0.185, 10);
+      rearTubFloor.rotateX(-Math.PI / 2);
+      rearTubFloor.scale(1.08, 1, 1);
+      rearTubFloor.translate(-0.44, -0.13, 0);
+      const cockpitInterior = new THREE.Mesh(
+        mergeBufferGeometries([
+          flipGeometryWinding(frontTubWall),
+          frontTubFloor,
+          flipGeometryWinding(rearTubWall),
+          rearTubFloor,
+        ]),
+        cockpitMat,
+      );
+      g.add(cockpitInterior);
+
+      const frontRim = new THREE.Mesh(new THREE.TorusGeometry(0.23, 0.024, 6, 16), trimMat);
+      frontRim.position.set(0.12, 0.33, 0);
+      frontRim.rotation.x = Math.PI / 2;
+      frontRim.scale.set(1.16, 1, 0.98);
+      g.add(frontRim);
+      const rearRim = new THREE.Mesh(new THREE.TorusGeometry(0.205, 0.022, 6, 16), trimMat);
+      rearRim.position.set(-0.44, 0.31, 0);
+      rearRim.rotation.x = Math.PI / 2;
+      rearRim.scale.set(1.1, 1, 0.94);
+      g.add(rearRim);
 
       // Engine cowling (slightly darker, near nose)
       const cowl = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.34, 0.4, 14),
         createMatteStandardMaterial({ color: 0x2c2014, roughness: 0.95 }));
       cowl.rotation.z = Math.PI / 2;
-      cowl.position.x = 1.0;
+      cowl.position.x = 1.14;
       cowl.castShadow = true;
       g.add(cowl);
 
       // Cockpit windscreen
-      const wsGeo = new THREE.SphereGeometry(0.30, 10, 8, 0, Math.PI, 0, Math.PI/2);
+      const wsGeo = new THREE.SphereGeometry(0.26, 10, 8, 0, Math.PI, 0, Math.PI/2);
       const ws = new THREE.Mesh(wsGeo, glassMat);
-      ws.position.set(0.1, 0.32, 0);
+      ws.position.set(0.16, 0.35, 0);
       ws.rotation.x = Math.PI / 2;
       g.add(ws);
-      // Cockpit hole rim
-      const rim = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.04, 6, 14), trimMat);
-      rim.position.set(0.05, 0.30, 0);
-      rim.rotation.x = Math.PI / 2;
-      g.add(rim);
 
-      // Lower wing
       const lowerWing = new THREE.Mesh(
-        new THREE.BoxGeometry(1.0, 0.06, 4.4),
+        createPlanformSurfaceGeometry({ halfSpan: 2.16, chordRoot: 1.18, chordTip: 0.88, thickness: 0.085, sweep: 0.02 }),
         wingMat,
       );
-      lowerWing.position.set(0.15, -0.05, 0);
+      lowerWing.position.set(0.14, -0.05, 0);
       lowerWing.castShadow = true;
       lowerWing.receiveShadow = !prefersMobileUI;
       g.add(lowerWing);
-      // Upper wing (slightly forward and above)
-      const upperWing = lowerWing.clone();
+      const upperWing = new THREE.Mesh(
+        createPlanformSurfaceGeometry({ halfSpan: 2.28, chordRoot: 1.28, chordTip: 0.94, thickness: 0.085, sweep: 0.05 }),
+        wingMat,
+      );
       upperWing.material = wingMat;
       upperWing.position.set(0.30, 0.65, 0);
-      upperWing.scale.set(1.05, 1, 1.05);
       upperWing.castShadow = true;
       upperWing.receiveShadow = !prefersMobileUI;
       g.add(upperWing);
@@ -1569,13 +1844,38 @@
       }
 
       // Tail empennage
-      const hStab = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.05, 1.6), wingMat);
-      hStab.position.set(-1.5, 0.05, 0);
+      const hStab = new THREE.Mesh(
+        createTailplaneGeometry({
+          halfSpan: 0.94,
+          chordRoot: 0.98,
+          chordTip: 0.56,
+          thickness: 0.055,
+          sweep: -0.04,
+          tipInset: 0.2,
+          notchDepth: 0.34,
+          notchHalfSpan: 0.22,
+        }),
+        wingMat,
+      );
+      hStab.position.set(-1.52, 0.07, 0);
       hStab.castShadow = true;
       hStab.receiveShadow = true;
       g.add(hStab);
-      const vStab = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.6, 0.05), wingMat);
-      vStab.position.set(-1.55, 0.35, 0);
+      const finShape = new THREE.Shape();
+      finShape.moveTo(-0.4, 0);
+      finShape.quadraticCurveTo(-0.25, 0.45, 0.0, 0.75);
+      finShape.quadraticCurveTo(0.18, 0.88, 0.22, 0.6);
+      finShape.lineTo(0.22, 0);
+      finShape.lineTo(-0.4, 0);
+      const vStab = new THREE.Mesh(new THREE.ExtrudeGeometry(finShape, {
+        depth: 0.05,
+        bevelEnabled: false,
+        steps: 1,
+        curveSegments: 6,
+      }), wingMat);
+      vStab.geometry.translate(0, 0, -0.025);
+      vStab.position.set(-1.7, 0.02, 0);
+      vStab.rotation.y = Math.PI;
       vStab.castShadow = true;
       vStab.receiveShadow = true;
       g.add(vStab);
@@ -1586,7 +1886,7 @@
       for (const sz of [-0.45, 0.45]) {
         const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.55, 6), gearMat);
         leg.position.set(0.5, -0.35, sz);
-        leg.rotation.z = Math.PI / 8 * (sz > 0 ? 1 : -1);
+        leg.rotation.z = Math.PI / 8;
         g.add(leg);
         const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.08, 14), wheelMat);
         wheel.rotation.x = Math.PI / 2;
@@ -1596,9 +1896,9 @@
       }
       // Tail skid
       const skid = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.25, 6), gearMat);
-      skid.position.set(-1.7, -0.2, 0);
+      skid.position.set(-1.76, -0.11, 0);
       skid.rotation.y = Math.PI;
-      skid.rotation.z = Math.PI / 4;
+      skid.rotation.z = Math.PI / 3.3;
       g.add(skid);
 
       // Propeller hub + blades
@@ -1885,6 +2185,7 @@
     const orbitVector = new THREE.Vector3();
     const orbitSpherical = new THREE.Spherical();
     const orbitState = {
+      enabled: false,
       active: false,
       pointerId: null,
       lastX: 0,
@@ -1906,9 +2207,18 @@
       camera.lookAt(camLook);
     }
 
+    function resetOrbitCamera() {
+      orbitState.enabled = false;
+      orbitState.active = false;
+      orbitState.pointerId = null;
+      orbitState.yaw = 0;
+      orbitState.pitch = 0;
+      syncCameraToChase();
+    }
+
     function updateCamera(dt) {
       computeChaseCameraTargets();
-      if (orbitState.active) {
+      if (orbitState.enabled) {
         orbitVector.copy(chasePos).sub(chaseLook);
         orbitSpherical.setFromVector3(orbitVector);
         orbitSpherical.theta += orbitState.yaw;
@@ -3075,6 +3385,10 @@
           closeAllZoom();
           return;
         }
+        if (orbitState.enabled) {
+          resetOrbitCamera();
+          return;
+        }
         togglePauseMenu();
         return;
       }
@@ -3093,12 +3407,11 @@
     });
     renderer.domElement.addEventListener('pointerdown', (e) => {
       if (e.button !== 2 || paused || isPauseOpen()) return;
+      orbitState.enabled = true;
       orbitState.active = true;
       orbitState.pointerId = e.pointerId;
       orbitState.lastX = e.clientX;
       orbitState.lastY = e.clientY;
-      orbitState.yaw = 0;
-      orbitState.pitch = 0;
       renderer.domElement.setPointerCapture(e.pointerId);
       e.preventDefault();
     });
@@ -3118,9 +3431,6 @@
       if (e && orbitState.pointerId !== e.pointerId) return;
       orbitState.active = false;
       orbitState.pointerId = null;
-      orbitState.yaw = 0;
-      orbitState.pitch = 0;
-      syncCameraToChase();
     };
     renderer.domElement.addEventListener('pointerup', stopOrbitCamera);
     renderer.domElement.addEventListener('pointercancel', stopOrbitCamera);
