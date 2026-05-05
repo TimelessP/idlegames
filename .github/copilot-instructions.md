@@ -104,6 +104,12 @@ if (requestURL.pathname.endsWith('/')) {
 
 Use this document as a living reference—update it whenever repo conventions evolve so future agents can ramp up quickly.
 
+## Custom agents
+
+- **Deep Research**
+  - **Use when:** a task benefits from isolated read-only research before implementation, especially web searches, documentation checks, codebase trawling, upstream API/reference review, or reviewing MIT-licensed example repositories for reusable patterns.
+  - **How to use:** prefer delegating these focused research passes to the `Deep Research` subagent so the main agent keeps a cleaner context window and gets back a compact summary.
+
 ## Skills
 
 - **pwa-development**
