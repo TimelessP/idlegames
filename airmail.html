@@ -1427,7 +1427,7 @@
     function makeDecalTexture(text, accent) {
       const c = document.createElement('canvas');
       c.width = 512; c.height = 256;
-      const ctx = c.getContext('2d');
+      const ctx = c.getContext('2d', { alpha: false });
       // base yellow paint
       ctx.fillStyle = '#e9c64a';
       ctx.fillRect(0, 0, c.width, c.height);
@@ -1500,9 +1500,9 @@
       nose.position.x = 1.2;
       nose.castShadow = true;
       g.add(nose);
-      const tailCone = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.6, 10), fuselageMat);
+      const tailCone = new THREE.Mesh(new THREE.ConeGeometry(0.31, 0.6, 12), fuselageMat);
       tailCone.rotation.z = Math.PI / 2;
-      tailCone.position.x = -1.5;
+      tailCone.position.x = -1.495;
       tailCone.castShadow = true;
       g.add(tailCone);
 
@@ -1597,6 +1597,7 @@
       // Tail skid
       const skid = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.25, 6), gearMat);
       skid.position.set(-1.7, -0.2, 0);
+      skid.rotation.y = Math.PI;
       skid.rotation.z = Math.PI / 4;
       g.add(skid);
 
@@ -1879,12 +1880,49 @@
     const camLookOffset = new THREE.Vector3(2, 0.5, 0);
     const camPos = new THREE.Vector3();
     const camLook = new THREE.Vector3();
+    const chasePos = new THREE.Vector3();
+    const chaseLook = new THREE.Vector3();
+    const orbitVector = new THREE.Vector3();
+    const orbitSpherical = new THREE.Spherical();
+    const orbitState = {
+      active: false,
+      pointerId: null,
+      lastX: 0,
+      lastY: 0,
+      yaw: 0,
+      pitch: 0,
+    };
+
+    function computeChaseCameraTargets() {
+      chasePos.copy(camOffset).applyQuaternion(flight.quat).add(flight.position);
+      chaseLook.copy(camLookOffset).applyQuaternion(flight.quat).add(flight.position);
+    }
+
+    function syncCameraToChase() {
+      computeChaseCameraTargets();
+      camPos.copy(chasePos);
+      camLook.copy(chaseLook);
+      camera.position.copy(camPos);
+      camera.lookAt(camLook);
+    }
 
     function updateCamera(dt) {
-      const desiredPos = camOffset.clone().applyQuaternion(flight.quat).add(flight.position);
-      const desiredLook = camLookOffset.clone().applyQuaternion(flight.quat).add(flight.position);
-      camPos.lerp(desiredPos, Math.min(1, dt * 4));
-      camLook.lerp(desiredLook, Math.min(1, dt * 6));
+      computeChaseCameraTargets();
+      if (orbitState.active) {
+        orbitVector.copy(chasePos).sub(chaseLook);
+        orbitSpherical.setFromVector3(orbitVector);
+        orbitSpherical.theta += orbitState.yaw;
+        orbitSpherical.phi = THREE.MathUtils.clamp(
+          orbitSpherical.phi + orbitState.pitch,
+          0.32,
+          Math.PI - 0.32,
+        );
+        camPos.copy(chaseLook).add(orbitVector.setFromSpherical(orbitSpherical));
+        camLook.copy(chaseLook);
+      } else {
+        camPos.lerp(chasePos, Math.min(1, dt * 4));
+        camLook.lerp(chaseLook, Math.min(1, dt * 6));
+      }
       camera.position.copy(camPos);
       camera.lookAt(camLook);
     }
@@ -3049,6 +3087,44 @@
       if (GAMEPLAY_KEYS.has(k) || e.code === 'Space') e.preventDefault();
       keys.delete(k);
     });
+
+    renderer.domElement.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+    });
+    renderer.domElement.addEventListener('pointerdown', (e) => {
+      if (e.button !== 2 || paused || isPauseOpen()) return;
+      orbitState.active = true;
+      orbitState.pointerId = e.pointerId;
+      orbitState.lastX = e.clientX;
+      orbitState.lastY = e.clientY;
+      orbitState.yaw = 0;
+      orbitState.pitch = 0;
+      renderer.domElement.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    renderer.domElement.addEventListener('pointermove', (e) => {
+      if (!orbitState.active || orbitState.pointerId !== e.pointerId) return;
+      const dx = e.clientX - orbitState.lastX;
+      const dy = e.clientY - orbitState.lastY;
+      orbitState.lastX = e.clientX;
+      orbitState.lastY = e.clientY;
+      orbitState.yaw -= dx * 0.008;
+      orbitState.pitch -= dy * 0.006;
+      orbitState.pitch = THREE.MathUtils.clamp(orbitState.pitch, -1.05, 0.85);
+      e.preventDefault();
+    });
+    const stopOrbitCamera = (e) => {
+      if (!orbitState.active) return;
+      if (e && orbitState.pointerId !== e.pointerId) return;
+      orbitState.active = false;
+      orbitState.pointerId = null;
+      orbitState.yaw = 0;
+      orbitState.pitch = 0;
+      syncCameraToChase();
+    };
+    renderer.domElement.addEventListener('pointerup', stopOrbitCamera);
+    renderer.domElement.addEventListener('pointercancel', stopOrbitCamera);
+    renderer.domElement.addEventListener('lostpointercapture', stopOrbitCamera);
 
     // Touch left pad — pitch (y) and roll (x)
     let touchPitch = 0, touchRoll = 0, touchRudder = 0;
