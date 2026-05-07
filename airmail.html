@@ -691,6 +691,18 @@
             <input id="setting-normal-bias" type="checkbox" checked>
           </div>
         </div>
+        <div class="menu-setting">
+          <div class="menu-setting-toggle">
+            <label for="setting-bright-lighting">Force Bright Lighting</label>
+            <input id="setting-bright-lighting" type="checkbox">
+          </div>
+        </div>
+        <div class="menu-setting">
+          <div class="menu-setting-toggle">
+            <label for="setting-unlit-wings">Unlit Wing Surfaces</label>
+            <input id="setting-unlit-wings" type="checkbox">
+          </div>
+        </div>
       </div>
       <div class="menu-actions">
         <button data-menu-back="settings">BACK</button>
@@ -1066,6 +1078,8 @@
       shadowsEnabled: true,
       softShadows: true,
       shadowNormalBias: true,
+      brightLighting: false,
+      unlitWings: false,
     };
     const SETTINGS_STORAGE_KEY = 'idlegames-airmail-settings';
     function clampNumber(value, min, max, fallback) {
@@ -1086,6 +1100,8 @@
         gameSettings.shadowsEnabled = parsed.shadowsEnabled !== undefined ? Boolean(parsed.shadowsEnabled) : gameSettings.shadowsEnabled;
         gameSettings.softShadows = parsed.softShadows !== undefined ? Boolean(parsed.softShadows) : gameSettings.softShadows;
         gameSettings.shadowNormalBias = parsed.shadowNormalBias !== undefined ? Boolean(parsed.shadowNormalBias) : gameSettings.shadowNormalBias;
+        gameSettings.brightLighting = parsed.brightLighting !== undefined ? Boolean(parsed.brightLighting) : gameSettings.brightLighting;
+        gameSettings.unlitWings = parsed.unlitWings !== undefined ? Boolean(parsed.unlitWings) : gameSettings.unlitWings;
       } catch {
         // Ignore invalid saved settings and keep defaults.
       }
@@ -1099,6 +1115,38 @@
     }
     loadSettings();
     let sunLight = null;
+    let ambient = null;
+    let plane = null;
+    function createUnlitMaterialVariant(material) {
+      return new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        map: material.map ?? null,
+        side: material.side,
+        transparent: material.transparent,
+        opacity: material.opacity,
+        alphaTest: material.alphaTest,
+      });
+    }
+    function applyPlaneDiagnosticMaterials() {
+      if (!plane?.userData?.diagnosticWingMeshes) return;
+      for (const mesh of plane.userData.diagnosticWingMeshes) {
+        if (!mesh.userData.originalMaterial) continue;
+        if (gameSettings.unlitWings) {
+          if (!mesh.userData.unlitMaterial) {
+            const originalMaterials = Array.isArray(mesh.userData.originalMaterial)
+              ? mesh.userData.originalMaterial
+              : [mesh.userData.originalMaterial];
+            const unlitMaterials = originalMaterials.map(createUnlitMaterialVariant);
+            mesh.userData.unlitMaterial = Array.isArray(mesh.userData.originalMaterial)
+              ? unlitMaterials
+              : unlitMaterials[0];
+          }
+          mesh.material = mesh.userData.unlitMaterial;
+        } else {
+          mesh.material = mesh.userData.originalMaterial;
+        }
+      }
+    }
     function invalidateSceneMaterials() {
       scene.traverse((object) => {
         const materials = object.material ? (Array.isArray(object.material) ? object.material : [object.material]) : [];
@@ -1119,6 +1167,7 @@
         sunLight.shadow.radius = gameSettings.softShadows ? DEFAULT_SHADOW_RADIUS : 0;
         sunLight.shadow.needsUpdate = true;
       }
+      applyPlaneDiagnosticMaterials();
       invalidateSceneMaterials();
     }
     applyGraphicsSettings();
@@ -1188,7 +1237,7 @@
     scene.add(sunLight.target);
     applyGraphicsSettings();
 
-    const ambient = new THREE.HemisphereLight(0xbcd3ea, 0x6a5a3a, 0.95);
+    ambient = new THREE.HemisphereLight(0xbcd3ea, 0x6a5a3a, 0.95);
     scene.add(ambient);
 
     // ----- Clouds (soft puffs, billboarded sprites) ----------------------
@@ -1950,6 +1999,7 @@
       lowerWing.position.set(0.14, -0.05, 0);
       lowerWing.castShadow = true;
       lowerWing.receiveShadow = true;
+      lowerWing.userData.originalMaterial = lowerWing.material;
       g.add(lowerWing);
       const upperWing = new THREE.Mesh(
         createPlanformSurfaceGeometry({ halfSpan: 2.28, chordRoot: 1.28, chordTip: 0.94, thickness: 0.085, sweep: 0.05 }),
@@ -1958,6 +2008,7 @@
       upperWing.position.set(0.30, 0.65, 0);
       upperWing.castShadow = true;
       upperWing.receiveShadow = true;
+      upperWing.userData.originalMaterial = upperWing.material;
       g.add(upperWing);
 
       // Wing struts (4)
@@ -2001,6 +2052,7 @@
       hStab.position.set(-1.52, 0.07, 0);
       hStab.castShadow = true;
       hStab.receiveShadow = true;
+      hStab.userData.originalMaterial = hStab.material;
       g.add(hStab);
       const finShape = new THREE.Shape();
       finShape.moveTo(-0.4, 0);
@@ -2019,6 +2071,7 @@
       vStab.rotation.y = Math.PI;
       vStab.castShadow = true;
       vStab.receiveShadow = true;
+      vStab.userData.originalMaterial = vStab.material;
       g.add(vStab);
 
       // Landing gear
@@ -2056,10 +2109,12 @@
       g.add(propGroup);
 
       g.userData.prop = propGroup;
+      g.userData.diagnosticWingMeshes = [lowerWing, upperWing, hStab, vStab];
       return g;
     }
-    const plane = buildBiplane();
+    plane = buildBiplane();
     scene.add(plane);
+    applyGraphicsSettings();
 
     // ======================================================================
     // FLIGHT MODEL (arcade)
@@ -4062,8 +4117,8 @@
       sunLight.target.position.copy(shadowAnchor);
       // night dim
       const dayness = Math.max(0, sunDir.y);
-      sunLight.intensity = 0.6 + dayness * 3.2;
-      ambient.intensity = 0.62 + dayness * 0.9;
+      sunLight.intensity = gameSettings.brightLighting ? 4.8 : 0.6 + dayness * 3.2;
+      ambient.intensity = gameSettings.brightLighting ? 1.9 : 0.62 + dayness * 0.9;
       const skyTop = new THREE.Color().setHSL(0.6, 0.5, 0.2 + dayness*0.4);
       const skyBot = new THREE.Color().setHSL(0.6, 0.4, 0.5 + dayness*0.3);
       skyUniforms.uTopCol.value.copy(skyTop);
@@ -4274,6 +4329,8 @@
       document.getElementById('setting-shadows-enabled').checked = gameSettings.shadowsEnabled;
       document.getElementById('setting-soft-shadows').checked = gameSettings.softShadows;
       document.getElementById('setting-normal-bias').checked = gameSettings.shadowNormalBias;
+      document.getElementById('setting-bright-lighting').checked = gameSettings.brightLighting;
+      document.getElementById('setting-unlit-wings').checked = gameSettings.unlitWings;
     }
     syncSettingsUI();
     addEventListener('pagehide', () => { saveGameState(true); });
@@ -4326,6 +4383,18 @@
     });
     document.getElementById('setting-normal-bias').addEventListener('change', (e) => {
       gameSettings.shadowNormalBias = e.target.checked;
+      applyGraphicsSettings();
+      saveSettings();
+      syncSettingsUI();
+    });
+    document.getElementById('setting-bright-lighting').addEventListener('change', (e) => {
+      gameSettings.brightLighting = e.target.checked;
+      applyGraphicsSettings();
+      saveSettings();
+      syncSettingsUI();
+    });
+    document.getElementById('setting-unlit-wings').addEventListener('change', (e) => {
+      gameSettings.unlitWings = e.target.checked;
       applyGraphicsSettings();
       saveSettings();
       syncSettingsUI();
