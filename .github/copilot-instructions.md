@@ -124,6 +124,14 @@ Use this document as a living reference—update it whenever repo conventions ev
   - **Use when:** building or refining production-quality side-scroller SPA games in this repo (single-file HTML/CSS/JS, SVG camera systems, robust controls, modal UX, and mobile/PWA polish).
   - **File:** `.github/skills/sidescroller-spa-game-dev/SKILL.md`
 
+- **mobile-webgl-rendering-debugging**
+  - **Use when:** diagnosing browser 3D rendering bugs that appear only on some phones or GPUs, especially in Three.js WebGL scenes using dynamic textures, shadows, lighting, and custom materials.
+  - **File:** `.github/skills/mobile-webgl-rendering-debugging/SKILL.md`
+
+- **threejs-browser-game-dev**
+  - **Use when:** building or refactoring browser-based Three.js 3D games, especially when defining axis conventions, scene-graph structure, camera rigs, procedural geometry, and transform discipline.
+  - **File:** `.github/skills/threejs-browser-game-dev/SKILL.md`
+
 - **rts-games**
   - **Use when:** building or refining browser RTS games in this repo, especially single-file HTML/CSS/JS runtimes with data-driven units, buildings, orders, fog, factions, and HUD systems.
   - **File:** `.github/skills/rts-games/SKILL.md`

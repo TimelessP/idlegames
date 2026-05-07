@@ -61,7 +61,39 @@ Optimize games for smooth performance across all devices, from high-end desktops
 - Mobile-specific optimizations
 - Accessibility in games
 
-### 4. **Accessible Game Design** (`accessible-game-design/`)
+### 4. **Mobile WebGL Rendering Debugging** (`mobile-webgl-rendering-debugging/`)
+Diagnose browser 3D rendering bugs that appear only on some phones or GPUs, especially in Three.js WebGL scenes using dynamic textures, shadows, lighting, and custom materials.
+
+**Use when:**
+- A mesh looks dark, black, missing, or wrong only on one mobile device
+- A runtime-generated texture behaves differently on one GPU
+- A Three.js scene is correct on desktop but broken on a subset of phones
+- You need fast rendering probes that isolate shadows, lighting, textures, or culling
+
+**Key topics:**
+- Device-specific rendering isolation strategy
+- Lit vs unlit and textured vs plain-color probes
+- Double-sided and culling diagnostics
+- Conservative `CanvasTexture` sampling setup for mobile GPUs
+- Narrow, falsifiable WebGL debugging workflow
+
+### 5. **Three.js Browser Game Development** (`threejs-browser-game-dev/`)
+Build browser-based Three.js 3D games with sane axis conventions, disciplined scene graphs, stable camera and lighting setup, procedural geometry patterns, and practical debugging habits.
+
+**Use when:**
+- Starting or refactoring a Three.js browser game
+- Defining what `x`, `y`, and `z` mean in gameplay and rendering terms
+- Building compound vehicles, cockpits, props, or interiors from primitives
+- Preventing transform confusion from nested groups and ad hoc rotations
+
+**Key topics:**
+- World-axis conventions and model-forward alignment
+- Root, visual, and pivot group patterns
+- Local-space vs world-space reasoning
+- Camera rig structure and readable lighting defaults
+- Procedural geometry assembly and transform debugging
+
+### 6. **Accessible Game Design** (`accessible-game-design/`)
 Design inclusive games that are playable by everyone, including players with disabilities.
 
 **Use when:**
@@ -79,7 +111,7 @@ Design inclusive games that are playable by everyone, including players with dis
 - Difficulty and assistance options
 - Testing for accessibility
 
-### 5. **RTS Games** (`rts-games/`)
+### 7. **RTS Games** (`rts-games/`)
 Build real-time strategy games as single-page HTML, CSS, and JavaScript apps.
 
 **Use when:**
@@ -96,7 +128,7 @@ Build real-time strategy games as single-page HTML, CSS, and JavaScript apps.
 - Support, logistics, aircraft, and faction systems
 - Playtest-driven iteration for complex RTS behavior
 
-### 6. **RTS AI Doctrine** (`rts-ai-doctrine/`)
+### 8. **RTS AI Doctrine** (`rts-ai-doctrine/`)
 Design layered AI for RTS games that scouts, remembers, scores objectives, and issues plausible tactical orders without cheating.
 
 **Use when:**
@@ -112,7 +144,7 @@ Design layered AI for RTS games that scouts, remembers, scores objectives, and i
 - Air doctrine and tactical assignment
 - Reusing player-facing order systems for AI
 
-### 7. **RTS Pathfinding** (`rts-pathfinding/`)
+### 9. **RTS Pathfinding** (`rts-pathfinding/`)
 Implement movement, occupancy, and pathfinding systems for RTS games with practical browser-friendly patterns.
 
 **Use when:**
@@ -128,7 +160,7 @@ Implement movement, occupancy, and pathfinding systems for RTS games with practi
 - Goal selection beyond exact target cells
 - Path repair and replanning triggers
 
-### 8. **RTS Rendering and Persistence** (`rts-rendering-persistence/`)
+### 10. **RTS Rendering and Persistence** (`rts-rendering-persistence/`)
 Build render, minimap, fog, and save/load systems for browser RTS games.
 
 **Use when:**
@@ -159,6 +191,8 @@ When Copilot detects you're working on a relevant task, it will automatically co
 Multiple skills often work together:
 - Use **Vanilla JS Game Dev** to build the game logic
 - Use **Web Game Optimization** to make it perform well
+- Use **Mobile WebGL Rendering Debugging** when a browser 3D scene fails only on certain phones or GPUs
+- Use **Three.js Browser Game Development** when you need clear 3D world conventions, scene-graph structure, and camera or transform discipline
 - Use **Accessible Game Design** to make it inclusive
 - Use **PWA Development** to add offline support, build pipeline setup, version management, and production deployment
 - Use **RTS Games** for the core RTS simulation, commands, and unit systems
