@@ -122,6 +122,11 @@ async function ensureVendorAssets() {
   const transformersDest = path.join(distDir, 'assets', 'vendor', 'transformers');
   await fs.rm(transformersDest, { recursive: true, force: true });
   await fs.cp(transformersSrc, transformersDest, { recursive: true });
+
+  const piperSrc = path.join(projectRoot, 'node_modules', 'piper-tts-web', 'dist');
+  const piperDest = path.join(distDir, 'assets', 'vendor', 'piper');
+  await fs.rm(piperDest, { recursive: true, force: true });
+  await fs.cp(piperSrc, piperDest, { recursive: true });
 }
 
 async function ensureFonts() {

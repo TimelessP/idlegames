@@ -709,6 +709,7 @@
             <option value="browser">BROWSER TTS</option>
             <option value="espeak">ESPEAK</option>
             <option value="tones">TONES</option>
+            <option value="piper">PIPER</option>
             <option value="none">NONE</option>
           </select>
         </div>
@@ -1156,7 +1157,7 @@
     const DEFAULT_SHADOW_BIAS = 0.0001;
     const DEFAULT_SHADOW_NORMAL_BIAS = 0.04;
     const DEFAULT_SHADOW_RADIUS = 2;
-    const VALID_TTS_MODES = ['auto', 'browser', 'espeak', 'tones', 'none'];
+    const VALID_TTS_MODES = ['auto', 'browser', 'espeak', 'tones', 'piper', 'none'];
 
     const gameSettings = {
       fpsCap: 0,
@@ -3046,6 +3047,12 @@
     // `window.TTS_WASM.speak = async (text) => ({ pcm: Int16Array, sampleRate: 22050 })`.
     loadWasmTts().then(async ok => {
       if (!ok) return;
+      if (window.TTS_WASM && typeof window.TTS_WASM.configure === 'function') {
+        await window.TTS_WASM.configure({ mode: selectedTtsMode() });
+      }
+      if (window.TTS_WASM && typeof window.TTS_WASM.prepare === 'function') {
+        await window.TTS_WASM.prepare('', { mode: selectedTtsMode() });
+      }
       if (window.TTS_WASM && typeof window.TTS_WASM.probe === 'function') {
         const ready = await window.TTS_WASM.probe();
         const state = (typeof window.TTS_WASM.getState === 'function') ? window.TTS_WASM.getState() : null;
@@ -3069,7 +3076,11 @@
         }
         if (window.TTS_WASM && typeof window.TTS_WASM.speak === 'function') {
           try {
-            const res = await window.TTS_WASM.speak(text, { mode: ttsMode });
+            const res = await window.TTS_WASM.speak(text, {
+              mode: ttsMode,
+              tower: !!opts.tower,
+              voiceIdentity: opts.voiceIdentity || null,
+            });
             if (res && res.handled) {
               resolve();
               return;
@@ -3098,7 +3109,7 @@
             // fall through to browser TTS fallback
           }
         }
-        if (ttsMode === 'espeak' || ttsMode === 'tones') {
+        if (ttsMode === 'espeak' || ttsMode === 'tones' || ttsMode === 'piper') {
           resolve();
           return;
         }
@@ -3166,6 +3177,21 @@
       document.getElementById('radio-text').textContent = text;
       ov.classList.add('show');
     }
+
+    function primeRadioExchange(exchange) {
+      if (!exchange || !Array.isArray(exchange.responses)) return;
+      if (!window.TTS_WASM || typeof window.TTS_WASM.prepare !== 'function') return;
+      const ttsMode = selectedTtsMode();
+      if (ttsMode === 'none') return;
+      for (const entry of exchange.responses) {
+        void window.TTS_WASM.prepare(entry.text, {
+          mode: ttsMode,
+          tower: entry.tower,
+          voiceIdentity: entry.voiceIdentity || null,
+        });
+      }
+    }
+
     function hideRadio() {
       document.getElementById('radio-overlay').classList.remove('show');
     }
@@ -3550,6 +3576,7 @@
               who: destinationAirfield.tower.toUpperCase(),
               text: `${callsign}, ${destinationAirfield.tower}, roger. Mail received. Taxi clear when able. ${formatWindCall(wind)}`,
               tower: true,
+              voiceIdentity: destinationAirfield.id,
             },
           ],
         };
@@ -3571,6 +3598,7 @@
               who: currentAirfield.tower.toUpperCase(),
               text: `${callsign}, ${currentAirfield.tower}, roger. Depart Runway ${depart.runway}, departure ${departurePhrase}. ${formatWindCall(wind)}`,
               tower: true,
+              voiceIdentity: currentAirfield.id,
             },
           ],
         };
@@ -3596,17 +3624,24 @@
               ? `${callsign}, ${destinationAirfield.tower}, roger. Join from the ${destinationRelativeLong} side for Runway ${landing.runway}. ${formatWindCall(arrivalWind)}`
               : `${callsign}, ${destinationAirfield.tower}, roger. Fly ${courseToDestinationLong} toward ${destinationAirfield.name}, expect Runway ${landing.runway}. ${formatWindCall(arrivalWind)}`,
             tower: true,
+            voiceIdentity: destinationAirfield.id,
           },
         ],
       };
     }
 
     async function playRadioExchange(exchange) {
+      primeRadioExchange(exchange);
       for (let i = 0; i < exchange.responses.length; i++) {
         const entry = exchange.responses[i];
         staticBurst(i === exchange.responses.length - 1 ? 0.60 : 0.56, 0.12);
         showRadio(entry.who, entry.text);
-        await speak(entry.text, { tower: entry.tower, pitch: entry.tower ? 0.85 : 1.0, rate: 1.0 });
+        await speak(entry.text, {
+          tower: entry.tower,
+          voiceIdentity: entry.voiceIdentity || null,
+          pitch: entry.tower ? 0.85 : 1.0,
+          rate: 1.0,
+        });
         await new Promise(r => setTimeout(r, i === exchange.responses.length - 1 ? 600 : 250));
       }
       staticBurst(0.44, 0.09);
@@ -4534,6 +4569,12 @@
     });
     document.getElementById('setting-tts-mode').addEventListener('change', (e) => {
       gameSettings.ttsMode = VALID_TTS_MODES.includes(String(e.target.value)) ? String(e.target.value) : 'auto';
+      if (window.TTS_WASM && typeof window.TTS_WASM.configure === 'function') {
+        void window.TTS_WASM.configure({ mode: selectedTtsMode() });
+      }
+      if (window.TTS_WASM && typeof window.TTS_WASM.prepare === 'function') {
+        void window.TTS_WASM.prepare('', { mode: selectedTtsMode() });
+      }
       saveSettings();
       syncSettingsUI();
     });
