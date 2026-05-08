@@ -7,11 +7,12 @@
   let lastEspeakError = null;
 
   let configuredMode = 'auto';
-  let piperEngine = null;
-  let piperVoiceMeta = null;
-  let piperProvider = null;
+  let piperWorker = null;
   let piperLoadPromise = null;
   let lastPiperError = null;
+  let piperRequestId = 0;
+  const pendingPiperRequests = new Map();
+  let piperWorkerState = { ready: false, speakerCount: 0 };
   const piperSpeechCache = new Map();
 
   const currentScriptSrc = document.currentScript?.src || new URL('./tts-wrapper.js', window.location.href).toString();
@@ -165,15 +166,6 @@
     return { pcm: out.subarray(0, pos), sampleRate };
   }
 
-  function hashString(value) {
-    let hash = 2166136261;
-    for (let i = 0; i < value.length; i++) {
-      hash ^= value.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    return hash >>> 0;
-  }
-
   function piperModelPathFromVoiceId(voiceId) {
     const parts = voiceId.split('-');
     return `${parts[0].split('_')[0]}/${parts.join('/')}/${parts.join('-')}`;
@@ -216,107 +208,74 @@
     const cache = await caches.open(PIPER_CACHE_NAME);
     await Promise.all(piperModelUrls().map((url) => cache.delete(url)));
     touchPiperMeta({ lastDownloadedAt: 0, lastEvictedAt: Date.now() });
-    if (piperProvider) piperProvider.destroy();
-    if (piperEngine && typeof piperEngine.destroy === 'function') piperEngine.destroy();
-    piperProvider = null;
-    piperEngine = null;
-    piperVoiceMeta = null;
+    piperSpeechCache.clear();
+    if (piperWorker) {
+      try {
+        void postToPiperWorker('reset', {});
+      } catch {
+        // Ignore worker reset errors during eviction.
+      }
+    }
+    piperWorkerState = { ready: false, speakerCount: 0 };
     return true;
   }
 
-  class PiperCacheProvider {
-    constructor() {
-      this.memo = new Map();
-      this.objectUrls = new Set();
-    }
-
-    destroy() {
-      for (const objectUrl of this.objectUrls) {
-        URL.revokeObjectURL(objectUrl);
+  function ensurePiperWorker() {
+    if (piperWorker) return piperWorker;
+    const workerUrl = new URL('piper-worker.js', wrapperBaseUrl);
+    piperWorker = new Worker(workerUrl, { type: 'module', name: 'piper-tts' });
+    piperWorker.onmessage = ({ data }) => {
+      const pending = pendingPiperRequests.get(data?.id);
+      if (!pending) return;
+      pendingPiperRequests.delete(data.id);
+      if (data?.state) {
+        piperWorkerState = {
+          ready: !!data.state.ready,
+          speakerCount: Number(data.state.speakerCount) || 0,
+        };
       }
-      this.objectUrls.clear();
-      this.memo.clear();
-    }
-
-    async fetch(url) {
-      if (this.memo.has(url)) return this.memo.get(url);
-      const value = await this.load(url);
-      this.memo.set(url, value);
-      return value;
-    }
-
-    async load(url) {
-      const isJson = url.endsWith('.json');
-      const isRemotePiperAsset = url.startsWith(PIPER_REMOTE_BASE) && (url.endsWith('.onnx') || url.endsWith('.onnx.json') || url.endsWith('voices.json'));
-      let response = null;
-      if (isRemotePiperAsset && 'caches' in window) {
-        const cache = await caches.open(PIPER_CACHE_NAME);
-        response = await cache.match(url);
-        if (!response) {
-          response = await fetch(url, { mode: 'cors' });
-          if (!response.ok) throw new Error(`Could not fetch: ${url}`);
-          await cache.put(url, response.clone());
-          if (url.endsWith('.onnx') || url.endsWith('.onnx.json')) {
-            touchPiperMeta({ lastDownloadedAt: Date.now() });
-          }
-        }
+      if (!data?.ok) {
+        const error = new Error(data?.error || 'Unknown Piper worker error');
+        lastPiperError = error;
+        pending.reject(error);
+        return;
       }
-      if (!response) {
-        response = await fetch(url, { mode: url.startsWith('http') ? 'cors' : 'same-origin' });
-        if (!response.ok) throw new Error(`Could not fetch: ${url}`);
+      pending.resolve(data.result || data.state || true);
+    };
+    piperWorker.onerror = (event) => {
+      const error = new Error(event.message || 'Piper worker crashed');
+      lastPiperError = error;
+      for (const pending of pendingPiperRequests.values()) {
+        pending.reject(error);
       }
-      if (isJson) return response.json();
-      const objectUrl = URL.createObjectURL(await response.blob());
-      this.objectUrls.add(objectUrl);
-      return objectUrl;
-    }
+      pendingPiperRequests.clear();
+    };
+    return piperWorker;
+  }
+
+  function postToPiperWorker(type, payload) {
+    const worker = ensurePiperWorker();
+    const id = ++piperRequestId;
+    return new Promise((resolve, reject) => {
+      pendingPiperRequests.set(id, { resolve, reject });
+      worker.postMessage({ id, type, payload });
+    });
   }
 
   async function tryLoadPiper() {
-    if (piperEngine) return piperEngine;
+    if (piperWorkerState.ready) return true;
     if (piperLoadPromise) return piperLoadPromise;
     piperLoadPromise = (async () => {
       await maybeEvictStalePiperAssets();
-      const mod = await import(new URL('piper-tts-web.js', piperVendorBaseUrl).toString());
-      piperProvider = new PiperCacheProvider();
-      const voiceProvider = new mod.HuggingFaceVoiceProvider({
-        provider: piperProvider,
-        baseUrl: PIPER_REMOTE_BASE,
-      });
-      try {
-        const voices = await voiceProvider.list();
-        piperVoiceMeta = voices ? (voices[PIPER_MODEL_ID] || null) : null;
-      } catch {
-        piperVoiceMeta = null;
-      }
-      let onnxRuntime = null;
-      if ('gpu' in navigator && mod.OnnxWebGPURuntime) {
-        try {
-          onnxRuntime = new mod.OnnxWebGPURuntime({ basePath: piperOnnxBaseUrl, numThreads: 1 });
-        } catch {
-          onnxRuntime = null;
-        }
-      }
-      if (!onnxRuntime) {
-        if (!window.crossOriginIsolated) {
-          throw new Error('Piper CPU fallback needs cross-origin isolation for threaded ONNX runtime assets');
-        }
-        onnxRuntime = new mod.OnnxWebRuntime({
-          basePath: piperOnnxBaseUrl,
-          numThreads: Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)),
-        });
-      }
-      const phonemizeRuntime = new mod.PhonemizeWebRuntime({
-        provider: piperProvider,
-        basePath: piperPhonemizeBaseUrl,
-      });
-      piperEngine = new mod.PiperWebEngine({
-        onnxRuntime,
-        phonemizeRuntime,
-        voiceProvider,
+      await postToPiperWorker('init', {
+        piperOnnxBaseUrl,
+        piperPhonemizeBaseUrl,
+        remoteBase: PIPER_REMOTE_BASE,
+        modelId: PIPER_MODEL_ID,
+        numThreads: Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)),
       });
       lastPiperError = null;
-      return piperEngine;
+      return true;
     })().catch((error) => {
       lastPiperError = error;
       return null;
@@ -326,26 +285,12 @@
     return piperLoadPromise;
   }
 
-  function getPiperSpeakerIds() {
-    const map = piperVoiceMeta?.speaker_id_map || {};
-    const ids = [...new Set(Object.values(map).map((value) => Number(value)).filter(Number.isFinite))].sort((a, b) => a - b);
-    if (ids.length) return ids;
-    const count = Number(piperVoiceMeta?.num_speakers) || 0;
-    return Array.from({ length: Math.max(0, count) }, (_, index) => index);
-  }
-
-  function piperSpeakerIdFor(options = {}) {
-    const ids = getPiperSpeakerIds();
-    if (!ids.length) return 0;
-    if (!options.tower) return ids[0];
-    if (ids.length === 1) return ids[0];
-    const towerIds = ids.slice(1);
-    const key = String(options.voiceIdentity || 'tower-default');
-    return towerIds[hashString(key) % towerIds.length];
-  }
-
-  function piperSpeechCacheKey(text, speakerId) {
-    return `${speakerId}\n${text}`;
+  function piperSpeechCacheKey(text, options = {}) {
+    return JSON.stringify({
+      text,
+      tower: !!options.tower,
+      voiceIdentity: options.voiceIdentity || null,
+    });
   }
 
   function trimPiperSpeechCache() {
@@ -356,53 +301,23 @@
     }
   }
 
-  async function wavBlobToPcm(blob) {
-    const buffer = await blob.arrayBuffer();
-    const view = new DataView(buffer);
-    const sampleRate = view.getUint32(24, true);
-    let offset = 12;
-    let dataOffset = -1;
-    let dataLength = 0;
-    while (offset + 8 <= buffer.byteLength) {
-      const chunkId = String.fromCharCode(
-        view.getUint8(offset),
-        view.getUint8(offset + 1),
-        view.getUint8(offset + 2),
-        view.getUint8(offset + 3)
-      );
-      const chunkLength = view.getUint32(offset + 4, true);
-      if (chunkId === 'data') {
-        dataOffset = offset + 8;
-        dataLength = chunkLength;
-        break;
-      }
-      offset += 8 + chunkLength + (chunkLength % 2);
+  async function generatePiperSpeech(text, options = {}) {
+    const ready = await tryLoadPiper();
+    if (!ready) {
+      throw lastPiperError || new Error('Piper unavailable');
     }
-    if (dataOffset < 0 || dataLength <= 0) {
-      throw new Error('Piper WAV output missing data chunk');
-    }
+    const response = await postToPiperWorker('generate', { text, options });
+    touchPiperMeta({ lastUsedAt: Date.now(), lastModeSelectedAt: Date.now() });
     return {
-      pcm: new Int16Array(buffer.slice(dataOffset, dataOffset + dataLength)),
-      sampleRate,
+      mode: response.mode || 'piper',
+      speakerId: response.speakerId ?? 0,
+      sampleRate: response.sampleRate || 22050,
+      pcm: new Int16Array(response.pcmBuffer),
     };
   }
 
-  async function generatePiperSpeech(text, options = {}) {
-    const engine = await tryLoadPiper();
-    if (!engine) {
-      throw lastPiperError || new Error('Piper unavailable');
-    }
-    const speakerId = piperSpeakerIdFor(options);
-    const response = await engine.generate(text, PIPER_MODEL_ID, speakerId);
-    if (!response?.file) throw new Error('Piper returned no audio');
-    touchPiperMeta({ lastUsedAt: Date.now(), lastModeSelectedAt: Date.now() });
-    const decoded = await wavBlobToPcm(response.file);
-    return { ...decoded, mode: 'piper', speakerId };
-  }
-
   function getPiperSpeech(text, options = {}) {
-    const speakerId = piperSpeakerIdFor(options);
-    const key = piperSpeechCacheKey(text, speakerId);
+    const key = piperSpeechCacheKey(text, options);
     if (piperSpeechCache.has(key)) {
       const cached = piperSpeechCache.get(key);
       piperSpeechCache.delete(key);
@@ -453,7 +368,7 @@
         loaderFound: espeakLoaderFound,
         espeakReady: !!(espeakApi && typeof espeakApi.speak === 'function'),
         piperModelId: PIPER_MODEL_ID,
-        piperSpeakerCount: Number(piperVoiceMeta?.num_speakers) || getPiperSpeakerIds().length,
+        piperSpeakerCount: piperWorkerState.speakerCount || 0,
         piperSelectedMode: configuredMode,
         piperCachedMeta: loadPiperMeta(),
         lastError: lastEspeakError ? String(lastEspeakError) : null,
