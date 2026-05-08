@@ -1076,6 +1076,12 @@
       }
       return best;
     }
+    function getAirstripContact(x, z, marginX = 0, marginZ = marginX) {
+      // Delivery should count anywhere on the usable strip, including a
+      // little rollout room beyond the threshold and grass shoulders either
+      // side of the runway, not only the exact runway rectangle.
+      return getRunwayContact(x, z, 24 + marginX, 12 + marginZ);
+    }
 
     // The flattened pad height under an airfield (used by terrain too).
     // The "pad" is an apron rectangle wider than the runway itself so that
@@ -2861,12 +2867,11 @@
       return bearingDegFromRad(Math.atan2(x / dirScale, -(z / dirScale)));
     }
     function windSockYawRad(wind) {
-      // Winds are named from where they come. A windsock trails away from the
-      // source direction, so the sock geometry should point downwind. The sock
-      // mesh itself extends along local -X after its construction-time Z
-      // rotation, so add pi here to align that local tail direction with the
-      // desired world bearing.
-      return bearingDegToYawRad(wind.toDeg) + Math.PI;
+      // This mesh is anchored at the sock mouth/cuff end, with the cloth body
+      // extending away from that pivot. Yaw therefore needs to face the mouth
+      // into the source wind direction; the trailing tail naturally ends up
+      // pointing downwind.
+      return bearingDegToYawRad(wind.fromDeg);
     }
     function bearingDegToCompassLong(deg) {
       const idx = Math.round(normalizeBearingDeg(deg) / 22.5) % 16;
@@ -2878,6 +2883,9 @@
       return String(n).padStart(2, '0');
     }
     function runwayCandidates(af) {
+      // The visual strip's long axis is local +X after rotating the airfield
+      // group by af.heading, so heading 0 means an east/west strip (09/27),
+      // heading PI/2 means a north/south strip (36/18), and so on.
       const axisX = Math.cos(af.heading);
       const axisZ = -Math.sin(af.heading);
       const courseA = bearingDegFromRad(Math.atan2(axisX, -axisZ));
@@ -2886,6 +2894,18 @@
         runway: runwayNumberFromBearingDeg(courseDeg),
         courseDeg,
       }));
+    }
+    function runwayFromContact(contact, preferredCourseDeg = null) {
+      if (!contact?.af) return null;
+      const candidates = runwayCandidates(contact.af);
+      if (preferredCourseDeg != null && Math.abs(contact.local.lx) < 14) {
+        return [...candidates].sort((a, b) =>
+          smallestAngleDiffDeg(a.courseDeg, preferredCourseDeg) - smallestAngleDiffDeg(b.courseDeg, preferredCourseDeg)
+        )[0];
+      }
+      // Negative local X is the threshold for the runway that points along
+      // the strip's +X course; positive local X is the reciprocal threshold.
+      return contact.local.lx <= 0 ? candidates[0] : candidates[1];
     }
     function pickBestRunway(af, fromX, fromZ) {
       // Inbound desired course from current position toward the airfield.
@@ -2914,10 +2934,18 @@
         })
         .sort((a, b) => b.score - a.score)[0].candidate;
     }
-    function getAirfieldWind(af, timeSec = performance.now() * 0.001) {
-      const dirX = fbm(af.x * 0.0023 + timeSec * 0.017, af.z * 0.0021 - 37.4) - 0.5;
-      const dirZ = fbm(af.x * 0.0021 - 19.7, af.z * 0.0024 + timeSec * 0.015) - 0.5;
-      const fromDeg = windFromVectorToBearingDeg(dirX, dirZ);
+    function currentWindTimeSec() {
+      return getGameDate().getTime() * 0.001;
+    }
+    function getAirfieldWind(af, timeSec = currentWindTimeSec()) {
+      // Use a slow prevailing direction with a smaller local veer term. The
+      // older model derived bearing from two independent near-zero channels,
+      // which could whip through huge angles when that vector briefly flipped.
+      const prevailingDeg = normalizeBearingDeg(
+        fbm(af.x * 0.00042 + 18.7, af.z * 0.00042 - 11.9 + timeSec * 0.0015) * 360
+      );
+      const veerDeg = (fbm(af.x * 0.0014 - 7.3, af.z * 0.0014 + 29.1 + timeSec * 0.0032) - 0.5) * 55;
+      const fromDeg = normalizeBearingDeg(prevailingDeg + veerDeg);
       const speedKnots = 5 + fbm(af.x * 0.0037 + 71.2, af.z * 0.0033 + timeSec * 0.024) * 10;
       const gust = fbm(af.x * 0.011 + timeSec * 0.12, af.z * 0.011 - 12.8) - 0.5;
       return {
@@ -3465,6 +3493,7 @@
       const runwayHere = getRunwayContact(flight.position.x, flight.position.z, 10, 5);
       const onCurrentRunway = runwayHere && runwayHere.af.id === currentAirfield.id;
       const onDestinationRunway = runwayHere && runwayHere.af.id === destinationAirfield.id;
+      const physicalRunwayHere = runwayFromContact(runwayHere, planeHeadingDeg);
       const distToDestination = Math.hypot(destinationAirfield.x - flight.position.x, destinationAirfield.z - flight.position.z);
       if (onGround && onDestinationRunway && stopped) {
         const wind = getAirfieldWind(destinationAirfield);
@@ -3488,7 +3517,7 @@
         const wind = getAirfieldWind(currentAirfield);
         const departureDirection = bearingDegToCompassLong(planeHeadingDeg);
         const departurePhrase = formatDepartureDirection(departureDirection);
-        const depart = pickDepartureRunway(currentAirfield, planeHeadingDeg, wind.fromDeg);
+        const depart = physicalRunwayHere || pickDepartureRunway(currentAirfield, planeHeadingDeg, wind.fromDeg);
         return {
           responses: [
             {
@@ -3505,9 +3534,11 @@
         };
       }
 
-      const landing = pickBestRunway(destinationAirfield, flight.position.x, flight.position.z);
+      const landing = onDestinationRunway
+        ? (physicalRunwayHere || pickBestRunway(destinationAirfield, flight.position.x, flight.position.z))
+        : pickBestRunway(destinationAirfield, flight.position.x, flight.position.z);
       const arrivalWind = getAirfieldWind(destinationAirfield);
-      const nearPattern = distToDestination < 1400;
+      const nearPattern = distToDestination < 1400 && currentAirfield.id === destinationAirfield.id;
       return {
         responses: [
           {
@@ -4252,8 +4283,8 @@
       const stopped = Math.hypot(flight.velocity.x, flight.velocity.z) < 1.0;
       if (!stopped) return;
       const dest = currentMail.to;
-      const runwayContact = getRunwayContact(flight.position.x, flight.position.z, 12, 6);
-      if (!runwayContact || runwayContact.af.id !== dest.id) return;
+      const airstripContact = getAirstripContact(flight.position.x, flight.position.z);
+      if (!airstripContact || airstripContact.af.id !== dest.id) return;
       deliveryInProgress = true;
       setStatus(`✉  Delivered to ${dest.name}!`, 3500);
       playDeliveryAnimation().finally(() => {
@@ -4369,7 +4400,7 @@
       drawClock(now2);
       drawThrottle(flight.throttle);
       syncThrottlePadVisual();
-      updateAirfieldWinds(now2.getTime() * 0.001);
+      updateAirfieldWinds(currentWindTimeSec());
 
       // Update propeller audio each frame
       try { if (propSound && typeof propSound.update === 'function') propSound.update(dt); } catch (e) { /* noop */ }
