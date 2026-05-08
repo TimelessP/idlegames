@@ -157,7 +157,7 @@ if (await fileExists(gitignoreInDist)) {
   await fs.rm(gitignoreInDist);
 }
 
-const PRECACHE_EXTENSIONS = new Set(['.html', '.css', '.js', '.json', '.webmanifest', '.png', '.svg', '.ico', '.txt', '.woff2']);
+const PRECACHE_EXTENSIONS = new Set(['.html', '.css', '.js', '.json', '.webmanifest', '.png', '.svg', '.ico', '.txt', '.woff2', '.wasm', '.data']);
 const precacheSet = new Set();
 
 async function collectPrecache(currentDir) {

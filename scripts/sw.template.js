@@ -1,6 +1,7 @@
 const APP_VERSION = '__APP_VERSION__';
 const CACHE_NAME = `IdleGames-v${APP_VERSION}`;
 const PRECACHE_URLS = __PRECACHE_LIST__;
+const PRECACHE_URL_SET = new Set(PRECACHE_URLS);
 const TIMER_ICON_PATH = 'assets/appicons/idle-games-512x512px.png';
 
 const timerData = new Map();
@@ -171,6 +172,22 @@ self.addEventListener('fetch', (event) => {
 
   const handleRequest = async (isNavigation, preloadResponse, request) => {
     const cache = await caches.open(CACHE_NAME);
+    const requestPath = new URL(request.url).pathname;
+    const cacheKey = `.${requestPath}`;
+    const isPinnedStaticAsset = PRECACHE_URL_SET.has(cacheKey)
+      && (requestPath.endsWith('.wasm')
+        || requestPath.endsWith('.data')
+        || requestPath.includes('/assets/vendor/tts/'));
+
+    if (isPinnedStaticAsset) {
+      const cached = await cache.match(request, { ignoreSearch: true }) || await cache.match(cacheKey, { ignoreSearch: true });
+      if (cached) return cached;
+      const networkResponse = await fetch(request, { cache: 'no-store' });
+      if (networkResponse && networkResponse.ok && (networkResponse.type === 'basic' || networkResponse.type === 'cors')) {
+        await cache.put(request, networkResponse.clone());
+      }
+      return networkResponse;
+    }
     
     // For navigation requests, use preload response if available (fixes cold-start)
     if (isNavigation) {
