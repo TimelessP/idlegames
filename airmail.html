@@ -899,62 +899,158 @@
     }
 
     // ======================================================================
-    // AIRFIELDS (seeded, fixed positions)
+    // AIRFIELDS (deterministic procedural world)
     // ======================================================================
-    // We place ~14 airfields scattered across an 8km x 8km region, then bend
-    // the terrain locally to flatten a strip.
-    const AIRFIELD_NAMES = [
-      'Hawthorne Field',     'Pemberton Field',   'Larkspur Field',
-      'Brookmill Field',     'Greystone Field',   'Foxhollow Field',
-      'Ashbridge Field',     'Whitchurch Field',  'Cedar Hollow Field',
-      'Marlowe Strip',       'Penrose Field',     'Saltwater Strip',
-      'Wickham Field',       'Driftwood Strip',
-    ];
-    const TOWER_CALLS = [
-      'Hawthorne Tower',     'Pemberton Tower',   'Larkspur Tower',
-      'Brookmill Tower',     'Greystone Tower',   'Foxhollow Tower',
-      'Ashbridge Tower',     'Whitchurch Tower',  'Cedar Tower',
-      'Marlowe Tower',       'Penrose Tower',     'Saltwater Tower',
-      'Wickham Tower',       'Driftwood Tower',
-    ];
+    // Airfields are generated from seeded world cells. A single generated
+    // start field anchors new games near the origin; every other runway comes
+    // from the same procedural system.
+    const PROCEDURAL_AIRFIELD_CELL = 960;
+    const PROCEDURAL_AIRFIELD_JITTER = 180;
+    const PROCEDURAL_AIRFIELD_EXCLUSION = 780;
+    const PROCEDURAL_AIRFIELD_QUERY_RADIUS = 1800;
+    const PROCEDURAL_AIRFIELD_VISUAL_RADIUS = 2600;
+    const AIRFIELD_PREFIXES = ['Alder','Barrow','Bracken','Briar','Cinder','Cliff','Clover','Dunlin','Elm','Fallow','Fen','Glen','Juniper','Kestrel','Morrow','North','Old','Pine','Raven','Sable','Silver','South','Thimble','West','Willow','Wren'];
+    const AIRFIELD_SUFFIXES = ['Bay','Bridge','Brook','Combe','Cross','Dale','Down','Fen','Ford','Gate','Grove','Haven','Hollow','Marsh','Mere','Point','Rest','Vale','View','Wash','Wick','Wold','Wood'];
+    const AIRFIELD_TYPES = ['Field','Strip','Aerodrome'];
+    const proceduralAirfields = new Map();
+    const proceduralAirfieldVisuals = new Map();
 
-    function placeAirfields() {
-      const rng = mulberry32(SEED ^ 0xA17F1ED);
-      const placed = [];
-      const wantCount = AIRFIELD_NAMES.length;
-      let safety = 0;
-      while (placed.length < wantCount && safety++ < 4000) {
-        // bias toward lower land
-        const x = (rng() - 0.5) * 7200;
-        const z = (rng() - 0.5) * 7200;
-        const h = worldHeight(x, z);
-        if (h < SEA_LEVEL + 1) continue;        // not on sea
-        if (h > 18) continue;                    // not on mountains
-        // min spacing
-        let ok = true;
-        for (const af of placed) {
-          const dx = af.x - x, dz = af.z - z;
-          if (dx * dx + dz * dz < 800 * 800) { ok = false; break; }
+    function proceduralAirfieldKey(cellX, cellZ) {
+      return `${cellX},${cellZ}`;
+    }
+    function proceduralAirfieldSeed(cellX, cellZ, salt = 0) {
+      return Math.floor(hash2(cellX * 131 + salt * 17, cellZ * 173 - salt * 29) * 0xFFFFFFFF) >>> 0;
+    }
+    function generateAirfieldName(rng) {
+      const prefix = AIRFIELD_PREFIXES[Math.floor(rng() * AIRFIELD_PREFIXES.length)];
+      const suffix = AIRFIELD_SUFFIXES[Math.floor(rng() * AIRFIELD_SUFFIXES.length)];
+      const type = AIRFIELD_TYPES[Math.floor(rng() * AIRFIELD_TYPES.length)];
+      return `${prefix}${suffix} ${type}`;
+    }
+    function towerNameForAirfield(name) {
+      return `${name.replace(/\s+(Field|Strip|Aerodrome)$/i, '')} Tower`;
+    }
+    function terrainIsAirfieldFriendly(x, z) {
+      const h = worldHeight(x, z);
+      if (h < SEA_LEVEL + 1 || h > 18) return null;
+      const sample = 36;
+      const hx = Math.abs(worldHeight(x + sample, z) - worldHeight(x - sample, z));
+      const hz = Math.abs(worldHeight(x, z + sample) - worldHeight(x, z - sample));
+      if (hx > 7 || hz > 7) return null;
+      return h;
+    }
+    function generateProceduralAirfield(cellX, cellZ) {
+      const key = proceduralAirfieldKey(cellX, cellZ);
+      if (proceduralAirfields.has(key)) return proceduralAirfields.get(key);
+      const rng = mulberry32(proceduralAirfieldSeed(cellX, cellZ, 7));
+      let found = null;
+      for (let attempt = 0; attempt < 4 && !found; attempt++) {
+        const x = (cellX + 0.5) * PROCEDURAL_AIRFIELD_CELL + (rng() - 0.5) * PROCEDURAL_AIRFIELD_JITTER * 2;
+        const z = (cellZ + 0.5) * PROCEDURAL_AIRFIELD_CELL + (rng() - 0.5) * PROCEDURAL_AIRFIELD_JITTER * 2;
+        const h = terrainIsAirfieldFriendly(x, z);
+        if (h == null) continue;
+        if (START_AIRFIELD) {
+          const dx = START_AIRFIELD.x - x;
+          const dz = START_AIRFIELD.z - z;
+          if (dx * dx + dz * dz < PROCEDURAL_AIRFIELD_EXCLUSION * PROCEDURAL_AIRFIELD_EXCLUSION) continue;
         }
-        if (!ok) continue;
-        const idx = placed.length;
-        // Runway heading aligned with prevailing land (snap to 4 directions)
         const dirs = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4];
         const heading = dirs[Math.floor(rng() * dirs.length)];
-        placed.push({
-          id: idx,
-          name: AIRFIELD_NAMES[idx],
-          tower: TOWER_CALLS[idx],
-          x, z,
+        const name = generateAirfieldName(rng);
+        found = {
+          id: `proc:${cellX},${cellZ}`,
+          procedural: true,
+          name,
+          tower: towerNameForAirfield(name),
+          x,
+          z,
           y: h,
-          heading,            // runway axis
+          heading,
           length: 130,
           width: 22,
-        });
+        };
       }
-      return placed;
+      proceduralAirfields.set(key, found);
+      return found;
     }
-    const AIRFIELDS = placeAirfields();
+    function generateStartAirfield() {
+      const rng = mulberry32(SEED ^ 0xA17F1ED);
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const x = (rng() - 0.5) * 900;
+        const z = (rng() - 0.5) * 900;
+        const h = terrainIsAirfieldFriendly(x, z);
+        if (h == null) continue;
+        const dirs = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4];
+        const heading = dirs[Math.floor(rng() * dirs.length)];
+        const name = generateAirfieldName(rng);
+        return {
+          id: 'start',
+          name,
+          tower: towerNameForAirfield(name),
+          x,
+          z,
+          y: h,
+          heading,
+          length: 130,
+          width: 22,
+        };
+      }
+      return {
+        id: 'start',
+        name: 'WillowCross Field',
+        tower: 'WillowCross Tower',
+        x: 0,
+        z: 0,
+        y: Math.max(SEA_LEVEL + 2, worldHeight(0, 0)),
+        heading: 0,
+        length: 130,
+        width: 22,
+      };
+    }
+    const START_AIRFIELD = generateStartAirfield();
+    function getAirfieldById(id) {
+      if (id === 'start' || id === 0) return START_AIRFIELD;
+      if (typeof id === 'string') {
+        const proc = /^proc:(-?\d+),(-?\d+)$/.exec(id);
+        if (proc) return generateProceduralAirfield(Number(proc[1]), Number(proc[2]));
+      }
+      return null;
+    }
+    function getAirfieldsNear(x, z, radius) {
+      const results = [];
+      const radiusSq = radius * radius;
+      const startDx = START_AIRFIELD.x - x;
+      const startDz = START_AIRFIELD.z - z;
+      if (startDx * startDx + startDz * startDz <= radiusSq) results.push(START_AIRFIELD);
+      const minCellX = Math.floor((x - radius) / PROCEDURAL_AIRFIELD_CELL) - 1;
+      const maxCellX = Math.floor((x + radius) / PROCEDURAL_AIRFIELD_CELL) + 1;
+      const minCellZ = Math.floor((z - radius) / PROCEDURAL_AIRFIELD_CELL) - 1;
+      const maxCellZ = Math.floor((z + radius) / PROCEDURAL_AIRFIELD_CELL) + 1;
+      for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
+        for (let cellX = minCellX; cellX <= maxCellX; cellX++) {
+          const af = generateProceduralAirfield(cellX, cellZ);
+          if (!af) continue;
+          const dx = af.x - x;
+          const dz = af.z - z;
+          if (dx * dx + dz * dz <= radiusSq) results.push(af);
+        }
+      }
+      return results;
+    }
+    function pickNearestAirfield(x, z) {
+      let radius = PROCEDURAL_AIRFIELD_QUERY_RADIUS;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const airfields = getAirfieldsNear(x, z, radius);
+        if (airfields.length) {
+          return airfields.reduce((best, af) => {
+            const d = (af.x - x) * (af.x - x) + (af.z - z) * (af.z - z);
+            return !best || d < best.distSq ? { af, distSq: d } : best;
+          }, null).af;
+        }
+        radius *= 1.8;
+      }
+      return START_AIRFIELD;
+    }
 
     function getAirfieldLocalPosition(af, x, z) {
       const dx = x - af.x;
@@ -971,7 +1067,7 @@
     }
     function getRunwayContact(x, z, marginX = 0, marginZ = marginX) {
       let best = null;
-      for (const af of AIRFIELDS) {
+      for (const af of getAirfieldsNear(x, z, PROCEDURAL_AIRFIELD_QUERY_RADIUS)) {
         const local = getAirfieldLocalPosition(af, x, z);
         if (!isWithinRunwayBounds(af, local.lx, local.lz, marginX, marginZ)) continue;
         const centerBias = Math.abs(local.lx) / (af.length / 2 + Math.max(1, marginX))
@@ -990,7 +1086,7 @@
     function airfieldFlatten(x, z) {
       // returns {affect: 0..1, target: y, af} or null
       let best = null;
-      for (const af of AIRFIELDS) {
+      for (const af of getAirfieldsNear(x, z, PROCEDURAL_AIRFIELD_QUERY_RADIUS)) {
         const { lx, lz } = getAirfieldLocalPosition(af, x, z);
         // Apron half-extents — generous enough to clear every building plus
         // a margin so the chunk grid (≈ 9 m vertex spacing) always has at
@@ -1379,6 +1475,7 @@
           farChunks.set(k, m);
         }
       }
+      ensureProceduralAirfieldVisuals(centreX, centreZ);
       updateTerrainShadowReceivers(centreX, centreZ);
     }
 
@@ -1496,13 +1593,38 @@
       g.rotation.y = af.heading;
       return g;
     }
-    for (const af of AIRFIELDS) scene.add(buildAirfieldVisual(af));
+    scene.add(buildAirfieldVisual(START_AIRFIELD));
+
+    function ensureProceduralAirfieldVisuals(centerX, centerZ) {
+      const visibleAirfields = getAirfieldsNear(centerX, centerZ, PROCEDURAL_AIRFIELD_VISUAL_RADIUS)
+        .filter((af) => af.procedural);
+      const wanted = new Set(visibleAirfields.map((af) => af.id));
+      for (const [id, group] of proceduralAirfieldVisuals) {
+        if (wanted.has(id)) continue;
+        scene.remove(group);
+        if (group.userData.af) group.userData.af.windVisual = null;
+        proceduralAirfieldVisuals.delete(id);
+      }
+      for (const af of visibleAirfields) {
+        if (proceduralAirfieldVisuals.has(af.id)) continue;
+        const group = buildAirfieldVisual(af);
+        group.userData.af = af;
+        scene.add(group);
+        proceduralAirfieldVisuals.set(af.id, group);
+      }
+    }
 
     function updateAirfieldWinds(timeSec) {
-      for (const af of AIRFIELDS) {
-        if (!af.windVisual) continue;
+      if (START_AIRFIELD.windVisual) {
+        const wind = getAirfieldWind(START_AIRFIELD, timeSec);
+        START_AIRFIELD.windVisual.yaw.rotation.y = windSockYawRad(wind) - START_AIRFIELD.heading;
+        START_AIRFIELD.windVisual.pitch.rotation.z = 0.22 + Math.min(0.55, wind.speedKnots / 26) + wind.flutter * 0.08;
+      }
+      for (const [id, group] of proceduralAirfieldVisuals) {
+        const af = group.userData.af;
+        if (!af || !af.windVisual) continue;
         const wind = getAirfieldWind(af, timeSec);
-        af.windVisual.yaw.rotation.y = bearingDegToYawRad(wind.fromDeg) - af.heading;
+        af.windVisual.yaw.rotation.y = windSockYawRad(wind) - af.heading;
         af.windVisual.pitch.rotation.z = 0.22 + Math.min(0.55, wind.speedKnots / 26) + wind.flutter * 0.08;
       }
     }
@@ -2099,7 +2221,7 @@
       flight.onGround = true;
       flight.throttle = 0.0;
     }
-    spawnAt(AIRFIELDS[0]);
+    spawnAt(START_AIRFIELD);
 
     const tmpForward = new THREE.Vector3();
     const tmpUp = new THREE.Vector3();
@@ -2474,54 +2596,67 @@
     // MAIL SYSTEM
     // ======================================================================
     const STAMP_EMOJIS = ['🐦','🦌','🌾','⛵','🌻','🐌','🌸','🍄','🐢','🪶','🌲','🐝'];
-    const SENDER_NAMES = ['MRS. AVERY','MR. DUNN','MISS HOLLOWAY','OLD MR. PRYCE','THE BAKER','THE LIGHTHOUSEKEEPER','DR. NEWELL','THE VICAR'];
     const MAIL_VARIANTS = ['letter','parcel'];
     const GAME_SAVE_STORAGE_KEY = 'idlegames-airmail-save';
+    const PERSON_TITLES = ['MR.','MRS.','MISS','DR.','CAPT.','AUNT','UNCLE'];
+    const PERSON_SURNAMES = ['Avery','Bramble','Chance','Dunn','Fairchild','Fenwick','Gable','Holloway','Marlowe','Newell','Pryce','Thorne','Whitley','Wren','Yarrow'];
+    const MAIL_OCCUPATIONS = ['THE APOTHECARY','THE BAKER','THE COOPER','THE FARMER','THE FERRYMAN','THE GROCER','THE HARBOURMASTER','THE INFIRMARY','THE LIBRARIAN','THE LIGHTHOUSEKEEPER','THE MILLINER','THE STATIONER','THE VICAR'];
+    const RECIPIENT_GIVENS = ['ADA','BEATRICE','CLARA','ELSIE','FLORENCE','JUNE','MABEL','NORA','OSCAR','PERCY','RUTH','TOMMY','VIOLET','WALTER'];
 
     let currentMail = null;
-    function pickRandomMail(rng) {
-      const aIdx = Math.floor(rng() * AIRFIELDS.length);
-      let bIdx;
-      do { bIdx = Math.floor(rng() * AIRFIELDS.length); } while (bIdx === aIdx);
-      const sender = SENDER_NAMES[Math.floor(rng() * SENDER_NAMES.length)];
-      const stamp = STAMP_EMOJIS[Math.floor(rng() * STAMP_EMOJIS.length)];
-      const recipientNames = ['MR. WHITLEY','MRS. CHANCE','LITTLE TOMMY','THE GRIST MILL','MISS PERKINS','THE INFIRMARY','THE GROCER','THE LIBRARIAN'];
-      const recipient = recipientNames[Math.floor(rng() * recipientNames.length)];
-      const variant = MAIL_VARIANTS[Math.floor(rng() * MAIL_VARIANTS.length)];
+    function pickSenderName(rng) {
+      if (rng() < 0.32) return MAIL_OCCUPATIONS[Math.floor(rng() * MAIL_OCCUPATIONS.length)];
+      const title = PERSON_TITLES[Math.floor(rng() * PERSON_TITLES.length)];
+      const surname = PERSON_SURNAMES[Math.floor(rng() * PERSON_SURNAMES.length)];
+      return `${title} ${surname}`;
+    }
+    function pickRecipientName(rng) {
+      if (rng() < 0.28) return MAIL_OCCUPATIONS[Math.floor(rng() * MAIL_OCCUPATIONS.length)];
+      if (rng() < 0.45) return `LITTLE ${RECIPIENT_GIVENS[Math.floor(rng() * RECIPIENT_GIVENS.length)]}`;
+      const title = PERSON_TITLES[Math.floor(rng() * PERSON_TITLES.length)];
+      const surname = PERSON_SURNAMES[Math.floor(rng() * PERSON_SURNAMES.length)];
+      return `${title} ${surname}`;
+    }
+    function pickHopDestination(fromAirfield, rng) {
+      let radius = PROCEDURAL_AIRFIELD_CELL * 3.2;
+      let candidates = [];
+      for (let attempt = 0; attempt < 4; attempt++) {
+        candidates = getAirfieldsNear(fromAirfield.x, fromAirfield.z, radius)
+          .filter((af) => af.id !== fromAirfield.id)
+          .map((af) => ({
+            af,
+            dist: Math.hypot(af.x - fromAirfield.x, af.z - fromAirfield.z),
+          }))
+          .sort((a, b) => a.dist - b.dist);
+        if (candidates.length >= 2) break;
+        radius *= 1.7;
+      }
+      if (!candidates.length) return START_AIRFIELD;
+      const baseHop = candidates[Math.min(1, candidates.length - 1)].dist;
+      const maxHop = Math.max(PROCEDURAL_AIRFIELD_CELL * 1.6, baseHop * 2.2);
+      const hopOptions = candidates.filter((candidate) => candidate.dist <= maxHop).slice(0, 10);
+      const pool = hopOptions.length ? hopOptions : candidates.slice(0, 6);
+      return pool[Math.floor(rng() * pool.length)].af;
+    }
+    function makeMailForRoute(fromAirfield, rng) {
       return {
-        from: AIRFIELDS[aIdx],
-        to:   AIRFIELDS[bIdx],
-        sender,
-        recipient,
-        stamp,
-        variant,
+        from: fromAirfield,
+        to: pickHopDestination(fromAirfield, rng),
+        sender: pickSenderName(rng),
+        recipient: pickRecipientName(rng),
+        stamp: STAMP_EMOJIS[Math.floor(rng() * STAMP_EMOJIS.length)],
+        variant: MAIL_VARIANTS[Math.floor(rng() * MAIL_VARIANTS.length)],
         date: 'POSTED ' + new Date().toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }).toUpperCase(),
       };
     }
     const mailRng = mulberry32(SEED ^ 0xBEEF);
     function newMail() {
-      // First mail: from where the plane currently is
-      let m;
-      let safety = 0;
-      do {
-        m = pickRandomMail(mailRng);
-        safety++;
-      } while (safety < 30 && currentMail && (m.from.id === currentMail.to.id ? false : (m.from.id === currentMail.from.id)));
-      // After delivery, sender airfield should be where we just landed (the previous destination)
-      if (currentMail) {
-        m.from = currentMail.to;
-        // ensure to !== from
-        let bIdx;
-        do { bIdx = Math.floor(mailRng() * AIRFIELDS.length); } while (AIRFIELDS[bIdx].id === m.from.id);
-        m.to = AIRFIELDS[bIdx];
-      } else {
-        m.from = AIRFIELDS[0];
-      }
-      currentMail = m;
+      const fromAirfield = currentMail ? currentMail.to : START_AIRFIELD;
+      currentMail = makeMailForRoute(fromAirfield, mailRng);
       renderMailCard();
     }
     function getCarryingOriginAirfield() {
-      return currentMail ? currentMail.from : AIRFIELDS[0];
+      return currentMail ? currentMail.from : START_AIRFIELD;
     }
     function renderMailCard() {
       if (!currentMail) return;
@@ -2535,7 +2670,7 @@
       if (env) env.classList.toggle('parcel', m.variant === 'parcel');
     }
     function airfieldById(id) {
-      return AIRFIELDS.find((airfield) => airfield.id === id) || null;
+      return getAirfieldById(id);
     }
     function serializeMail(mail) {
       if (!mail) return null;
@@ -2719,7 +2854,19 @@
       const rad = THREE.MathUtils.degToRad(normalizeBearingDeg(deg));
       const dx = Math.sin(rad);
       const dz = -Math.cos(rad);
-      return Math.atan2(dz, dx);
+      return Math.atan2(-dz, dx);
+    }
+    function windFromVectorToBearingDeg(x, z) {
+      const dirScale = Math.max(0.0001, Math.hypot(x, z));
+      return bearingDegFromRad(Math.atan2(x / dirScale, -(z / dirScale)));
+    }
+    function windSockYawRad(wind) {
+      // Winds are named from where they come. A windsock trails away from the
+      // source direction, so the sock geometry should point downwind. The sock
+      // mesh itself extends along local -X after its construction-time Z
+      // rotation, so add pi here to align that local tail direction with the
+      // desired world bearing.
+      return bearingDegToYawRad(wind.toDeg) + Math.PI;
     }
     function bearingDegToCompassLong(deg) {
       const idx = Math.round(normalizeBearingDeg(deg) / 22.5) % 16;
@@ -2770,8 +2917,7 @@
     function getAirfieldWind(af, timeSec = performance.now() * 0.001) {
       const dirX = fbm(af.x * 0.0023 + timeSec * 0.017, af.z * 0.0021 - 37.4) - 0.5;
       const dirZ = fbm(af.x * 0.0021 - 19.7, af.z * 0.0024 + timeSec * 0.015) - 0.5;
-      const dirScale = Math.max(0.0001, Math.hypot(dirX, dirZ));
-      const fromDeg = bearingDegFromRad(Math.atan2(dirX / dirScale, -(dirZ / dirScale)));
+      const fromDeg = windFromVectorToBearingDeg(dirX, dirZ);
       const speedKnots = 5 + fbm(af.x * 0.0037 + 71.2, af.z * 0.0033 + timeSec * 0.024) * 10;
       const gust = fbm(af.x * 0.011 + timeSec * 0.12, af.z * 0.011 - 12.8) - 0.5;
       return {
@@ -3302,12 +3448,7 @@
 
     // Find nearest airfield to player (for "I'm SSW of X")
     function nearestAirfield(x, z) {
-      let best = null, bd = Infinity;
-      for (const af of AIRFIELDS) {
-        const d = (af.x-x)*(af.x-x) + (af.z-z)*(af.z-z);
-        if (d < bd) { bd = d; best = af; }
-      }
-      return best;
+      return pickNearestAirfield(x, z);
     }
 
     function buildRadioExchange({
@@ -3493,7 +3634,7 @@
       if (typeof mailRng.setState === 'function') {
         mailRng.setState(SEED ^ 0xBEEF);
       }
-      spawnAt(AIRFIELDS[0]);
+      spawnAt(START_AIRFIELD);
       flight.pitchInput = 0;
       flight.rollInput = 0;
       flight.yawInput = 0;
