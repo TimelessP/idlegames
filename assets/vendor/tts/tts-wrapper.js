@@ -175,38 +175,57 @@
         lastError: _lastEspeakError ? String(_lastEspeakError) : null,
       };
     },
-    speak: async function(text) {
-      // Prefer browser TTS first when available.
-      try {
+    speak: async function(text, options = {}) {
+      const mode = String(options.mode || 'auto').toLowerCase();
+      if (mode === 'none') return { handled: true, mode: 'none' };
+
+      const tryBrowser = async () => {
         await speakWithBrowser(text);
         return { handled: true, mode: 'browser' };
-      } catch (e) {
-        // Fall through to eSpeak/tone fallback.
-      }
-
-      // Try espeak WASM loader next (if present).
-      try {
+      };
+      const tryEspeak = async () => {
         const api = await tryLoadEspeak();
         if (api && typeof api.speak === 'function') {
-          // espeak-loader should return { pcm: Int16Array|ArrayBuffer, sampleRate }
           const res = await api.speak(text);
-          if (res && res.pcm) return { pcm: (res.pcm instanceof Int16Array) ? res.pcm : new Int16Array(res.pcm), sampleRate: res.sampleRate || 22050 };
+          if (res && res.pcm) {
+            return {
+              pcm: (res.pcm instanceof Int16Array) ? res.pcm : new Int16Array(res.pcm),
+              sampleRate: res.sampleRate || 22050,
+              mode: 'espeak',
+            };
+          }
         }
-      } catch (e) {
-        _lastEspeakError = e;
-      }
+        throw new Error('eSpeak unavailable');
+      };
+      const tryTones = async () => {
+        const res = synthToPcmInt16(text, 22050);
+        return { ...res, mode: 'tones' };
+      };
 
-      // Last resort: synthesize a tiny offline tone-based voice.
-      try {
-        return synthToPcmInt16(text, 22050);
-      } catch (e) {
+      const routes = {
+        auto: [tryBrowser, tryEspeak, tryTones],
+        browser: [tryBrowser],
+        espeak: [tryEspeak],
+        tones: [tryTones],
+      };
+      const selectedRoute = routes[mode] || routes.auto;
+      let lastError = null;
+      for (const attempt of selectedRoute) {
+        try {
+          return await attempt();
+        } catch (e) {
+          lastError = e;
+          if (attempt === tryEspeak) _lastEspeakError = e;
+        }
+      }
+      if (mode === 'auto') {
         console.warn('TTS routing failed across browser, eSpeak, and tone fallback', {
           loaderFound: _espeakLoaderFound,
           lastEspeakError: _lastEspeakError ? String(_lastEspeakError) : null,
-          toneError: String(e),
+          lastError: lastError ? String(lastError) : null,
         });
-        return null;
       }
+      return null;
     }
   };
 })();
