@@ -270,6 +270,26 @@
       background: radial-gradient(circle at 30% 30%, #d84a4a, #6a1818);
       animation: pulseRed 1.2s infinite;
     }
+    #action-wrap {
+      right: 14px;
+      bottom: 14px;
+      display: none;
+    }
+    #action-btn {
+      width: 92px;
+      height: 92px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, #d7b364, #715226);
+      border: 4px solid #2a1f10;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.6), inset 0 -4px 8px rgba(0,0,0,0.35), inset 0 4px 8px rgba(255,220,150,0.28);
+      color: #2a1f10;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 1.5px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #action-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
     @keyframes pulseRed {
       0%,100% { box-shadow: 0 6px 18px rgba(0,0,0,0.6), 0 0 0 0 rgba(216,74,74,0.6); }
       50%     { box-shadow: 0 6px 18px rgba(0,0,0,0.6), 0 0 0 14px rgba(216,74,74,0); }
@@ -325,6 +345,9 @@
       box-shadow: 0 8px 18px rgba(0,0,0,0.35), inset 0 5px 10px rgba(255,226,170,0.08);
       pointer-events: auto;
       touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
     }
     #tpad-left { left: 14px; }
     #tpad-right { right: 14px; display: none; }
@@ -366,6 +389,13 @@
       display: block;
       bottom: 14px;
     }
+    body.mobile-ui.on-foot-mode #tpad-right,
+    body.mobile-ui.on-foot-mode #transmit-wrap {
+      display: none;
+    }
+    body.mobile-ui.on-foot-mode #action-wrap {
+      display: block;
+    }
     body.mobile-ui #callsign-label {
       text-align: center;
     }
@@ -389,10 +419,17 @@
       body.mobile-ui #tpad-right {
         bottom: 10px;
       }
+      body.mobile-ui #action-wrap {
+        bottom: 10px;
+      }
       body.mobile-ui #radio-overlay {
         bottom: 26px;
         max-width: 48vw;
       }
+    }
+    body.on-foot-mode #transmit-wrap,
+    body.on-foot-mode #throttle-wrap {
+      display: none;
     }
 
     /* Loading screen */
@@ -1328,9 +1365,11 @@
         <kbd>]</kbd> throttle up &nbsp;
         <kbd>[</kbd> throttle down and hold brakes at idle<br>
         <kbd>Space</kbd> transmit &nbsp;
+        <kbd>Enter</kbd> board/disembark &nbsp;
         <kbd>?</kbd> menu/controls &nbsp;
         <kbd>Esc</kbd> menu
       </p>
+      <p class="menu-copy"><b>On Foot:</b> use <kbd>W</kbd>/<kbd>S</kbd> to walk forward and backward, <kbd>A</kbd>/<kbd>D</kbd> to turn, or the left touch pad to move and steer. Tap the plane or press <kbd>Enter</kbd> within 3m to board. Pilots can swim.</p>
       <p class="menu-copy"><b>Touch:</b> left stick = pitch/roll, right stick = throttle with rudder on the horizontal axis. Hold either throttle control at idle on the ground to apply brakes.</p>
       <p class="menu-copy"><b>Instruments:</b> tap the clock or compass to enlarge them. In the enlarged clock, tap the centre to restore local time, the middle ring for AM, and the outer ring for PM.</p>
       <div class="menu-actions">
@@ -1428,6 +1467,9 @@
 
   <div class="hud interact" id="transmit-wrap">
     <button id="transmit-btn" title="Transmit (Space)">TRANSMIT</button>
+  </div>
+  <div class="hud interact" id="action-wrap">
+    <button id="action-btn" title="Board Or Disembark (Enter)">BOARD</button>
   </div>
 
   <!-- Zoom modals -->
@@ -1720,6 +1762,16 @@
       return START_AIRFIELD;
     }
 
+    const airfieldQueryCache = new Map();
+    function getAirfieldsNearCached(x, z, radius) {
+      const key = `${radius}:${Math.round(x * 4)}:${Math.round(z * 4)}`;
+      const cached = airfieldQueryCache.get(key);
+      if (cached) return cached;
+      const result = getAirfieldsNear(x, z, radius);
+      airfieldQueryCache.set(key, result);
+      return result;
+    }
+
     function getAirfieldLocalPosition(af, x, z) {
       const dx = x - af.x;
       const dz = z - af.z;
@@ -1735,7 +1787,7 @@
     }
     function getRunwayContact(x, z, marginX = 0, marginZ = marginX) {
       let best = null;
-      for (const af of getAirfieldsNear(x, z, PROCEDURAL_AIRFIELD_QUERY_RADIUS)) {
+      for (const af of getAirfieldsNearCached(x, z, PROCEDURAL_AIRFIELD_QUERY_RADIUS)) {
         const local = getAirfieldLocalPosition(af, x, z);
         if (!isWithinRunwayBounds(af, local.lx, local.lz, marginX, marginZ)) continue;
         const centerBias = Math.abs(local.lx) / (af.length / 2 + Math.max(1, marginX))
@@ -1751,6 +1803,93 @@
       return getRunwayContact(x, z, 24 + marginX, 12 + marginZ);
     }
 
+    const RUNWAY_SURFACE_OFFSET = 0.12;
+    const HANGAR_LENGTH = 14;
+    const HANGAR_WIDTH = 9;
+    const HANGAR_HEIGHT = 6;
+    const HANGAR_DOOR_OPENING_WIDTH = HANGAR_WIDTH - 1.3;
+    const HANGAR_FLOOR_OFFSET = 0.16;
+    const HANGAR_LOCAL_X_OFFSET = 8;
+    const HANGAR_LOCAL_Z_OFFSET = 6;
+    const SURFACE_EDGE_BLEND = 1.4;
+    const HANGAR_CAMERA_MARGIN = 0.8;
+
+    function smoothRectSupportWeight(localX, localZ, halfX, halfZ, blend = SURFACE_EDGE_BLEND) {
+      function axisWeight(coord, halfExtent) {
+        const dist = Math.abs(coord);
+        if (dist <= Math.max(0, halfExtent - blend)) return 1;
+        if (dist >= halfExtent + blend) return 0;
+        const t = 1 - (dist - Math.max(0, halfExtent - blend)) / Math.max(0.0001, blend * 2);
+        return t * t * (3 - 2 * t);
+      }
+      return axisWeight(localX, halfX) * axisWeight(localZ, halfZ);
+    }
+
+    function getRunwaySurfaceSupport(x, z) {
+      let best = null;
+      for (const af of getAirfieldsNearCached(x, z, PROCEDURAL_AIRFIELD_QUERY_RADIUS)) {
+        const local = getAirfieldLocalPosition(af, x, z);
+        const weight = smoothRectSupportWeight(local.lx, local.lz, af.length / 2, af.width / 2, 2.2);
+        if (weight <= 0) continue;
+        if (!best || weight > best.weight) best = { af, weight, surfaceY: af.y + RUNWAY_SURFACE_OFFSET };
+      }
+      return best;
+    }
+
+    function getHangarFloorSupport(x, z) {
+      let best = null;
+      for (const af of getAirfieldsNearCached(x, z, PROCEDURAL_AIRFIELD_QUERY_RADIUS)) {
+        const { hx: hangarLocalX, hz: hangarLocalZ } = getHangarLocalPosition(af, x, z);
+        const weight = smoothRectSupportWeight(hangarLocalX, hangarLocalZ, (HANGAR_LENGTH - 0.2) / 2, (HANGAR_WIDTH - 0.2) / 2, 1.1);
+        if (weight <= 0) continue;
+        if (!best || weight > best.weight) best = { af, weight, surfaceY: af.y + HANGAR_FLOOR_OFFSET };
+      }
+      return best;
+    }
+
+    function getHangarLocalPosition(af, x, z) {
+      const local = getAirfieldLocalPosition(af, x, z);
+      return {
+        hx: local.lx - (-af.length / 2 - HANGAR_LOCAL_X_OFFSET),
+        hz: local.lz - (-af.width / 2 - HANGAR_LOCAL_Z_OFFSET),
+      };
+    }
+
+    function getContainingHangar(x, y, z, margin = 0) {
+      for (const af of getAirfieldsNearCached(x, z, PROCEDURAL_AIRFIELD_QUERY_RADIUS)) {
+        const { hx, hz } = getHangarLocalPosition(af, x, z);
+        const insidePlan = Math.abs(hx) <= HANGAR_LENGTH / 2 - margin
+          && Math.abs(hz) <= HANGAR_WIDTH / 2 - margin;
+        const insideHeight = y >= af.y - 0.2 && y <= af.y + HANGAR_HEIGHT - margin * 0.35;
+        if (insidePlan && insideHeight) return { af, hx, hz };
+      }
+      return null;
+    }
+
+    function sampleSupportedSurface(x, z) {
+      const groundY = terrainHeight(x, z);
+      let supportType = 'ground';
+      let surfaceY = groundY;
+      const runway = getRunwaySurfaceSupport(x, z);
+      if (runway) {
+        surfaceY = Math.max(surfaceY, groundY + (runway.surfaceY - groundY) * runway.weight);
+        supportType = 'runway';
+      }
+      const hangar = getHangarFloorSupport(x, z);
+      if (hangar) {
+        const hangarSurfaceY = groundY + (hangar.surfaceY - groundY) * hangar.weight;
+        if (hangarSurfaceY >= surfaceY) supportType = 'hangar';
+        surfaceY = Math.max(surfaceY, hangarSurfaceY);
+      }
+      const swimming = supportType === 'ground' && groundY < SEA_LEVEL - 0.08;
+      return {
+        groundY,
+        supportType,
+        swimming,
+        surfaceY: swimming ? SEA_LEVEL : surfaceY,
+      };
+    }
+
     // The flattened pad height under an airfield (used by terrain too).
     // The "pad" is an apron rectangle wider than the runway itself so that
     // the runway, hangar, tower and wind sock all sit on perfectly flat
@@ -1760,7 +1899,7 @@
     function airfieldFlatten(x, z) {
       // returns {affect: 0..1, target: y, af} or null
       let best = null;
-      for (const af of getAirfieldsNear(x, z, PROCEDURAL_AIRFIELD_QUERY_RADIUS)) {
+      for (const af of getAirfieldsNearCached(x, z, PROCEDURAL_AIRFIELD_QUERY_RADIUS)) {
         const { lx, lz } = getAirfieldLocalPosition(af, x, z);
         // Apron half-extents — generous enough to clear every building plus
         // a margin so the chunk grid (≈ 9 m vertex spacing) always has at
@@ -1796,7 +1935,9 @@
     // SCENE / RENDERER
     // ======================================================================
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.5, 12000);
+    const FLIGHT_CAMERA_FOV = 55;
+    const FOOT_CAMERA_FOV = 62;
+    const camera = new THREE.PerspectiveCamera(FLIGHT_CAMERA_FOV, innerWidth / innerHeight, 0.5, 12000);
     const prefersMobileUI = matchMedia('(pointer: coarse)').matches;
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -2179,6 +2320,12 @@
     // ======================================================================
     // AIRFIELD VISUALS
     // ======================================================================
+    const HANGAR_TRIGGER_RADIUS = 8;
+    const HANGAR_DOOR_RESPONSE = 2.6;
+    const HANGAR_LIGHT_RESPONSE = 8;
+    const HANGAR_LIGHT_FLICKER_DURATION = 1.15;
+    const hangarPlayerPos = new THREE.Vector3();
+    const hangarTriggerPos = new THREE.Vector3();
     function buildAirfieldVisual(af) {
       const g = new THREE.Group();
       // Runway grass strip (slightly darker green)
@@ -2186,7 +2333,7 @@
       stripGeo.rotateX(-Math.PI / 2);
       const stripMat = createMatteStandardMaterial({ color: 0x6d8a4c, roughness: 1.0 });
       const strip = new THREE.Mesh(stripGeo, stripMat);
-      strip.position.y = 0.12;
+      strip.position.y = RUNWAY_SURFACE_OFFSET;
       strip.receiveShadow = true;
       g.add(strip);
 
@@ -2236,15 +2383,92 @@
       sockPitch.add(innerSock);
       af.windVisual = { yaw: sockYaw, pitch: sockPitch };
 
-      // Hangar (a small barn)
+      // Hangar with sliding doors and fluorescent interior lighting.
       const hangarG = new THREE.Group();
       const wallMat = createMatteStandardMaterial({ color: 0xb0623c, roughness: 0.92 });
+      const trimMat = createMatteStandardMaterial({ color: 0x73452b, roughness: 0.92 });
       const roofMat = createMatteStandardMaterial({ color: 0x4a3122, roughness: 0.92 });
-      const hangarLength = 14;
-      const hangarWidth = 9;
-      const walls = new THREE.Mesh(new THREE.BoxGeometry(hangarLength, 6, hangarWidth), wallMat);
-      walls.position.y = 3; walls.castShadow = true; walls.receiveShadow = true;
-      hangarG.add(walls);
+      const floorMat = createMatteStandardMaterial({ color: 0x7b7469, roughness: 0.98 });
+      const doorMat = createMatteStandardMaterial({ color: 0xd6c6a6, roughness: 0.95, metalness: 0.04 });
+      const railMat = createMatteStandardMaterial({ color: 0x4b4339, roughness: 0.86, metalness: 0.12 });
+      const fixtureMat = createMatteStandardMaterial({
+        color: 0xe8edf2,
+        roughness: 0.76,
+        emissive: 0xd9efff,
+        emissiveIntensity: 0,
+      });
+      const hangarLength = HANGAR_LENGTH;
+      const hangarWidth = HANGAR_WIDTH;
+      const hangarHeight = HANGAR_HEIGHT;
+      const wallThickness = 0.36;
+      const doorHeight = 4.8;
+      const doorLayersPerSide = 3;
+      const frontX = hangarLength / 2 - wallThickness / 2;
+      const backX = -hangarLength / 2 + wallThickness / 2;
+      const floor = new THREE.Mesh(
+        new THREE.BoxGeometry(hangarLength - 0.2, HANGAR_FLOOR_OFFSET, hangarWidth - 0.2),
+        floorMat,
+      );
+      floor.position.y = HANGAR_FLOOR_OFFSET * 0.5;
+      floor.receiveShadow = true;
+      hangarG.add(floor);
+      const backWall = new THREE.Mesh(new THREE.BoxGeometry(wallThickness, hangarHeight, hangarWidth), wallMat);
+      backWall.position.set(backX, hangarHeight / 2, 0);
+      backWall.castShadow = true;
+      backWall.receiveShadow = true;
+      hangarG.add(backWall);
+      for (const side of [-1, 1]) {
+        const sideWall = new THREE.Mesh(new THREE.BoxGeometry(hangarLength, hangarHeight, wallThickness), wallMat);
+        sideWall.position.set(0, hangarHeight / 2, side * (hangarWidth / 2 - wallThickness / 2));
+        sideWall.castShadow = true;
+        sideWall.receiveShadow = true;
+        hangarG.add(sideWall);
+      }
+      const frontOpeningWidth = hangarWidth - 1.3;
+      const jambDepth = (hangarWidth - frontOpeningWidth) / 2;
+      const frontHeader = new THREE.Mesh(
+        new THREE.BoxGeometry(wallThickness, hangarHeight - doorHeight + 0.45, frontOpeningWidth),
+        wallMat,
+      );
+      frontHeader.position.set(frontX, doorHeight + (hangarHeight - doorHeight + 0.45) / 2, 0);
+      frontHeader.castShadow = true;
+      frontHeader.receiveShadow = true;
+      hangarG.add(frontHeader);
+      for (const side of [-1, 1]) {
+        const jamb = new THREE.Mesh(new THREE.BoxGeometry(wallThickness, doorHeight, jambDepth), trimMat);
+        jamb.position.set(frontX, doorHeight / 2, side * (frontOpeningWidth / 2 + jambDepth / 2));
+        jamb.castShadow = true;
+        jamb.receiveShadow = true;
+        hangarG.add(jamb);
+      }
+      const doorPanels = [];
+      const halfOpening = frontOpeningWidth / 2;
+      const panelSpan = halfOpening / doorLayersPerSide;
+      const panelWidth = panelSpan - 0.06;
+      const railDepthStep = 0.12;
+      for (let layer = 0; layer < doorLayersPerSide; layer++) {
+        const rail = new THREE.Mesh(
+          new THREE.BoxGeometry(0.12, 0.08, frontOpeningWidth + 0.45),
+          railMat,
+        );
+        rail.position.set(frontX - 0.08 - layer * railDepthStep, doorHeight + 0.22, 0);
+        hangarG.add(rail);
+      }
+      for (const side of [-1, 1]) {
+        for (let layer = 0; layer < doorLayersPerSide; layer++) {
+          const closedZ = side * ((layer + 0.5) * panelSpan);
+          const openZ = side * (halfOpening - panelWidth * 0.48 + layer * panelWidth * 0.2);
+          const panel = new THREE.Mesh(
+            new THREE.BoxGeometry(0.12, doorHeight, panelWidth),
+            doorMat,
+          );
+          panel.position.set(frontX - 0.1 - layer * railDepthStep, doorHeight / 2, closedZ);
+          panel.castShadow = true;
+          panel.receiveShadow = true;
+          hangarG.add(panel);
+          doorPanels.push({ mesh: panel, closedZ, openZ });
+        }
+      }
       const roofRise = 2.4;
       const roofOverhang = 0.7;
       const roofShape = new THREE.Shape();
@@ -2262,8 +2486,37 @@
       roof.castShadow = true;
       roof.receiveShadow = true;
       hangarG.add(roof);
-      hangarG.position.set(-af.length/2 - 8, 0, -af.width/2 - 6);
+      const fixtureMeshes = [];
+      for (const x of [-3.2, 0, 3.2]) {
+        const fixture = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.14, 0.34), fixtureMat);
+        fixture.position.set(x, hangarHeight - 0.45, 0);
+        hangarG.add(fixture);
+        fixtureMeshes.push(fixture);
+      }
+      const hangarLights = [];
+      const ceilingLight = new THREE.PointLight(0xf2f8ff, 0, 20, 2);
+      ceilingLight.position.set(-0.6, hangarHeight - 1.0, 0);
+      hangarG.add(ceilingLight);
+      hangarLights.push({ light: ceilingLight, intensity: 8.8 });
+      const rearFillLight = new THREE.PointLight(0xd7e7ff, 0, 14, 2);
+      rearFillLight.position.set(-3.2, 2.5, 0);
+      hangarG.add(rearFillLight);
+      hangarLights.push({ light: rearFillLight, intensity: 3.2 });
+      hangarG.position.set(-af.length/2 - HANGAR_LOCAL_X_OFFSET, 0, -af.width/2 - HANGAR_LOCAL_Z_OFFSET);
       g.add(hangarG);
+      af.hangarVisual = {
+        root: hangarG,
+        triggerLocal: new THREE.Vector3(hangarLength / 2 + 4.5, 2.2, 0),
+        doors: doorPanels,
+        fixtureMat,
+        fixtureMeshes,
+        hangarLights,
+        openAmount: 0,
+        lightLevel: 0,
+        flickerTime: 0,
+        playerInRange: false,
+        flickerSeed: hash2(Math.round(af.x * 10), Math.round(af.z * 10)) * Math.PI * 2,
+      };
 
       // Tower (small)
       const towerG = new THREE.Group();
@@ -2286,6 +2539,11 @@
       // Position the whole group
       g.position.set(af.x, af.y, af.z);
       g.rotation.y = af.heading;
+      g.updateWorldMatrix(true, false);
+      const hangarTriggerWorld = new THREE.Vector3();
+      hangarTriggerWorld.copy(af.hangarVisual.triggerLocal);
+      hangarG.localToWorld(hangarTriggerWorld);
+      af.hangarVisual.triggerWorld = hangarTriggerWorld;
       return g;
     }
     scene.add(buildAirfieldVisual(START_AIRFIELD));
@@ -2297,30 +2555,100 @@
       for (const [id, group] of proceduralAirfieldVisuals) {
         if (wanted.has(id)) continue;
         scene.remove(group);
-        if (group.userData.af) group.userData.af.windVisual = null;
+        if (group.userData.af) {
+          group.userData.af.windVisual = null;
+          group.userData.af.hangarVisual = null;
+        }
         proceduralAirfieldVisuals.delete(id);
       }
-      for (const af of visibleAirfields) {
-        if (proceduralAirfieldVisuals.has(af.id)) continue;
-        const group = buildAirfieldVisual(af);
-        group.userData.af = af;
-        scene.add(group);
-        proceduralAirfieldVisuals.set(af.id, group);
-      }
+      const missing = visibleAirfields
+        .filter((af) => !proceduralAirfieldVisuals.has(af.id))
+        .sort((a, b) => {
+          const da = (a.x - centerX) * (a.x - centerX) + (a.z - centerZ) * (a.z - centerZ);
+          const db = (b.x - centerX) * (b.x - centerX) + (b.z - centerZ) * (b.z - centerZ);
+          return da - db;
+        });
+      const nextAirfield = missing[0];
+      if (!nextAirfield) return;
+      const group = buildAirfieldVisual(nextAirfield);
+      group.userData.af = nextAirfield;
+      scene.add(group);
+      proceduralAirfieldVisuals.set(nextAirfield.id, group);
+      syncHangarVisualImmediate(nextAirfield, getActivePlayerPosition());
     }
 
-    function updateAirfieldWinds(timeSec) {
+    function getActivePlayerPosition() {
+      const pilot = getPilot();
+      return pilot.embarked ? flight.position : pilot.position;
+    }
+
+    function applyHangarVisualState(hangar, openAmount, lightLevel, flickerTime, playerInRange) {
+      hangar.openAmount = openAmount;
+      hangar.lightLevel = lightLevel;
+      hangar.flickerTime = flickerTime;
+      hangar.playerInRange = playerInRange;
+      for (const door of hangar.doors) {
+        door.mesh.position.z = THREE.MathUtils.lerp(door.closedZ, door.openZ, hangar.openAmount);
+      }
+      hangar.fixtureMat.emissiveIntensity = 0.04 + hangar.lightLevel * 1.35;
+      hangar.fixtureMeshes.forEach((fixture) => {
+        fixture.material.emissiveIntensity = hangar.fixtureMat.emissiveIntensity;
+      });
+      hangar.hangarLights.forEach(({ light, intensity }) => {
+        light.intensity = hangar.lightLevel * intensity;
+      });
+    }
+
+    function syncHangarVisualImmediate(af, playerPos = getActivePlayerPosition()) {
+      const hangar = af?.hangarVisual;
+      if (!hangar || !hangar.triggerWorld) return;
+      const containingHangar = getContainingHangar(playerPos.x, playerPos.y, playerPos.z, 0.2);
+      const playerInRange = (containingHangar && containingHangar.af.id === af.id)
+        || hangar.triggerWorld.distanceTo(playerPos) <= HANGAR_TRIGGER_RADIUS;
+      applyHangarVisualState(hangar, playerInRange ? 1 : 0, playerInRange ? 1 : 0, 0, playerInRange);
+    }
+
+    function updateHangarVisual(af, playerPos, containingHangar, timeSec, dt) {
+      const hangar = af.hangarVisual;
+      if (!hangar) return;
+      const playerInRange = (containingHangar && containingHangar.af.id === af.id)
+        || hangar.triggerWorld.distanceTo(playerPos) <= HANGAR_TRIGGER_RADIUS;
+      if (playerInRange && !hangar.playerInRange) {
+        hangar.flickerTime = HANGAR_LIGHT_FLICKER_DURATION;
+      }
+      hangar.playerInRange = playerInRange;
+      hangar.openAmount = easeTowards(hangar.openAmount, playerInRange ? 1 : 0, HANGAR_DOOR_RESPONSE, dt);
+      let lightTarget = playerInRange ? 1 : 0;
+      if (playerInRange && hangar.flickerTime > 0) {
+        hangar.flickerTime = Math.max(0, hangar.flickerTime - dt);
+        const elapsed = HANGAR_LIGHT_FLICKER_DURATION - hangar.flickerTime;
+        const buzz = Math.sin(elapsed * 38 + hangar.flickerSeed) * 0.5 + 0.5;
+        const stutter = Math.sin(elapsed * 93 + hangar.flickerSeed * 1.7) * 0.5 + 0.5;
+        lightTarget = hangar.flickerTime < 0.16
+          ? 1
+          : THREE.MathUtils.clamp(Math.max(buzz * 0.92, stutter - 0.22), 0.05, 1);
+      }
+      hangar.lightLevel = easeTowards(hangar.lightLevel, lightTarget, HANGAR_LIGHT_RESPONSE, dt);
+      applyHangarVisualState(hangar, hangar.openAmount, hangar.lightLevel, hangar.flickerTime, playerInRange);
+    }
+
+    function updateAirfieldWinds(timeSec, dt) {
+      const pilot = getPilot();
+      hangarPlayerPos.copy(pilot.embarked ? flight.position : pilot.position);
+      const containingHangar = getContainingHangar(hangarPlayerPos.x, hangarPlayerPos.y, hangarPlayerPos.z, 0.2);
       if (START_AIRFIELD.windVisual) {
         const wind = getAirfieldWind(START_AIRFIELD, timeSec);
         START_AIRFIELD.windVisual.yaw.rotation.y = windSockYawRad(wind) - START_AIRFIELD.heading;
         START_AIRFIELD.windVisual.pitch.rotation.z = 0.22 + Math.min(0.55, wind.speedKnots / 26) + wind.flutter * 0.08;
       }
+      updateHangarVisual(START_AIRFIELD, hangarPlayerPos, containingHangar, timeSec, dt);
       for (const [id, group] of proceduralAirfieldVisuals) {
         const af = group.userData.af;
         if (!af || !af.windVisual) continue;
         const wind = getAirfieldWind(af, timeSec);
         af.windVisual.yaw.rotation.y = windSockYawRad(wind) - af.heading;
         af.windVisual.pitch.rotation.z = 0.22 + Math.min(0.55, wind.speedKnots / 26) + wind.flutter * 0.08;
+        updateHangarVisual(af, hangarPlayerPos, containingHangar, timeSec, dt);
       }
     }
 
@@ -2754,6 +3082,9 @@
       rearRim.rotation.x = Math.PI / 2;
       rearRim.scale.set(1.1, 1, 0.94);
       g.add(rearRim);
+      const rearSeatAnchor = new THREE.Group();
+      rearSeatAnchor.position.set(-0.46, 0.02, 0);
+      g.add(rearSeatAnchor);
 
       // Engine cowling (slightly darker, near nose)
       const cowl = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.34, 0.4, 14),
@@ -2883,11 +3214,404 @@
       g.add(propGroup);
 
       g.userData.prop = propGroup;
+      g.userData.rearSeatAnchor = rearSeatAnchor;
       return g;
     }
     plane = buildBiplane();
     scene.add(plane);
+    plane.userData.interactionMeshes = [];
+    plane.traverse((child) => {
+      if (child.isMesh) plane.userData.interactionMeshes.push(child);
+    });
     applyGraphicsSettings();
+
+    // ======================================================================
+    // PEOPLE / PILOT
+    // ======================================================================
+    const CHARACTER_BOARD_RADIUS = 3;
+    const WALK_SPEED = 3.9;
+    const SWIM_SPEED = 2.2;
+    const WALK_BACKPEDAL_FACTOR = 0.72;
+    const WALK_TURN_SPEED = 2.7;
+    const WALK_FORWARD_RESPONSE = 8.5;
+    const WALK_TURN_RESPONSE = 10.5;
+    const WALK_ANIMATION_RESPONSE = 10;
+    const WALK_SURFACE_RESPONSE = 10;
+    const GROUND_SURFACE_RESPONSE = 9;
+    const PERSON_WORLD_UP = new THREE.Vector3(0, 1, 0);
+    const seatWorldPos = new THREE.Vector3();
+    const seatWorldQuat = new THREE.Quaternion();
+    const personForward = new THREE.Vector3();
+    const personMove = new THREE.Vector3();
+    const personFacing = new THREE.Vector3();
+    const personRight = new THREE.Vector3();
+    const interactionPointer = new THREE.Vector2();
+    const interactionRaycaster = new THREE.Raycaster();
+    function easeTowards(current, target, rate, dt) {
+      if (dt <= 0) return target;
+      return THREE.MathUtils.lerp(current, target, Math.min(1, dt * rate));
+    }
+    function makePersonAppearance(seed, overrides = {}) {
+      const rng = mulberry32((SEED ^ seed ^ 0x50fa2d91) >>> 0);
+      const heightScale = overrides.heightScale ?? THREE.MathUtils.lerp(0.62, 0.72, rng());
+      const legLength = overrides.legLength ?? heightScale * THREE.MathUtils.lerp(0.36, 0.4, rng());
+      const torsoLength = overrides.torsoLength ?? heightScale * THREE.MathUtils.lerp(0.3, 0.34, rng());
+      const armLength = overrides.armLength ?? heightScale * THREE.MathUtils.lerp(0.28, 0.34, rng());
+      const headRadius = overrides.headRadius ?? heightScale * THREE.MathUtils.lerp(0.105, 0.12, rng());
+      const shoulderWidth = overrides.shoulderWidth ?? heightScale * THREE.MathUtils.lerp(0.22, 0.27, rng());
+      return {
+        heightScale,
+        legLength,
+        torsoLength,
+        armLength,
+        headRadius,
+        shoulderWidth,
+        hipWidth: overrides.hipWidth ?? heightScale * THREE.MathUtils.lerp(0.16, 0.2, rng()),
+        bodyDepth: overrides.bodyDepth ?? heightScale * THREE.MathUtils.lerp(0.12, 0.15, rng()),
+        limbWidth: overrides.limbWidth ?? heightScale * THREE.MathUtils.lerp(0.052, 0.062, rng()),
+        coatColor: overrides.coatColor ?? 0x6f5234,
+        trouserColor: overrides.trouserColor ?? 0x43516d,
+        skinColor: overrides.skinColor ?? 0xe5b58a,
+        scarfColor: overrides.scarfColor ?? 0xbd4337,
+        capColor: overrides.capColor ?? 0x3e2b1d,
+        goggleColor: overrides.goggleColor ?? 0x6f7f94,
+      };
+    }
+    function buildPersonVisual(appearance) {
+      const root = new THREE.Group();
+      const rig = {};
+      const skinMat = createMatteStandardMaterial({ color: appearance.skinColor, roughness: 0.95 });
+      const coatMat = createMatteStandardMaterial({ color: appearance.coatColor, roughness: 0.94 });
+      const trouserMat = createMatteStandardMaterial({ color: appearance.trouserColor, roughness: 0.95 });
+      const scarfMat = createMatteStandardMaterial({ color: appearance.scarfColor, roughness: 0.9 });
+      const capMat = createMatteStandardMaterial({ color: appearance.capColor, roughness: 0.92 });
+      const goggleMat = createMatteStandardMaterial({ color: appearance.goggleColor, roughness: 0.52, metalness: 0.18 });
+      const upperLegLen = appearance.legLength * 0.54;
+      const lowerLegLen = appearance.legLength * 0.46;
+      const upperArmLen = appearance.armLength * 0.54;
+      const lowerArmLen = appearance.armLength * 0.46;
+      const shoulderY = appearance.torsoLength * 0.72;
+      const hipSpread = appearance.hipWidth * 0.28;
+      const pelvis = new THREE.Mesh(
+        new THREE.BoxGeometry(appearance.hipWidth * 0.82, appearance.heightScale * 0.1, appearance.bodyDepth),
+        trouserMat,
+      );
+      root.add(pelvis);
+      rig.torso = new THREE.Group();
+      rig.torso.position.y = appearance.torsoLength * 0.08;
+      root.add(rig.torso);
+      const torso = new THREE.Mesh(
+        new THREE.BoxGeometry(appearance.torsoLength * 0.62, appearance.torsoLength, appearance.bodyDepth * 1.08),
+        coatMat,
+      );
+      torso.position.y = appearance.torsoLength * 0.46;
+      rig.torso.add(torso);
+      const scarf = new THREE.Mesh(
+        new THREE.BoxGeometry(appearance.bodyDepth * 0.44, appearance.heightScale * 0.11, appearance.bodyDepth * 1.12),
+        scarfMat,
+      );
+      scarf.position.set(appearance.torsoLength * 0.18, shoulderY, 0);
+      rig.torso.add(scarf);
+      rig.head = new THREE.Group();
+      rig.head.position.set(appearance.torsoLength * 0.1, appearance.torsoLength * 0.9 + appearance.headRadius * 0.32, 0);
+      rig.torso.add(rig.head);
+      const neck = new THREE.Mesh(
+        new THREE.CylinderGeometry(appearance.limbWidth * 0.4, appearance.limbWidth * 0.46, appearance.headRadius * 0.42, 6),
+        skinMat,
+      );
+      neck.position.y = -appearance.headRadius * 0.18;
+      rig.head.add(neck);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(appearance.headRadius, 12, 10), skinMat);
+      head.position.y = appearance.headRadius * 0.68;
+      rig.head.add(head);
+      const cap = new THREE.Mesh(
+        new THREE.SphereGeometry(appearance.headRadius * 1.02, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.64),
+        capMat,
+      );
+      cap.position.y = appearance.headRadius * 1.02;
+      rig.head.add(cap);
+      const brim = new THREE.Mesh(
+        new THREE.BoxGeometry(appearance.headRadius * 0.95, appearance.headRadius * 0.08, appearance.headRadius * 0.42),
+        capMat,
+      );
+      brim.position.set(appearance.headRadius * 0.52, appearance.headRadius * 0.88, 0);
+      rig.head.add(brim);
+      const goggles = new THREE.Mesh(
+        new THREE.TorusGeometry(appearance.headRadius * 0.34, appearance.headRadius * 0.07, 6, 12),
+        goggleMat,
+      );
+      goggles.rotation.y = Math.PI / 2;
+      goggles.position.set(appearance.headRadius * 0.62, appearance.headRadius * 0.72, 0);
+      rig.head.add(goggles);
+      function buildLimb(parent, side, baseY, upperLen, lowerLen, upperMat, lowerMat, lateral) {
+        const upper = new THREE.Group();
+        upper.position.set(0, baseY, lateral);
+        parent.add(upper);
+        const upperMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(appearance.limbWidth, upperLen, appearance.limbWidth),
+          upperMat,
+        );
+        upperMesh.position.y = -upperLen * 0.5;
+        upper.add(upperMesh);
+        const lower = new THREE.Group();
+        lower.position.y = -upperLen;
+        upper.add(lower);
+        const lowerMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(appearance.limbWidth * 0.92, lowerLen, appearance.limbWidth * 0.92),
+          lowerMat,
+        );
+        lowerMesh.position.y = -lowerLen * 0.5;
+        lower.add(lowerMesh);
+        const foot = new THREE.Mesh(
+          new THREE.BoxGeometry(appearance.limbWidth * 1.8, appearance.limbWidth * 0.55, appearance.limbWidth * 1.15),
+          createMatteStandardMaterial({ color: 0x2a2218, roughness: 0.96 }),
+        );
+        foot.position.set(appearance.limbWidth * 0.34, -lowerLen, 0);
+        lower.add(foot);
+        rig[`${side}Upper`] = upper;
+        rig[`${side}Lower`] = lower;
+      }
+      buildLimb(root, 'leftLeg', 0, upperLegLen, lowerLegLen, trouserMat, trouserMat, -hipSpread);
+      buildLimb(root, 'rightLeg', 0, upperLegLen, lowerLegLen, trouserMat, trouserMat, hipSpread);
+      buildLimb(rig.torso, 'leftArm', shoulderY, upperArmLen, lowerArmLen, coatMat, skinMat, -appearance.shoulderWidth * 0.52);
+      buildLimb(rig.torso, 'rightArm', shoulderY, upperArmLen, lowerArmLen, coatMat, skinMat, appearance.shoulderWidth * 0.52);
+      root.traverse((child) => {
+        if (child.isMesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+      return { root, rig };
+    }
+    function makeCrewMember({ id, role, seed, appearance: appearanceOverrides = {}, embarked = true }) {
+      const appearance = makePersonAppearance(seed, appearanceOverrides);
+      const visual = buildPersonVisual(appearance);
+      scene.add(visual.root);
+      return {
+        id,
+        role,
+        seed,
+        appearance,
+        root: visual.root,
+        rig: visual.rig,
+        position: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+        quat: new THREE.Quaternion(),
+        embarked,
+        swimming: false,
+        gaitPhase: 0,
+        walkForward: 0,
+        walkTurn: 0,
+        moveBlend: 0,
+      };
+    }
+    const people = [makeCrewMember({ id: 'pilot', role: 'pilot', seed: 0x50494c4f })];
+    function getPilot() {
+      return people[0];
+    }
+    function setYawFromForward(targetQuat, x, z) {
+      targetQuat.setFromEuler(new THREE.Euler(0, Math.atan2(-z, x), 0, 'YXZ'));
+      return targetQuat;
+    }
+    function getSeatWorldTransform() {
+      const anchor = plane.userData.rearSeatAnchor;
+      if (anchor) {
+        anchor.getWorldPosition(seatWorldPos);
+        anchor.getWorldQuaternion(seatWorldQuat);
+      } else {
+        seatWorldPos.copy(flight.position);
+        seatWorldQuat.copy(flight.quat);
+      }
+      return { position: seatWorldPos, quaternion: seatWorldQuat };
+    }
+    function getPilotBoardingDistance(person = getPilot()) {
+      const seat = getSeatWorldTransform().position;
+      return person.position.distanceTo(seat);
+    }
+    function samplePersonSurface(x, z) {
+      return sampleSupportedSurface(x, z);
+    }
+    function syncActionButtonUi() {
+      const btn = document.getElementById('action-btn');
+      if (!btn) return;
+      const pilot = getPilot();
+      const canBoard = !pilot.embarked && getPilotBoardingDistance(pilot) <= CHARACTER_BOARD_RADIUS;
+      btn.textContent = pilot.embarked ? 'EXIT' : (canBoard ? 'BOARD' : 'PLANE');
+      btn.disabled = false;
+    }
+    function syncControlModeUi() {
+      document.body.classList.toggle('on-foot-mode', !getPilot().embarked);
+      syncActionButtonUi();
+    }
+    function resetPilotEmbarkedState() {
+      const pilot = getPilot();
+      const seat = getSeatWorldTransform();
+      pilot.embarked = true;
+      pilot.swimming = false;
+      pilot.velocity.set(0, 0, 0);
+      pilot.gaitPhase = 0;
+      pilot.walkForward = 0;
+      pilot.walkTurn = 0;
+      pilot.moveBlend = 0;
+      pilot.position.copy(seat.position);
+      pilot.quat.copy(seat.quaternion);
+      syncControlModeUi();
+    }
+    function canDisembarkPilot() {
+      return flight.onGround && Math.hypot(flight.velocity.x, flight.velocity.z) < 1.1;
+    }
+    function disembarkPilot() {
+      const pilot = getPilot();
+      if (!pilot.embarked) return true;
+      if (!canDisembarkPilot()) {
+        setStatus('Bring the plane to a halt on the ground before disembarking.', 2200);
+        return false;
+      }
+      tmpForward.set(1, 0, 0).applyQuaternion(flight.quat);
+      tmpRight.set(0, 0, 1).applyQuaternion(flight.quat);
+      pilot.position.copy(flight.position)
+        .addScaledVector(tmpRight, 1.45)
+        .addScaledVector(tmpForward, -0.35);
+      const surface = samplePersonSurface(pilot.position.x, pilot.position.z);
+      pilot.position.y = surface.surfaceY + pilot.appearance.legLength;
+      pilot.velocity.set(0, 0, 0);
+      pilot.swimming = surface.swimming;
+      pilot.walkForward = 0;
+      pilot.walkTurn = 0;
+      pilot.moveBlend = 0;
+      setYawFromForward(pilot.quat, tmpForward.x, tmpForward.z);
+      pilot.embarked = false;
+      flight.throttle = 0;
+      flight.pitchInput = 0;
+      flight.rollInput = 0;
+      flight.yawInput = 0;
+      flight.brakeInput = true;
+      resetOrbitCamera();
+      syncControlModeUi();
+      setStatus('Pilot disembarked.', 1800);
+      return true;
+    }
+    function embarkPilot() {
+      const pilot = getPilot();
+      if (pilot.embarked) return true;
+      if (!flight.onGround || Math.hypot(flight.velocity.x, flight.velocity.z) >= 1.1) {
+        setStatus('The aircraft must be stopped before boarding.', 2200);
+        return false;
+      }
+      if (getPilotBoardingDistance(pilot) > CHARACTER_BOARD_RADIUS) {
+        setStatus('Move within 3m of the aircraft to board.', 2200);
+        return false;
+      }
+      resetPilotEmbarkedState();
+      setStatus('Pilot boarded the aircraft.', 1800);
+      return true;
+    }
+    function togglePilotEmbark() {
+      return getPilot().embarked ? disembarkPilot() : embarkPilot();
+    }
+    function updatePilotOnFoot(dt) {
+      const pilot = getPilot();
+      if (pilot.embarked) return;
+      const forwardInput = THREE.MathUtils.clamp(
+        (keys.has('w') || keys.has('arrowup') ? 1 : 0) - (keys.has('s') || keys.has('arrowdown') ? 1 : 0) + touchWalkForward,
+        -1,
+        1,
+      );
+      const turnInput = THREE.MathUtils.clamp(
+        (keys.has('a') || keys.has('arrowleft') ? 1 : 0) - (keys.has('d') || keys.has('arrowright') ? 1 : 0) + touchWalkTurn,
+        -1,
+        1,
+      );
+      pilot.walkForward = easeTowards(pilot.walkForward, forwardInput, WALK_FORWARD_RESPONSE, dt);
+      pilot.walkTurn = easeTowards(pilot.walkTurn, turnInput, WALK_TURN_RESPONSE, dt);
+      personForward.set(1, 0, 0).applyQuaternion(pilot.quat);
+      personForward.y = 0;
+      if (personForward.lengthSq() < 1e-4) personForward.set(1, 0, 0);
+      personForward.normalize();
+      if (Math.abs(pilot.walkTurn) > 1e-3) {
+        personFacing.copy(personForward).applyAxisAngle(PERSON_WORLD_UP, pilot.walkTurn * WALK_TURN_SPEED * dt);
+        setYawFromForward(pilot.quat, personFacing.x, personFacing.z);
+        personForward.copy(personFacing).normalize();
+      }
+      const baseMoveSpeed = pilot.swimming ? SWIM_SPEED : WALK_SPEED;
+      const moveSpeed = baseMoveSpeed * (pilot.walkForward < 0 ? WALK_BACKPEDAL_FACTOR : 1);
+      const moving = Math.abs(pilot.walkForward) > 1e-3;
+      if (moving) {
+        personMove.copy(personForward).multiplyScalar(pilot.walkForward * moveSpeed);
+        pilot.position.addScaledVector(personMove, dt);
+        pilot.velocity.copy(personMove);
+        pilot.gaitPhase += dt * (pilot.swimming ? 3.8 : 7.2) * Math.max(0.12, Math.abs(pilot.walkForward));
+      } else {
+        personMove.set(0, 0, 0);
+        pilot.velocity.multiplyScalar(Math.max(0, 1 - dt * 10));
+      }
+      const surface = samplePersonSurface(pilot.position.x, pilot.position.z);
+      pilot.swimming = surface.swimming;
+      const blendDenominator = pilot.swimming ? SWIM_SPEED : WALK_SPEED;
+      pilot.moveBlend = easeTowards(
+        pilot.moveBlend,
+        Math.min(1, pilot.velocity.length() / Math.max(0.001, blendDenominator)),
+        WALK_ANIMATION_RESPONSE,
+        dt,
+      );
+      const targetY = surface.swimming
+        ? SEA_LEVEL - pilot.appearance.torsoLength * 0.18
+        : surface.surfaceY + pilot.appearance.legLength;
+      pilot.position.y = easeTowards(pilot.position.y, targetY, WALK_SURFACE_RESPONSE, dt);
+      syncActionButtonUi();
+    }
+    function updatePeople(dt) {
+      function easeRotation(part, target, rate = WALK_ANIMATION_RESPONSE) {
+        part.rotation.z = easeTowards(part.rotation.z, target, rate, dt);
+      }
+      for (const person of people) {
+        const strideDir = person.walkForward < -0.05 ? -1 : 1;
+        const stride = Math.sin(person.gaitPhase) * strideDir;
+        const strideOpp = Math.sin(person.gaitPhase + Math.PI) * strideDir;
+        if (person.embarked) {
+          const seat = getSeatWorldTransform();
+          person.root.position.copy(seat.position);
+          person.root.quaternion.copy(seat.quaternion);
+          easeRotation(person.rig.torso, -0.1);
+          easeRotation(person.rig.head, 0.08);
+          easeRotation(person.rig.leftLegUpper, 1.08);
+          easeRotation(person.rig.rightLegUpper, 1.08);
+          easeRotation(person.rig.leftLegLower, -1.1);
+          easeRotation(person.rig.rightLegLower, -1.1);
+          easeRotation(person.rig.leftArmUpper, 0.46);
+          easeRotation(person.rig.rightArmUpper, 0.3);
+          easeRotation(person.rig.leftArmLower, -0.38);
+          easeRotation(person.rig.rightArmLower, -0.22);
+        } else {
+          person.root.position.copy(person.position);
+          person.root.quaternion.copy(person.quat);
+          easeRotation(person.rig.torso, person.swimming ? -0.14 : 0);
+          easeRotation(person.rig.head, person.swimming ? 0.12 : 0);
+          if (person.swimming) {
+            const swimStroke = Math.sin(person.gaitPhase * 0.85);
+            easeRotation(person.rig.leftArmUpper, 0.9 + swimStroke * 0.45);
+            easeRotation(person.rig.rightArmUpper, 0.9 - swimStroke * 0.45);
+            easeRotation(person.rig.leftArmLower, -0.55 + swimStroke * 0.25);
+            easeRotation(person.rig.rightArmLower, -0.55 - swimStroke * 0.25);
+            easeRotation(person.rig.leftLegUpper, 0.18 - swimStroke * 0.34);
+            easeRotation(person.rig.rightLegUpper, 0.18 + swimStroke * 0.34);
+            easeRotation(person.rig.leftLegLower, 0.1);
+            easeRotation(person.rig.rightLegLower, 0.1);
+            person.root.position.y += Math.sin(person.gaitPhase * 0.6) * 0.05 * Math.max(0.35, person.moveBlend);
+          } else {
+            const moveAmount = person.moveBlend;
+            easeRotation(person.rig.leftArmUpper, strideOpp * 0.5 * moveAmount);
+            easeRotation(person.rig.rightArmUpper, stride * 0.5 * moveAmount);
+            easeRotation(person.rig.leftArmLower, Math.max(-0.3, strideOpp * 0.2 * moveAmount));
+            easeRotation(person.rig.rightArmLower, Math.max(-0.3, stride * 0.2 * moveAmount));
+            easeRotation(person.rig.leftLegUpper, stride * 0.62 * moveAmount);
+            easeRotation(person.rig.rightLegUpper, strideOpp * 0.62 * moveAmount);
+            easeRotation(person.rig.leftLegLower, Math.max(-0.15, -stride * 0.4 * moveAmount));
+            easeRotation(person.rig.rightLegLower, Math.max(-0.15, -strideOpp * 0.4 * moveAmount));
+          }
+        }
+      }
+    }
 
     // ======================================================================
     // FLIGHT MODEL (arcade)
@@ -2901,6 +3625,8 @@
       pitchInput: 0,
       rollInput: 0,
       yawInput: 0,
+      brakeInput: false,
+      groundSupportY: 0,
       onGround: true,
       crashed: false,
     };
@@ -2915,6 +3641,13 @@
       flight.quat.setFromEuler(new THREE.Euler(0, af.heading, 0, 'YXZ'));
       flight.onGround = true;
       flight.throttle = 0.0;
+      flight.pitchInput = 0;
+      flight.rollInput = 0;
+      flight.yawInput = 0;
+      flight.brakeInput = false;
+      flight.groundSupportY = sampleSupportedSurface(flight.position.x, flight.position.z).surfaceY;
+      resetPilotEmbarkedState();
+      syncHangarVisualImmediate(START_AIRFIELD, flight.position);
     }
     spawnAt(START_AIRFIELD);
 
@@ -3067,7 +3800,8 @@
       flight.position.addScaledVector(flight.velocity, dt);
 
       // ----- Ground interaction -----
-      const groundY = terrainHeight(flight.position.x, flight.position.z);
+      const supportSurface = sampleSupportedSurface(flight.position.x, flight.position.z);
+      const groundY = supportSurface.surfaceY;
       // Compute the lowest wheel/skid contact point of the rotated airframe
       // and place the pivot so that contact rests on the ground. This way a
       // taildragger sits with both main wheels AND tail skid on the ground at
@@ -3080,8 +3814,19 @@
       const mainDY = 0.55 * fwdW.y + (-0.78) * upW.y;
       const tailDY = -1.79 * fwdW.y + (-0.29) * upW.y;
       const minY = groundY - Math.min(mainDY, tailDY);
-      if (flight.position.y <= minY) {
-        flight.position.y = minY;
+      const groundSnapRange = 0.35;
+      const supportRise = groundY > flight.groundSupportY + 0.02;
+      const easingGroundContact = flight.onGround
+        && supportRise
+        && flight.velocity.y <= 0.5
+        && flight.position.y <= minY + groundSnapRange;
+      if (flight.position.y <= minY || easingGroundContact) {
+        if (!flight.onGround) {
+          flight.groundSupportY = groundY;
+        } else {
+          flight.groundSupportY = easeTowards(flight.groundSupportY, groundY, GROUND_SURFACE_RESPONSE, dt);
+        }
+        flight.position.y = flight.groundSupportY - Math.min(mainDY, tailDY);
         // Vertical impact
         const vy = flight.velocity.y;
         flight.velocity.y = Math.max(0, vy);
@@ -3139,7 +3884,10 @@
       plane.position.copy(flight.position);
       plane.quaternion.copy(flight.quat);
       // spin prop
-      plane.userData.prop.rotation.x += dt * (8 + flight.throttle * 40);
+      const propShouldSpin = flight.throttle > 0.001 || flight.velocity.lengthSq() > 0.04;
+      if (propShouldSpin) {
+        plane.userData.prop.rotation.x += dt * (8 + flight.throttle * 40);
+      }
     }
 
     // ======================================================================
@@ -3147,10 +3895,14 @@
     // ======================================================================
     const camOffset = new THREE.Vector3(-7, 2.4, 0); // behind & above (in plane local)
     const camLookOffset = new THREE.Vector3(2, 0.5, 0);
+    const footCamOffset = new THREE.Vector3(-3.35, 2.05, 0.34);
+    const footLookOffset = new THREE.Vector3(1.45, 1.02, 0.04);
     const camPos = new THREE.Vector3();
     const camLook = new THREE.Vector3();
     const chasePos = new THREE.Vector3();
     const chaseLook = new THREE.Vector3();
+    const hangarCameraLocal = new THREE.Vector3();
+    const hangarCameraWorld = new THREE.Vector3();
     const orbitVector = new THREE.Vector3();
     const orbitSpherical = new THREE.Spherical();
     const orbitState = {
@@ -3164,12 +3916,52 @@
     };
 
     function computeChaseCameraTargets() {
+      const pilot = getPilot();
+      if (pilot && !pilot.embarked) {
+        chasePos.copy(footCamOffset).applyQuaternion(pilot.quat).add(pilot.position);
+        chaseLook.copy(footLookOffset).applyQuaternion(pilot.quat).add(pilot.position);
+        return;
+      }
       chasePos.copy(camOffset).applyQuaternion(flight.quat).add(flight.position);
       chaseLook.copy(camLookOffset).applyQuaternion(flight.quat).add(flight.position);
     }
 
+    function clampCameraToHangarInterior(subjectPos, cameraPos) {
+      const containingHangar = getContainingHangar(subjectPos.x, subjectPos.y, subjectPos.z, 0.5);
+      if (!containingHangar) return;
+      const { af } = containingHangar;
+      const hangarVisual = af.hangarVisual;
+      const dx = cameraPos.x - af.x;
+      const dz = cameraPos.z - af.z;
+      const c = Math.cos(af.heading);
+      const s = Math.sin(af.heading);
+      const localX = dx * c - dz * s;
+      const localZ = dx * s + dz * c;
+      const hangarLocalX = localX - (-af.length / 2 - HANGAR_LOCAL_X_OFFSET);
+      const hangarLocalZ = localZ - (-af.width / 2 - HANGAR_LOCAL_Z_OFFSET);
+      const doorwayIsOpen = hangarVisual?.openAmount > 0.55
+        && Math.abs(hangarLocalZ) <= HANGAR_DOOR_OPENING_WIDTH * 0.5 - HANGAR_CAMERA_MARGIN;
+      const frontClampMax = doorwayIsOpen
+        ? Math.max(hangarLocalX, HANGAR_LENGTH / 2 - HANGAR_CAMERA_MARGIN)
+        : HANGAR_LENGTH / 2 - HANGAR_CAMERA_MARGIN;
+      hangarCameraLocal.set(
+        THREE.MathUtils.clamp(hangarLocalX, -HANGAR_LENGTH / 2 + HANGAR_CAMERA_MARGIN, frontClampMax),
+        THREE.MathUtils.clamp(cameraPos.y - af.y, 0.75, HANGAR_HEIGHT - 0.65),
+        THREE.MathUtils.clamp(hangarLocalZ, -HANGAR_WIDTH / 2 + HANGAR_CAMERA_MARGIN, HANGAR_WIDTH / 2 - HANGAR_CAMERA_MARGIN),
+      );
+      const afLocalX = hangarCameraLocal.x + (-af.length / 2 - HANGAR_LOCAL_X_OFFSET);
+      const afLocalZ = hangarCameraLocal.z + (-af.width / 2 - HANGAR_LOCAL_Z_OFFSET);
+      hangarCameraWorld.set(
+        af.x + afLocalX * c + afLocalZ * s,
+        af.y + hangarCameraLocal.y,
+        af.z - afLocalX * s + afLocalZ * c,
+      );
+      cameraPos.copy(hangarCameraWorld);
+    }
+
     function syncCameraToChase() {
       computeChaseCameraTargets();
+      clampCameraToHangarInterior(chaseLook, chasePos);
       camPos.copy(chasePos);
       camLook.copy(chaseLook);
       camera.position.copy(camPos);
@@ -3186,7 +3978,10 @@
     }
 
     function updateCamera(dt) {
+      const onFoot = !!(getPilot() && !getPilot().embarked);
+      const targetFov = onFoot ? FOOT_CAMERA_FOV : FLIGHT_CAMERA_FOV;
       computeChaseCameraTargets();
+      clampCameraToHangarInterior(chaseLook, chasePos);
       if (orbitState.enabled) {
         orbitVector.copy(chasePos).sub(chaseLook);
         orbitSpherical.setFromVector3(orbitVector);
@@ -3199,8 +3994,13 @@
         camPos.copy(chaseLook).add(orbitVector.setFromSpherical(orbitSpherical));
         camLook.copy(chaseLook);
       } else {
-        camPos.lerp(chasePos, Math.min(1, dt * 4));
-        camLook.lerp(chaseLook, Math.min(1, dt * 6));
+        camPos.lerp(chasePos, Math.min(1, dt * (onFoot ? 8 : 4)));
+        camLook.lerp(chaseLook, Math.min(1, dt * (onFoot ? 10 : 6)));
+      }
+      if (orbitState.enabled) clampCameraToHangarInterior(camLook, camPos);
+      if (Math.abs(camera.fov - targetFov) > 0.01) {
+        camera.fov = THREE.MathUtils.lerp(camera.fov, targetFov, Math.min(1, dt * 6));
+        camera.updateProjectionMatrix();
       }
       camera.position.copy(camPos);
       camera.lookAt(camLook);
@@ -3522,12 +4322,35 @@
     let lastAutoSaveAt = 0;
     let pendingGameSaveTimer = null;
     let pendingGameSaveIdle = null;
+    function serializePersonState(person) {
+      return {
+        id: person.id,
+        seed: person.seed,
+        embarked: person.embarked,
+        swimming: person.swimming,
+        position: [person.position.x, person.position.y, person.position.z],
+        velocity: [person.velocity.x, person.velocity.y, person.velocity.z],
+        quat: [person.quat.x, person.quat.y, person.quat.z, person.quat.w],
+      };
+    }
+    function hydratePersonState(savedPerson) {
+      if (!savedPerson || !savedPerson.id) return null;
+      return {
+        id: String(savedPerson.id),
+        embarked: Boolean(savedPerson.embarked),
+        swimming: Boolean(savedPerson.swimming),
+        position: Array.isArray(savedPerson.position) ? savedPerson.position.map(Number) : null,
+        velocity: Array.isArray(savedPerson.velocity) ? savedPerson.velocity.map(Number) : null,
+        quat: Array.isArray(savedPerson.quat) ? savedPerson.quat.map(Number) : null,
+      };
+    }
     function serializeGameState() {
       if (!currentMail) return null;
       return JSON.stringify({
-        version: 1,
+        version: 2,
         successfulDeliveries,
         pilotLogbook: pilotLogbook.map(serializeLogbookEntry),
+        people: people.map(serializePersonState),
         flight: {
           position: [flight.position.x, flight.position.y, flight.position.z],
           velocity: [flight.velocity.x, flight.velocity.y, flight.velocity.z],
@@ -3609,16 +4432,47 @@
       flight.yawInput = clampNumber(savedFlight.yawInput, -1, 1, 0);
       flight.onGround = Boolean(savedFlight.onGround);
       flight.crashed = Boolean(savedFlight.crashed);
+      flight.groundSupportY = sampleSupportedSurface(flight.position.x, flight.position.z).surfaceY;
       successfulDeliveries = Math.max(0, Math.floor(Number(parsed?.successfulDeliveries) || 0));
       pilotLogbook = Array.isArray(parsed?.pilotLogbook) ? parsed.pilotLogbook.map(hydrateLogbookEntry).filter(Boolean) : [];
       currentLogbookPage = Math.max(0, pilotLogbook.length - 1);
       currentMail = savedMail;
       gameTimeOffsetMs = Number.isFinite(parsed?.gameTimeOffsetMs) ? parsed.gameTimeOffsetMs : gameTimeOffsetMs;
+      const savedPeople = Array.isArray(parsed?.people) ? parsed.people.map(hydratePersonState).filter(Boolean) : [];
+      for (const person of people) {
+        const saved = savedPeople.find((entry) => entry.id === person.id);
+        if (!saved) {
+          person.embarked = true;
+          person.swimming = false;
+          person.velocity.set(0, 0, 0);
+          person.walkForward = 0;
+          person.walkTurn = 0;
+          person.moveBlend = 0;
+          person.position.copy(flight.position);
+          person.quat.copy(flight.quat);
+          continue;
+        }
+        person.embarked = saved.embarked;
+        person.swimming = saved.swimming;
+        person.walkForward = 0;
+        person.walkTurn = 0;
+        person.moveBlend = 0;
+        if (saved.position?.length === 3) person.position.set(saved.position[0] || 0, saved.position[1] || 0, saved.position[2] || 0);
+        if (saved.velocity?.length === 3) person.velocity.set(saved.velocity[0] || 0, saved.velocity[1] || 0, saved.velocity[2] || 0);
+        if (saved.quat?.length === 4) person.quat.set(saved.quat[0] || 0, saved.quat[1] || 0, saved.quat[2] || 0, saved.quat[3] || 1).normalize();
+      }
+      if (getPilot().embarked) {
+        resetPilotEmbarkedState();
+      } else {
+        syncControlModeUi();
+      }
       renderMailCard();
+      updatePeople(0);
       plane.position.copy(flight.position);
       plane.quaternion.copy(flight.quat);
       updateCamera(1);
       ensureChunks(flight.position.x, flight.position.z);
+      syncHangarVisualImmediate(START_AIRFIELD, getActivePlayerPosition());
       document.getElementById('status').textContent = defaultStatus();
       lastSavedGameState = rawSnapshot ?? JSON.stringify(parsed);
       return true;
@@ -4493,6 +5347,10 @@
     let transmitting = false;
     async function transmit() {
       if (transmitting) return;
+      if (!getPilot().embarked) {
+        setStatus('Board the aircraft before transmitting.', 1800);
+        return;
+      }
       if (!currentMail) return;
       transmitting = true;
       const btn = document.getElementById('transmit-btn');
@@ -4586,6 +5444,8 @@
       touchPitch = 0;
       touchRoll = 0;
       touchRudder = 0;
+      touchWalkForward = 0;
+      touchWalkTurn = 0;
       touchThrottleActive = false;
       desktopThrottleActive = false;
       syncThrottlePadVisual();
@@ -4625,6 +5485,7 @@
     addEventListener('keydown', e => {
       const k = e.key.toLowerCase();
       const isGameplay = GAMEPLAY_KEYS.has(k) || e.code === 'Space';
+      const isActionKey = e.key === 'Enter';
       const isHelpShortcut = e.key === '?';
       const isEscape = e.key === 'Escape';
       const isLogbookShortcut = k === 'l';
@@ -4636,7 +5497,14 @@
         e.key === 'Home' ||
         e.key === 'End'
       );
-      if (isGameplay || isHelpShortcut || isEscape || isLogbookShortcut || isLogbookNav) e.preventDefault();
+      if (isGameplay || isActionKey || isHelpShortcut || isEscape || isLogbookShortcut || isLogbookNav) e.preventDefault();
+      if (isActionKey) {
+        if (e.repeat) return;
+        if (paused || isPauseOpen()) return;
+        if (Object.values(zoomState).some(Boolean)) return;
+        togglePilotEmbark();
+        return;
+      }
       if (isHelpShortcut) {
         if (e.repeat) return;
         if (isPauseOpen()) closePauseMenu();
@@ -4689,7 +5557,8 @@
         e.key === 'PageUp' ||
         e.key === 'PageDown' ||
         e.key === 'Home' ||
-        e.key === 'End'
+        e.key === 'End' ||
+        e.key === 'Enter'
       ) e.preventDefault();
       keys.delete(k);
     });
@@ -4727,16 +5596,34 @@
     renderer.domElement.addEventListener('pointerup', stopOrbitCamera);
     renderer.domElement.addEventListener('pointercancel', stopOrbitCamera);
     renderer.domElement.addEventListener('lostpointercapture', stopOrbitCamera);
+    renderer.domElement.addEventListener('pointerup', (e) => {
+      if (e.button !== 0 || paused || isPauseOpen()) return;
+      if (Object.values(zoomState).some(Boolean)) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      interactionPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      interactionPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      interactionRaycaster.setFromCamera(interactionPointer, camera);
+      const hits = interactionRaycaster.intersectObjects(plane.userData.interactionMeshes || [], false);
+      if (hits.length) togglePilotEmbark();
+    });
 
     // Touch left pad — pitch (y) and roll (x)
     let touchPitch = 0, touchRoll = 0, touchRudder = 0;
+    let touchWalkForward = 0, touchWalkTurn = 0;
     let touchThrottleActive = false;
     let desktopThrottleActive = false;
     let syncThrottlePadVisual = () => {};
+    function suppressContextMenu(el) {
+      if (!el) return;
+      el.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+      });
+    }
     function setupTouchPad(padId, knobId, onChange) {
       const pad = document.getElementById(padId);
       const knob = document.getElementById(knobId);
       let active = false;
+      suppressContextMenu(pad);
       function shapeAxis(raw) {
         const mag = Math.abs(raw);
         return Math.sign(raw) * Math.pow(mag, 1.8);
@@ -4757,11 +5644,17 @@
       pad.addEventListener('pointerup',   e => { active = false; knob.style.transform = 'translate(-50%,-50%)'; onChange(0, 0); });
       pad.addEventListener('pointercancel',e => { active = false; knob.style.transform = 'translate(-50%,-50%)'; onChange(0, 0); });
     }
-    setupTouchPad('tpad-left', 'tpad-left-knob', (x, y) => { touchRoll = x; touchPitch = y; });
+    setupTouchPad('tpad-left', 'tpad-left-knob', (x, y) => {
+      touchRoll = x;
+      touchPitch = y;
+      touchWalkTurn = -x;
+      touchWalkForward = -y;
+    });
     function setupThrottlePad(padId, knobId) {
       const pad = document.getElementById(padId);
       const knob = document.getElementById(knobId);
       let active = false;
+      suppressContextMenu(pad);
       function knobMax(rect) {
         return { x: rect.width / 2 - 12, y: rect.height / 2 - 12 };
       }
@@ -4823,6 +5716,9 @@
       document.body.classList.add('mobile-ui');
       document.getElementById('touch').classList.add('on');
     }
+    document.getElementById('action-btn').addEventListener('click', () => {
+      togglePilotEmbark();
+    });
 
     // ======================================================================
     // HUD CANVASES (compass, clock)
@@ -5277,6 +6173,17 @@
       statusTimer = ms / 1000;
     }
     function defaultStatus() {
+      const pilot = getPilot();
+      if (pilot && !pilot.embarked) {
+        const dist = getPilotBoardingDistance(pilot);
+        if (dist <= CHARACTER_BOARD_RADIUS) {
+          return pilot.swimming
+            ? 'Swimming beside the aircraft — press Enter or tap the plane to board.'
+            : 'On foot beside the aircraft — press Enter or tap the plane to board.';
+        }
+        const near = nearestAirfield(pilot.position.x, pilot.position.z);
+        return `${pilot.swimming ? 'Swimming' : 'On foot'} near ${near.name} — ${dist.toFixed(1)} m from the aircraft.`;
+      }
       if (!currentMail) return 'Press TRANSMIT for heading';
       const dx = currentMail.to.x - flight.position.x;
       const dz = currentMail.to.z - flight.position.z;
@@ -5291,6 +6198,7 @@
     // ======================================================================
     let lastT = performance.now();
     function frame(now = performance.now()) {
+      airfieldQueryCache.clear();
       const minFrameMs = gameSettings.fpsCap > 0 ? 1000 / gameSettings.fpsCap : 0;
       if (!paused && minFrameMs > 0 && (now - lastT) < minFrameMs) {
         requestAnimationFrame(frame);
@@ -5306,46 +6214,45 @@
         return;
       }
 
-      // Inputs (raw target from keys/touch)
-      const targetPitch = (keys.has('s') || keys.has('arrowdown') ? 1 : 0)
-                       - (keys.has('w') || keys.has('arrowup') ? 1 : 0)
-                       + touchPitch;
-      const targetRoll  = (keys.has('a') || keys.has('arrowleft') ? 1 : 0)
-                       - (keys.has('d') || keys.has('arrowright') ? 1 : 0)
-                       - touchRoll;
-      const targetYaw   = (keys.has('e') ? 1 : 0) - (keys.has('q') ? 1 : 0) + touchRudder;
-
-      // Ease the controls toward target so initial inputs are gentle (good for
-      // landing approaches) and release decays smoothly. Slew rates are 1/sec
-      // — pressRate is slower than releaseRate so flicks barely move the stick
-      // but full deflection is still reachable in ~0.6s.
-      const pressRate   = 1.6;   // units / sec while building authority
-      const releaseRate = 3.0;   // units / sec while easing back to centre
-      function easeAxis(current, target) {
-        const tgt = Math.max(-1, Math.min(1, target));
-        // If we're moving toward larger magnitude in the target's sign, use
-        // pressRate; otherwise we're returning toward 0 (or reversing), use
-        // releaseRate which is faster.
-        const sameDir = (tgt !== 0) && Math.sign(tgt) === Math.sign(current);
-        const buildingUp = sameDir && Math.abs(tgt) > Math.abs(current);
-        const rate = buildingUp ? pressRate : releaseRate;
-        const step = rate * dt;
-        if (Math.abs(tgt - current) <= step) return tgt;
-        return current + Math.sign(tgt - current) * step;
-      }
-      flight.pitchInput = easeAxis(flight.pitchInput, targetPitch);
-      flight.rollInput  = easeAxis(flight.rollInput,  targetRoll);
-      flight.yawInput   = easeAxis(flight.yawInput,   targetYaw);
-
-      // Throttle (and brake when at idle)
-      if (keys.has(']')) flight.throttle = Math.min(1, flight.throttle + dt * 0.6);
-      if (keys.has('[')) flight.throttle = Math.max(0, flight.throttle - dt * 0.6);
-      flight.brakeInput = keys.has('[');
-      if (flight.onGround && flight.throttle <= 0.01 && (touchThrottleActive || desktopThrottleActive)) {
+      if (getPilot().embarked) {
+        const targetPitch = (keys.has('s') || keys.has('arrowdown') ? 1 : 0)
+                         - (keys.has('w') || keys.has('arrowup') ? 1 : 0)
+                         + touchPitch;
+        const targetRoll  = (keys.has('a') || keys.has('arrowleft') ? 1 : 0)
+                         - (keys.has('d') || keys.has('arrowright') ? 1 : 0)
+                         - touchRoll;
+        const targetYaw   = (keys.has('e') ? 1 : 0) - (keys.has('q') ? 1 : 0) + touchRudder;
+        const pressRate   = 1.6;
+        const releaseRate = 3.0;
+        function easeAxis(current, target) {
+          const tgt = Math.max(-1, Math.min(1, target));
+          const sameDir = (tgt !== 0) && Math.sign(tgt) === Math.sign(current);
+          const buildingUp = sameDir && Math.abs(tgt) > Math.abs(current);
+          const rate = buildingUp ? pressRate : releaseRate;
+          const step = rate * dt;
+          if (Math.abs(tgt - current) <= step) return tgt;
+          return current + Math.sign(tgt - current) * step;
+        }
+        flight.pitchInput = easeAxis(flight.pitchInput, targetPitch);
+        flight.rollInput  = easeAxis(flight.rollInput,  targetRoll);
+        flight.yawInput   = easeAxis(flight.yawInput,   targetYaw);
+        if (keys.has(']')) flight.throttle = Math.min(1, flight.throttle + dt * 0.6);
+        if (keys.has('[')) flight.throttle = Math.max(0, flight.throttle - dt * 0.6);
+        flight.brakeInput = keys.has('[');
+        if (flight.onGround && flight.throttle <= 0.01 && (touchThrottleActive || desktopThrottleActive)) {
+          flight.brakeInput = true;
+        }
+      } else {
+        flight.pitchInput = 0;
+        flight.rollInput = 0;
+        flight.yawInput = 0;
+        flight.throttle = 0;
         flight.brakeInput = true;
+        updatePilotOnFoot(dt);
       }
 
       updateFlight(dt);
+      updatePeople(dt);
       updateCamera(dt);
       ensureChunks(flight.position.x, flight.position.z);
       updateTerrainShadowReceivers(flight.position.x, flight.position.z);
@@ -5369,14 +6276,15 @@
       const now2 = getGameDate();
       updateSun(now2);
 
-      // Heading for compass: forward direction in world
-      tmpForward.set(1,0,0).applyQuaternion(flight.quat);
+      // Heading for compass: aircraft in flight, pilot facing when on foot.
+      const compassQuat = getPilot().embarked ? flight.quat : getPilot().quat;
+      tmpForward.set(1,0,0).applyQuaternion(compassQuat);
       const heading = Math.atan2(tmpForward.x, -tmpForward.z); // North=0
       drawCompass(heading);
       drawClock(now2);
       drawThrottle(flight.throttle);
       syncThrottlePadVisual();
-      updateAirfieldWinds(currentWindTimeSec());
+      updateAirfieldWinds(currentWindTimeSec(), dt);
 
       // Update propeller audio each frame
       try { if (propSound && typeof propSound.update === 'function') propSound.update(dt); } catch (e) { /* noop */ }
