@@ -402,6 +402,14 @@
     body.mobile-ui.on-foot-mode #action-wrap {
       display: block;
     }
+    body.mobile-ui.vehicle-mode #tpad-left,
+    body.mobile-ui.vehicle-mode #transmit-wrap {
+      display: none;
+    }
+    body.mobile-ui.vehicle-mode #tpad-right,
+    body.mobile-ui.vehicle-mode #action-wrap {
+      display: block;
+    }
     body.mobile-ui #callsign-label {
       text-align: center;
     }
@@ -435,6 +443,10 @@
     }
     body.on-foot-mode #transmit-wrap,
     body.on-foot-mode #throttle-wrap {
+      display: none;
+    }
+    body.vehicle-mode #transmit-wrap,
+    body.vehicle-mode #throttle-wrap {
       display: none;
     }
 
@@ -1896,6 +1908,16 @@
       };
     }
 
+    function sampleSurfaceNormal(x, z, step = 0.7) {
+      const left = sampleSupportedSurface(x - step, z).surfaceY;
+      const right = sampleSupportedSurface(x + step, z).surfaceY;
+      const back = sampleSupportedSurface(x, z - step).surfaceY;
+      const front = sampleSupportedSurface(x, z + step).surfaceY;
+      roverSurfaceNormal.set(left - right, step * 2, back - front);
+      if (roverSurfaceNormal.lengthSq() < 1e-6) return roverSurfaceNormal.set(0, 1, 0);
+      return roverSurfaceNormal.normalize();
+    }
+
     // The flattened pad height under an airfield (used by terrain too).
     // The "pad" is an apron rectangle wider than the runway itself so that
     // the runway, hangar, tower and wind sock all sit on perfectly flat
@@ -2689,7 +2711,7 @@
 
     function getActivePlayerPosition() {
       const pilot = getPilot();
-      return pilot.embarked ? flight.position : pilot.position;
+      return isPilotInPlane(pilot) ? flight.position : (isPilotDrivingRover(pilot) ? rover.position : pilot.position);
     }
 
     function applyHangarVisualState(hangar, openAmount, lightLevel, flickerTime, playerInRange) {
@@ -2747,7 +2769,7 @@
 
     function updateAirfieldWinds(timeSec, dt) {
       const pilot = getPilot();
-      hangarPlayerPos.copy(pilot.embarked ? flight.position : pilot.position);
+      hangarPlayerPos.copy(isPilotInPlane(pilot) ? flight.position : (isPilotDrivingRover(pilot) ? rover.position : pilot.position));
       const containingHangar = getContainingHangar(hangarPlayerPos.x, hangarPlayerPos.y, hangarPlayerPos.z, 0.2);
       if (START_AIRFIELD.windVisual) {
         const wind = getAirfieldWind(START_AIRFIELD, timeSec);
@@ -3338,12 +3360,159 @@
     plane.traverse((child) => {
       if (child.isMesh) plane.userData.interactionMeshes.push(child);
     });
+
+    function buildRover() {
+      const g = new THREE.Group();
+      const wheelRadius = 0.34;
+      const bodyMat = createMatteStandardMaterial({ color: 0x6f8665, roughness: 0.9 });
+      const trimMat = createMatteStandardMaterial({ color: 0x2b251d, roughness: 0.6, metalness: 0.12 });
+      const canopyMat = new THREE.MeshPhysicalMaterial({
+        color: 0xb7d2dc,
+        roughness: 0.18,
+        metalness: 0,
+        transmission: 0.36,
+        transparent: true,
+        opacity: 0.38,
+        thickness: 0.08,
+        ior: 1.18,
+      });
+      const tyreMat = createMatteStandardMaterial({ color: 0x141311, roughness: 0.97 });
+      const rimMat = createMatteStandardMaterial({ color: 0xd7cab2, roughness: 0.58, metalness: 0.14 });
+
+      const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.42, 1.58), bodyMat);
+      chassis.position.y = 0.72;
+      chassis.castShadow = true;
+      chassis.receiveShadow = true;
+      g.add(chassis);
+
+      const bonnet = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.38, 1.48), bodyMat);
+      bonnet.position.set(0.94, 0.93, 0);
+      bonnet.castShadow = true;
+      bonnet.receiveShadow = true;
+      g.add(bonnet);
+
+      const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.18, 0.78, 1.42), bodyMat);
+      cabin.position.set(-0.18, 1.16, 0);
+      cabin.castShadow = true;
+      cabin.receiveShadow = true;
+      g.add(cabin);
+
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.16, 1.32), trimMat);
+      roof.position.set(-0.16, 1.64, 0);
+      roof.castShadow = true;
+      roof.receiveShadow = true;
+      g.add(roof);
+
+      const windscreen = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.54, 1.2), canopyMat);
+      windscreen.position.set(0.36, 1.3, 0);
+      windscreen.rotation.z = -0.26;
+      g.add(windscreen);
+
+      const rearWindow = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.5, 1.12), canopyMat);
+      rearWindow.position.set(-0.82, 1.26, 0);
+      rearWindow.rotation.z = 0.18;
+      g.add(rearWindow);
+
+      for (const side of [-1, 1]) {
+        const sideWindow = new THREE.Mesh(new THREE.BoxGeometry(0.74, 0.44, 0.06), canopyMat);
+        sideWindow.position.set(-0.18, 1.3, side * 0.62);
+        g.add(sideWindow);
+        const headlamp = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.08, 12), rimMat);
+        headlamp.rotation.z = Math.PI / 2;
+        headlamp.position.set(1.42, 0.92, side * 0.46);
+        headlamp.castShadow = true;
+        g.add(headlamp);
+      }
+
+      const frontBumper = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.18, 1.54), trimMat);
+      frontBumper.position.set(1.5, 0.56, 0);
+      g.add(frontBumper);
+      const rearBumper = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.18, 1.5), trimMat);
+      rearBumper.position.set(-1.48, 0.54, 0);
+      g.add(rearBumper);
+
+      const axleGeo = new THREE.CylinderGeometry(0.04, 0.04, 1.42, 8);
+      const wheelGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.24, 16);
+      const wheelOffsets = [
+        [0.86, -1],
+        [0.86, 1],
+        [-0.92, -1],
+        [-0.92, 1],
+      ];
+      const wheelMeshes = [];
+      const frontWheelPivots = [];
+      const wheelContactOffsets = [];
+      for (const axleX of [0.86, -0.92]) {
+        const axle = new THREE.Mesh(axleGeo, trimMat);
+        axle.rotation.x = Math.PI / 2;
+        axle.position.set(axleX, 0.44, 0);
+        g.add(axle);
+      }
+      for (const [wheelX, side] of wheelOffsets) {
+        const wheelPivot = new THREE.Group();
+        wheelPivot.position.set(wheelX, 0.44, side * 0.82);
+        g.add(wheelPivot);
+        const wheel = new THREE.Mesh(wheelGeo, tyreMat);
+        wheel.rotation.x = Math.PI / 2;
+        wheel.castShadow = true;
+        wheelPivot.add(wheel);
+        const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.26, 12), rimMat);
+        rim.rotation.x = Math.PI / 2;
+        wheelPivot.add(rim);
+        wheelMeshes.push(wheel);
+        wheelContactOffsets.push(new THREE.Vector3(wheelX, 0.44 - wheelRadius, side * 0.82));
+        if (wheelX > 0) frontWheelPivots.push(wheelPivot);
+      }
+
+      const driverSeatAnchor = new THREE.Group();
+      driverSeatAnchor.position.set(-0.12, 0.9, -0.2);
+      g.add(driverSeatAnchor);
+
+      g.userData.driverSeatAnchor = driverSeatAnchor;
+      g.userData.wheels = wheelMeshes;
+      g.userData.frontWheelPivots = frontWheelPivots;
+      g.userData.wheelContactOffsets = wheelContactOffsets;
+      g.userData.interactionMeshes = [];
+      g.traverse((child) => {
+        if (child.isMesh) {
+          child.castShadow = child.castShadow ?? true;
+          child.receiveShadow = child.receiveShadow ?? true;
+          g.userData.interactionMeshes.push(child);
+        }
+      });
+      return g;
+    }
+
+    const rover = {
+      group: buildRover(),
+      position: new THREE.Vector3(),
+      velocity: new THREE.Vector3(),
+      quat: new THREE.Quaternion(),
+      throttle: 0,
+      steer: 0,
+      hostAirfieldId: START_AIRFIELD.id,
+      occupied: false,
+      speed: 0,
+      driveForwardInput: 0,
+      driveSteerInput: 0,
+      touchDriveForwardInput: 0,
+      touchDriveSteerInput: 0,
+      touchThrottleLock: 0,
+      cruiseLocked: false,
+      forwardHoldTime: 0,
+      wheelSpinAngle: 0,
+    };
+    scene.add(rover.group);
     applyGraphicsSettings();
 
     // ======================================================================
     // PEOPLE / PILOT
     // ======================================================================
+    const PILOT_MODE_PLANE = 'plane';
+    const PILOT_MODE_FOOT = 'foot';
+    const PILOT_MODE_ROVER = 'rover';
     const CHARACTER_BOARD_RADIUS = 3;
+    const ROVER_BOARD_RADIUS = 3.2;
     const WALK_SPEED = 3.9;
     const SWIM_SPEED = 2.2;
     const WALK_BACKPEDAL_FACTOR = 0.72;
@@ -3352,9 +3521,37 @@
     const WALK_TURN_RESPONSE = 10.5;
     const WALK_ANIMATION_RESPONSE = 10;
     const WALK_SURFACE_RESPONSE = 10;
+    const ROVER_MAX_SPEED = 9.5;
+    const ROVER_REVERSE_SPEED = 3.8;
+    const ROVER_ACCEL = 6.4;
+    const ROVER_BRAKE = 11.5;
+    const ROVER_DRAG = 1.9;
+    const ROVER_IDLE_DRAG = 3.4;
+    const ROVER_WHEEL_RADIUS = 0.34;
+    const ROVER_MAX_STEER_ANGLE = 0.52;
+    const ROVER_STEER_RATE = 3.8;
+    const ROVER_STEER_RESPONSE = 10;
+    const ROVER_CRUISE_HOLD_SEC = 2;
+    const ROVER_WHEEL_BASE = 1.78;
+    const ROVER_CAM_OFFSET = new THREE.Vector3(-4.2, 2.2, 0);
+    const ROVER_CAM_LOOK_OFFSET = new THREE.Vector3(2.5, 1.15, 0);
     const GROUND_SURFACE_RESPONSE = 9;
     const PERSON_WORLD_UP = new THREE.Vector3(0, 1, 0);
     const seatWorldPos = new THREE.Vector3();
+    const roverSeatWorldPos = new THREE.Vector3();
+    const roverSeatWorldQuat = new THREE.Quaternion();
+    const roverSpawnLocal = new THREE.Vector3();
+    const roverSpawnWorld = new THREE.Vector3();
+    const roverForward = new THREE.Vector3();
+    const roverRight = new THREE.Vector3();
+    const roverUp = new THREE.Vector3(0, 1, 0);
+    const roverSurfaceNormal = new THREE.Vector3(0, 1, 0);
+    const roverPlanarForward = new THREE.Vector3();
+    const roverTargetForward = new THREE.Vector3();
+    const roverTargetRight = new THREE.Vector3();
+    const roverBasis = new THREE.Matrix4();
+    const roverTargetQuat = new THREE.Quaternion();
+    const roverWheelWorld = new THREE.Vector3();
     const seatWorldQuat = new THREE.Quaternion();
     const personForward = new THREE.Vector3();
     const personMove = new THREE.Vector3();
@@ -3513,6 +3710,7 @@
         velocity: new THREE.Vector3(),
         quat: new THREE.Quaternion(),
         embarked,
+        transportMode: embarked ? PILOT_MODE_PLANE : PILOT_MODE_FOOT,
         swimming: false,
         gaitPhase: 0,
         walkForward: 0,
@@ -3523,6 +3721,22 @@
     const people = [makeCrewMember({ id: 'pilot', role: 'pilot', seed: 0x50494c4f })];
     function getPilot() {
       return people[0];
+    }
+    function setPilotTransportMode(mode) {
+      const pilot = getPilot();
+      pilot.transportMode = mode;
+      pilot.embarked = mode === PILOT_MODE_PLANE;
+      rover.occupied = mode === PILOT_MODE_ROVER;
+      return pilot;
+    }
+    function isPilotInPlane(pilot = getPilot()) {
+      return pilot.transportMode === PILOT_MODE_PLANE;
+    }
+    function isPilotOnFoot(pilot = getPilot()) {
+      return pilot.transportMode === PILOT_MODE_FOOT;
+    }
+    function isPilotDrivingRover(pilot = getPilot()) {
+      return pilot.transportMode === PILOT_MODE_ROVER;
     }
     function setYawFromForward(targetQuat, x, z) {
       targetQuat.setFromEuler(new THREE.Euler(0, Math.atan2(-z, x), 0, 'YXZ'));
@@ -3543,6 +3757,77 @@
       const seat = getSeatWorldTransform().position;
       return person.position.distanceTo(seat);
     }
+    function getRoverSeatWorldTransform() {
+      const anchor = rover.group.userData.driverSeatAnchor;
+      if (anchor) {
+        anchor.getWorldPosition(roverSeatWorldPos);
+        anchor.getWorldQuaternion(roverSeatWorldQuat);
+      } else {
+        roverSeatWorldPos.copy(rover.position);
+        roverSeatWorldQuat.copy(rover.quat);
+      }
+      return { position: roverSeatWorldPos, quaternion: roverSeatWorldQuat };
+    }
+    function getPilotRoverDistance(person = getPilot()) {
+      return person.position.distanceTo(getRoverSeatWorldTransform().position);
+    }
+    function getRoverSpawnTransform(af) {
+      roverSpawnLocal.set(
+        -af.length / 2 - HANGAR_LOCAL_X_OFFSET + HANGAR_LENGTH / 2 + 2.1,
+        0,
+        -af.width / 2 - HANGAR_LOCAL_Z_OFFSET - HANGAR_WIDTH / 2 - 1.1,
+      );
+      const c = Math.cos(af.heading);
+      const s = Math.sin(af.heading);
+      roverSpawnWorld.set(
+        af.x + roverSpawnLocal.x * c + roverSpawnLocal.z * s,
+        0,
+        af.z - roverSpawnLocal.x * s + roverSpawnLocal.z * c,
+      );
+      const surface = sampleSupportedSurface(roverSpawnWorld.x, roverSpawnWorld.z);
+      roverSpawnWorld.y = surface.surfaceY + 0.02;
+      roverSeatWorldQuat.setFromEuler(new THREE.Euler(0, af.heading, 0, 'YXZ'));
+      return { position: roverSpawnWorld, quaternion: roverSeatWorldQuat, swimming: surface.swimming };
+    }
+    function syncRoverVisual() {
+      rover.group.position.copy(rover.position);
+      rover.group.quaternion.copy(rover.quat);
+      const steerAngle = rover.steer * ROVER_MAX_STEER_ANGLE;
+      for (const pivot of rover.group.userData.frontWheelPivots || []) {
+        pivot.rotation.y = steerAngle;
+      }
+      for (const wheel of rover.group.userData.wheels || []) {
+        wheel.rotation.y = rover.wheelSpinAngle;
+      }
+    }
+    function moveRoverToAirfield(af) {
+      if (!af) return;
+      const spawn = getRoverSpawnTransform(af);
+      rover.hostAirfieldId = af.id;
+      rover.position.copy(spawn.position);
+      rover.quat.copy(spawn.quaternion);
+      rover.velocity.set(0, 0, 0);
+      rover.speed = 0;
+      rover.throttle = 0;
+      rover.steer = 0;
+      rover.driveForwardInput = 0;
+      rover.driveSteerInput = 0;
+      rover.touchDriveForwardInput = 0;
+      rover.touchDriveSteerInput = 0;
+      rover.touchThrottleLock = 0;
+      rover.cruiseLocked = false;
+      rover.forwardHoldTime = 0;
+      rover.wheelSpinAngle = 0;
+      syncRoverVisual();
+    }
+    function ensureNearestRoverHost(force = false) {
+      if (rover.occupied) return;
+      const focus = getActivePlayerPosition();
+      const af = nearestAirfield(focus.x, focus.z);
+      if (!af) return;
+      if (!force && rover.hostAirfieldId === af.id) return;
+      moveRoverToAirfield(af);
+    }
     function samplePersonSurface(x, z) {
       return sampleSupportedSurface(x, z);
     }
@@ -3550,18 +3835,30 @@
       const btn = document.getElementById('action-btn');
       if (!btn) return;
       const pilot = getPilot();
-      const canBoard = !pilot.embarked && getPilotBoardingDistance(pilot) <= CHARACTER_BOARD_RADIUS;
-      btn.textContent = pilot.embarked ? 'EXIT' : (canBoard ? 'BOARD' : 'PLANE');
+      const planeDist = getPilotBoardingDistance(pilot);
+      const roverDist = getPilotRoverDistance(pilot);
+      const nearPlane = isPilotOnFoot(pilot) && planeDist <= CHARACTER_BOARD_RADIUS;
+      const nearRover = isPilotOnFoot(pilot) && roverDist <= ROVER_BOARD_RADIUS;
+      if (isPilotInPlane(pilot) || isPilotDrivingRover(pilot)) {
+        btn.textContent = 'EXIT';
+      } else if (nearPlane && (!nearRover || planeDist <= roverDist)) {
+        btn.textContent = 'BOARD';
+      } else if (nearRover) {
+        btn.textContent = 'DRIVE';
+      } else {
+        btn.textContent = planeDist <= roverDist ? 'PLANE' : 'ROVER';
+      }
       btn.disabled = false;
     }
     function syncControlModeUi() {
-      document.body.classList.toggle('on-foot-mode', !getPilot().embarked);
+      document.body.classList.toggle('on-foot-mode', isPilotOnFoot());
+      document.body.classList.toggle('vehicle-mode', isPilotDrivingRover());
       syncActionButtonUi();
     }
     function resetPilotEmbarkedState() {
       const pilot = getPilot();
       const seat = getSeatWorldTransform();
-      pilot.embarked = true;
+      setPilotTransportMode(PILOT_MODE_PLANE);
       pilot.swimming = false;
       pilot.velocity.set(0, 0, 0);
       pilot.gaitPhase = 0;
@@ -3577,7 +3874,7 @@
     }
     function disembarkPilot() {
       const pilot = getPilot();
-      if (!pilot.embarked) return true;
+      if (!isPilotInPlane(pilot)) return true;
       if (!canDisembarkPilot()) {
         setStatus('Bring the plane to a halt on the ground before disembarking.', 2200);
         return false;
@@ -3595,12 +3892,12 @@
       pilot.walkTurn = 0;
       pilot.moveBlend = 0;
       setYawFromForward(pilot.quat, tmpForward.x, tmpForward.z);
-      pilot.embarked = false;
       flight.throttle = 0;
       flight.pitchInput = 0;
       flight.rollInput = 0;
       flight.yawInput = 0;
       flight.brakeInput = true;
+      setPilotTransportMode(PILOT_MODE_FOOT);
       resetOrbitCamera();
       syncControlModeUi();
       setStatus('Pilot disembarked.', 1800);
@@ -3608,7 +3905,7 @@
     }
     function embarkPilot() {
       const pilot = getPilot();
-      if (pilot.embarked) return true;
+      if (isPilotInPlane(pilot)) return true;
       if (!flight.onGround || Math.hypot(flight.velocity.x, flight.velocity.z) >= 1.1) {
         setStatus('The aircraft must be stopped before boarding.', 2200);
         return false;
@@ -3621,12 +3918,88 @@
       setStatus('Pilot boarded the aircraft.', 1800);
       return true;
     }
-    function togglePilotEmbark() {
-      return getPilot().embarked ? disembarkPilot() : embarkPilot();
+    function canExitRover() {
+      return Math.abs(rover.speed) < 0.45;
+    }
+    function driveRover() {
+      const pilot = getPilot();
+      if (!isPilotOnFoot(pilot)) return false;
+      if (getPilotRoverDistance(pilot) > ROVER_BOARD_RADIUS) {
+        setStatus('Move within 3m of the rover to drive it.', 2200);
+        return false;
+      }
+      const seat = getRoverSeatWorldTransform();
+      pilot.position.copy(seat.position);
+      pilot.quat.copy(seat.quaternion);
+      pilot.velocity.set(0, 0, 0);
+      pilot.swimming = false;
+      pilot.walkForward = 0;
+      pilot.walkTurn = 0;
+      pilot.moveBlend = 0;
+      rover.throttle = 0;
+      rover.steer = 0;
+      rover.driveForwardInput = 0;
+      rover.driveSteerInput = 0;
+      rover.touchDriveForwardInput = 0;
+      rover.touchDriveSteerInput = 0;
+      rover.touchThrottleLock = 0;
+      rover.cruiseLocked = false;
+      rover.forwardHoldTime = 0;
+      setPilotTransportMode(PILOT_MODE_ROVER);
+      resetOrbitCamera();
+      syncControlModeUi();
+      setStatus('Pilot is driving the rover.', 1800);
+      return true;
+    }
+    function exitRover() {
+      const pilot = getPilot();
+      if (!isPilotDrivingRover(pilot)) return true;
+      if (!canExitRover()) {
+        setStatus('Bring the rover to a halt before climbing out.', 2200);
+        return false;
+      }
+      roverForward.set(1, 0, 0).applyQuaternion(rover.quat).setY(0).normalize();
+      roverRight.set(0, 0, 1).applyQuaternion(rover.quat).setY(0).normalize();
+      pilot.position.copy(rover.position)
+        .addScaledVector(roverRight, -1.35)
+        .addScaledVector(roverForward, -0.2);
+      const surface = samplePersonSurface(pilot.position.x, pilot.position.z);
+      pilot.position.y = surface.surfaceY + pilot.appearance.legLength;
+      pilot.velocity.set(0, 0, 0);
+      pilot.swimming = surface.swimming;
+      pilot.walkForward = 0;
+      pilot.walkTurn = 0;
+      pilot.moveBlend = 0;
+      setYawFromForward(pilot.quat, roverForward.x, roverForward.z);
+      setPilotTransportMode(PILOT_MODE_FOOT);
+      rover.throttle = 0;
+      rover.steer = 0;
+      rover.driveForwardInput = 0;
+      rover.driveSteerInput = 0;
+      rover.touchDriveForwardInput = 0;
+      rover.touchDriveSteerInput = 0;
+      rover.touchThrottleLock = 0;
+      rover.cruiseLocked = false;
+      rover.forwardHoldTime = 0;
+      resetOrbitCamera();
+      syncControlModeUi();
+      setStatus('Pilot climbed out of the rover.', 1800);
+      return true;
+    }
+    function performPrimaryAction() {
+      const pilot = getPilot();
+      if (isPilotInPlane(pilot)) return disembarkPilot();
+      if (isPilotDrivingRover(pilot)) return exitRover();
+      const planeDist = getPilotBoardingDistance(pilot);
+      const roverDist = getPilotRoverDistance(pilot);
+      if (planeDist <= CHARACTER_BOARD_RADIUS && planeDist <= roverDist) return embarkPilot();
+      if (roverDist <= ROVER_BOARD_RADIUS) return driveRover();
+      setStatus('Move within 3m of the aircraft or rover to use it.', 2200);
+      return false;
     }
     function updatePilotOnFoot(dt) {
       const pilot = getPilot();
-      if (pilot.embarked) return;
+      if (!isPilotOnFoot(pilot)) return;
       const forwardInput = THREE.MathUtils.clamp(
         (keys.has('w') || keys.has('arrowup') ? 1 : 0) - (keys.has('s') || keys.has('arrowdown') ? 1 : 0) + touchWalkForward,
         -1,
@@ -3683,7 +4056,7 @@
         const strideDir = person.walkForward < -0.05 ? -1 : 1;
         const stride = Math.sin(person.gaitPhase) * strideDir;
         const strideOpp = Math.sin(person.gaitPhase + Math.PI) * strideDir;
-        if (person.embarked) {
+        if (isPilotInPlane(person)) {
           const seat = getSeatWorldTransform();
           person.root.position.copy(seat.position);
           person.root.quaternion.copy(seat.quaternion);
@@ -3697,6 +4070,20 @@
           easeRotation(person.rig.rightArmUpper, 0.3);
           easeRotation(person.rig.leftArmLower, -0.38);
           easeRotation(person.rig.rightArmLower, -0.22);
+        } else if (isPilotDrivingRover(person)) {
+          const seat = getRoverSeatWorldTransform();
+          person.root.position.copy(seat.position);
+          person.root.quaternion.copy(seat.quaternion);
+          easeRotation(person.rig.torso, -0.06);
+          easeRotation(person.rig.head, 0.04 + rover.steer * 0.06);
+          easeRotation(person.rig.leftLegUpper, 1.18);
+          easeRotation(person.rig.rightLegUpper, 1.12);
+          easeRotation(person.rig.leftLegLower, -1.18);
+          easeRotation(person.rig.rightLegLower, -1.08);
+          easeRotation(person.rig.leftArmUpper, 0.62 - rover.steer * 0.18);
+          easeRotation(person.rig.rightArmUpper, 0.48 + rover.steer * 0.18);
+          easeRotation(person.rig.leftArmLower, -0.42 + rover.steer * 0.1);
+          easeRotation(person.rig.rightArmLower, -0.36 - rover.steer * 0.1);
         } else {
           person.root.position.copy(person.position);
           person.root.quaternion.copy(person.quat);
@@ -4005,6 +4392,68 @@
       }
     }
 
+    function updateRover(dt) {
+      const throttleTarget = THREE.MathUtils.clamp(rover.driveForwardInput, -1, 1);
+      const accelRate = Math.abs(throttleTarget) > Math.abs(rover.throttle) ? ROVER_ACCEL : ROVER_BRAKE;
+      rover.throttle = easeTowards(rover.throttle, throttleTarget, accelRate, dt);
+      rover.steer = easeTowards(rover.steer, rover.driveSteerInput, ROVER_STEER_RESPONSE, dt);
+
+      const targetSpeed = rover.throttle >= 0
+        ? rover.throttle * ROVER_MAX_SPEED
+        : rover.throttle * ROVER_REVERSE_SPEED;
+      const braking = Math.sign(targetSpeed) !== Math.sign(rover.speed) && Math.abs(targetSpeed) > 0.01;
+      rover.speed = easeTowards(rover.speed, targetSpeed, braking ? ROVER_BRAKE : ROVER_ACCEL, dt);
+      if (Math.abs(targetSpeed) < 0.02) {
+        rover.speed = easeTowards(rover.speed, 0, Math.abs(rover.speed) < 0.5 ? ROVER_IDLE_DRAG : ROVER_DRAG, dt);
+      }
+
+      const steeringAngle = rover.steer * ROVER_MAX_STEER_ANGLE;
+      const steerScale = Math.min(1, Math.abs(rover.speed) / Math.max(0.001, ROVER_MAX_SPEED));
+      const turnRate = (rover.speed / ROVER_WHEEL_BASE) * Math.tan(steeringAngle) * (0.28 + steerScale * 0.72);
+      tmpQ.setFromAxisAngle(PERSON_WORLD_UP, turnRate * dt);
+      rover.quat.premultiply(tmpQ).normalize();
+
+      roverPlanarForward.set(1, 0, 0).applyQuaternion(rover.quat);
+      roverPlanarForward.y = 0;
+      if (roverPlanarForward.lengthSq() < 1e-4) roverPlanarForward.set(1, 0, 0);
+      roverPlanarForward.normalize();
+      rover.velocity.copy(roverPlanarForward).multiplyScalar(rover.speed);
+      rover.position.addScaledVector(rover.velocity, dt);
+      roverUp.copy(sampleSurfaceNormal(rover.position.x, rover.position.z));
+      roverTargetForward.copy(roverPlanarForward).addScaledVector(roverUp, -roverPlanarForward.dot(roverUp));
+      if (roverTargetForward.lengthSq() < 1e-5) {
+        roverTargetForward.set(1, 0, 0).applyQuaternion(rover.quat);
+        roverTargetForward.addScaledVector(roverUp, -roverTargetForward.dot(roverUp));
+      }
+      if (roverTargetForward.lengthSq() < 1e-5) roverTargetForward.set(1, 0, 0);
+      roverTargetForward.normalize();
+      roverTargetRight.crossVectors(roverTargetForward, roverUp).normalize();
+      roverTargetForward.crossVectors(roverUp, roverTargetRight).normalize();
+      roverBasis.makeBasis(roverTargetForward, roverUp, roverTargetRight);
+      roverTargetQuat.setFromRotationMatrix(roverBasis);
+      rover.quat.slerp(roverTargetQuat, Math.min(1, dt * 8));
+      let requiredY = -Infinity;
+      for (const contactOffset of rover.group.userData.wheelContactOffsets || []) {
+        roverWheelWorld.copy(contactOffset).applyQuaternion(rover.quat);
+        const wheelSurface = sampleSupportedSurface(
+          rover.position.x + roverWheelWorld.x,
+          rover.position.z + roverWheelWorld.z,
+        ).surfaceY;
+        requiredY = Math.max(requiredY, wheelSurface - roverWheelWorld.y);
+      }
+      if (Number.isFinite(requiredY)) rover.position.y = requiredY;
+      rover.wheelSpinAngle += (rover.speed / Math.max(0.001, ROVER_WHEEL_RADIUS)) * dt;
+      syncRoverVisual();
+
+      const pilot = getPilot();
+      if (isPilotDrivingRover(pilot)) {
+        const seat = getRoverSeatWorldTransform();
+        pilot.position.copy(seat.position);
+        pilot.quat.copy(seat.quaternion);
+        pilot.velocity.copy(rover.velocity);
+      }
+    }
+
     // ======================================================================
     // CAMERA — third-person chase
     // ======================================================================
@@ -4032,9 +4481,14 @@
 
     function computeChaseCameraTargets() {
       const pilot = getPilot();
-      if (pilot && !pilot.embarked) {
+      if (pilot && isPilotOnFoot(pilot)) {
         chasePos.copy(footCamOffset).applyQuaternion(pilot.quat).add(pilot.position);
         chaseLook.copy(footLookOffset).applyQuaternion(pilot.quat).add(pilot.position);
+        return;
+      }
+      if (pilot && isPilotDrivingRover(pilot)) {
+        chasePos.copy(ROVER_CAM_OFFSET).applyQuaternion(rover.quat).add(rover.position);
+        chaseLook.copy(ROVER_CAM_LOOK_OFFSET).applyQuaternion(rover.quat).add(rover.position);
         return;
       }
       chasePos.copy(camOffset).applyQuaternion(flight.quat).add(flight.position);
@@ -4093,8 +4547,10 @@
     }
 
     function updateCamera(dt) {
-      const onFoot = !!(getPilot() && !getPilot().embarked);
-      const targetFov = onFoot ? FOOT_CAMERA_FOV : FLIGHT_CAMERA_FOV;
+      const pilot = getPilot();
+      const onFoot = !!(pilot && isPilotOnFoot(pilot));
+      const driving = !!(pilot && isPilotDrivingRover(pilot));
+      const targetFov = onFoot ? FOOT_CAMERA_FOV : (driving ? 58 : FLIGHT_CAMERA_FOV);
       computeChaseCameraTargets();
       clampCameraToHangarInterior(chaseLook, chasePos);
       if (orbitState.enabled) {
@@ -4109,8 +4565,8 @@
         camPos.copy(chaseLook).add(orbitVector.setFromSpherical(orbitSpherical));
         camLook.copy(chaseLook);
       } else {
-        camPos.lerp(chasePos, Math.min(1, dt * (onFoot ? 8 : 4)));
-        camLook.lerp(chaseLook, Math.min(1, dt * (onFoot ? 10 : 6)));
+        camPos.lerp(chasePos, Math.min(1, dt * (onFoot ? 8 : (driving ? 7 : 4))));
+        camLook.lerp(chaseLook, Math.min(1, dt * (onFoot ? 10 : (driving ? 8 : 6))));
       }
       if (orbitState.enabled) clampCameraToHangarInterior(camLook, camPos);
       if (Math.abs(camera.fov - targetFov) > 0.01) {
@@ -4442,6 +4898,7 @@
         id: person.id,
         seed: person.seed,
         embarked: person.embarked,
+        transportMode: person.transportMode,
         swimming: person.swimming,
         position: [person.position.x, person.position.y, person.position.z],
         velocity: [person.velocity.x, person.velocity.y, person.velocity.z],
@@ -4453,6 +4910,7 @@
       return {
         id: String(savedPerson.id),
         embarked: Boolean(savedPerson.embarked),
+        transportMode: typeof savedPerson.transportMode === 'string' ? savedPerson.transportMode : null,
         swimming: Boolean(savedPerson.swimming),
         position: Array.isArray(savedPerson.position) ? savedPerson.position.map(Number) : null,
         velocity: Array.isArray(savedPerson.velocity) ? savedPerson.velocity.map(Number) : null,
@@ -4462,7 +4920,7 @@
     function serializeGameState() {
       if (!currentMail) return null;
       return JSON.stringify({
-        version: 2,
+        version: 3,
         successfulDeliveries,
         pilotLogbook: pilotLogbook.map(serializeLogbookEntry),
         people: people.map(serializePersonState),
@@ -4476,6 +4934,17 @@
           yawInput: flight.yawInput,
           onGround: flight.onGround,
           crashed: flight.crashed,
+        },
+        rover: {
+          position: [rover.position.x, rover.position.y, rover.position.z],
+          velocity: [rover.velocity.x, rover.velocity.y, rover.velocity.z],
+          quat: [rover.quat.x, rover.quat.y, rover.quat.z, rover.quat.w],
+          throttle: rover.throttle,
+          steer: rover.steer,
+          speed: rover.speed,
+          hostAirfieldId: rover.hostAirfieldId,
+          cruiseLocked: rover.cruiseLocked,
+          touchThrottleLock: rover.touchThrottleLock,
         },
         currentMail: serializeMail(currentMail),
         gameTimeOffsetMs,
@@ -4554,10 +5023,11 @@
       currentMail = savedMail;
       gameTimeOffsetMs = Number.isFinite(parsed?.gameTimeOffsetMs) ? parsed.gameTimeOffsetMs : gameTimeOffsetMs;
       const savedPeople = Array.isArray(parsed?.people) ? parsed.people.map(hydratePersonState).filter(Boolean) : [];
+      const savedRover = parsed?.rover;
       for (const person of people) {
         const saved = savedPeople.find((entry) => entry.id === person.id);
         if (!saved) {
-          person.embarked = true;
+          setPilotTransportMode(PILOT_MODE_PLANE);
           person.swimming = false;
           person.velocity.set(0, 0, 0);
           person.walkForward = 0;
@@ -4567,7 +5037,8 @@
           person.quat.copy(flight.quat);
           continue;
         }
-        person.embarked = saved.embarked;
+        person.transportMode = saved.transportMode || (saved.embarked ? PILOT_MODE_PLANE : PILOT_MODE_FOOT);
+        person.embarked = person.transportMode === PILOT_MODE_PLANE;
         person.swimming = saved.swimming;
         person.walkForward = 0;
         person.walkTurn = 0;
@@ -4576,7 +5047,24 @@
         if (saved.velocity?.length === 3) person.velocity.set(saved.velocity[0] || 0, saved.velocity[1] || 0, saved.velocity[2] || 0);
         if (saved.quat?.length === 4) person.quat.set(saved.quat[0] || 0, saved.quat[1] || 0, saved.quat[2] || 0, saved.quat[3] || 1).normalize();
       }
-      if (getPilot().embarked) {
+      if (savedRover?.position?.length === 3) rover.position.set(Number(savedRover.position[0]) || 0, Number(savedRover.position[1]) || 0, Number(savedRover.position[2]) || 0);
+      if (savedRover?.velocity?.length === 3) rover.velocity.set(Number(savedRover.velocity[0]) || 0, Number(savedRover.velocity[1]) || 0, Number(savedRover.velocity[2]) || 0);
+      if (savedRover?.quat?.length === 4) rover.quat.set(Number(savedRover.quat[0]) || 0, Number(savedRover.quat[1]) || 0, Number(savedRover.quat[2]) || 0, Number(savedRover.quat[3]) || 1).normalize();
+      rover.throttle = clampNumber(savedRover?.throttle, -1, 1, 0);
+      rover.steer = clampNumber(savedRover?.steer, -1, 1, 0);
+      rover.speed = clampNumber(savedRover?.speed, -ROVER_REVERSE_SPEED, ROVER_MAX_SPEED, 0);
+      rover.hostAirfieldId = savedRover?.hostAirfieldId || START_AIRFIELD.id;
+      rover.cruiseLocked = Boolean(savedRover?.cruiseLocked);
+      rover.touchThrottleLock = clampNumber(savedRover?.touchThrottleLock, 0, 1, 0);
+      rover.touchDriveForwardInput = 0;
+      rover.touchDriveSteerInput = 0;
+      rover.driveForwardInput = rover.touchThrottleLock;
+      rover.driveSteerInput = 0;
+      rover.forwardHoldTime = 0;
+      rover.occupied = isPilotDrivingRover();
+      if (!savedRover) moveRoverToAirfield(nearestAirfield(flight.position.x, flight.position.z));
+      syncRoverVisual();
+      if (isPilotInPlane()) {
         resetPilotEmbarkedState();
       } else {
         syncControlModeUi();
@@ -5462,7 +5950,7 @@
     let transmitting = false;
     async function transmit() {
       if (transmitting) return;
-      if (!getPilot().embarked) {
+      if (!isPilotInPlane()) {
         setStatus('Board the aircraft before transmitting.', 1800);
         return;
       }
@@ -5561,6 +6049,13 @@
       touchRudder = 0;
       touchWalkForward = 0;
       touchWalkTurn = 0;
+      rover.driveForwardInput = 0;
+      rover.driveSteerInput = 0;
+      rover.touchDriveForwardInput = 0;
+      rover.touchDriveSteerInput = 0;
+      rover.touchThrottleLock = 0;
+      rover.cruiseLocked = false;
+      rover.forwardHoldTime = 0;
       touchThrottleActive = false;
       desktopThrottleActive = false;
       syncThrottlePadVisual();
@@ -5581,6 +6076,7 @@
       flight.crashed = false;
       applyStartTimePreference(false);
       resetLiveControls();
+      moveRoverToAirfield(START_AIRFIELD);
       newMail();
       plane.position.copy(flight.position);
       plane.quaternion.copy(flight.quat);
@@ -5617,7 +6113,7 @@
         if (e.repeat) return;
         if (paused || isPauseOpen()) return;
         if (Object.values(zoomState).some(Boolean)) return;
-        togglePilotEmbark();
+        performPrimaryAction();
         return;
       }
       if (isHelpShortcut) {
@@ -5718,8 +6214,22 @@
       interactionPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       interactionPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       interactionRaycaster.setFromCamera(interactionPointer, camera);
-      const hits = interactionRaycaster.intersectObjects(plane.userData.interactionMeshes || [], false);
-      if (hits.length) togglePilotEmbark();
+      const hits = interactionRaycaster.intersectObjects([
+        ...(plane.userData.interactionMeshes || []),
+        ...(rover.group.userData.interactionMeshes || []),
+      ], false);
+      if (!hits.length) return;
+      const hitObject = hits[0].object;
+      const roverMeshes = rover.group.userData.interactionMeshes || [];
+      if (roverMeshes.includes(hitObject)) {
+        if (isPilotDrivingRover()) exitRover();
+        else driveRover();
+        return;
+      }
+      if (plane.userData.interactionMeshes?.includes(hitObject)) {
+        if (isPilotInPlane()) disembarkPilot();
+        else embarkPilot();
+      }
     });
 
     // Touch left pad — pitch (y) and roll (x)
@@ -5780,6 +6290,11 @@
         if (active) return;
         const rect = pad.getBoundingClientRect();
         const max = knobMax(rect);
+        if (isPilotDrivingRover()) {
+          const throttle = THREE.MathUtils.clamp(rover.touchThrottleLock || rover.throttle, -1, 1);
+          applyKnob(0, -throttle * max.y);
+          return;
+        }
         const offsetY = (1 - 2 * Math.max(0, Math.min(1, flight.throttle))) * max.y;
         applyKnob(0, offsetY);
       }
@@ -5798,6 +6313,12 @@
         const dx = Math.max(-max.x, Math.min(max.x, clientX - centreX));
         const dy = Math.max(-max.y, Math.min(max.y, clientY - centreY));
         applyKnob(dx, dy);
+        if (isPilotDrivingRover()) {
+          rover.touchDriveSteerInput = THREE.MathUtils.clamp(dx / max.x, -1, 1);
+          rover.touchDriveForwardInput = THREE.MathUtils.clamp(-dy / max.y, -1, 1);
+          rover.touchThrottleLock = 0;
+          return;
+        }
         const value = Math.max(0, Math.min(1, 1 - ((dy / max.y) + 1) * 0.5));
         flight.throttle = value;
         touchRudder = shapeRudder(dx / max.x);
@@ -5815,7 +6336,13 @@
       const release = () => {
         active = false;
         touchThrottleActive = false;
-        touchRudder = 0;
+        if (isPilotDrivingRover()) {
+          rover.touchDriveSteerInput = 0;
+          rover.touchThrottleLock = rover.touchDriveForwardInput > 0.5 ? rover.touchDriveForwardInput : 0;
+          rover.touchDriveForwardInput = rover.touchThrottleLock;
+        } else {
+          touchRudder = 0;
+        }
         syncFromThrottle();
       };
       pad.addEventListener('pointerup', release);
@@ -5832,7 +6359,7 @@
       document.getElementById('touch').classList.add('on');
     }
     document.getElementById('action-btn').addEventListener('click', () => {
-      togglePilotEmbark();
+      performPrimaryAction();
     });
 
     // ======================================================================
@@ -6289,12 +6816,20 @@
     }
     function defaultStatus() {
       const pilot = getPilot();
-      if (pilot && !pilot.embarked) {
+      if (pilot && isPilotDrivingRover(pilot)) {
+        const near = nearestAirfield(rover.position.x, rover.position.z);
+        return `Driving near ${near.name} — rover cruise ${rover.cruiseLocked ? 'locked' : 'manual'}.`;
+      }
+      if (pilot && isPilotOnFoot(pilot)) {
         const dist = getPilotBoardingDistance(pilot);
+        const roverDist = getPilotRoverDistance(pilot);
         if (dist <= CHARACTER_BOARD_RADIUS) {
           return pilot.swimming
             ? 'Swimming beside the aircraft — press Enter or tap the plane to board.'
             : 'On foot beside the aircraft — press Enter or tap the plane to board.';
+        }
+        if (roverDist <= ROVER_BOARD_RADIUS) {
+          return 'On foot beside the rover — press Enter or tap the rover to drive.';
         }
         const near = nearestAirfield(pilot.position.x, pilot.position.z);
         return `${pilot.swimming ? 'Swimming' : 'On foot'} near ${near.name} — ${dist.toFixed(1)} m from the aircraft.`;
@@ -6329,7 +6864,8 @@
         return;
       }
 
-      if (getPilot().embarked) {
+      const pilot = getPilot();
+      if (isPilotInPlane(pilot)) {
         const targetPitch = (keys.has('s') || keys.has('arrowdown') ? 1 : 0)
                          - (keys.has('w') || keys.has('arrowup') ? 1 : 0)
                          + touchPitch;
@@ -6357,6 +6893,48 @@
         if (flight.onGround && flight.throttle <= 0.01 && (touchThrottleActive || desktopThrottleActive)) {
           flight.brakeInput = true;
         }
+        rover.driveForwardInput = 0;
+        rover.driveSteerInput = 0;
+        rover.touchDriveForwardInput = 0;
+        rover.touchDriveSteerInput = 0;
+        rover.touchThrottleLock = 0;
+        rover.cruiseLocked = false;
+        rover.forwardHoldTime = 0;
+      } else if (isPilotDrivingRover(pilot)) {
+        flight.pitchInput = 0;
+        flight.rollInput = 0;
+        flight.yawInput = 0;
+        flight.throttle = 0;
+        flight.brakeInput = true;
+
+        const forwardHeld = keys.has('w') || keys.has('arrowup');
+        const reverseHeld = keys.has('s') || keys.has('arrowdown');
+        const steerTarget = THREE.MathUtils.clamp(
+          (keys.has('a') || keys.has('arrowleft') ? 1 : 0) - (keys.has('d') || keys.has('arrowright') ? 1 : 0) + rover.touchDriveSteerInput,
+          -1,
+          1,
+        );
+
+        if (reverseHeld) {
+          rover.cruiseLocked = false;
+          rover.forwardHoldTime = 0;
+        } else if (forwardHeld && !rover.cruiseLocked) {
+          rover.forwardHoldTime += dt;
+          if (rover.forwardHoldTime >= ROVER_CRUISE_HOLD_SEC) {
+            rover.cruiseLocked = true;
+            setStatus('Rover cruise hold engaged.', 1400);
+          }
+        } else if (!forwardHeld && !rover.cruiseLocked) {
+          rover.forwardHoldTime = 0;
+        }
+
+        let driveTarget = rover.touchThrottleLock || rover.touchDriveForwardInput || 0;
+        if (forwardHeld) driveTarget = 1;
+        else if (reverseHeld) driveTarget = -1;
+        else if (rover.cruiseLocked) driveTarget = 1;
+        rover.driveForwardInput = THREE.MathUtils.clamp(driveTarget, -1, 1);
+        rover.driveSteerInput = steerTarget;
+        updateRover(dt);
       } else {
         flight.pitchInput = 0;
         flight.rollInput = 0;
@@ -6366,8 +6944,9 @@
         updatePilotOnFoot(dt);
       }
 
-      updateFlight(dt);
+      if (!isPilotDrivingRover(pilot)) updateFlight(dt);
       updatePeople(dt);
+      ensureNearestRoverHost();
       updateCamera(dt);
       ensureChunks(flight.position.x, flight.position.z);
       updateTerrainShadowReceivers(flight.position.x, flight.position.z);
@@ -6392,7 +6971,7 @@
       updateSun(now2);
 
       // Heading for compass: aircraft in flight, pilot facing when on foot.
-      const compassQuat = getPilot().embarked ? flight.quat : getPilot().quat;
+      const compassQuat = isPilotInPlane(pilot) ? flight.quat : (isPilotDrivingRover(pilot) ? rover.quat : pilot.quat);
       tmpForward.set(1,0,0).applyQuaternion(compassQuat);
       const heading = Math.atan2(tmpForward.x, -tmpForward.z); // North=0
       drawCompass(heading);
@@ -6434,6 +7013,8 @@
       deliveryInProgress = false;
       plane.position.copy(flight.position);
       plane.quaternion.copy(flight.quat);
+      if (!rover.hostAirfieldId) moveRoverToAirfield(nearestAirfield(flight.position.x, flight.position.z));
+      syncRoverVisual();
       updateCamera(1);
       ensureChunks(flight.position.x, flight.position.z);
       syncThrottlePadVisual();
