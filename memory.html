@@ -1035,6 +1035,10 @@
             weather: { name: 'Weather', emojis: ['☀️', '⛅', '☁️', '🌧️', '⛈️', '❄️', '🌈', '🌪️'] },
         };
 
+        const GAME_STATE_STORAGE_KEY = 'idlegames-memory-game-state';
+        let matchTimeoutId = null;
+        let gameOverTimeoutId = null;
+
         let gameState = {
             cards: [],
             flipped: [],
@@ -1058,8 +1062,174 @@
             mismatchTimeoutId: null,
             queuedFlips: [],
             resolvingMatch: false,
-            patternBaseTile: null
+            patternBaseTile: null,
+            timerInterval: null
         };
+
+        function persistGameState() {
+            const stateToSave = {
+                cards: [...gameState.cards],
+                flipped: [...gameState.flipped],
+                matched: [...gameState.matched],
+                moves: gameState.moves,
+                matches: gameState.matches,
+                startTime: gameState.startTime,
+                elapsedSeconds: gameState.elapsedSeconds,
+                gameActive: gameState.gameActive,
+                boardSize: gameState.boardSize,
+                nextBoardSize: gameState.nextBoardSize,
+                currentTheme: gameState.currentTheme,
+                gameCompleted: gameState.gameCompleted,
+                lastShareText: gameState.lastShareText,
+                timerRunning: gameState.timerRunning,
+                resolvingMismatch: gameState.resolvingMismatch,
+                pendingFlip: gameState.pendingFlip,
+                nextFlipped: [...gameState.nextFlipped],
+                mismatchPair: [...gameState.mismatchPair],
+                queuedFlips: [...gameState.queuedFlips],
+                resolvingMatch: gameState.resolvingMatch,
+                patternBaseTile: gameState.patternBaseTile
+            };
+
+            try {
+                localStorage.setItem(GAME_STATE_STORAGE_KEY, JSON.stringify(stateToSave));
+            } catch (error) {
+                console.warn('Unable to save Memory game state:', error);
+            }
+        }
+
+        function loadSavedGameState() {
+            try {
+                const rawState = localStorage.getItem(GAME_STATE_STORAGE_KEY);
+                if (!rawState) {
+                    return false;
+                }
+
+                const savedState = JSON.parse(rawState);
+                const inferredBoardSizeByCardCount = {
+                    4: 2,
+                    6: 3,
+                    16: 4,
+                    20: 5,
+                    36: 6
+                };
+
+                const hasValidCards = Array.isArray(savedState?.cards) && savedState.cards.length > 0 && savedState.cards.every(card => typeof card === 'string');
+                const hasValidFlipped = Array.isArray(savedState?.flipped) && savedState.flipped.every(Number.isInteger);
+                const hasValidMatched = Array.isArray(savedState?.matched) && savedState.matched.every(Number.isInteger);
+                const inferredBoardSize = inferredBoardSizeByCardCount[savedState?.cards?.length] || null;
+                const restoredBoardSize = Number.isInteger(savedState?.boardSize) && savedState.boardSize >= 2 && savedState.boardSize <= 6
+                    ? savedState.boardSize
+                    : inferredBoardSize;
+                const restoredNextBoardSize = Number.isInteger(savedState?.nextBoardSize) && savedState.nextBoardSize >= 2 && savedState.nextBoardSize <= 6
+                    ? savedState.nextBoardSize
+                    : restoredBoardSize;
+                const restoredTheme = typeof savedState?.currentTheme === 'string' && savedState.currentTheme.length > 0
+                    ? savedState.currentTheme
+                    : (gameState.currentTheme || 'simple_light');
+
+                if (!hasValidCards || !hasValidFlipped || !hasValidMatched || !restoredBoardSize || !restoredNextBoardSize) {
+                    console.warn('Saved Memory game state rejected during restore');
+                    return false;
+                }
+
+                gameState.cards = [...savedState.cards];
+                gameState.flipped = [...savedState.flipped];
+                gameState.matched = new Set(savedState.matched);
+                gameState.moves = Number.isInteger(savedState.moves) ? savedState.moves : 0;
+                gameState.matches = Number.isInteger(savedState.matches) ? savedState.matches : 0;
+                gameState.startTime = Number.isFinite(savedState.startTime) ? savedState.startTime : 0;
+                gameState.elapsedSeconds = Number.isInteger(savedState.elapsedSeconds) ? savedState.elapsedSeconds : 0;
+                gameState.gameActive = typeof savedState.gameActive === 'boolean' ? savedState.gameActive : true;
+                gameState.boardSize = restoredBoardSize;
+                gameState.nextBoardSize = restoredNextBoardSize;
+                gameState.currentTheme = restoredTheme;
+                gameState.gameCompleted = Boolean(savedState.gameCompleted);
+                gameState.lastShareText = typeof savedState.lastShareText === 'string' ? savedState.lastShareText : '';
+                gameState.timerRunning = Boolean(savedState.timerRunning);
+                gameState.resolvingMismatch = Boolean(savedState.resolvingMismatch);
+                gameState.pendingFlip = savedState.pendingFlip ?? null;
+                gameState.nextFlipped = Array.isArray(savedState.nextFlipped) ? savedState.nextFlipped.filter(Number.isInteger) : [];
+                gameState.mismatchPair = Array.isArray(savedState.mismatchPair) ? savedState.mismatchPair.filter(Number.isInteger) : [];
+                gameState.queuedFlips = Array.isArray(savedState.queuedFlips) ? savedState.queuedFlips.filter(Number.isInteger) : [];
+                gameState.resolvingMatch = Boolean(savedState.resolvingMatch);
+                gameState.patternBaseTile = Number.isFinite(savedState.patternBaseTile) ? savedState.patternBaseTile : null;
+                gameState.mismatchTimeoutId = null;
+
+                const { cols, rows } = getGridDimensions();
+                const expectedCardCount = cols * rows;
+                if (gameState.cards.length !== expectedCardCount) {
+                    console.warn('Saved Memory game state card count did not match inferred board size');
+                    return false;
+                }
+
+                if (!gameState.selectedThemes.has(gameState.currentTheme) && !GAME_THEMES[gameState.currentTheme] && !SEASONS[gameState.currentTheme?.toUpperCase()]) {
+                    gameState.currentTheme = 'simple_light';
+                }
+
+                return true;
+            } catch (error) {
+                console.warn('Unable to load Memory game state:', error);
+                return false;
+            }
+        }
+
+        function syncBoardSizeButtons() {
+            document.querySelectorAll('.size-btn').forEach(btn => {
+                btn.classList.toggle('active', parseInt(btn.dataset.size) === gameState.nextBoardSize);
+            });
+        }
+
+        function syncCompletedGameUI() {
+            if (!gameState.gameCompleted) {
+                return;
+            }
+
+            const board = document.getElementById('gameBoard');
+            if (board) {
+                board.classList.add('celebrate');
+                const cards = board.querySelectorAll('.card');
+                cards.forEach((card) => {
+                    if (!card.style.getPropertyValue('--celebrate-offset')) {
+                        const offset = (Math.random() * 12 - 6).toFixed(2);
+                        card.style.setProperty('--celebrate-offset', `${offset}deg`);
+                    }
+                });
+            }
+
+            const score = calculateScore();
+            document.getElementById('finalScore').textContent = `Score: ${score}`;
+            document.getElementById('finalStats').innerHTML = `
+                <strong>${gameState.moves} moves in ${gameState.elapsedSeconds}s</strong>
+            `;
+            if (!gameState.lastShareText) {
+                gameState.lastShareText = buildShareText();
+            }
+        }
+
+        function resumePendingState() {
+            if (gameState.gameCompleted) {
+                syncCompletedGameUI();
+                return;
+            }
+
+            if (gameState.timerRunning) {
+                gameState.startTime = Date.now() - gameState.elapsedSeconds * 1000;
+                if (gameState.timerInterval) {
+                    clearInterval(gameState.timerInterval);
+                }
+                startTimer();
+            }
+
+            if (gameState.resolvingMatch && gameState.flipped.length === 2) {
+                scheduleResolvedMatch(500);
+                return;
+            }
+
+            if (gameState.resolvingMismatch && gameState.mismatchPair.length === 2) {
+                restartMismatchTimeout();
+            }
+        }
         function drainQueuedFlips() {
             if (gameState.nextFlipped.length > 0) {
                 return;
@@ -1116,15 +1286,42 @@
             localStorage.setItem('idlegames-memory-themes', JSON.stringify([...gameState.selectedThemes]));
         }
 
+        function isSeasonalTheme(themeKey) {
+            return Object.prototype.hasOwnProperty.call(SEASONS, themeKey.toUpperCase());
+        }
+
+        function hasUnstartedSavedGame() {
+            return !gameState.timerRunning &&
+                gameState.moves === 0 &&
+                gameState.matches === 0 &&
+                gameState.elapsedSeconds === 0 &&
+                gameState.matched.size === 0 &&
+                gameState.flipped.length === 0 &&
+                gameState.nextFlipped.length === 0 &&
+                gameState.queuedFlips.length === 0 &&
+                !gameState.resolvingMismatch &&
+                !gameState.resolvingMatch &&
+                !gameState.gameCompleted;
+        }
+
         // Initialize theme on load
         function initializeThemes() {
             const seasonal = getSeasonalThemes();
             const saved = getSavedSelectedThemes();
+            let seasonalAvailabilityChanged = false;
+
+            for (const theme of [...saved]) {
+                if (isSeasonalTheme(theme) && !seasonal.has(theme)) {
+                    saved.delete(theme);
+                    seasonalAvailabilityChanged = true;
+                }
+            }
 
             // Check for new seasonal themes
             for (const theme of seasonal) {
                 if (!saved.has(theme)) {
                     saved.add(theme);
+                    seasonalAvailabilityChanged = true;
                 }
             }
 
@@ -1132,6 +1329,7 @@
             saveSelectedThemes();
             console.log('Initialized themes:', [...gameState.selectedThemes]);
             renderThemeSettings();
+            return seasonalAvailabilityChanged;
         }
 
         // ========================================
@@ -1614,6 +1812,7 @@
 
             gameState.cards = cardEmojis;
             console.log(`Created ${cardEmojis.length} cards from theme "${gameState.currentTheme}"`);
+            persistGameState();
         }
 
         function resizeBoard() {
@@ -1703,6 +1902,8 @@
 
                 board.appendChild(card);
             });
+
+            persistGameState();
         }
 
         function startTimerIfNeeded() {
@@ -1713,6 +1914,7 @@
                 clearInterval(gameState.timerInterval);
             }
             startTimer();
+            persistGameState();
         }
 
         function animateFlipBack(indices) {
@@ -1724,65 +1926,88 @@
             });
         }
 
+        function finalizeResolvedMatch(idx1, idx2) {
+            gameState.matched.add(idx1);
+            gameState.matched.add(idx2);
+            gameState.matches++;
+            gameState.flipped = [];
+            gameState.gameActive = true;
+            gameState.resolvingMatch = false;
+            matchTimeoutId = null;
+            updateStats();
+            renderBoard();
+
+            requestAnimationFrame(() => {
+                const first = document.querySelector(`.card[data-index="${idx1}"]`);
+                const second = document.querySelector(`.card[data-index="${idx2}"]`);
+                if (first) {
+                    first.classList.add('jiggle');
+                    first.classList.add('pulse');
+                    setTimeout(() => first.classList.remove('jiggle'), 2200);
+                    setTimeout(() => first.classList.remove('pulse'), 1100);
+                }
+                if (second) {
+                    second.classList.add('jiggle');
+                    second.classList.add('pulse');
+                    setTimeout(() => second.classList.remove('jiggle'), 2200);
+                    setTimeout(() => second.classList.remove('pulse'), 1100);
+                }
+            });
+
+            persistGameState();
+
+            if (gameState.matched.size === gameState.cards.length) {
+                endGame();
+                return;
+            }
+
+            if (gameState.nextFlipped.length === 0 && gameState.queuedFlips.length > 0) {
+                drainQueuedFlips();
+            }
+
+            if (gameState.nextFlipped.length > 0) {
+                gameState.flipped = [...gameState.nextFlipped];
+                gameState.nextFlipped = [];
+                renderBoard();
+                handleResolvedPair();
+            }
+        }
+
+        function scheduleResolvedMatch(delay = 500) {
+            const [idx1, idx2] = gameState.flipped;
+            if (idx1 === undefined || idx2 === undefined) {
+                return;
+            }
+
+            if (matchTimeoutId) {
+                clearTimeout(matchTimeoutId);
+            }
+
+            matchTimeoutId = setTimeout(() => {
+                finalizeResolvedMatch(idx1, idx2);
+            }, delay);
+        }
+
         function handleResolvedPair() {
             if (gameState.flipped.length !== 2) return;
 
             gameState.gameActive = false;
             gameState.moves++;
             updateStats();
+            persistGameState();
 
             const [idx1, idx2] = gameState.flipped;
             if (gameState.cards[idx1] === gameState.cards[idx2]) {
                 gameState.resolvingMatch = true;
-                setTimeout(() => {
-                    gameState.matched.add(idx1);
-                    gameState.matched.add(idx2);
-                    gameState.matches++;
-                    gameState.flipped = [];
-                    gameState.gameActive = true;
-                    gameState.resolvingMatch = false;
-                    updateStats();
-                    renderBoard();
-
-                    requestAnimationFrame(() => {
-                        const first = document.querySelector(`.card[data-index="${idx1}"]`);
-                        const second = document.querySelector(`.card[data-index="${idx2}"]`);
-                        if (first) {
-                            first.classList.add('jiggle');
-                            first.classList.add('pulse');
-                            setTimeout(() => first.classList.remove('jiggle'), 2200);
-                            setTimeout(() => first.classList.remove('pulse'), 1100);
-                        }
-                        if (second) {
-                            second.classList.add('jiggle');
-                            second.classList.add('pulse');
-                            setTimeout(() => second.classList.remove('jiggle'), 2200);
-                            setTimeout(() => second.classList.remove('pulse'), 1100);
-                        }
-                    });
-
-                    if (gameState.matched.size === gameState.cards.length) {
-                        endGame();
-                        return;
-                    }
-
-                    if (gameState.nextFlipped.length === 0 && gameState.queuedFlips.length > 0) {
-                        drainQueuedFlips();
-                    }
-
-                    if (gameState.nextFlipped.length > 0) {
-                        gameState.flipped = [...gameState.nextFlipped];
-                        gameState.nextFlipped = [];
-                        renderBoard();
-                        handleResolvedPair();
-                    }
-                }, 500);
+                persistGameState();
+                scheduleResolvedMatch(500);
             } else {
                 gameState.resolvingMismatch = true;
                 gameState.mismatchPair = [idx1, idx2];
                 if (gameState.mismatchTimeoutId) {
                     clearTimeout(gameState.mismatchTimeoutId);
                 }
+                persistGameState();
                 gameState.mismatchTimeoutId = setTimeout(() => {
                     const mismatchIndices = [...gameState.mismatchPair];
                     animateFlipBack(mismatchIndices);
@@ -1794,6 +2019,7 @@
                         gameState.flipped = [];
                         gameState.gameActive = true;
                         renderBoard();
+                        persistGameState();
 
                         if (gameState.nextFlipped.length === 0 && gameState.queuedFlips.length > 0) {
                             drainQueuedFlips();
@@ -1828,6 +2054,7 @@
                     gameState.flipped = [];
                     gameState.gameActive = true;
                     renderBoard();
+                    persistGameState();
 
                     if (gameState.nextFlipped.length === 0 && gameState.queuedFlips.length > 0) {
                         drainQueuedFlips();
@@ -1868,6 +2095,7 @@
                     renderBoard();
                     handleResolvedPair();
                 }
+                persistGameState();
                 return;
             }
             if (gameState.flipped.includes(index)) return;
@@ -1879,11 +2107,13 @@
                 if (gameState.nextFlipped.length < 2) {
                     gameState.nextFlipped.push(index);
                     cardElement.classList.add('flipped');
+                    persistGameState();
                     return;
                 }
                 if (!gameState.queuedFlips.includes(index)) {
                     gameState.queuedFlips.push(index);
                 }
+                persistGameState();
                 return;
             }
 
@@ -1892,11 +2122,13 @@
                 if (gameState.nextFlipped.length < 2) {
                     gameState.nextFlipped.push(index);
                     cardElement.classList.add('flipped');
+                    persistGameState();
                     return;
                 }
                 if (!gameState.queuedFlips.includes(index)) {
                     gameState.queuedFlips.push(index);
                 }
+                persistGameState();
                 return;
             }
 
@@ -1904,6 +2136,7 @@
 
             gameState.flipped.push(index);
             cardElement.classList.add('flipped');
+            persistGameState();
 
             if (gameState.flipped.length === 2) {
                 handleResolvedPair();
@@ -1939,6 +2172,14 @@
             gameState.mismatchPair = [];
             gameState.queuedFlips = [];
             gameState.resolvingMatch = false;
+            if (matchTimeoutId) {
+                clearTimeout(matchTimeoutId);
+            }
+            matchTimeoutId = null;
+            if (gameOverTimeoutId) {
+                clearTimeout(gameOverTimeoutId);
+            }
+            gameOverTimeoutId = null;
             if (gameState.mismatchTimeoutId) {
                 clearTimeout(gameState.mismatchTimeoutId);
             }
@@ -1959,13 +2200,17 @@
 
             if (gameState.timerInterval) {
                 clearInterval(gameState.timerInterval);
+                gameState.timerInterval = null;
             }
+
+            persistGameState();
         }
 
         function startTimer() {
             gameState.timerInterval = setInterval(() => {
                 gameState.elapsedSeconds = Math.floor((Date.now() - gameState.startTime) / 1000);
                 updateStats();
+                persistGameState();
             }, 100);
         }
 
@@ -1986,6 +2231,7 @@
         function endGame() {
             if (gameState.timerInterval) {
                 clearInterval(gameState.timerInterval);
+                gameState.timerInterval = null;
             }
             gameState.gameActive = false;
             gameState.timerRunning = false;
@@ -2007,8 +2253,12 @@
                 <strong>${gameState.moves} moves in ${gameState.elapsedSeconds}s</strong>
             `;
             gameState.lastShareText = buildShareText();
+            persistGameState();
 
-            setTimeout(() => {
+            if (gameOverTimeoutId) {
+                clearTimeout(gameOverTimeoutId);
+            }
+            gameOverTimeoutId = setTimeout(() => {
                 gameOverModal.classList.add('open');
             }, 2200);
         }
@@ -2032,8 +2282,23 @@
                 }
             });
 
-            initializeThemes();
-            startNewGame();
+            const seasonalAvailabilityChanged = initializeThemes();
+            syncBoardSizeButtons();
+
+            if (loadSavedGameState()) {
+                if (seasonalAvailabilityChanged && hasUnstartedSavedGame()) {
+                    startNewGame();
+                    resizeBoard();
+                    return;
+                }
+                syncBoardSizeButtons();
+                setCardBackPattern(gameState.currentTheme);
+                renderBoard();
+                updateStats();
+                resumePendingState();
+            } else {
+                startNewGame();
+            }
             resizeBoard();
 
             const container = document.querySelector('.board-container');
@@ -2056,6 +2321,8 @@
         window.addEventListener('resize', () => {
             requestAnimationFrame(resizeBoard);
         });
+
+        window.addEventListener('beforeunload', persistGameState);
     </script>
     <script src="parental.js" defer></script>
 </body>
