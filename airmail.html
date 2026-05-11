@@ -1751,11 +1751,23 @@
     }
 
     // Biome → vertex colour
-    const COL_SAND  = new THREE.Color('#d8c391');
-    const COL_GRASS = new THREE.Color('#7d9b56');
-    const COL_DARK  = new THREE.Color('#4f6a3a');
-    const COL_ROCK  = new THREE.Color('#8a847a');
-    const COL_SNOW  = new THREE.Color('#f3eee0');
+    const SUMMER_WARMTH = new THREE.Color('#f0c78d');
+    function summerGradeColor(color, { desaturate = 0.14, lift = 0.045, warmth = 0.055 } = {}) {
+      const c = new THREE.Color(color);
+      const hsl = { h: 0, s: 0, l: 0 };
+      c.getHSL(hsl);
+      hsl.s = THREE.MathUtils.clamp(hsl.s * (1 - desaturate), 0, 1);
+      hsl.l = THREE.MathUtils.clamp(hsl.l + lift * (1 - hsl.l) + (hsl.l < 0.22 ? 0.035 : 0), 0, 1);
+      c.setHSL(hsl.h, hsl.s, hsl.l);
+      c.lerp(SUMMER_WARMTH, warmth);
+      return c;
+    }
+
+    const COL_SAND  = new THREE.Color('#d9c494');
+    const COL_GRASS = new THREE.Color('#789367');
+    const COL_DARK  = new THREE.Color('#596c43');
+    const COL_ROCK  = new THREE.Color('#918a7e');
+    const COL_SNOW  = new THREE.Color('#f0eadc');
     function biomeColor(h, slope, jitter) {
       const c = new THREE.Color();
       if (h < SEA_LEVEL + 0.6) c.copy(COL_SAND);
@@ -1763,12 +1775,12 @@
       else if (h < 22)         c.copy(COL_GRASS).lerp(COL_DARK, Math.min(1, (h - 6) / 16));
       else if (h < 32)         c.copy(COL_DARK).lerp(COL_ROCK, (h - 22) / 10);
       else                     c.copy(COL_ROCK).lerp(COL_SNOW, Math.min(1, (h - 32) / 14));
-      if (slope > 0.55) c.lerp(COL_ROCK, Math.min(0.8, (slope - 0.55) * 2));
-      const j = (jitter - 0.5) * 0.07;
+      if (slope > 0.55) c.lerp(COL_ROCK, Math.min(0.62, (slope - 0.55) * 1.45));
+      const j = (jitter - 0.5) * 0.04;
       c.r = Math.max(0, Math.min(1, c.r + j));
       c.g = Math.max(0, Math.min(1, c.g + j));
       c.b = Math.max(0, Math.min(1, c.b + j));
-      return c;
+      return summerGradeColor(c, { desaturate: 0.1, lift: 0.035, warmth: 0.045 });
     }
 
     // ======================================================================
@@ -2122,7 +2134,7 @@
     renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.3;
+    renderer.toneMappingExposure = 1.18;
     document.getElementById('stage').appendChild(renderer.domElement);
 
     const DEFAULT_SHADOW_BIAS = 0.0001;
@@ -2132,7 +2144,7 @@
 
     const gameSettings = {
       fpsCap: 0,
-      gamma: 1.3,
+      gamma: 1.18,
       masterVolume: 1,
       effectsVolume: 1,
       ttsMode: 'auto',
@@ -2176,6 +2188,7 @@
     }
     let sunLight = null;
     let ambient = null;
+    let fillLight = null;
     let plane = null;
     function invalidateSceneMaterials() {
       scene.traverse((object) => {
@@ -2206,9 +2219,9 @@
     // ----- Sky dome (custom gradient + sun) ----------------------------------
     const skyUniforms = {
       uSunDir:    { value: new THREE.Vector3(0.4, 0.6, 0.3).normalize() },
-      uTopCol:    { value: new THREE.Color(0x4f7fc0) },
-      uBotCol:    { value: new THREE.Color(0xdfe7e8) },
-      uSunCol:    { value: new THREE.Color(0xfff0c0) },
+      uTopCol:    { value: new THREE.Color(0x6f9ec5) },
+      uBotCol:    { value: new THREE.Color(0xe5e0cf) },
+      uSunCol:    { value: new THREE.Color(0xffe4ad) },
       uSunSize:   { value: 0.998 },
       uHorizonGlow:{ value: 0.4 },
     };
@@ -2247,7 +2260,7 @@
     scene.add(sky);
 
     // ----- Lighting ----------------------------------------------------------
-    sunLight = new THREE.DirectionalLight(0xfff1cc, 2.4);
+    sunLight = new THREE.DirectionalLight(0xffe6b8, 2.05);
     sunLight.castShadow = true;
     sunLight.shadow.mapSize.set(2048, 2048);
     const shadowHalfSpan = 520;
@@ -2266,8 +2279,10 @@
     scene.add(sunLight.target);
     applyGraphicsSettings();
 
-    ambient = new THREE.HemisphereLight(0xbcd3ea, 0x6a5a3a, 0.95);
+    ambient = new THREE.HemisphereLight(0xd5dfdf, 0xb28b5e, 1.28);
     scene.add(ambient);
+    fillLight = new THREE.AmbientLight(0xffefd1, 0.18);
+    scene.add(fillLight);
 
     // ----- Clouds (soft puffs, billboarded sprites) ----------------------
     function makeCloudTexture(seed) {
@@ -2358,19 +2373,366 @@
     // TERRAIN CHUNKS
     // ======================================================================
     function createMatteStandardMaterial(options = {}) {
-      const { roughness, metalness, envMapIntensity, ...rest } = options;
+      const { roughness, metalness, envMapIntensity, color, emissive, emissiveIntensity, softLit = true, ...rest } = options;
+      const gradedColor = color !== undefined ? summerGradeColor(color) : undefined;
+      const softEmissive = softLit && gradedColor ? gradedColor.clone().multiplyScalar(0.55) : undefined;
       return new THREE.MeshStandardMaterial({
         ...rest,
+        ...(gradedColor ? { color: gradedColor } : {}),
+        ...(emissive !== undefined ? { emissive } : (softEmissive ? { emissive: softEmissive } : {})),
+        emissiveIntensity: emissiveIntensity ?? (softEmissive ? 0.018 : 0),
         roughness: THREE.MathUtils.clamp(roughness ?? 0.9, 0.42, 0.98),
         metalness: metalness ?? 0,
-        envMapIntensity: envMapIntensity ?? 0,
+        envMapIntensity: envMapIntensity ?? 0.08,
+        dithering: true,
       });
     }
     const terrainMat = createMatteStandardMaterial({
-      vertexColors: true, roughness: 0.95, flatShading: true,
+      vertexColors: true, roughness: 0.93, flatShading: false, softLit: false,
     });
+    const GRASS_LAYER_COUNT = 5;
+    const GRASS_SEGS = CHUNK_SEGS * 2;
+    const GRASS_MIN_HEIGHT = SEA_LEVEL + 2.0;
+    const GRASS_MAX_HEIGHT = 17.5;
+    const GRASS_MAX_SLOPE = 0.32;
+    const GRASS_LAYER_GAP = 0.018;
+    const GRASS_BASE_OFFSET = 0.003;
+    const GRASS_DRAW_DISTANCE = 30;
+    const GRASS_BASE_COLOR = biomeColor(10, 0, 0.5);
+    const GRASS_BASE_HSL = { h: 0, s: 0, l: 0 };
+    GRASS_BASE_COLOR.getHSL(GRASS_BASE_HSL);
+    const grassUniforms = {
+      uTime: { value: 0 },
+      uSunDir: { value: new THREE.Vector3(0.4, 0.6, 0.3).normalize() },
+      uSunStrength: { value: 0.72 },
+      uAmbientStrength: { value: 0.32 },
+      uGrassCenter: { value: new THREE.Vector2(0, 0) },
+      uGrassDrawDistance: { value: GRASS_DRAW_DISTANCE },
+      uGrassBaseColor: { value: GRASS_BASE_COLOR.clone() },
+      fogColor: { value: new THREE.Color(0xc7d4e0) },
+      fogNear: { value: 1100 },
+      fogFar: { value: 3200 },
+    };
+    function makeGrassDotTexture() {
+      const size = 1024;
+      const cnv = document.createElement('canvas');
+      cnv.width = cnv.height = size;
+      const ctx = cnv.getContext('2d');
+      const baseSrgb = GRASS_BASE_COLOR.clone().convertLinearToSRGB();
+      const meanR = Math.round(baseSrgb.r * 255);
+      const meanG = Math.round(baseSrgb.g * 255);
+      const meanB = Math.round(baseSrgb.b * 255);
+      const base = ctx.createImageData(size, size);
+      for (let i = 0; i < base.data.length; i += 4) {
+        base.data[i] = meanR;
+        base.data[i + 1] = meanG;
+        base.data[i + 2] = meanB;
+        base.data[i + 3] = 0;
+      }
+      ctx.putImageData(base, 0, 0);
+      const rng = mulberry32((SEED ^ 0x6A551A55) >>> 0);
+      const dotCount = (size * size) / 16;
+      const lightnessRange = 0.06;
+      const saturationRange = 0.04;
+      const hueRange = 0.008;
+      function paintDot(x, y, hueShift, satDelta, lightDelta, orientation) {
+        const sat = THREE.MathUtils.clamp(GRASS_BASE_HSL.s + satDelta, 0, 1);
+        const light = THREE.MathUtils.clamp(GRASS_BASE_HSL.l + lightDelta, 0.16, 0.7);
+        ctx.fillStyle = new THREE.Color().setHSL(GRASS_BASE_HSL.h + hueShift, sat, light).getStyle();
+        ctx.fillRect(x, y, 1, 1);
+        if (orientation === 0) ctx.fillRect((x + 1) & (size - 1), y, 1, 1);
+        else ctx.fillRect(x, (y + 1) & (size - 1), 1, 1);
+      }
+      function fract(value) {
+        return value - Math.floor(value);
+      }
+      function samplePoint(index, jitterX, jitterY) {
+        const x = fract(0.5 + index * 0.7548776662466927 + jitterX * 0.12);
+        const y = fract(0.5 + index * 0.5698402909980532 + jitterY * 0.12);
+        return [Math.floor(x * size), Math.floor(y * size)];
+      }
+      const halfDots = dotCount / 2;
+      for (let i = 0; i < halfDots; i++) {
+        const hueDelta = (rng() - 0.5) * hueRange;
+        const satDelta = (rng() - 0.5) * saturationRange;
+        const lightDelta = (0.25 + rng() * 0.75) * lightnessRange;
+        const [x1, y1] = samplePoint(i, rng() - 0.5, rng() - 0.5);
+        const [x2, y2] = samplePoint(i + halfDots, rng() - 0.5, rng() - 0.5);
+        paintDot(x1, y1, hueDelta, satDelta, lightDelta, i & 1);
+        paintDot(x2, y2, -hueDelta, -satDelta, -lightDelta, (i + 1) & 1);
+      }
+      const balanced = ctx.getImageData(0, 0, size, size);
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      const pixelCount = size * size;
+      for (let i = 0; i < balanced.data.length; i += 4) {
+        sumR += balanced.data[i];
+        sumG += balanced.data[i + 1];
+        sumB += balanced.data[i + 2];
+      }
+      const scaleR = THREE.MathUtils.clamp((meanR * pixelCount) / Math.max(1, sumR), 0.92, 1.08);
+      const scaleG = THREE.MathUtils.clamp((meanG * pixelCount) / Math.max(1, sumG), 0.92, 1.08);
+      const scaleB = THREE.MathUtils.clamp((meanB * pixelCount) / Math.max(1, sumB), 0.92, 1.08);
+      for (let i = 0; i < balanced.data.length; i += 4) {
+        balanced.data[i] = THREE.MathUtils.clamp(Math.round(balanced.data[i] * scaleR), 0, 255);
+        balanced.data[i + 1] = THREE.MathUtils.clamp(Math.round(balanced.data[i + 1] * scaleG), 0, 255);
+        balanced.data[i + 2] = THREE.MathUtils.clamp(Math.round(balanced.data[i + 2] * scaleB), 0, 255);
+      }
+      ctx.putImageData(balanced, 0, 0);
+      const tex = new THREE.CanvasTexture(cnv);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.generateMipmaps = true;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy ? renderer.capabilities.getMaxAnisotropy() : 1);
+      tex.needsUpdate = true;
+      return tex;
+    }
+    const grassDotTexture = makeGrassDotTexture();
+    const grassDotTextures = Array.from({ length: GRASS_LAYER_COUNT }, () => grassDotTexture);
+    const grassMaterials = grassDotTextures.map((texture, layer) => new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      side: THREE.DoubleSide,
+      fog: true,
+      uniforms: {
+        ...grassUniforms,
+        uDotMap: { value: texture },
+      },
+      vertexShader: `
+        attribute float grassCoverage;
+        attribute vec3 terrainColor;
+        uniform float uTime;
+        varying vec2 vUv;
+        varying vec3 vNormalW;
+        varying float vGrassCoverage;
+        varying vec3 vTerrainColor;
+        varying vec2 vWorldXZ;
+        #include <fog_pars_vertex>
+        void main(){
+          vec3 transformed = position;
+          vUv = uv;
+          vNormalW = normalize(mat3(modelMatrix) * normal);
+          vGrassCoverage = grassCoverage;
+          vTerrainColor = terrainColor;
+          vec4 worldPosition = modelMatrix * vec4(transformed, 1.0);
+          vWorldXZ = worldPosition.xz;
+          vec4 mvPosition = viewMatrix * worldPosition;
+          gl_Position = projectionMatrix * mvPosition;
+          #include <fog_vertex>
+        }`,
+      fragmentShader: `
+        uniform sampler2D uDotMap;
+        uniform vec3 uSunDir;
+        uniform float uSunStrength;
+        uniform float uAmbientStrength;
+        uniform vec2 uGrassCenter;
+        uniform float uGrassDrawDistance;
+        uniform vec3 uGrassBaseColor;
+        varying vec2 vUv;
+        varying vec3 vNormalW;
+        varying float vGrassCoverage;
+        varying vec3 vTerrainColor;
+        varying vec2 vWorldXZ;
+        #include <fog_pars_fragment>
+        void main(){
+          float grassDistance = distance(vWorldXZ, uGrassCenter);
+          if (grassDistance > uGrassDrawDistance) discard;
+          vec4 dotSample = texture2D(uDotMap, vUv);
+          float dots = dotSample.a * smoothstep(0.0, 0.35, vGrassCoverage);
+          if (dots < 0.08) discard;
+          vec3 baseLinear = max(uGrassBaseColor, vec3(0.001));
+          vec3 sampleLinear = max(dotSample.rgb, vec3(0.001));
+          vec3 variationDelta = (sampleLinear - baseLinear) / baseLinear;
+          vec3 darkerDelta = min(variationDelta, vec3(0.0)) * 1.15;
+          vec3 lighterDelta = max(variationDelta, vec3(0.0)) * 2.35;
+          vec3 variation = vec3(1.0) + clamp(darkerDelta + lighterDelta, vec3(-0.10), vec3(0.22));
+          vec3 bladeColor = vTerrainColor * variation;
+          vec3 normalW = normalize(vNormalW);
+          float diffuse = max(dot(normalW, normalize(uSunDir)), 0.0);
+          float lighting = uAmbientStrength + diffuse * uSunStrength;
+          vec3 col = bladeColor * lighting;
+          float distanceFade = 1.0 - smoothstep(uGrassDrawDistance * 0.5, uGrassDrawDistance, grassDistance);
+          gl_FragColor = vec4(col, clamp(dots * 1.08 * distanceFade, 0.0, 1.0));
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+          #include <fog_fragment>
+        }`,
+    }));
     const terrainChunks = new Map(); // key "cx,cz" -> Mesh
     const tmpColor = new THREE.Color();
+
+    function grassAirfieldFlatten(x, z, nearbyAirfields) {
+      let best = null;
+      for (const af of nearbyAirfields) {
+        const { lx, lz } = getAirfieldLocalPosition(af, x, z);
+        const padX = af.length / 2 + 16;
+        const padZ = af.width / 2 + 18;
+        const innerX = Math.max(0, Math.abs(lx) - padX);
+        const innerZ = Math.max(0, Math.abs(lz) - padZ);
+        let cap;
+        if (innerX === 0 && innerZ === 0) {
+          cap = 1;
+        } else {
+          cap = Math.exp(-(innerX * innerX + innerZ * innerZ) / (45 * 45));
+          if (cap < 0.005) continue;
+        }
+        if (!best || cap > best.affect) best = { affect: cap, target: af.y, af };
+      }
+      return best;
+    }
+
+    function grassTerrainHeight(x, z, nearbyAirfields) {
+      let h = worldHeight(x, z);
+      const flat = grassAirfieldFlatten(x, z, nearbyAirfields);
+      if (flat) h = h * (1 - flat.affect) + flat.target * flat.affect;
+      return h;
+    }
+
+    function smoothStep01(edge0, edge1, value) {
+      const t = THREE.MathUtils.clamp((value - edge0) / Math.max(0.0001, edge1 - edge0), 0, 1);
+      return t * t * (3 - 2 * t);
+    }
+
+    function isGrassEligibleAt(x, z, nearbyAirfields) {
+      const h = grassTerrainHeight(x, z, nearbyAirfields);
+      if (h < GRASS_MIN_HEIGHT || h > GRASS_MAX_HEIGHT) return false;
+      const flat = grassAirfieldFlatten(x, z, nearbyAirfields);
+      if (flat && flat.affect > 0.72) return false;
+      for (const af of nearbyAirfields) {
+        const local = getAirfieldLocalPosition(af, x, z);
+        if (smoothRectSupportWeight(local.lx, local.lz, af.length / 2 + 8, af.width / 2 + 10, 2.2) > 0) return false;
+        const { hx, hz } = getHangarLocalPosition(af, x, z);
+        if (smoothRectSupportWeight(hx, hz, (HANGAR_LENGTH + 3.5) / 2, (HANGAR_WIDTH + 3.0) / 2, 1.1) > 0) return false;
+      }
+      const step = 7.5;
+      const hx = Math.abs(grassTerrainHeight(x + step, z, nearbyAirfields) - grassTerrainHeight(x - step, z, nearbyAirfields));
+      const hz = Math.abs(grassTerrainHeight(x, z + step, nearbyAirfields) - grassTerrainHeight(x, z - step, nearbyAirfields));
+      const slope = Math.max(hx, hz) / (step * 2);
+      if (slope > GRASS_MAX_SLOPE) return false;
+      return true;
+    }
+
+    function grassCoverageAt(x, z, nearbyAirfields) {
+      if (!isGrassEligibleAt(x, z, nearbyAirfields)) return 0;
+      let coverage = 1;
+      const h = grassTerrainHeight(x, z, nearbyAirfields);
+      coverage *= smoothStep01(GRASS_MIN_HEIGHT - 0.2, GRASS_MIN_HEIGHT + 1.2, h);
+      coverage *= 1 - smoothStep01(GRASS_MAX_HEIGHT - 3.5, GRASS_MAX_HEIGHT + 0.2, h);
+      const flat = grassAirfieldFlatten(x, z, nearbyAirfields);
+      if (flat) coverage *= 1 - smoothStep01(0.32, 0.72, flat.affect);
+      return THREE.MathUtils.clamp(coverage, 0, 1);
+    }
+
+    function pushGrassVertex(arrays, x, y, z, normal, uvx, uvz, terrainColor, coverage) {
+      arrays.positions.push(x, y, z);
+      arrays.normals.push(normal.x, normal.y, normal.z);
+      arrays.uvs.push(uvx, uvz);
+      arrays.terrainColors.push(terrainColor.r, terrainColor.g, terrainColor.b);
+      arrays.coverages.push(coverage);
+    }
+
+    function createGrassGeometryFromTerrain(cx, cz, layer, terrainGeo) {
+      const arrays = { positions: [], normals: [], uvs: [], terrainColors: [], coverages: [] };
+      const ox = cx * CHUNK_SIZE;
+      const oz = cz * CHUNK_SIZE;
+      const layerHeight = GRASS_BASE_OFFSET + layer * GRASS_LAYER_GAP;
+      const worldUvScale = 0.0825;
+      const uvBasisX = new THREE.Vector2(0.9170600744, 0.3987490689);
+      const uvBasisY = new THREE.Vector2(-0.3987490689, 0.9170600744);
+      const nearbyAirfields = getAirfieldsNear(ox, oz, PROCEDURAL_AIRFIELD_QUERY_RADIUS + CHUNK_SIZE);
+      const posAttr = terrainGeo.attributes.position;
+      const normAttr = terrainGeo.attributes.normal;
+      const colorAttr = terrainGeo.attributes.color;
+      const indexAttr = terrainGeo.index;
+      const triCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
+      const vertexIds = [0, 0, 0];
+      const triVerts = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+      const triNormals = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+      const terrainColor = new THREE.Color();
+      const cornerCoverage = [0, 0, 0];
+      for (let tri = 0; tri < triCount; tri++) {
+        for (let corner = 0; corner < 3; corner++) {
+          const id = indexAttr ? indexAttr.getX(tri * 3 + corner) : tri * 3 + corner;
+          vertexIds[corner] = id;
+          triVerts[corner].set(posAttr.getX(id), posAttr.getY(id), posAttr.getZ(id));
+          triNormals[corner].set(normAttr.getX(id), normAttr.getY(id), normAttr.getZ(id)).normalize();
+          cornerCoverage[corner] = grassCoverageAt(triVerts[corner].x + ox, triVerts[corner].z + oz, nearbyAirfields);
+        }
+        const maxCoverage = Math.max(cornerCoverage[0], cornerCoverage[1], cornerCoverage[2]);
+        if (maxCoverage <= 0.001) continue;
+        if (colorAttr) {
+          terrainColor.setRGB(
+            (colorAttr.getX(vertexIds[0]) + colorAttr.getX(vertexIds[1]) + colorAttr.getX(vertexIds[2])) / 3,
+            (colorAttr.getY(vertexIds[0]) + colorAttr.getY(vertexIds[1]) + colorAttr.getY(vertexIds[2])) / 3,
+            (colorAttr.getZ(vertexIds[0]) + colorAttr.getZ(vertexIds[1]) + colorAttr.getZ(vertexIds[2])) / 3,
+          );
+        } else {
+          terrainColor.copy(GRASS_BASE_COLOR);
+        }
+        for (let corner = 0; corner < 3; corner++) {
+          const v = triVerts[corner];
+          const n = triNormals[corner];
+          const wx = v.x + ox;
+          const wz = v.z + oz;
+          const uvx = (wx * uvBasisX.x + wz * uvBasisX.y) * worldUvScale;
+          const uvy = (wx * uvBasisY.x + wz * uvBasisY.y) * worldUvScale;
+          pushGrassVertex(arrays, v.x, v.y + layerHeight, v.z, n, uvx, uvy, terrainColor, cornerCoverage[corner]);
+        }
+      }
+      if (!arrays.positions.length) return null;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(arrays.positions, 3));
+      geo.setAttribute('normal', new THREE.Float32BufferAttribute(arrays.normals, 3));
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(arrays.uvs, 2));
+      geo.setAttribute('terrainColor', new THREE.Float32BufferAttribute(arrays.terrainColors, 3));
+      geo.setAttribute('grassCoverage', new THREE.Float32BufferAttribute(arrays.coverages, 1));
+      geo.computeBoundingSphere();
+      return geo;
+    }
+
+    function addGrassLayersToChunk(mesh, cx, cz, terrainGeo) {
+      for (let layer = 0; layer < GRASS_LAYER_COUNT; layer++) {
+        const geo = createGrassGeometryFromTerrain(cx, cz, layer, terrainGeo);
+        if (!geo) continue;
+        const grass = new THREE.Mesh(geo, grassMaterials[layer]);
+        grass.renderOrder = 2 + layer;
+        grass.frustumCulled = false;
+        grass.castShadow = false;
+        grass.receiveShadow = false;
+        grass.userData.isGrassLayer = true;
+        mesh.add(grass);
+      }
+      mesh.userData.grassReady = true;
+    }
+
+    function updateGrassVisibility(centerX, centerZ) {
+      const drawDistSq = GRASS_DRAW_DISTANCE * GRASS_DRAW_DISTANCE;
+      const halfChunk = CHUNK_SIZE * 0.5;
+      for (const mesh of terrainChunks.values()) {
+        const dx = Math.max(Math.abs(centerX - mesh.position.x) - halfChunk, 0);
+        const dz = Math.max(Math.abs(centerZ - mesh.position.z) - halfChunk, 0);
+        const grassVisible = (dx * dx + dz * dz) <= drawDistSq;
+        if (grassVisible && mesh.userData.chunkLod === 'near' && !mesh.userData.grassReady) {
+          const cx = Math.round(mesh.position.x / CHUNK_SIZE);
+          const cz = Math.round(mesh.position.z / CHUNK_SIZE);
+          addGrassLayersToChunk(mesh, cx, cz, mesh.geometry);
+        }
+        for (const child of mesh.children) {
+          if (child.userData.isGrassLayer) child.visible = grassVisible;
+        }
+      }
+    }
+
+    function disposeTerrainChunk(mesh) {
+      mesh.traverse((object) => {
+        if (object.geometry) object.geometry.dispose();
+      });
+    }
 
     function buildChunk(cx, cz, lod) {
       const segs = lod === 'far' ? 12 : CHUNK_SEGS;
@@ -2402,6 +2764,7 @@
       mesh.position.set(ox, 0, oz);
       mesh.receiveShadow = lod !== 'far';
       mesh.userData.chunkLod = lod;
+      mesh.userData.grassReady = lod !== 'near';
       return mesh;
     }
 
@@ -2432,7 +2795,7 @@
       for (const [k, m] of terrainChunks) {
         if (!wanted.has(k)) {
           scene.remove(m);
-          m.geometry.dispose();
+          disposeTerrainChunk(m);
           terrainChunks.delete(k);
         }
       }
@@ -2459,7 +2822,7 @@
       for (const [k, m] of farChunks) {
         if (!fWanted.has(k)) {
           scene.remove(m);
-          m.geometry.dispose();
+          disposeTerrainChunk(m);
           farChunks.delete(k);
         }
       }
@@ -2478,14 +2841,131 @@
     // ======================================================================
     // SEA (single big plane below SEA_LEVEL)
     // ======================================================================
-    const seaMesh = (() => {
-      const seaGeo = new THREE.PlaneGeometry(20000, 20000, 1, 1);
-      seaGeo.rotateX(-Math.PI / 2);
-      const seaMat = createMatteStandardMaterial({
-        color: 0x3a6e8a, roughness: 0.92, transparent: true, opacity: 0.85,
+    const waterUniforms = {
+      uTime: { value: 0 },
+      uSeaLevel: { value: SEA_LEVEL },
+      uHeightAmp: { value: HEIGHT_AMP },
+      uSunDir: { value: new THREE.Vector3(0.4, 0.6, 0.3).normalize() },
+      fogColor: { value: new THREE.Color(0xc7d4e0) },
+      fogNear: { value: 1100 },
+      fogFar: { value: 3200 },
+    };
+    function createWaterMaterial() {
+      return new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        fog: true,
+        uniforms: waterUniforms,
+        vertexShader: `
+          uniform float uTime;
+          varying vec3 vWorldPos;
+          varying float vWave;
+          #include <fog_pars_vertex>
+          void main(){
+            vec3 transformed = position;
+            vec4 baseWorld = modelMatrix * vec4(transformed, 1.0);
+            vec2 w = baseWorld.xz;
+            float wave = sin(w.x * 0.055 + uTime * 0.85) * 0.12
+                       + sin((w.x * 0.026 + w.y * 0.044) - uTime * 0.62) * 0.08
+                       + sin((w.x * -0.038 + w.y * 0.031) + uTime * 0.38) * 0.05;
+            transformed.y += wave;
+            vWave = wave;
+            vec4 world = modelMatrix * vec4(transformed, 1.0);
+            vWorldPos = world.xyz;
+            vec4 mvPosition = viewMatrix * world;
+            gl_Position = projectionMatrix * mvPosition;
+            #include <fog_vertex>
+          }`,
+        fragmentShader: `
+          uniform float uTime;
+          uniform float uSeaLevel;
+          uniform float uHeightAmp;
+          uniform vec3 uSunDir;
+          varying vec3 vWorldPos;
+          varying float vWave;
+          #include <fog_pars_fragment>
+          float hash(vec2 p){
+            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+          }
+          float noise(vec2 p){
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            float a = hash(i);
+            float b = hash(i + vec2(1.0, 0.0));
+            float c = hash(i + vec2(0.0, 1.0));
+            float d = hash(i + vec2(1.0, 1.0));
+            vec2 u = f * f * (3.0 - 2.0 * f);
+            return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+          }
+          float fbm(vec2 p){
+            float amp = 1.0;
+            float freq = 1.0;
+            float sum = 0.0;
+            float norm = 0.0;
+            for (int i = 0; i < 5; i++) {
+              sum += noise(p * freq) * amp;
+              norm += amp;
+              amp *= 0.5;
+              freq *= 2.0;
+            }
+            return sum / norm;
+          }
+          float estimatedLandHeight(vec2 p){
+            float big = fbm(p * 0.0035);
+            float med = fbm(p * 0.012);
+            float fine = fbm(p * 0.045);
+            float continent = pow(big, 1.5);
+            float h = (continent - 0.35) * uHeightAmp * 1.4
+                    + (med - 0.5) * uHeightAmp * 0.5
+                    + (fine - 0.5) * uHeightAmp * 0.08;
+            if (h < uSeaLevel + 1.5) h = uSeaLevel + (h - uSeaLevel) * 0.4;
+            return h;
+          }
+          void main(){
+            vec2 w = vWorldPos.xz;
+            float land = estimatedLandHeight(w);
+            float depth = clamp((uSeaLevel - land) / 9.0, 0.0, 1.0);
+            float longWave = sin(w.x * 0.035 + uTime * 0.55) * 0.5 + 0.5;
+            float crossWave = sin((w.x * 0.065 + w.y * 0.045) - uTime * 0.92) * 0.5 + 0.5;
+            float ripple = fbm(w * 0.035 + vec2(uTime * 0.045, -uTime * 0.032));
+
+            vec3 shallow = vec3(0.36, 0.58, 0.60);
+            vec3 deep = vec3(0.18, 0.38, 0.48);
+            vec3 summerSky = vec3(0.82, 0.86, 0.78);
+            vec3 col = mix(shallow, deep, smoothstep(0.08, 1.0, depth));
+            col = mix(col, summerSky, 0.08 + longWave * 0.05);
+
+            vec3 waveNormal = normalize(vec3(
+              -cos(w.x * 0.055 + uTime * 0.85) * 0.08,
+               1.0,
+              -cos((w.x * 0.026 + w.y * 0.044) - uTime * 0.62) * 0.07
+            ));
+            float sunGleam = pow(max(dot(waveNormal, normalize(uSunDir)), 0.0), 52.0) * 0.16;
+            col += vec3(1.0, 0.82, 0.52) * sunGleam;
+
+            float shore = 1.0 - smoothstep(0.0, 3.2, abs(land - uSeaLevel));
+            float breaker = smoothstep(0.48, 0.78, crossWave * 0.72 + ripple * 0.28);
+            float foam = shore * (0.24 + breaker * 0.76) * smoothstep(-1.8, 1.1, land - uSeaLevel);
+            foam += shore * smoothstep(0.68, 0.92, ripple) * 0.16;
+            foam = clamp(foam, 0.0, 0.86);
+            col = mix(col, vec3(0.96, 0.91, 0.78), foam);
+            col += (longWave - 0.5) * 0.025 + (vWave * 0.04);
+
+            float alpha = mix(0.72, 0.88, depth) + foam * 0.06;
+            gl_FragColor = vec4(col, alpha);
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+            #include <fog_fragment>
+          }`,
       });
+    }
+    const seaMesh = (() => {
+      const seaGeo = new THREE.PlaneGeometry(20000, 20000, 96, 96);
+      seaGeo.rotateX(-Math.PI / 2);
+      const seaMat = createWaterMaterial();
       const sea = new THREE.Mesh(seaGeo, seaMat);
       sea.position.y = SEA_LEVEL;
+      sea.frustumCulled = false;
       scene.add(sea);
       return sea;
     })();
@@ -6973,15 +7453,23 @@
       sunLight.target.position.copy(shadowAnchor);
       // night dim
       const dayness = Math.max(0, sunDir.y);
-      sunLight.intensity = 0.6 + dayness * 3.2;
-      ambient.intensity = 0.62 + dayness * 0.9;
-      const skyTop = new THREE.Color().setHSL(0.6, 0.5, 0.2 + dayness*0.4);
-      const skyBot = new THREE.Color().setHSL(0.6, 0.4, 0.5 + dayness*0.3);
+      sunLight.intensity = 0.75 + dayness * 2.35;
+      ambient.intensity = 0.92 + dayness * 1.1;
+      if (fillLight) fillLight.intensity = 0.16 + dayness * 0.2;
+      waterUniforms.uSunDir.value.copy(sunDir);
+      grassUniforms.uSunDir.value.copy(sunDir);
+      grassUniforms.uSunStrength.value = THREE.MathUtils.clamp(sunLight.intensity / 4.1, 0.18, 0.82);
+      const ambientTotal = (ambient ? ambient.intensity : 0) + (fillLight ? fillLight.intensity : 0);
+      grassUniforms.uAmbientStrength.value = ambientTotal > 0
+        ? THREE.MathUtils.clamp(0.16 + ambientTotal / 10.0, 0.16, 0.42)
+        : 0.0;
+      const skyTop = new THREE.Color().setHSL(0.58, 0.34, 0.28 + dayness*0.36);
+      const skyBot = new THREE.Color().setHSL(0.13, 0.28, 0.58 + dayness*0.27);
       skyUniforms.uTopCol.value.copy(skyTop);
       skyUniforms.uBotCol.value.copy(skyBot);
-      const warm = dayness < 0.2 ? 0.6 : 0.2;
+      const warm = dayness < 0.2 ? 0.62 : 0.34;
       skyUniforms.uHorizonGlow.value = warm;
-      const fogCol = new THREE.Color().lerpColors(new THREE.Color(0x1a2030), new THREE.Color(0xc7d4e0), Math.max(0, dayness));
+      const fogCol = new THREE.Color().lerpColors(new THREE.Color(0x25283a), new THREE.Color(0xd3d2c3), Math.max(0, dayness));
       scene.fog.color.copy(fogCol);
     }
 
@@ -7169,11 +7657,15 @@
       updateCamera(dt);
       ensureChunks(flight.position.x, flight.position.z);
       updateTerrainShadowReceivers(flight.position.x, flight.position.z);
+      updateGrassVisibility(camera.position.x, camera.position.z);
 
       // Sky dome and sea follow the camera so the world feels endless
       sky.position.copy(camera.position);
       seaMesh.position.x = camera.position.x;
       seaMesh.position.z = camera.position.z;
+      waterUniforms.uTime.value = now * 0.001;
+      grassUniforms.uTime.value = now * 0.001;
+      grassUniforms.uGrassCenter.value.set(camera.position.x, camera.position.z);
 
       // Drift clouds gently east, wrap around the player so the ring is always full
       cloudGroup.children.forEach(s => {
