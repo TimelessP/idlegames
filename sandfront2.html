@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sandfront Command — HD (prototype)</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="favicon.ico" type="image/x-icon">
+<style>
+  html,body{height:100%;margin:0;background:#120b08;color:#f1d7ab;font-family:system-ui,Segoe UI,Arial}
+  #app{height:100%;display:flex;align-items:stretch;justify-content:center}
+  #viewport{width:100%;height:100%;image-rendering:pixelated;background:#120b08;display:block}
+  .hud-placeholder{position:absolute;left:10px;top:10px;color:#f1d7ab;padding:6px 10px;border-radius:8px;background:rgba(20,12,9,0.6);font-size:13px}
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="viewport" aria-label="Sandfront HD battlefield"></canvas>
+  <div class="hud-placeholder">Sandfront2 prototype — terrain tiles generated at load</div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // Higher-resolution base cell (doubled from original 8 -> 16)
+  const CELL = 16;                // base pixel grid unit
+  const TILE_CELLS = 4;          // tile is 4x4 cells (so TILE_PX = 64 px)
+  const TILE_PX = CELL * TILE_CELLS;
+  const WORLD_CELLS_X = 128;
+  const WORLD_CELLS_Y = 128;
+  const WORLD_WIDTH_PX = WORLD_CELLS_X * CELL;
+  const WORLD_HEIGHT_PX = WORLD_CELLS_Y * CELL;
+
+  const canvas = document.getElementById('viewport');
+  const ctx = canvas.getContext('2d', {alpha:false});
+  ctx.imageSmoothingEnabled = false;
+
+  // Resize the canvas to fit the viewport while keeping pixelated rendering
+  function resize() {
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = Math.min(WORLD_WIDTH_PX, Math.floor(window.innerWidth * dpr));
+    canvas.height = Math.min(WORLD_HEIGHT_PX, Math.floor(window.innerHeight * dpr));
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.imageSmoothingEnabled = false;
+    draw();
+  }
+
+  // Lightweight seeded RNG for deterministic texture generation
+  function makeRng(seed) {
+    let s = seed >>> 0;
+    return () => {
+      s = (s + 0x6D2B79F5) | 0;
+      let t = Math.imul(s ^ s >>> 15, 1 | s);
+      t = (t + Math.imul(t ^ t >>> 7, 61 | t)) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  // Simple per-pixel noise (value noise) to add paint-fleck and grunge
+  function generateNoise(width, height, seed) {
+    const rng = makeRng(seed || 12345);
+    const out = new Float32Array(width * height);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        // combine a couple of octaves
+        let v = 0.0;
+        let amp = 1.0;
+        let freq = 1.0;
+        for (let o = 0; o < 3; o++) {
+          const sx = Math.floor((x / width) * freq);
+          const sy = Math.floor((y / height) * freq);
+          const r = rng();
+          v += (r * 2 - 1) * amp;
+          amp *= 0.5;
+          freq *= 2.0;
+        }
+        out[y * width + x] = v;
+      }
+    }
+    return out;
+  }
+
+  // Colour helpers
+  function lerp(a,b,t){return a + (b-a)*t}
+  function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+  function rgb(r,g,b){return 'rgb('+Math.round(r)+','+Math.round(g)+','+Math.round(b)+')'}
+
+  // Create a single terrain tile canvas of TILE_PX x TILE_PX
+  // style: baseSandColor, darker accents for height, optional hazard stripes, paint-fleck grunge
+  function createTerrainTile(options) {
+    const tile = document.createElement('canvas');
+    tile.width = TILE_PX;
+    tile.height = TILE_PX;
+    const c = tile.getContext('2d');
+
+    const rng = makeRng(options.seed || 0);
+
+    // base gradient (slightly desaturated photoreal sand)
+    const base = c.createLinearGradient(0,0,0,TILE_PX);
+    base.addColorStop(0, options.topColor);
+    base.addColorStop(1, options.bottomColor);
+    c.fillStyle = base;
+    c.fillRect(0,0,TILE_PX,TILE_PX);
+
+    // gentle height blotches (soft radial spots)
+    for (let i=0;i<6;i++){
+      const rx = rng()*TILE_PX;
+      const ry = rng()*TILE_PX;
+      const rad = (0.35 + rng()*0.65) * TILE_PX * 0.6;
+      const g = c.createRadialGradient(rx,ry,0,rx,ry,rad);
+      const a = 0.06 + rng()*0.12;
+      g.addColorStop(0, `rgba(0,0,0,${a})`);
+      g.addColorStop(1, `rgba(0,0,0,0)`);
+      c.fillStyle = g;
+      c.fillRect(0,0,TILE_PX,TILE_PX);
+    }
+
+    // paint-fleck: many tiny specks
+    const noise = generateNoise(TILE_PX, TILE_PX, options.seed || 0);
+    const img = c.getImageData(0,0,TILE_PX,TILE_PX);
+    for (let y=0;y<TILE_PX;y++){
+      for (let x=0;x<TILE_PX;x++){
+        const v = noise[y*TILE_PX + x];
+        // add subtle dark and light flecks
+        if (v > 0.5) {
+          const idx = (y*TILE_PX + x) * 4;
+          img.data[idx] = clamp(img.data[idx] * 0.95,0,255);
+          img.data[idx+1] = clamp(img.data[idx+1] * 0.95,0,255);
+          img.data[idx+2] = clamp(img.data[idx+2] * 0.92,0,255);
+        } else if (v < -0.5) {
+          const idx = (y*TILE_PX + x) * 4;
+          img.data[idx] = clamp(img.data[idx] * 1.03 + 2,0,255);
+          img.data[idx+1] = clamp(img.data[idx+1] * 1.01 + 2,0,255);
+          img.data[idx+2] = clamp(img.data[idx+2] * 1.02 + 2,0,255);
+        }
+      }
+    }
+    c.putImageData(img,0,0);
+
+    // hazard stripe overlay (optional)
+    if (options.hazard) {
+      c.save();
+      c.globalAlpha = 0.9;
+      c.translate(0,0);
+      c.rotate(-0.3 + Math.sin(options.seed||0)*0.1);
+      const stripeW = TILE_PX * 0.18;
+      c.fillStyle = options.hazardColorPrimary;
+      c.fillRect(-TILE_PX*0.5, TILE_PX*0.28, TILE_PX*2, stripeW);
+      c.fillStyle = options.hazardColorSecondary;
+      c.fillRect(-TILE_PX*0.5, TILE_PX*0.28 + stripeW*1.2, TILE_PX*2, stripeW);
+      c.restore();
+      // add edge wear
+      c.globalAlpha = 0.3;
+      c.fillStyle = 'black';
+      for (let i=0;i<6;i++){
+        const x = Math.floor(rng()*TILE_PX);
+        const y = Math.floor(rng()*TILE_PX);
+        const w = Math.floor(rng()*6)+1;
+        const h = Math.floor(rng()*2)+1;
+        c.fillRect(x,y,w,h);
+      }
+      c.globalAlpha = 1.0;
+    }
+
+    // team-colour overlay hook (transparent layer)
+    if (options.teamColor) {
+      const overlay = c.createLinearGradient(0,0,TILE_PX,TILE_PX);
+      overlay.addColorStop(0, options.teamColor + '22');
+      overlay.addColorStop(1, options.teamColor + '00');
+      c.fillStyle = overlay;
+      c.fillRect(0,0,TILE_PX,TILE_PX);
+    }
+
+    return tile;
+  }
+
+  // Create an array of 9 tiles with subtle variations for height/texture.
+  function createTerrainPalette(seedBase) {
+    const palette = [];
+    for (let i=0;i<9;i++){
+      const seed = (seedBase||0) + i*911;
+      const top = `rgb(${lerp(210,170,i/12)},${lerp(160,140,i/12)},${lerp(120,100,i/12)})`;
+      const bottom = `rgb(${lerp(190,150,i/12)},${lerp(130,110,i/12)},${lerp(90,70,i/12)})`;
+      const hazard = (i % 4) === 0; // sparse hazard tiles
+      const tile = createTerrainTile({seed, topColor:top, bottomColor:bottom, hazard, hazardColorPrimary:'rgba(180,140,70,0.92)', hazardColorSecondary:'rgba(80,60,40,0.9)', teamColor: null});
+      palette.push(tile);
+    }
+    return palette;
+  }
+
+  // Draw the world by tiling the palette in a pseudo-random but seam-friendly manner
+  function drawWorld(palette, ctx2d) {
+    const cols = Math.ceil(WORLD_WIDTH_PX / TILE_PX);
+    const rows = Math.ceil(WORLD_HEIGHT_PX / TILE_PX);
+    const rng = makeRng(42);
+    for (let ry=0; ry<rows; ry++){
+      for (let rx=0; rx<cols; rx++){
+        // choose tile index with slight neighbor bias to reduce seams
+        const idx = (rx + ry) % palette.length; // deterministic for now
+        const tile = palette[idx];
+        const px = rx * TILE_PX;
+        const py = ry * TILE_PX;
+        ctx2d.drawImage(tile, px, py);
+
+        // small random local variation overlay to break repetition
+        if (rng() > 0.92) {
+          ctx2d.globalAlpha = 0.06 + rng()*0.12;
+          ctx2d.fillStyle = 'black';
+          ctx2d.fillRect(px + Math.floor(rng()*TILE_PX), py + Math.floor(rng()*TILE_PX), Math.floor(rng()*6)+2, Math.floor(rng()*3)+1);
+          ctx2d.globalAlpha = 1.0;
+        }
+      }
+    }
+  }
+
+  // Keep palette available globally for later team-colourization and sprite rendering
+  window.Sandfront2 = {
+    CELL, TILE_PX, TILE_CELLS, WORLD_WIDTH_PX, WORLD_HEIGHT_PX,
+    createTerrainPalette, createTerrainTile,
+
+    // Apply a subtle team tint using multiply/source-atop layering. Returns a new canvas.
+    applyTeamColor(tileCanvas, hexColor, alpha = 0.18) {
+      const c = document.createElement('canvas');
+      c.width = tileCanvas.width; c.height = tileCanvas.height;
+      const cx = c.getContext('2d');
+      cx.imageSmoothingEnabled = false;
+      cx.drawImage(tileCanvas, 0, 0);
+      // tint layer
+      cx.globalCompositeOperation = 'source-atop';
+      cx.fillStyle = hexColor;
+      cx.globalAlpha = alpha;
+      cx.fillRect(0, 0, c.width, c.height);
+      cx.globalAlpha = 1.0;
+      cx.globalCompositeOperation = 'multiply';
+      // a faint screen overlay to preserve highlights
+      cx.fillStyle = '#ffffff';
+      cx.globalAlpha = 0.02;
+      cx.fillRect(0,0,c.width,c.height);
+      cx.globalCompositeOperation = 'source-over';
+      return c;
+    },
+
+    // Return a recolored copy of a palette for a team.
+    colorizePalette(palette, hexColor) {
+      return palette.map(tile => this.applyTeamColor(tile, hexColor));
+    },
+
+    // Generate a seam-reducing index map using simple value-noise with neighbor bias.
+    generateSeamMap(cols, rows, seed) {
+      const map = new Uint8Array(cols * rows);
+      const noise = new Float32Array(cols * rows);
+      const rng = makeRng(seed || 0);
+      // base noise
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          noise[y*cols + x] = rng();
+        }
+      }
+      // smooth pass (average with neighbors) to avoid hard seams
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          let s = 0, c = 0;
+          for (let oy = -1; oy <= 1; oy++) {
+            for (let ox = -1; ox <= 1; ox++) {
+              const nx = x + ox, ny = y + oy;
+              if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                s += noise[ny*cols + nx]; c++;
+              }
+            }
+          }
+          noise[y*cols + x] = s / c;
+        }
+      }
+      // quantize into palette indices (9 variations expected)
+      const paletteLen = 9;
+      for (let i = 0; i < cols*rows; i++) {
+        const v = clamp(noise[i], 0, 1);
+        map[i] = Math.floor(v * (paletteLen - 1) + 0.0001) % paletteLen;
+      }
+      return map;
+    },
+
+    // Draw world using a seam map for tile indices
+    drawWorldWithMap(palette, ctx2d, seamMap) {
+      const cols = Math.ceil(WORLD_WIDTH_PX / TILE_PX);
+      const rows = Math.ceil(WORLD_HEIGHT_PX / TILE_PX);
+      for (let ry = 0; ry < rows; ry++) {
+        for (let rx = 0; rx < cols; rx++) {
+          const idx = seamMap ? seamMap[ry*cols + rx] % palette.length : (rx + ry) % palette.length;
+          const tile = palette[idx];
+          const px = rx * TILE_PX;
+          const py = ry * TILE_PX;
+          ctx2d.drawImage(tile, px, py);
+        }
+      }
+    }
+  };
+
+  let palette = createTerrainPalette(12345);
+
+  // generate seam map to reduce visible tiling seams and allow height-based variation
+  const seamCols = Math.ceil(WORLD_WIDTH_PX / TILE_PX);
+  const seamRows = Math.ceil(WORLD_HEIGHT_PX / TILE_PX);
+  const seamMap = window.Sandfront2.generateSeamMap(seamCols, seamRows, 4242);
+
+  // offscreen world canvas (may be larger than visible viewport); keep moderate size to avoid memory bloat
+  const worldCanvas = document.createElement('canvas');
+  worldCanvas.width = Math.min(WORLD_WIDTH_PX, 2048);
+  worldCanvas.height = Math.min(WORLD_HEIGHT_PX, 2048);
+  const worldCtx = worldCanvas.getContext('2d', {alpha:false});
+  worldCtx.imageSmoothingEnabled = false;
+
+  // draw full world on the offscreen canvas using seam map
+  window.Sandfront2.drawWorldWithMap(palette, worldCtx, seamMap);
+
+  function draw() {
+    // simple camera: show top-left of the world
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    // tile the worldCanvas to fill viewport
+    for (let y = 0; y < canvas.height; y += worldCanvas.height) {
+      for (let x = 0; x < canvas.width; x += worldCanvas.width) {
+        ctx.drawImage(worldCanvas, x, y);
+      }
+    }
+
+    // small debug grid (aligned to CELL)
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < canvas.width; x += CELL) {
+      ctx.beginPath(); ctx.moveTo(x+0.5,0); ctx.lineTo(x+0.5,canvas.height); ctx.stroke();
+    }
+    for (let y = 0; y < canvas.height; y += CELL) {
+      ctx.beginPath(); ctx.moveTo(0,y+0.5); ctx.lineTo(canvas.width,y+0.5); ctx.stroke();
+    }
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+})();
+</script>
+</body>
+</html>
