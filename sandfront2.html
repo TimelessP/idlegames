@@ -21,17 +21,18 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#12100f;col
 #tech{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;padding:8px 10px;border-top:1px solid rgba(255,218,162,.14);background:linear-gradient(180deg,rgba(24,20,18,.9),rgba(15,13,12,.95));font-size:11px}
 .tech-item{padding:6px;border:1px solid rgba(255,218,162,.2);border-radius:8px;background:rgba(255,221,166,.04)}
 .tech-item[data-state="ready"]{border-color:rgba(161,255,177,.45);background:rgba(120,201,133,.12)}
+.tech-item[data-state="done"]{border-color:rgba(132,198,255,.5);background:rgba(96,153,210,.16)}
 .tech-item[data-state="locked"]{opacity:.75}
 </style>
 </head>
 <body>
 <div id="app">
   <div id="hud">
-    <div class="hud-pill">Renderer <strong>2x Pixel</strong></div>
-    <div class="hud-pill">Cell <strong id="cellReadout">16px</strong></div>
+    <div class="hud-pill">Renderer <strong id="rendererReadout"></strong></div>
+    <div class="hud-pill">Cell <strong id="cellReadout"></strong></div>
     <div class="hud-pill">Units <strong id="unitReadout">0</strong></div>
     <div class="hud-pill">Buildings <strong id="buildingReadout">0</strong></div>
-    <div class="hud-pill">Terrain Tiles <strong id="terrainReadout">9</strong></div>
+    <div class="hud-pill">Terrain Tiles <strong id="terrainReadout"></strong></div>
   </div>
   <div id="stage"><canvas id="viewport" width="960" height="540"></canvas></div>
   <div id="tech"></div>
@@ -46,14 +47,34 @@ const WORLD_HEIGHT = WORLD_CELLS_Y * CELL;
 const HEIGHT_LEVELS = 3;
 const VARIANTS_PER_LEVEL = 3;
 const TERRAIN_TILE_SIZE = CELL;
+const HEIGHT_SEED_MULTIPLIER = 1000;
+// Offset per variant keeps each height band deterministic but visually distinct.
+const VARIANT_SEED_OFFSET = 777;
+const UNIT_SPAWN_SPACING = 9;
+const BASE_RENDER_CELL = 8;
+const PLAYER_SPAWN_CELL_X = 8;
+const ENEMY_SPAWN_CELL_X = WORLD_CELLS_X - 16;
+const SPAWN_GRID_WIDTH = 6;
+const UNIT_WANDER_RANGE_X = 16;
+const UNIT_WANDER_RANGE_Y = 12;
+const MAX_FRAME_DELTA = 0.05;
+const NOISE_COEFF_X = 93.1;
+const NOISE_COEFF_Y = 173.7;
+const NOISE_COEFF_SEED = 131.9;
+const DEG_TO_RAD = 0.0174533;
+const NOISE_HASH_SCALE = 43758.5453;
+const LCG_MULTIPLIER = 1664525;
+const LCG_INCREMENT = 1013904223;
 
 const UNIT_DEFS = {
+  // radius/hp are simulation-facing placeholders for upcoming combat and collision systems.
   scout: { radius: 6, speed: 52, hp: 64, sprite: { w: 18, h: 18, shape: 'diamond' } },
   tank: { radius: 8, speed: 34, hp: 130, sprite: { w: 22, h: 20, shape: 'slab' } },
   drone: { radius: 5, speed: 68, hp: 48, sprite: { w: 16, h: 16, shape: 'wing' } }
 };
 
 const BUILDING_DEFS = {
+  // size/hp/frame are retained for scalable build placement, health, and animation pipelines.
   hub: { size: [3, 3], hp: 540, sprite: { w: 48, h: 48, frame: 'hub' } },
   factory: { size: [4, 3], hp: 620, sprite: { w: 64, h: 48, frame: 'factory' } },
   lab: { size: [3, 3], hp: 420, sprite: { w: 48, h: 48, frame: 'lab' } }
@@ -86,17 +107,22 @@ const state = {
   terrainAtlas: null,
   terrainLayer: null,
   sprites: { player: { units: {}, buildings: {} }, enemy: { units: {}, buildings: {} } },
-  unlockedTech: new Set(['optics'])
+  unlockedTech: new Set(['optics']),
+  rng: seeded(0x2f6a11c3)
 };
 
 function makeNoise(x, y, seed) {
-  const n = Math.sin((x * 93.1 + y * 173.7 + seed * 131.9) * 0.0174533) * 43758.5453;
+  const n = Math.sin((x * NOISE_COEFF_X + y * NOISE_COEFF_Y + seed * NOISE_COEFF_SEED) * DEG_TO_RAD) * NOISE_HASH_SCALE;
   return n - Math.floor(n);
+}
+
+function randomf() {
+  return state.rng();
 }
 
 function paintFlecks(c, rng, amount, colors, ox = 0, oy = 0) {
   for (let i = 0; i < amount; i += 1) {
-    c.fillStyle = colors[Math.floor(rng() * colors.length) % colors.length];
+    c.fillStyle = colors[Math.floor(rng() * colors.length)];
     const w = 1 + Math.floor(rng() * 3);
     const h = 1 + Math.floor(rng() * 2);
     c.fillRect(ox + Math.floor(rng() * TERRAIN_TILE_SIZE), oy + Math.floor(rng() * TERRAIN_TILE_SIZE), w, h);
@@ -106,7 +132,7 @@ function paintFlecks(c, rng, amount, colors, ox = 0, oy = 0) {
 function seeded(seed) {
   let s = seed >>> 0;
   return () => {
-    s = (s * 1664525 + 1013904223) >>> 0;
+    s = (s * LCG_MULTIPLIER + LCG_INCREMENT) >>> 0;
     return s / 4294967296;
   };
 }
@@ -130,7 +156,7 @@ function buildTerrainAtlas() {
       const palette = levels[h];
       c.fillStyle = palette[0];
       c.fillRect(ox, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE);
-      const rng = seeded((h + 1) * 1000 + (v + 1) * 777);
+      const rng = seeded((h + 1) * HEIGHT_SEED_MULTIPLIER + (v + 1) * VARIANT_SEED_OFFSET);
       for (let i = 0; i < 14; i += 1) {
         c.strokeStyle = i % 2 ? 'rgba(22,18,16,0.22)' : 'rgba(255,225,170,0.08)';
         c.beginPath();
@@ -149,8 +175,12 @@ function buildTerrainAtlas() {
       c.fillRect(ox + 3, Math.floor(TERRAIN_TILE_SIZE * 0.48), TERRAIN_TILE_SIZE - 6, 1);
       paintFlecks(c, rng, 28, ['rgba(255,238,206,0.12)', 'rgba(25,21,20,0.22)', 'rgba(201,137,75,0.15)'], ox, 0);
       c.fillStyle = 'rgba(0,0,0,0.2)';
-      if (v === 1) {
+      if (v === 0) {
+        for (let s = 0; s < TERRAIN_TILE_SIZE; s += 5) c.fillRect(ox + s, 2, 1, 1);
+      } else if (v === 1) {
         for (let s = 0; s < TERRAIN_TILE_SIZE; s += 4) c.fillRect(ox + s, s, 2, 1);
+      } else {
+        for (let s = 2; s < TERRAIN_TILE_SIZE; s += 5) c.fillRect(ox + (TERRAIN_TILE_SIZE - s), s, 1, 1);
       }
     }
   }
@@ -164,7 +194,7 @@ function generateTerrainMap() {
       const n = makeNoise(x, y, 1) * 0.55 + makeNoise(x * 0.5, y * 0.5, 4) * 0.45;
       const height = Math.max(0, Math.min(HEIGHT_LEVELS - 1, Math.floor(n * HEIGHT_LEVELS)));
       state.terrainHeight[i] = height;
-      state.terrainVariant[i] = Math.floor(makeNoise(x, y, 7) * VARIANTS_PER_LEVEL) % VARIANTS_PER_LEVEL;
+      state.terrainVariant[i] = Math.floor(makeNoise(x, y, 7) * VARIANTS_PER_LEVEL);
     }
   }
 }
@@ -174,10 +204,14 @@ function buildSeamMap() {
     for (let x = 0; x < WORLD_CELLS_X; x += 1) {
       const i = y * WORLD_CELLS_X + x;
       const h = state.terrainHeight[i];
+      const left = x > 0 ? state.terrainHeight[i - 1] : h;
       const right = x + 1 < WORLD_CELLS_X ? state.terrainHeight[i + 1] : h;
+      const up = y > 0 ? state.terrainHeight[i - WORLD_CELLS_X] : h;
       const down = y + 1 < WORLD_CELLS_Y ? state.terrainHeight[i + WORLD_CELLS_X] : h;
-      const seamBias = (Math.abs(h - right) + Math.abs(h - down)) > 0 ? 1 : 0;
-      const variant = (state.terrainVariant[i] + seamBias) % VARIANTS_PER_LEVEL;
+      // Nudge seam-adjacent cells to a neighboring variant so height edges are less repetitive.
+      const hasSeam = (h !== left || h !== right || h !== up || h !== down);
+      const seamNoise = hasSeam ? Math.floor(makeNoise(x, y, 19) * VARIANTS_PER_LEVEL) : 0;
+      const variant = hasSeam ? ((seamNoise + 1) % VARIANTS_PER_LEVEL) : state.terrainVariant[i];
       state.terrainSeams[i] = h * VARIANTS_PER_LEVEL + variant;
     }
   }
@@ -246,7 +280,13 @@ function buildUnitSprite(def, team) {
     c.fillRect(1, 2, w - 2, h - 3);
     c.fillStyle = '#a29786';
     if (def.sprite.shape === 'diamond') {
-      c.beginPath(); c.moveTo(w * 0.5, 1); c.lineTo(w - 2, h * 0.5); c.lineTo(w * 0.5, h - 2); c.lineTo(1, h * 0.5); c.closePath(); c.fill();
+      c.beginPath();
+      c.moveTo(w * 0.5, 1);
+      c.lineTo(w - 2, h * 0.5);
+      c.lineTo(w * 0.5, h - 2);
+      c.lineTo(1, h * 0.5);
+      c.closePath();
+      c.fill();
     } else if (def.sprite.shape === 'wing') {
       c.fillRect(2, h * 0.5 - 2, w - 4, 4);
       c.fillRect(w * 0.5 - 2, 1, 4, h - 2);
@@ -303,9 +343,11 @@ function spawnData() {
   for (let i = 0; i < 28; i += 1) {
     const team = i % 2 === 0 ? 'player' : 'enemy';
     const type = unitTypes[i % unitTypes.length];
-    const x = (team === 'player' ? 8 : 56) * CELL + (i % 6) * 9;
+    const x = (team === 'player' ? PLAYER_SPAWN_CELL_X : ENEMY_SPAWN_CELL_X) * CELL + (i % SPAWN_GRID_WIDTH) * UNIT_SPAWN_SPACING;
     const y = (8 + (i * 5) % 26) * CELL;
-    state.units.push({ id: `u${i}`, team, type, x, y, targetX: x + (Math.random() - 0.5) * CELL * 6, targetY: y + (Math.random() - 0.5) * CELL * 6 });
+    const targetX = x + (randomf() - 0.5) * CELL * 6;
+    const targetY = y + (randomf() - 0.5) * CELL * 6;
+    state.units.push({ id: `u${i}`, team, type, x, y, targetX, targetY });
   }
 }
 
@@ -316,8 +358,8 @@ function stepUnits(dt) {
     const dy = unit.targetY - unit.y;
     const distance = Math.hypot(dx, dy);
     if (distance < 2) {
-      unit.targetX = unit.x + (Math.random() - 0.5) * CELL * 16;
-      unit.targetY = unit.y + (Math.random() - 0.5) * CELL * 12;
+      unit.targetX = unit.x + (randomf() - 0.5) * CELL * UNIT_WANDER_RANGE_X;
+      unit.targetY = unit.y + (randomf() - 0.5) * CELL * UNIT_WANDER_RANGE_Y;
       unit.targetX = Math.max(8, Math.min(WORLD_WIDTH - 8, unit.targetX));
       unit.targetY = Math.max(8, Math.min(WORLD_HEIGHT - 8, unit.targetY));
       continue;
@@ -341,8 +383,11 @@ function draw() {
 }
 
 function updateHud() {
+  document.getElementById('rendererReadout').textContent = `${(CELL / BASE_RENDER_CELL).toFixed(1).replace('.0', '')}x Scale`;
+  document.getElementById('cellReadout').textContent = `${CELL}px`;
   document.getElementById('unitReadout').textContent = String(state.units.length);
   document.getElementById('buildingReadout').textContent = String(state.buildings.length);
+  document.getElementById('terrainReadout').textContent = String(HEIGHT_LEVELS * VARIANTS_PER_LEVEL);
 }
 
 function renderTechTree() {
@@ -354,7 +399,15 @@ function renderTechTree() {
     const item = document.createElement('div');
     item.className = 'tech-item';
     item.dataset.state = unlocked ? 'done' : (ready ? 'ready' : 'locked');
-    item.innerHTML = `<strong>${tech.label}</strong><div>${tech.desc}</div><div>${tech.requires.length ? 'Requires: ' + tech.requires.join(', ') : 'Baseline'}</div>`;
+    const title = document.createElement('strong');
+    title.textContent = tech.label;
+    const description = document.createElement('div');
+    description.textContent = tech.desc;
+    const requires = document.createElement('div');
+    requires.textContent = tech.requires.length ? `Requires: ${tech.requires.join(', ')}` : 'Baseline';
+    item.appendChild(title);
+    item.appendChild(description);
+    item.appendChild(requires);
     host.appendChild(item);
   }
 }
@@ -368,7 +421,7 @@ function resize() {
 
 let previous = performance.now();
 function frame(now) {
-  const dt = Math.min(0.05, (now - previous) / 1000);
+  const dt = Math.min(MAX_FRAME_DELTA, (now - previous) / 1000);
   previous = now;
   stepUnits(dt);
   draw();
