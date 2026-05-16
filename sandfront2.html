@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#3a3028">
+<meta name="description" content="Sandfront 2 prototype with doubled-pixel rendering, procedural terrain tiles, and team-color sprite pipeline.">
+<script src="assets/js/pwa.js" defer></script>
+<title>Sandfront 2 Prototype</title>
+<link rel="icon" href="favicon.ico" type="image/x-icon">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#12100f;color:#e8dcc8;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+#app{position:relative;width:100%;height:100%;display:grid;grid-template-rows:auto 1fr auto;background:radial-gradient(circle at 18% 12%,#5f5650 0%,#2f2a28 38%,#171413 100%)}
+#hud{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;border-bottom:1px solid rgba(255,218,162,.18);background:linear-gradient(180deg,rgba(46,37,32,.95),rgba(27,23,20,.9));font-size:12px}
+.hud-pill{display:flex;gap:6px;align-items:center;padding:4px 8px;border-radius:999px;background:rgba(255,221,166,.08);border:1px solid rgba(255,221,166,.16)}
+.hud-pill strong{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#ffe3b1}
+#stage{position:relative;overflow:hidden}
+#viewport{position:absolute;inset:0;width:100%;height:100%;display:block;image-rendering:pixelated;image-rendering:crisp-edges;background:#0f0d0c}
+#tech{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;padding:8px 10px;border-top:1px solid rgba(255,218,162,.14);background:linear-gradient(180deg,rgba(24,20,18,.9),rgba(15,13,12,.95));font-size:11px}
+.tech-item{padding:6px;border:1px solid rgba(255,218,162,.2);border-radius:8px;background:rgba(255,221,166,.04)}
+.tech-item[data-state="ready"]{border-color:rgba(161,255,177,.45);background:rgba(120,201,133,.12)}
+.tech-item[data-state="locked"]{opacity:.75}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="hud-pill">Renderer <strong>2x Pixel</strong></div>
+    <div class="hud-pill">Cell <strong id="cellReadout">16px</strong></div>
+    <div class="hud-pill">Units <strong id="unitReadout">0</strong></div>
+    <div class="hud-pill">Buildings <strong id="buildingReadout">0</strong></div>
+    <div class="hud-pill">Terrain Tiles <strong id="terrainReadout">9</strong></div>
+  </div>
+  <div id="stage"><canvas id="viewport" width="960" height="540"></canvas></div>
+  <div id="tech"></div>
+</div>
+
+<script type="module">
+const CELL = 16;
+const WORLD_CELLS_X = 72;
+const WORLD_CELLS_Y = 48;
+const WORLD_WIDTH = WORLD_CELLS_X * CELL;
+const WORLD_HEIGHT = WORLD_CELLS_Y * CELL;
+const HEIGHT_LEVELS = 3;
+const VARIANTS_PER_LEVEL = 3;
+const TERRAIN_TILE_SIZE = CELL;
+
+const UNIT_DEFS = {
+  scout: { radius: 6, speed: 52, hp: 64, sprite: { w: 18, h: 18, shape: 'diamond' } },
+  tank: { radius: 8, speed: 34, hp: 130, sprite: { w: 22, h: 20, shape: 'slab' } },
+  drone: { radius: 5, speed: 68, hp: 48, sprite: { w: 16, h: 16, shape: 'wing' } }
+};
+
+const BUILDING_DEFS = {
+  hub: { size: [3, 3], hp: 540, sprite: { w: 48, h: 48, frame: 'hub' } },
+  factory: { size: [4, 3], hp: 620, sprite: { w: 64, h: 48, frame: 'factory' } },
+  lab: { size: [3, 3], hp: 420, sprite: { w: 48, h: 48, frame: 'lab' } }
+};
+
+const TECH_TREE = {
+  optics: { label: 'Optics', requires: [], desc: 'Improves scouting' },
+  metallurgy: { label: 'Metallurgy', requires: ['optics'], desc: 'Unlocks reinforced plates' },
+  logistics: { label: 'Logistics', requires: ['optics'], desc: 'Improves unit flow' },
+  avionics: { label: 'Avionics', requires: ['metallurgy', 'logistics'], desc: 'Unlocks drone doctrine' }
+};
+
+const TEAM_PALETTES = {
+  player: { base: '#5d7f8d', shade: '#2f3f46', accent: '#8fd4e9', stripe: '#f4b763' },
+  enemy: { base: '#7d5f56', shade: '#46332f', accent: '#f1966e', stripe: '#f0ce77' }
+};
+
+const canvas = document.getElementById('viewport');
+const ctx = canvas.getContext('2d', { alpha: false });
+ctx.imageSmoothingEnabled = false;
+
+const state = {
+  camera: { x: 0, y: 0 },
+  teams: ['player', 'enemy'],
+  units: [],
+  buildings: [],
+  terrainHeight: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
+  terrainVariant: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
+  terrainSeams: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
+  terrainAtlas: null,
+  terrainLayer: null,
+  sprites: { player: { units: {}, buildings: {} }, enemy: { units: {}, buildings: {} } },
+  unlockedTech: new Set(['optics'])
+};
+
+function makeNoise(x, y, seed) {
+  const n = Math.sin((x * 93.1 + y * 173.7 + seed * 131.9) * 0.0174533) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function paintFlecks(c, rng, amount, colors, ox = 0, oy = 0) {
+  for (let i = 0; i < amount; i += 1) {
+    c.fillStyle = colors[Math.floor(rng() * colors.length) % colors.length];
+    const w = 1 + Math.floor(rng() * 3);
+    const h = 1 + Math.floor(rng() * 2);
+    c.fillRect(ox + Math.floor(rng() * TERRAIN_TILE_SIZE), oy + Math.floor(rng() * TERRAIN_TILE_SIZE), w, h);
+  }
+}
+
+function seeded(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+function buildTerrainAtlas() {
+  const tileCount = HEIGHT_LEVELS * VARIANTS_PER_LEVEL;
+  const atlas = document.createElement('canvas');
+  atlas.width = TERRAIN_TILE_SIZE * tileCount;
+  atlas.height = TERRAIN_TILE_SIZE;
+  const c = atlas.getContext('2d', { alpha: true });
+  c.imageSmoothingEnabled = false;
+  const levels = [
+    ['#5f5b53', '#7b6f5f', '#3c3530'],
+    ['#6c665d', '#8a7d6b', '#493f37'],
+    ['#777267', '#9a8a74', '#53483d']
+  ];
+  for (let h = 0; h < HEIGHT_LEVELS; h += 1) {
+    for (let v = 0; v < VARIANTS_PER_LEVEL; v += 1) {
+      const index = h * VARIANTS_PER_LEVEL + v;
+      const ox = index * TERRAIN_TILE_SIZE;
+      const palette = levels[h];
+      c.fillStyle = palette[0];
+      c.fillRect(ox, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE);
+      const rng = seeded((h + 1) * 1000 + (v + 1) * 777);
+      for (let i = 0; i < 14; i += 1) {
+        c.strokeStyle = i % 2 ? 'rgba(22,18,16,0.22)' : 'rgba(255,225,170,0.08)';
+        c.beginPath();
+        c.moveTo(ox + rng() * TERRAIN_TILE_SIZE, rng() * TERRAIN_TILE_SIZE);
+        c.lineTo(ox + rng() * TERRAIN_TILE_SIZE, rng() * TERRAIN_TILE_SIZE);
+        c.stroke();
+      }
+      c.fillStyle = palette[1];
+      c.globalAlpha = 0.45;
+      c.fillRect(ox, 0, TERRAIN_TILE_SIZE, 4);
+      c.fillRect(ox, TERRAIN_TILE_SIZE - 4, TERRAIN_TILE_SIZE, 4);
+      c.globalAlpha = 1;
+      c.fillStyle = palette[2];
+      c.fillRect(ox + 2, Math.floor(TERRAIN_TILE_SIZE * 0.45), TERRAIN_TILE_SIZE - 4, 2);
+      c.fillStyle = 'rgba(243,188,102,0.22)';
+      c.fillRect(ox + 3, Math.floor(TERRAIN_TILE_SIZE * 0.48), TERRAIN_TILE_SIZE - 6, 1);
+      paintFlecks(c, rng, 28, ['rgba(255,238,206,0.12)', 'rgba(25,21,20,0.22)', 'rgba(201,137,75,0.15)'], ox, 0);
+      c.fillStyle = 'rgba(0,0,0,0.2)';
+      if (v === 1) {
+        for (let s = 0; s < TERRAIN_TILE_SIZE; s += 4) c.fillRect(ox + s, s, 2, 1);
+      }
+    }
+  }
+  return atlas;
+}
+
+function generateTerrainMap() {
+  for (let y = 0; y < WORLD_CELLS_Y; y += 1) {
+    for (let x = 0; x < WORLD_CELLS_X; x += 1) {
+      const i = y * WORLD_CELLS_X + x;
+      const n = makeNoise(x, y, 1) * 0.55 + makeNoise(x * 0.5, y * 0.5, 4) * 0.45;
+      const height = Math.max(0, Math.min(HEIGHT_LEVELS - 1, Math.floor(n * HEIGHT_LEVELS)));
+      state.terrainHeight[i] = height;
+      state.terrainVariant[i] = Math.floor(makeNoise(x, y, 7) * VARIANTS_PER_LEVEL) % VARIANTS_PER_LEVEL;
+    }
+  }
+}
+
+function buildSeamMap() {
+  for (let y = 0; y < WORLD_CELLS_Y; y += 1) {
+    for (let x = 0; x < WORLD_CELLS_X; x += 1) {
+      const i = y * WORLD_CELLS_X + x;
+      const h = state.terrainHeight[i];
+      const right = x + 1 < WORLD_CELLS_X ? state.terrainHeight[i + 1] : h;
+      const down = y + 1 < WORLD_CELLS_Y ? state.terrainHeight[i + WORLD_CELLS_X] : h;
+      const seamBias = (Math.abs(h - right) + Math.abs(h - down)) > 0 ? 1 : 0;
+      const variant = (state.terrainVariant[i] + seamBias) % VARIANTS_PER_LEVEL;
+      state.terrainSeams[i] = h * VARIANTS_PER_LEVEL + variant;
+    }
+  }
+}
+
+function buildTerrainLayer() {
+  const layer = document.createElement('canvas');
+  layer.width = WORLD_WIDTH;
+  layer.height = WORLD_HEIGHT;
+  const c = layer.getContext('2d', { alpha: false });
+  c.imageSmoothingEnabled = false;
+  for (let y = 0; y < WORLD_CELLS_Y; y += 1) {
+    for (let x = 0; x < WORLD_CELLS_X; x += 1) {
+      const i = y * WORLD_CELLS_X + x;
+      const tileIndex = state.terrainSeams[i];
+      c.drawImage(state.terrainAtlas, tileIndex * TERRAIN_TILE_SIZE, 0, TERRAIN_TILE_SIZE, TERRAIN_TILE_SIZE, x * CELL, y * CELL, CELL, CELL);
+    }
+  }
+  state.terrainLayer = layer;
+}
+
+function paintHazardStripes(c, width, height, stripeColor) {
+  c.save();
+  c.globalAlpha = 0.24;
+  c.fillStyle = stripeColor;
+  for (let x = -height; x < width + height; x += 7) {
+    c.beginPath();
+    c.moveTo(x, 0);
+    c.lineTo(x + 5, 0);
+    c.lineTo(x + height + 5, height);
+    c.lineTo(x + height, height);
+    c.closePath();
+    c.fill();
+  }
+  c.restore();
+}
+
+function makeSpriteCanvas(width, height, painter) {
+  const c = document.createElement('canvas');
+  c.width = width;
+  c.height = height;
+  const s = c.getContext('2d', { alpha: true });
+  s.imageSmoothingEnabled = false;
+  painter(s, width, height);
+  return c;
+}
+
+function applyTeamTint(spriteCanvas, palette) {
+  const s = spriteCanvas.getContext('2d');
+  s.save();
+  s.globalCompositeOperation = 'multiply';
+  s.globalAlpha = 0.72;
+  s.fillStyle = palette.base;
+  s.fillRect(0, 0, spriteCanvas.width, spriteCanvas.height);
+  s.globalCompositeOperation = 'screen';
+  s.globalAlpha = 0.2;
+  s.fillStyle = palette.accent;
+  s.fillRect(0, 0, spriteCanvas.width, spriteCanvas.height);
+  s.restore();
+}
+
+function buildUnitSprite(def, team) {
+  const p = TEAM_PALETTES[team];
+  const sprite = makeSpriteCanvas(def.sprite.w, def.sprite.h, (c, w, h) => {
+    c.fillStyle = p.shade;
+    c.fillRect(1, 2, w - 2, h - 3);
+    c.fillStyle = '#a29786';
+    if (def.sprite.shape === 'diamond') {
+      c.beginPath(); c.moveTo(w * 0.5, 1); c.lineTo(w - 2, h * 0.5); c.lineTo(w * 0.5, h - 2); c.lineTo(1, h * 0.5); c.closePath(); c.fill();
+    } else if (def.sprite.shape === 'wing') {
+      c.fillRect(2, h * 0.5 - 2, w - 4, 4);
+      c.fillRect(w * 0.5 - 2, 1, 4, h - 2);
+    } else {
+      c.fillRect(2, 3, w - 4, h - 6);
+    }
+    paintHazardStripes(c, w, h, p.stripe);
+    c.fillStyle = p.accent;
+    c.fillRect(w * 0.5 - 1, h * 0.5 - 1, 3, 3);
+  });
+  applyTeamTint(sprite, p);
+  return sprite;
+}
+
+function buildBuildingSprite(def, team) {
+  const p = TEAM_PALETTES[team];
+  const sprite = makeSpriteCanvas(def.sprite.w, def.sprite.h, (c, w, h) => {
+    c.fillStyle = '#1f1a17';
+    c.fillRect(0, 0, w, h);
+    c.fillStyle = p.shade;
+    c.fillRect(2, 2, w - 4, h - 4);
+    c.fillStyle = '#998d7b';
+    c.fillRect(4, 4, w - 8, h - 8);
+    c.fillStyle = 'rgba(255,255,255,0.08)';
+    c.fillRect(4, 4, w - 8, 6);
+    paintHazardStripes(c, w, h, p.stripe);
+    c.fillStyle = p.accent;
+    c.fillRect(8, h * 0.5 - 2, w - 16, 4);
+  });
+  applyTeamTint(sprite, p);
+  return sprite;
+}
+
+function buildSpriteSheets() {
+  for (const team of state.teams) {
+    for (const [key, def] of Object.entries(UNIT_DEFS)) {
+      state.sprites[team].units[key] = buildUnitSprite(def, team);
+    }
+    for (const [key, def] of Object.entries(BUILDING_DEFS)) {
+      state.sprites[team].buildings[key] = buildBuildingSprite(def, team);
+    }
+  }
+}
+
+function spawnData() {
+  state.buildings = [
+    { id: 'player-hub', type: 'hub', team: 'player', x: 8 * CELL, y: 14 * CELL },
+    { id: 'player-factory', type: 'factory', team: 'player', x: 16 * CELL, y: 20 * CELL },
+    { id: 'enemy-hub', type: 'hub', team: 'enemy', x: 52 * CELL, y: 10 * CELL },
+    { id: 'enemy-lab', type: 'lab', team: 'enemy', x: 46 * CELL, y: 24 * CELL }
+  ];
+  state.units = [];
+  const unitTypes = Object.keys(UNIT_DEFS);
+  for (let i = 0; i < 28; i += 1) {
+    const team = i % 2 === 0 ? 'player' : 'enemy';
+    const type = unitTypes[i % unitTypes.length];
+    const x = (team === 'player' ? 8 : 56) * CELL + (i % 6) * 9;
+    const y = (8 + (i * 5) % 26) * CELL;
+    state.units.push({ id: `u${i}`, team, type, x, y, targetX: x + (Math.random() - 0.5) * CELL * 6, targetY: y + (Math.random() - 0.5) * CELL * 6 });
+  }
+}
+
+function stepUnits(dt) {
+  for (const unit of state.units) {
+    const def = UNIT_DEFS[unit.type];
+    const dx = unit.targetX - unit.x;
+    const dy = unit.targetY - unit.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 2) {
+      unit.targetX = unit.x + (Math.random() - 0.5) * CELL * 16;
+      unit.targetY = unit.y + (Math.random() - 0.5) * CELL * 12;
+      unit.targetX = Math.max(8, Math.min(WORLD_WIDTH - 8, unit.targetX));
+      unit.targetY = Math.max(8, Math.min(WORLD_HEIGHT - 8, unit.targetY));
+      continue;
+    }
+    const step = Math.min(distance, def.speed * dt);
+    unit.x += (dx / distance) * step;
+    unit.y += (dy / distance) * step;
+  }
+}
+
+function draw() {
+  ctx.drawImage(state.terrainLayer, -state.camera.x, -state.camera.y);
+  for (const building of state.buildings) {
+    const sprite = state.sprites[building.team].buildings[building.type];
+    ctx.drawImage(sprite, Math.round(building.x - state.camera.x), Math.round(building.y - state.camera.y));
+  }
+  for (const unit of state.units) {
+    const sprite = state.sprites[unit.team].units[unit.type];
+    ctx.drawImage(sprite, Math.round(unit.x - sprite.width * 0.5 - state.camera.x), Math.round(unit.y - sprite.height * 0.5 - state.camera.y));
+  }
+}
+
+function updateHud() {
+  document.getElementById('unitReadout').textContent = String(state.units.length);
+  document.getElementById('buildingReadout').textContent = String(state.buildings.length);
+}
+
+function renderTechTree() {
+  const host = document.getElementById('tech');
+  host.textContent = '';
+  for (const [key, tech] of Object.entries(TECH_TREE)) {
+    const unlocked = state.unlockedTech.has(key);
+    const ready = !unlocked && tech.requires.every((req) => state.unlockedTech.has(req));
+    const item = document.createElement('div');
+    item.className = 'tech-item';
+    item.dataset.state = unlocked ? 'done' : (ready ? 'ready' : 'locked');
+    item.innerHTML = `<strong>${tech.label}</strong><div>${tech.desc}</div><div>${tech.requires.length ? 'Requires: ' + tech.requires.join(', ') : 'Baseline'}</div>`;
+    host.appendChild(item);
+  }
+}
+
+function resize() {
+  const stage = document.getElementById('stage').getBoundingClientRect();
+  canvas.width = Math.max(640, Math.floor(stage.width));
+  canvas.height = Math.max(360, Math.floor(stage.height));
+  ctx.imageSmoothingEnabled = false;
+}
+
+let previous = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - previous) / 1000);
+  previous = now;
+  stepUnits(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function init() {
+  state.terrainAtlas = buildTerrainAtlas();
+  generateTerrainMap();
+  buildSeamMap();
+  buildTerrainLayer();
+  buildSpriteSheets();
+  spawnData();
+  updateHud();
+  renderTechTree();
+  resize();
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+init();
+</script>
+<script src="parental.js" defer></script>
+</body>
+</html>
