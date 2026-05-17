@@ -1194,6 +1194,37 @@ html{
     return teamById(TEAM_AI);
   }
 
+  function makeAiSquads() {
+    return {
+      nextSerial: 1,
+      attack: {
+        serial: 1,
+        targetSize: 3,
+        rallying: [],
+        phase: 'building'
+      },
+      defense: {}
+    };
+  }
+
+  function restoreAiSquads(saved) {
+    if (!saved) return makeAiSquads();
+    const defense = {};
+    for (const [k, v] of Object.entries(saved.defense || {})) {
+      defense[k] = { targetSize: v.targetSize ?? 3, unitIds: Array.isArray(v.unitIds) ? [...v.unitIds] : [] };
+    }
+    return {
+      nextSerial: saved.nextSerial ?? 1,
+      attack: {
+        serial: saved.attack?.serial ?? 1,
+        targetSize: saved.attack?.targetSize ?? 3,
+        rallying: Array.isArray(saved.attack?.rallying) ? [...saved.attack.rallying] : [],
+        phase: saved.attack?.phase ?? 'building'
+      },
+      defense
+    };
+  }
+
   function makeTeam(id, faction, color, accent, isPlayer) {
     return {
       id,
@@ -1212,7 +1243,8 @@ html{
         scoutCursor: 0,
         phase: 'normal',
         oilIntel: {},
-        oilObjective: null
+        oilObjective: null,
+        squads: isPlayer ? null : makeAiSquads()
       },
       enemyMemory: { units: {}, buildings: {} },
       fogVisible: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
@@ -1931,6 +1963,23 @@ html{
     if (!passengers.length) return 0;
     const centerCellX = pxToCell(transport.x);
     const centerCellY = pxToCell(transport.y);
+    // Build initial reserved set from existing ground units so passengers spread around them.
+    const passengerIds = new Set(passengers.map((p) => p.id));
+    const reservedCells = new Set();
+    for (const u of state.units) {
+      if (u.hp <= 0 || passengerIds.has(u.id) || UNIT_TYPES[u.type]?.flying) continue;
+      const rcx = clamp(pxToCell(u.x), 0, WORLD_CELLS_X - 1);
+      const rcy = clamp(pxToCell(u.y), 0, WORLD_CELLS_Y - 1);
+      const hr = UNIT_TYPES[u.type]?.geometry?.hitRadius ?? (CELL * 0.5);
+      const sp = Math.max(1, Math.ceil((2 * hr) / CELL) - 1);
+      for (let dy = -sp; dy <= sp; dy++) {
+        for (let dx = -sp; dx <= sp; dx++) {
+          const nx = rcx + dx, ny = rcy + dy;
+          if (nx >= 0 && nx < WORLD_CELLS_X && ny >= 0 && ny < WORLD_CELLS_Y)
+            reservedCells.add(worldToKey(nx, ny));
+        }
+      }
+    }
     for (const passenger of passengers) {
       passenger.garrisonedIn = null;
       passenger.targetId = null;
@@ -1946,10 +1995,18 @@ html{
         continue;
       }
       passenger.order = { type: 'idle' };
-      const found = findNearestFreeCell(centerCellX, centerCellY, 8, passenger.id, false, passenger);
-      if (found) {
-        passenger.x = found.x * CELL + CELL * 0.5;
-        passenger.y = found.y * CELL + CELL * 0.5;
+      const dest = findNearestMoveDest(centerCellX, centerCellY, passenger, reservedCells);
+      if (dest) {
+        passenger.x = dest.x * CELL + CELL * 0.5;
+        passenger.y = dest.y * CELL + CELL * 0.5;
+        const sp = dest.spacing;
+        for (let dy = -sp; dy <= sp; dy++) {
+          for (let dx = -sp; dx <= sp; dx++) {
+            const nx = dest.x + dx, ny = dest.y + dy;
+            if (nx >= 0 && nx < WORLD_CELLS_X && ny >= 0 && ny < WORLD_CELLS_Y)
+              reservedCells.add(worldToKey(nx, ny));
+          }
+        }
       } else {
         passenger.x = transport.x;
         passenger.y = transport.y;
@@ -2174,6 +2231,24 @@ html{
           const ny = cellY + oy;
           if (!isCellWalkable(nx, ny, ignoreUnitId, ignoreUnits, mover)) continue;
           return { x: nx, y: ny };
+        }
+      }
+    }
+    return null;
+  }
+
+  function findNearestMoveDest(tCellX, tCellY, unit, reservedCells) {
+    const hitRadius = UNIT_TYPES[unit.type]?.geometry?.hitRadius ?? (CELL * 0.5);
+    const spacing = Math.max(1, Math.ceil((2 * hitRadius) / CELL) - 1);
+    for (let r = 0; r <= 10; r++) {
+      for (let oy = -r; oy <= r; oy++) {
+        for (let ox = -r; ox <= r; ox++) {
+          const nx = tCellX + ox;
+          const ny = tCellY + oy;
+          if (nx < 0 || nx >= WORLD_CELLS_X || ny < 0 || ny >= WORLD_CELLS_Y) continue;
+          if (reservedCells.has(worldToKey(nx, ny))) continue;
+          if (!isCellWalkable(nx, ny, unit.id, true, unit)) continue;
+          return { x: nx, y: ny, spacing };
         }
       }
     }
@@ -4088,7 +4163,20 @@ html{
         ai: {
           ...team.ai,
           oilIntel: Object.fromEntries(Object.entries(team.ai?.oilIntel || {}).map(([key, value]) => [key, { ...value }])),
-          oilObjective: team.ai?.oilObjective ? { ...team.ai.oilObjective } : null
+          oilObjective: team.ai?.oilObjective ? { ...team.ai.oilObjective } : null,
+          squads: team.isPlayer ? null : (() => {
+            const sq = team.ai?.squads;
+            if (!sq) return null;
+            const defense = {};
+            for (const [k, v] of Object.entries(sq.defense || {})) {
+              defense[k] = { targetSize: v.targetSize, unitIds: [...v.unitIds] };
+            }
+            return {
+              nextSerial: sq.nextSerial,
+              attack: { serial: sq.attack.serial, targetSize: sq.attack.targetSize, rallying: [...sq.attack.rallying], phase: sq.attack.phase },
+              defense
+            };
+          })()
         },
         enemyMemory: {
           units: Object.values(team.enemyMemory?.units || {}),
@@ -4240,7 +4328,8 @@ html{
         ...team.ai,
         ...(saved.ai || {}),
         oilIntel: Object.fromEntries(Object.entries(saved.ai?.oilIntel || {}).map(([key, value]) => [key, { ...value }])),
-        oilObjective: saved.ai?.oilObjective ? { ...saved.ai.oilObjective } : null
+        oilObjective: saved.ai?.oilObjective ? { ...saved.ai.oilObjective } : null,
+        squads: team.isPlayer ? null : restoreAiSquads(saved.ai?.squads)
       };
       team.enemyMemory = {
         units: Object.fromEntries(((saved.enemyMemory && saved.enemyMemory.units) || []).map((entry) => [entry.id, { ...entry }])),
@@ -5794,9 +5883,9 @@ html{
 
   function finishParatrooperLanding(unit) {
     const scoutDef = UNIT_TYPES.scout;
-    const dropTargetX = unit.dropTargetX;
-    const dropTargetY = unit.dropTargetY;
-    const landingCell = findNearestFreeCell(pxToCell(unit.landingX || unit.x), pxToCell(unit.landingY || unit.y), 6, null, false, null);
+    const lx = clamp(pxToCell(unit.landingX || unit.x), 0, WORLD_CELLS_X - 1);
+    const ly = clamp(pxToCell(unit.landingY || unit.y), 0, WORLD_CELLS_Y - 1);
+    const landingCell = findNearestFreeCell(lx, ly, 6, null, false, null);
     if (!landingCell) {
       releaseClaim(unit);
       unit.hp = 0;
@@ -5824,9 +5913,6 @@ html{
     unit.altitude = 0;
     unit.landingX = null;
     unit.landingY = null;
-    unit.dropTargetX = null;
-    unit.dropTargetY = null;
-    unit.dropTargetId = null;
     unit.x = landingCell.x * CELL + CELL * 0.5;
     unit.y = landingCell.y * CELL + CELL * 0.5;
     unit.order = { type: 'idle' };
@@ -5837,17 +5923,10 @@ html{
     if (immediateTarget) {
       unit.order = { type: 'attack', targetId: immediateTarget.id };
       unit.targetId = immediateTarget.id;
-    } else if (Number.isFinite(dropTargetX) && Number.isFinite(dropTargetY) && dist(unit.x, unit.y, dropTargetX, dropTargetY) > 10) {
-      unit.order = { type: 'attack-move', x: dropTargetX, y: dropTargetY };
-      unit.targetId = null;
     }
   }
 
   function spawnParadropScout(operation, index) {
-    const angle = (index / PARADROP_SCOUT_COUNT) * Math.PI * 2 + random() * 0.65;
-    const radius = random() * PARATROOPER_SCATTER_RADIUS;
-    const landingX = clamp(operation.dropX + Math.cos(angle) * radius, 0, WORLD_WIDTH);
-    const landingY = clamp(operation.dropY + Math.sin(angle) * radius, 0, WORLD_HEIGHT);
     const spawnX = clamp(operation.x - operation.dirX * (index - (PARADROP_SCOUT_COUNT - 1) * 0.5) * 5, 0, WORLD_WIDTH);
     const spawnY = clamp(operation.y - operation.dirY * (index - (PARADROP_SCOUT_COUNT - 1) * 0.5) * 5, 0, WORLD_HEIGHT);
     const paratrooper = spawnUnit(operation.teamId, 'paratrooper', pxToCell(spawnX), pxToCell(spawnY), false);
@@ -5859,11 +5938,49 @@ html{
     paratrooper.path.length = 0;
     paratrooper.claimKey = null;
     paratrooper.altitude = PARATROOPER_INITIAL_ALTITUDE + random() * 8;
+    // Compute a spread landing position at leap time so each paratrooper aims
+    // for a distinct, properly-spaced cell around the drop target.
+    if (!operation.landingReserved || typeof operation.landingReserved.has !== 'function') {
+      operation.landingReserved = new Set();
+      for (const u of state.units) {
+        if (u.hp <= 0 || UNIT_TYPES[u.type]?.flying) continue;
+        const rcx = clamp(pxToCell(u.x), 0, WORLD_CELLS_X - 1);
+        const rcy = clamp(pxToCell(u.y), 0, WORLD_CELLS_Y - 1);
+        const hr = UNIT_TYPES[u.type]?.geometry?.hitRadius ?? (CELL * 0.5);
+        const sp = Math.max(1, Math.ceil((2 * hr) / CELL) - 1);
+        for (let dy = -sp; dy <= sp; dy++) {
+          for (let dx = -sp; dx <= sp; dx++) {
+            const nx = rcx + dx, ny = rcy + dy;
+            if (nx >= 0 && nx < WORLD_CELLS_X && ny >= 0 && ny < WORLD_CELLS_Y)
+              operation.landingReserved.add(worldToKey(nx, ny));
+          }
+        }
+      }
+    }
+    const dropCX = clamp(pxToCell(operation.dropX), 0, WORLD_CELLS_X - 1);
+    const dropCY = clamp(pxToCell(operation.dropY), 0, WORLD_CELLS_Y - 1);
+    const dest = findNearestMoveDest(dropCX, dropCY, paratrooper, operation.landingReserved);
+    let landingX, landingY;
+    if (dest) {
+      landingX = dest.x * CELL + CELL * 0.5;
+      landingY = dest.y * CELL + CELL * 0.5;
+      const sp = dest.spacing;
+      for (let dy = -sp; dy <= sp; dy++) {
+        for (let dx = -sp; dx <= sp; dx++) {
+          const nx = dest.x + dx, ny = dest.y + dy;
+          if (nx >= 0 && nx < WORLD_CELLS_X && ny >= 0 && ny < WORLD_CELLS_Y)
+            operation.landingReserved.add(worldToKey(nx, ny));
+        }
+      }
+    } else {
+      // Fallback: random scatter if no spread cell available.
+      const angle = (index / PARADROP_SCOUT_COUNT) * Math.PI * 2 + random() * 0.65;
+      const radius = random() * PARATROOPER_SCATTER_RADIUS;
+      landingX = clamp(operation.dropX + Math.cos(angle) * radius, 0, WORLD_WIDTH);
+      landingY = clamp(operation.dropY + Math.sin(angle) * radius, 0, WORLD_HEIGHT);
+    }
     paratrooper.landingX = landingX;
     paratrooper.landingY = landingY;
-    paratrooper.dropTargetX = operation.dropX;
-    paratrooper.dropTargetY = operation.dropY;
-    paratrooper.dropTargetId = operation.targetId || null;
     addEffect(spawnX, spawnY, '#fff1b2');
     return true;
   }
@@ -6253,6 +6370,9 @@ html{
               spawned.order = makeFighterLandedOrder(building.id, null);
             } else {
               issuedMoveOrder([spawned], building.rally.x, building.rally.y, false, 0);
+              if (building.teamId !== TEAM_PLAYER && (item === 'scout' || item === 'tank')) {
+                assignNewUnitToAiSquad(building.teamId, spawned);
+              }
             }
             if (building.teamId === TEAM_PLAYER) {
               playUiCue('ready');
@@ -7486,6 +7606,7 @@ html{
         if (node) harvester.order = { type: 'gather', targetId: node.id };
       }
     }
+    manageAiSquads(team);
   }
 
   function placeAiStructure(team, engineer, type) {
@@ -8019,22 +8140,122 @@ html{
   }
 
   function runAiAttack(team) {
-    const target = getBestAiAttackMemory(team);
-    if (!target) return;
     assignAiFighterOrders(team);
-    const attackers = state.units.filter((unit) => {
-      if (unit.teamId !== team.id || unit.hp <= 0 || (unit.type !== 'scout' && unit.type !== 'tank')) return false;
-      const orderType = unit.order?.type || 'idle';
-      return orderType !== 'capture';
-    });
-    const minimumWave = team.ai.phase === 'oil-race' ? 4 : 3;
-    if (attackers.length < minimumWave) return;
-    const wave = attackers.slice(0, Math.min(attackers.length, 6));
-    for (const unit of wave) {
-      unit.order = { type: 'attack-move', x: target.x, y: target.y };
-      unit.path.length = 0;
+    // Ground attacks are managed by the squad build-up system in runAiEconomy.
+    // No direct wave dispatch here — squads launch when they reach targetSize.
+  }
+
+  function assignNewUnitToAiSquad(teamId, unit) {
+    const team = teamById(teamId);
+    if (!team || team.isPlayer) return;
+    const squads = team.ai.squads;
+    if (!squads) return;
+    // Defense squads have priority — fill any under-strength one first.
+    for (const [hqIdStr, defSquad] of Object.entries(squads.defense)) {
+      if (defSquad.unitIds.length < defSquad.targetSize) {
+        defSquad.unitIds.push(unit.id);
+        unit.aiSquadRole = 'defend';
+        unit.aiSquadHqId = parseInt(hqIdStr);
+        unit.aiSquadSerial = null;
+        const hq = getEntityById(parseInt(hqIdStr));
+        if (hq && hq.hp > 0) {
+          const center = getBuildingGeometry(hq).visualCenter;
+          unit.order = { type: 'attack-move', x: center.x, y: center.y };
+          unit.path.length = 0;
+        }
+        return;
+      }
     }
-    toast('Raiders Incoming');
+    // Otherwise add to the attack rally squad.
+    if (squads.attack.phase === 'building') {
+      squads.attack.rallying.push(unit.id);
+      unit.aiSquadSerial = squads.attack.serial;
+      unit.aiSquadRole = 'rally';
+    }
+    // (If already marching, the unit stays at its rally point and will be
+    // adopted next squad cycle in manageAiSquads.)
+  }
+
+  function manageAiSquads(team) {
+    const squads = team.ai?.squads;
+    if (!squads) return;
+
+    // --- Initialize defense squads for any HQ that lacks one ---
+    for (const hq of state.buildings) {
+      if (hq.hp > 0 && hq.teamId === team.id && hq.type === 'hq') {
+        if (!squads.defense[hq.id]) squads.defense[hq.id] = { targetSize: 3, unitIds: [] };
+      }
+    }
+
+    // --- Clean up destroyed HQ defense entries ---
+    for (const hqIdStr of Object.keys(squads.defense)) {
+      const hq = getEntityById(parseInt(hqIdStr));
+      if (!hq || hq.hp <= 0) delete squads.defense[hqIdStr];
+    }
+
+    // --- Maintain defense squads ---
+    for (const [hqIdStr, defSquad] of Object.entries(squads.defense)) {
+      const prevCount = defSquad.unitIds.length;
+      defSquad.unitIds = defSquad.unitIds.filter((id) => { const u = getEntityById(id); return u && u.hp > 0; });
+      if (prevCount > 0 && defSquad.unitIds.length === 0) defSquad.targetSize++;
+      const hq = getEntityById(parseInt(hqIdStr));
+      if (!hq || hq.hp <= 0) continue;
+      const center = getBuildingGeometry(hq).visualCenter;
+      for (const uid of defSquad.unitIds) {
+        const u = getEntityById(uid);
+        if (!u || u.hp <= 0) continue;
+        if (u.order.type === 'idle') {
+          u.order = { type: 'attack-move', x: center.x, y: center.y };
+          u.path.length = 0;
+        }
+      }
+    }
+
+    // --- Adopt unassigned idle combat units into squads ---
+    for (const u of state.units) {
+      if (u.teamId !== team.id || u.hp <= 0) continue;
+      if (u.type !== 'scout' && u.type !== 'tank') continue;
+      if (u.aiSquadRole) continue;
+      assignNewUnitToAiSquad(team.id, u);
+    }
+
+    // --- Clean up dead units from the rally list ---
+    squads.attack.rallying = squads.attack.rallying.filter((id) => { const u = getEntityById(id); return u && u.hp > 0; });
+
+    // --- Check for attack squad depletion (all marching units dead) ---
+    if (squads.attack.phase === 'marching') {
+      const anyAlive = state.units.some((u) =>
+        u.teamId === team.id && u.aiSquadSerial === squads.attack.serial &&
+        u.aiSquadRole === 'attack' && u.hp > 0
+      );
+      if (!anyAlive) {
+        const newSerial = squads.nextSerial + 1;
+        squads.nextSerial = newSerial;
+        squads.attack = {
+          serial: newSerial,
+          targetSize: squads.attack.targetSize + 1,
+          rallying: [],
+          phase: 'building'
+        };
+      }
+    }
+
+    // --- Launch attack squad when rally is full ---
+    if (squads.attack.phase === 'building' && squads.attack.rallying.length >= squads.attack.targetSize) {
+      const target = getBestAiAttackMemory(team);
+      if (target) {
+        squads.attack.phase = 'marching';
+        for (const uid of squads.attack.rallying) {
+          const u = getEntityById(uid);
+          if (!u || u.hp <= 0) continue;
+          u.aiSquadRole = 'attack';
+          u.order = { type: 'attack-move', x: target.x, y: target.y };
+          u.path.length = 0;
+        }
+        squads.attack.rallying = [];
+        toast('Raiders Incoming');
+      }
+    }
   }
 
   function countTeamAssets(teamId) {
@@ -10702,7 +10923,37 @@ html{
   }
 
   function issuedMoveOrder(units, worldX, worldY, attackMove, manualLock = attackMove ? MANUAL_ORDER_LOCK.attackMove : MANUAL_ORDER_LOCK.move, announce = false) {
-    for (const unit of units) {
+    const tCellX = clamp(pxToCell(worldX), 0, WORLD_CELLS_X - 1);
+    const tCellY = clamp(pxToCell(worldY), 0, WORLD_CELLS_Y - 1);
+    const movingIds = new Set(units.map((u) => u.id));
+    const reservedDestCells = new Set();
+    for (const u of state.units) {
+      if (u.hp <= 0 || movingIds.has(u.id)) continue;
+      if (UNIT_TYPES[u.type]?.flying) continue;
+      const ot = u.order?.type;
+      let rcx, rcy;
+      if (ot === 'move' || ot === 'attack-move') {
+        rcx = clamp(pxToCell(u.order.x), 0, WORLD_CELLS_X - 1);
+        rcy = clamp(pxToCell(u.order.y), 0, WORLD_CELLS_Y - 1);
+      } else {
+        // Reserve around stationary units so arrivals spread past them.
+        rcx = clamp(pxToCell(u.x), 0, WORLD_CELLS_X - 1);
+        rcy = clamp(pxToCell(u.y), 0, WORLD_CELLS_Y - 1);
+      }
+      const hr = UNIT_TYPES[u.type]?.geometry?.hitRadius ?? (CELL * 0.5);
+      const sp = Math.max(1, Math.ceil((2 * hr) / CELL) - 1);
+      for (let dy = -sp; dy <= sp; dy++) {
+        for (let dx = -sp; dx <= sp; dx++) {
+          const nx = rcx + dx, ny = rcy + dy;
+          if (nx >= 0 && nx < WORLD_CELLS_X && ny >= 0 && ny < WORLD_CELLS_Y)
+            reservedDestCells.add(worldToKey(nx, ny));
+        }
+      }
+    }
+    const groundUnits = units.filter((u) => !UNIT_TYPES[u.type]?.flying);
+    const flyingUnits = units.filter((u) => UNIT_TYPES[u.type]?.flying);
+    groundUnits.sort((a, b) => dist(a.x, a.y, worldX, worldY) - dist(b.x, b.y, worldX, worldY));
+    for (const unit of [...groundUnits, ...flyingUnits]) {
       clearPendingConstruction(unit, true);
       releaseClaim(unit);
       if (unit.type === 'drone') {
@@ -10715,7 +10966,21 @@ html{
           issueFighterRedirectOrder(unit, worldX, worldY);
         }
       } else {
-        unit.order = { type: attackMove ? 'attack-move' : 'move', x: worldX, y: worldY };
+        const dest = findNearestMoveDest(tCellX, tCellY, unit, reservedDestCells);
+        let tx = worldX, ty = worldY;
+        if (dest) {
+          tx = dest.x * CELL + CELL * 0.5;
+          ty = dest.y * CELL + CELL * 0.5;
+          const sp = dest.spacing;
+          for (let dy = -sp; dy <= sp; dy++) {
+            for (let dx = -sp; dx <= sp; dx++) {
+              const nx = dest.x + dx, ny = dest.y + dy;
+              if (nx >= 0 && nx < WORLD_CELLS_X && ny >= 0 && ny < WORLD_CELLS_Y)
+                reservedDestCells.add(worldToKey(nx, ny));
+            }
+          }
+        }
+        unit.order = { type: attackMove ? 'attack-move' : 'move', x: tx, y: ty };
       }
       unit.path.length = 0;
       unit.targetId = null;
