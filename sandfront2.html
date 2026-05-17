@@ -1225,6 +1225,44 @@ html{
     };
   }
 
+  // ── AI Budget System ────────────────────────────────────────────────────────
+  // Each AI team gets a virtual "budget" split across five cost centres.
+  // Every think cycle, credits accumulate from estimated spice income × centre
+  // weight. Spending is gated so that a starved centre cannot be out-competed
+  // by higher-priority centres even when total spice is plentiful.
+  // Weights drift slowly each cycle according to situational rules, keeping the
+  // AI from tunnel-visioning on attack while neglecting research or defense.
+
+  function makeAiBudget() {
+    return {
+      // Fraction of income directed to each centre (sum ≈ 1.0 after normalize)
+      weights:       { economy: 0.25, combat: 0.30, research: 0.15, infrastructure: 0.20, special: 0.10 },
+      // Hard floors — a centre can never drop below this share
+      floors:        { economy: 0.10, combat: 0.12, research: 0.07, infrastructure: 0.07, special: 0.04 },
+      // Accumulated virtual spice credits per centre — pre-seeded so the AI can
+      // act immediately without waiting for credits to accumulate from zero.
+      credits:       { economy: 150, combat: 130, research: 80, infrastructure: 220, special: 50 },
+      incomeEst:     60,       // spice/sec estimate, recalculated each cycle
+      recentWipes:   0,        // attack squads fully wiped (rolling, halved periodically)
+      recentDeploys: 0,        // attack squads launched (same window)
+      baseAttackedAt: -999     // state.time when enemy was last spotted near AI HQ
+    };
+  }
+
+  function restoreAiBudget(saved) {
+    if (!saved) return makeAiBudget();
+    const fresh = makeAiBudget();
+    return {
+      weights:        { ...fresh.weights,  ...saved.weights  },
+      floors:         { ...fresh.floors,   ...saved.floors   },
+      credits:        { ...fresh.credits,  ...saved.credits  },
+      incomeEst:      saved.incomeEst      ?? fresh.incomeEst,
+      recentWipes:    saved.recentWipes    ?? 0,
+      recentDeploys:  saved.recentDeploys  ?? 0,
+      baseAttackedAt: saved.baseAttackedAt ?? -999
+    };
+  }
+
   function makeTeam(id, faction, color, accent, isPlayer) {
     return {
       id,
@@ -1244,7 +1282,8 @@ html{
         phase: 'normal',
         oilIntel: {},
         oilObjective: null,
-        squads: isPlayer ? null : makeAiSquads()
+        squads: isPlayer ? null : makeAiSquads(),
+        budget: isPlayer ? null : makeAiBudget()
       },
       enemyMemory: { units: {}, buildings: {} },
       fogVisible: new Uint8Array(WORLD_CELLS_X * WORLD_CELLS_Y),
@@ -2167,6 +2206,41 @@ html{
     unit.path.length = 0;
   }
 
+  // After killing a target, issue a short move to a properly-spaced free cell so
+  // the unit doesn't remain piled in a huddle with others from the same group.
+  function issuePostAttackSpread(unit) {
+    if (UNIT_TYPES[unit.type]?.flying) {
+      unit.order = { type: 'idle' };
+      return;
+    }
+    const cx = clamp(pxToCell(unit.x), 0, WORLD_CELLS_X - 1);
+    const cy = clamp(pxToCell(unit.y), 0, WORLD_CELLS_Y - 1);
+    const reserved = new Set();
+    for (const u of state.units) {
+      if (u.hp <= 0 || u.id === unit.id || UNIT_TYPES[u.type]?.flying) continue;
+      const ux = clamp(pxToCell(u.x), 0, WORLD_CELLS_X - 1);
+      const uy = clamp(pxToCell(u.y), 0, WORLD_CELLS_Y - 1);
+      if (Math.abs(ux - cx) > 8 || Math.abs(uy - cy) > 8) continue;
+      const hr = UNIT_TYPES[u.type]?.geometry?.hitRadius ?? (CELL * 0.5);
+      const sp = Math.max(1, Math.ceil((2 * hr) / CELL) - 1);
+      for (let dy = -sp; dy <= sp; dy++) {
+        for (let dx = -sp; dx <= sp; dx++) {
+          const nx = ux + dx, ny = uy + dy;
+          if (nx >= 0 && nx < WORLD_CELLS_X && ny >= 0 && ny < WORLD_CELLS_Y)
+            reserved.add(worldToKey(nx, ny));
+        }
+      }
+    }
+    const dest = findNearestMoveDest(cx, cy, unit, reserved);
+    if (dest && (dest.x !== cx || dest.y !== cy)) {
+      releaseClaim(unit);
+      unit.order = { type: 'move', x: dest.x * CELL + CELL * 0.5, y: dest.y * CELL + CELL * 0.5 };
+      unit.path.length = 0;
+    } else {
+      unit.order = { type: 'idle' };
+    }
+  }
+
   function releaseClaim(unit) {
     if (unit.claimKey !== null) {
       state.unitClaims.delete(unit.claimKey);
@@ -2838,6 +2912,7 @@ html{
     const oilObjective = team.ai.oilObjective;
     let oilReconAssigned = false;
     for (const scout of scouts) {
+      if (scout.aiSquadRole) continue; // Respect squad assignments — defense and rally scouts manage their own orders
       const order = scout.order || { type: 'idle' };
       if (order.type === 'capture') continue;
       const scoutingOrder = (order.type === 'move' || order.type === 'attack-move') && order.aiScout;
@@ -4176,6 +4251,11 @@ html{
               attack: { serial: sq.attack.serial, targetSize: sq.attack.targetSize, rallying: [...sq.attack.rallying], phase: sq.attack.phase },
               defense
             };
+          })(),
+          budget: team.isPlayer ? null : (() => {
+            const b = team.ai?.budget;
+            if (!b) return null;
+            return { weights: { ...b.weights }, floors: { ...b.floors }, credits: { ...b.credits }, incomeEst: b.incomeEst, recentWipes: b.recentWipes, recentDeploys: b.recentDeploys, baseAttackedAt: b.baseAttackedAt };
           })()
         },
         enemyMemory: {
@@ -4329,7 +4409,8 @@ html{
         ...(saved.ai || {}),
         oilIntel: Object.fromEntries(Object.entries(saved.ai?.oilIntel || {}).map(([key, value]) => [key, { ...value }])),
         oilObjective: saved.ai?.oilObjective ? { ...saved.ai.oilObjective } : null,
-        squads: team.isPlayer ? null : restoreAiSquads(saved.ai?.squads)
+        squads: team.isPlayer ? null : restoreAiSquads(saved.ai?.squads),
+        budget: team.isPlayer ? null : restoreAiBudget(saved.ai?.budget)
       };
       team.enemyMemory = {
         units: Object.fromEntries(((saved.enemyMemory && saved.enemyMemory.units) || []).map((entry) => [entry.id, { ...entry }])),
@@ -6780,8 +6861,8 @@ html{
   function updateAttackOrder(unit, dt) {
     const target = resolveCombatTargetEntity(getEntityById(unit.targetId || unit.order.targetId));
     if (!target || target.hp <= 0 || target.teamId === unit.teamId) {
-      unit.order = { type: 'idle' };
       unit.targetId = null;
+      issuePostAttackSpread(unit);
       return;
     }
     if (!canSourceDamageTarget(unit, target)) {
@@ -6880,14 +6961,14 @@ html{
   function updateCrushOrder(unit, dt) {
     const target = getEntityById(unit.order.targetId || unit.targetId);
     if (!target || target.kind !== 'unit' || target.hp <= 0 || target.teamId === unit.teamId) {
-      unit.order = { type: 'idle' };
       unit.targetId = null;
+      issuePostAttackSpread(unit);
       return;
     }
     const targetDef = UNIT_TYPES[target.type];
     if (!targetDef || !targetDef.infantry) {
-      unit.order = { type: 'idle' };
       unit.targetId = null;
+      issuePostAttackSpread(unit);
       return;
     }
     moveUnitAlongOrder(unit, dt, target.x, target.y);
@@ -7519,10 +7600,141 @@ html{
     }
   }
 
+  // ── Budget helpers ──────────────────────────────────────────────────────────
+  const AI_BUDGET_CENTRES = ['economy', 'combat', 'research', 'infrastructure', 'special'];
+
+  function aiNudgeWeight(b, centre, delta) {
+    b.weights[centre] = clamp(b.weights[centre] + delta, b.floors[centre], 0.65);
+  }
+
+  function aiNormalizeWeights(b) {
+    for (const c of AI_BUDGET_CENTRES) b.weights[c] = Math.max(b.floors[c], b.weights[c]);
+    const sum = AI_BUDGET_CENTRES.reduce((s, c) => s + b.weights[c], 0);
+    for (const c of AI_BUDGET_CENTRES) b.weights[c] /= sum;
+  }
+
+  function aiCountUnresearched(team) {
+    return ['rangefinding','composite-armor','scanner','capture','drone-tech','hacking','paradrop-tech','nuclear-silo-tech'].filter(r => !team.research.has(r)).length;
+  }
+
+  // Called once per think cycle (1.4 s) right after countTeamAssets.
+  function updateAiBudget(team, counts) {
+    const b = team.ai.budget;
+    if (!b) return;
+    const TICK = 1.4;
+
+    // Estimate per-second income: harvesters contribute only when spice is still plentiful;
+    // in oil-race phase harvesters sit idle so only oil trickle counts.
+    const harvUptime = team.ai.phase === 'oil-race' ? 0 : 0.55;
+    b.incomeEst = Math.max(10, (counts.harvester || 0) * 34 * harvUptime + (counts.oilDerrick || 0) * 6);
+
+    // Earn credits into each centre; cap at ~90 s worth of that centre's share
+    for (const c of AI_BUDGET_CENTRES) {
+      const cap = b.weights[c] * b.incomeEst * 90;
+      b.credits[c] = Math.min(b.credits[c] + b.incomeEst * TICK * b.weights[c], cap);
+    }
+
+    // Detect enemy units near our nearest HQ → flag base under pressure
+    const aiHq = state.buildings.find(bld => bld.hp > 0 && bld.teamId === team.id && bld.type === 'hq');
+    if (aiHq) {
+      const gc = getBuildingGeometry(aiHq).visualCenter;
+      const hqCx = clamp(pxToCell(gc.x), 0, WORLD_CELLS_X - 1);
+      const hqCy = clamp(pxToCell(gc.y), 0, WORLD_CELLS_Y - 1);
+      for (const entry of Object.values(team.enemyMemory?.units || {})) {
+        if (!entry || state.time - (entry.lastSeen ?? -Infinity) > 15) continue;
+        const ex = clamp(pxToCell(entry.x), 0, WORLD_CELLS_X - 1);
+        const ey = clamp(pxToCell(entry.y), 0, WORLD_CELLS_Y - 1);
+        if (Math.abs(ex - hqCx) < 16 && Math.abs(ey - hqCy) < 16) { b.baseAttackedAt = state.time; break; }
+      }
+    }
+
+    // ── Weight-adjustment rules (slow drift ±NUDGE per cycle) ─────────────
+    const NUDGE = 0.015;
+    const harvCount  = counts.harvester || 0;
+    const unresearched = aiCountUnresearched(team);
+    const wipeRate   = b.recentDeploys > 0 ? b.recentWipes / b.recentDeploys : 0;
+    const hasKeyBuildings = (counts.barracks > 0) && (counts.factory > 0) && (counts.lab > 0) && (counts.refinery > 0);
+    const underAttack = (state.time - b.baseAttackedAt) < 45;
+    const allDefFull  = (() => {
+      const sq = team.ai.squads;
+      if (!sq) return true;
+      for (const ds of Object.values(sq.defense)) {
+        if ((ds.unitIds?.length || 0) < (ds.targetSize || 3)) return false;
+      }
+      return true;
+    })();
+
+    // Economy: needs harvesters → UP; flush with harvesters → DOWN
+    if (harvCount < 2)  aiNudgeWeight(b, 'economy', +NUDGE * 2);
+    else if (harvCount >= 5) aiNudgeWeight(b, 'economy', -NUDGE);
+
+    // Combat: strong economy + full defense → UP; high wipe rate → DOWN
+    if (team.spice > 500 && allDefFull && harvCount >= 3) aiNudgeWeight(b, 'combat', +NUDGE);
+    if (wipeRate > 0.65) aiNudgeWeight(b, 'combat', -NUDGE * 1.5);
+
+    // Research: items remain → UP; all done → DOWN
+    if (unresearched > 0 && state.time > 45) aiNudgeWeight(b, 'research', +NUDGE);
+    else if (unresearched === 0)              aiNudgeWeight(b, 'research', -NUDGE * 2);
+
+    // Infrastructure: missing key buildings → UP; all built → slowly DOWN
+    if (!hasKeyBuildings) aiNudgeWeight(b, 'infrastructure', +NUDGE * 1.5);
+    else                  aiNudgeWeight(b, 'infrastructure', -NUDGE * 0.5);
+
+    // Special: base pressure or late game nuke push → UP; nuke built → DOWN
+    if (underAttack) aiNudgeWeight(b, 'special', +NUDGE);
+    if (state.time > 150 && !team.research.has('nuclear-silo-tech')) aiNudgeWeight(b, 'special', +NUDGE * 0.5);
+    if (team.research.has('nuclear-silo-tech') && (counts.nuclearSilo || 0) > 0) aiNudgeWeight(b, 'special', -NUDGE);
+
+    aiNormalizeWeights(b);
+  }
+
+  /** Returns true if the budget centre has enough credits for this cost. */
+  function aiCanBudget(team, cost, centre) {
+    return !team.ai.budget || team.ai.budget.credits[centre] >= cost;
+  }
+
+  /** Deduct cost from the named budget centre (no spice change — handled by callee). */
+  function aiSpendBudget(team, cost, centre) {
+    if (team.ai.budget) team.ai.budget.credits[centre] = Math.max(0, team.ai.budget.credits[centre] - cost);
+  }
+
+  /**
+   * Building placement helper.  Calls fn() and, if the build succeeds, records
+   * the spend against the named budget centre for weight-drift tracking.
+   * No credit-blocking here — spice affordability is already checked by every
+   * caller's `canAfford` guard, and blocking on credits would silently consume
+   * an else-if branch and prevent lower-priority buildings from being tried.
+   */
+  function aiBuildingGate(team, type, centre, fn) {
+    const cost = BUILDING_TYPES[type]?.cost || 0;
+    const result = fn();
+    if (result) aiSpendBudget(team, cost, centre);
+    return result;
+  }
+
+  /** Budget-gated unit production.  Returns false if credits are insufficient. */
+  function aiEnqueueUnit(building, key, centre) {
+    const team = teamById(building.teamId);
+    const cost = UNIT_TYPES[key]?.cost || 0;
+    if (!aiCanBudget(team, cost, centre)) return false;
+    if (enqueueProduction(building, 'unit', key)) { aiSpendBudget(team, cost, centre); return true; }
+    return false;
+  }
+
+  /** Budget-gated research. Always uses the 'research' centre. */
+  function aiEnqueueResearch(building, key) {
+    const team = teamById(building.teamId);
+    const cost = RESEARCH[key]?.cost || 0;
+    if (!aiCanBudget(team, cost, 'research')) return false;
+    if (enqueueProduction(building, 'research', key)) { aiSpendBudget(team, cost, 'research'); return true; }
+    return false;
+  }
+
   function runAiEconomy(team) {
     const engineer = state.units.find((unit) => unit.teamId === team.id && unit.type === 'engineer' && unit.hp > 0);
     const counts = countTeamAssets(team.id);
     updateAiStrategicPhase(team, counts);
+    updateAiBudget(team, counts);
     refreshAiOilIntel(team);
     team.ai.oilObjective = getAiOilObjective(team);
     tryActivateAiHack(team, counts);
@@ -7532,42 +7744,48 @@ html{
     const exposedOilDerrick = engineer ? findAiOilDerrickNeedingTurret(team.id, engineer) : null;
     if (!counts.engineer) {
       const engineerProducer = barracks || hq;
-      if (engineerProducer && !engineerProducer.queue && canAfford(team.id, 'engineer')) enqueueProduction(engineerProducer, 'unit', 'engineer');
+      if (engineerProducer && !engineerProducer.queue && canAfford(team.id, 'engineer')) aiEnqueueUnit(engineerProducer, 'engineer', 'infrastructure');
     }
     if (engineer && engineer.order.type === 'idle') {
-      if (!counts.refinery && canAfford(team.id, 'refinery')) placeAiStructure(team, engineer, 'refinery');
+      if (!counts.refinery && canAfford(team.id, 'refinery')) aiBuildingGate(team, 'refinery', 'economy', () => placeAiStructure(team, engineer, 'refinery'));
       // Nuclear threat: urgently build a second HQ to avoid total wipeout
-      else if (team.ai.huntNuclSilo && counts.hq < 2 && team.spice >= 400 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
+      else if (team.ai.huntNuclSilo && counts.hq < 2 && team.spice >= 400 && canAfford(team.id, 'hq')) aiBuildingGate(team, 'hq', 'infrastructure', () => placeAiExpansionHub(team, engineer));
       // Nuclear threat: bootstrap secondary HQ with refinery then barracks
       else if (team.ai.huntNuclSilo && counts.hq >= 2) {
         const isolatedHq = getAiIsolatedSecondaryHq(team);
-        if (isolatedHq && canAfford(team.id, 'refinery') && !aiHqHasNearbyBuilding(isolatedHq, 'refinery', 16)) placeAiStructureNearHq(team, engineer, 'refinery', isolatedHq);
-        else if (isolatedHq && canAfford(team.id, 'barracks') && !aiHqHasNearbyBuilding(isolatedHq, 'barracks', 16)) placeAiStructureNearHq(team, engineer, 'barracks', isolatedHq);
-        else if (counts.factory && team.research.has('paradrop-tech') && counts.hq < 3 && !hasAiParadropHub(team.id) && team.spice >= 980 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer, 'paradrop');
-        else if (counts.hq < 3 && counts.factory && team.spice >= 980 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
-        else if (counts.barracks && exposedOilDerrick && canAfford(team.id, 'turret')) placeAiTurretNearOil(team, engineer, exposedOilDerrick);
-        else if (team.ai.oilObjective?.kind === 'build' && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer, team.ai.oilObjective.resourceId);
-        else if (counts.barracks && !counts.silo && canAfford(team.id, 'silo')) placeAiStructure(team, engineer, 'silo');
-        else if (counts.refinery && counts.oilDerrick < 2 && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer);
-        else if (!counts.barracks && canAfford(team.id, 'barracks')) placeAiStructure(team, engineer, 'barracks');
-        else if (!counts.lab && canAfford(team.id, 'lab')) placeAiStructure(team, engineer, 'lab');
-        else if (!counts.factory && team.research.has('rangefinding') && canAfford(team.id, 'factory')) placeAiStructure(team, engineer, 'factory');
-        else if (counts.factory && counts.airfield < Math.min(Math.max(1, counts.hq || 1), 2) && team.spice >= 420 && canAfford(team.id, 'airfield')) placeAiStructure(team, engineer, 'airfield');
-        else if (counts.turret < 2 && canAfford(team.id, 'turret')) placeAiStructure(team, engineer, 'turret');
+        if (isolatedHq && canAfford(team.id, 'refinery') && !aiHqHasNearbyBuilding(isolatedHq, 'refinery', 16)) aiBuildingGate(team, 'refinery', 'economy', () => placeAiStructureNearHq(team, engineer, 'refinery', isolatedHq));
+        else if (isolatedHq && canAfford(team.id, 'barracks') && !aiHqHasNearbyBuilding(isolatedHq, 'barracks', 16)) aiBuildingGate(team, 'barracks', 'infrastructure', () => placeAiStructureNearHq(team, engineer, 'barracks', isolatedHq));
+        else if (counts.factory && team.research.has('paradrop-tech') && counts.hq < 3 && !hasAiParadropHub(team.id) && team.spice >= 980 && canAfford(team.id, 'hq')) aiBuildingGate(team, 'hq', 'infrastructure', () => placeAiExpansionHub(team, engineer, 'paradrop'));
+        else if (counts.hq < 3 && counts.factory && team.spice >= 980 && canAfford(team.id, 'hq')) aiBuildingGate(team, 'hq', 'infrastructure', () => placeAiExpansionHub(team, engineer));
+        else if (counts.barracks && exposedOilDerrick && canAfford(team.id, 'turret')) aiBuildingGate(team, 'turret', 'infrastructure', () => placeAiTurretNearOil(team, engineer, exposedOilDerrick));
+        else if (team.ai.oilObjective?.kind === 'build' && canAfford(team.id, 'oilDerrick')) aiBuildingGate(team, 'oilDerrick', 'economy', () => placeAiOilDerrick(team, engineer, team.ai.oilObjective.resourceId));
+        else if (counts.barracks && !counts.silo && canAfford(team.id, 'silo')) aiBuildingGate(team, 'silo', 'economy', () => placeAiStructure(team, engineer, 'silo'));
+        // Rebuild nuclear silo before secondary expansion if it was destroyed
+        else if (team.research.has('nuclear-silo-tech') && !counts.nuclearSilo && counts.factory && canAfford(team.id, 'nuclearSilo')) aiBuildingGate(team, 'nuclearSilo', 'special', () => placeAiStructure(team, engineer, 'nuclearSilo'));
+        // In oil-race phase allow more derricks to compensate for depleted spice fields
+        else if (counts.refinery && counts.oilDerrick < (team.ai.phase === 'oil-race' ? 4 : 2) && canAfford(team.id, 'oilDerrick')) aiBuildingGate(team, 'oilDerrick', 'economy', () => placeAiOilDerrick(team, engineer));
+        else if (!counts.barracks && canAfford(team.id, 'barracks')) aiBuildingGate(team, 'barracks', 'infrastructure', () => placeAiStructure(team, engineer, 'barracks'));
+        else if (!counts.lab && canAfford(team.id, 'lab')) aiBuildingGate(team, 'lab', 'infrastructure', () => placeAiStructure(team, engineer, 'lab'));
+        else if (!counts.factory && team.research.has('rangefinding') && canAfford(team.id, 'factory')) aiBuildingGate(team, 'factory', 'infrastructure', () => placeAiStructure(team, engineer, 'factory'));
+        else if (counts.factory && counts.airfield < Math.min(Math.max(1, counts.hq || 1), 2) && team.spice >= 420 && canAfford(team.id, 'airfield')) aiBuildingGate(team, 'airfield', 'special', () => placeAiStructure(team, engineer, 'airfield'));
+        else if (counts.turret < 2 && canAfford(team.id, 'turret')) aiBuildingGate(team, 'turret', 'infrastructure', () => placeAiStructure(team, engineer, 'turret'));
       }
-      else if (counts.factory && team.research.has('paradrop-tech') && counts.hq < 3 && !hasAiParadropHub(team.id) && team.spice >= 980 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer, 'paradrop');
-      else if (counts.hq < 2 && team.research.has('scanner') && team.spice >= 720 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
-      else if (counts.hq < 3 && counts.factory && team.spice >= 980 && canAfford(team.id, 'hq')) placeAiExpansionHub(team, engineer);
-      else if (counts.barracks && exposedOilDerrick && canAfford(team.id, 'turret')) placeAiTurretNearOil(team, engineer, exposedOilDerrick);
-      else if (team.ai.oilObjective?.kind === 'build' && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer, team.ai.oilObjective.resourceId);
-      else if (counts.barracks && !counts.silo && canAfford(team.id, 'silo')) placeAiStructure(team, engineer, 'silo');
-      else if (counts.refinery && counts.oilDerrick < 2 && canAfford(team.id, 'oilDerrick')) placeAiOilDerrick(team, engineer);
-      else if (!counts.barracks && canAfford(team.id, 'barracks')) placeAiStructure(team, engineer, 'barracks');
-      else if (!counts.lab && canAfford(team.id, 'lab')) placeAiStructure(team, engineer, 'lab');
-      else if (!counts.factory && team.research.has('rangefinding') && canAfford(team.id, 'factory')) placeAiStructure(team, engineer, 'factory');
-      else if (counts.factory && counts.airfield < Math.min(Math.max(1, counts.hq || 1), 2) && team.spice >= 420 && canAfford(team.id, 'airfield')) placeAiStructure(team, engineer, 'airfield');
-      else if (team.research.has('nuclear-silo-tech') && !counts.nuclearSilo && canAfford(team.id, 'nuclearSilo')) placeAiStructure(team, engineer, 'nuclearSilo');
-      else if (counts.turret < 2 && canAfford(team.id, 'turret')) placeAiStructure(team, engineer, 'turret');
+      else if (counts.factory && team.research.has('paradrop-tech') && counts.hq < 3 && !hasAiParadropHub(team.id) && team.spice >= 980 && canAfford(team.id, 'hq')) aiBuildingGate(team, 'hq', 'infrastructure', () => placeAiExpansionHub(team, engineer, 'paradrop'));
+      else if (counts.hq < 2 && team.research.has('scanner') && team.spice >= 720 && canAfford(team.id, 'hq')) aiBuildingGate(team, 'hq', 'infrastructure', () => placeAiExpansionHub(team, engineer));
+      else if (counts.hq < 3 && counts.factory && team.spice >= 980 && canAfford(team.id, 'hq')) aiBuildingGate(team, 'hq', 'infrastructure', () => placeAiExpansionHub(team, engineer));
+      else if (counts.barracks && exposedOilDerrick && canAfford(team.id, 'turret')) aiBuildingGate(team, 'turret', 'infrastructure', () => placeAiTurretNearOil(team, engineer, exposedOilDerrick));
+      else if (team.ai.oilObjective?.kind === 'build' && canAfford(team.id, 'oilDerrick')) aiBuildingGate(team, 'oilDerrick', 'economy', () => placeAiOilDerrick(team, engineer, team.ai.oilObjective.resourceId));
+      else if (counts.barracks && !counts.silo && canAfford(team.id, 'silo')) aiBuildingGate(team, 'silo', 'economy', () => placeAiStructure(team, engineer, 'silo'));
+      // Rebuild nuclear silo before secondary expansion if it was destroyed
+      else if (team.research.has('nuclear-silo-tech') && !counts.nuclearSilo && counts.factory && canAfford(team.id, 'nuclearSilo')) aiBuildingGate(team, 'nuclearSilo', 'special', () => placeAiStructure(team, engineer, 'nuclearSilo'));
+      // In oil-race phase allow more derricks to compensate for depleted spice fields
+      else if (counts.refinery && counts.oilDerrick < (team.ai.phase === 'oil-race' ? 4 : 2) && canAfford(team.id, 'oilDerrick')) aiBuildingGate(team, 'oilDerrick', 'economy', () => placeAiOilDerrick(team, engineer));
+      else if (!counts.barracks && canAfford(team.id, 'barracks')) aiBuildingGate(team, 'barracks', 'infrastructure', () => placeAiStructure(team, engineer, 'barracks'));
+      else if (!counts.lab && canAfford(team.id, 'lab')) aiBuildingGate(team, 'lab', 'infrastructure', () => placeAiStructure(team, engineer, 'lab'));
+      else if (!counts.factory && team.research.has('rangefinding') && canAfford(team.id, 'factory')) aiBuildingGate(team, 'factory', 'infrastructure', () => placeAiStructure(team, engineer, 'factory'));
+      else if (counts.factory && counts.airfield < Math.min(Math.max(1, counts.hq || 1), 2) && team.spice >= 420 && canAfford(team.id, 'airfield')) aiBuildingGate(team, 'airfield', 'special', () => placeAiStructure(team, engineer, 'airfield'));
+      else if (team.research.has('nuclear-silo-tech') && !counts.nuclearSilo && canAfford(team.id, 'nuclearSilo')) aiBuildingGate(team, 'nuclearSilo', 'special', () => placeAiStructure(team, engineer, 'nuclearSilo'));
+      else if (counts.turret < 2 && canAfford(team.id, 'turret')) aiBuildingGate(team, 'turret', 'infrastructure', () => placeAiStructure(team, engineer, 'turret'));
     }
 
     const refinery = nearestBuilding(team.id, 'refinery', WORLD_WIDTH, WORLD_HEIGHT);
@@ -7576,37 +7794,71 @@ html{
     const airfield = nearestBuilding(team.id, 'airfield', WORLD_WIDTH, WORLD_HEIGHT);
     const combatCount = (counts.scout || 0) + (counts.tank || 0);
     const desiredAmbulances = Math.min(2, Math.floor(combatCount / 4));
-    if (refinery && !refinery.queue && counts.harvester < 2 && canAfford(team.id, 'harvester')) enqueueProduction(refinery, 'unit', 'harvester');
-    if (barracks && !barracks.queue && counts.scout < 5 && canAfford(team.id, 'scout')) enqueueProduction(barracks, 'unit', 'scout');
-    if (lab && !lab.queue && !team.research.has('rangefinding') && canAffordResearch(team.id, 'rangefinding')) enqueueProduction(lab, 'research', 'rangefinding');
-    else if (lab && !lab.queue && team.research.has('rangefinding') && !team.research.has('composite-armor') && canAffordResearch(team.id, 'composite-armor')) enqueueProduction(lab, 'research', 'composite-armor');
-    else if (lab && !lab.queue && team.research.has('composite-armor') && !team.research.has('scanner') && canAffordResearch(team.id, 'scanner')) enqueueProduction(lab, 'research', 'scanner');
-    else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('capture') && team.ai.phase !== 'normal' && canAffordResearch(team.id, 'capture')) enqueueProduction(lab, 'research', 'capture');
-    else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('drone-tech') && canAffordResearch(team.id, 'drone-tech')) enqueueProduction(lab, 'research', 'drone-tech');
-    else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('capture') && canAffordResearch(team.id, 'capture')) enqueueProduction(lab, 'research', 'capture');
-    else if (lab && !lab.queue && team.research.has('scanner') && team.research.has('drone-tech') && team.research.has('capture') && !team.research.has('hacking') && canAffordResearch(team.id, 'hacking')) enqueueProduction(lab, 'research', 'hacking');
-    else if (lab && !lab.queue && team.research.has('hacking') && !team.research.has('paradrop-tech') && canAffordResearch(team.id, 'paradrop-tech')) enqueueProduction(lab, 'research', 'paradrop-tech');
-    else if (lab && !lab.queue && team.research.has('paradrop-tech') && !team.research.has('nuclear-silo-tech') && canAffordResearch(team.id, 'nuclear-silo-tech')) enqueueProduction(lab, 'research', 'nuclear-silo-tech');
+    // Cap harvesters based on remaining map spice — don't queue harvesters that will sit idle.
+    const mapSpiceLeft = getRemainingSpiceOnMap();
+    const maxHarvesters = mapSpiceLeft > 2000 ? 4 : mapSpiceLeft > 800 ? 3 : mapSpiceLeft > 300 ? 2 : 1;
+    if (refinery && !refinery.queue && counts.harvester < maxHarvesters && canAfford(team.id, 'harvester')) aiEnqueueUnit(refinery, 'harvester', 'economy');
+    // Scout cap scales with the current attack-squad target size so that the rally
+    // can always fill as escalation grows; cap at 8 to avoid runaway production.
+    const scoutCap = Math.min(8, (team.ai.squads?.attack?.targetSize ?? 3) + 4);
+    if (barracks && !barracks.queue && counts.scout < scoutCap && canAfford(team.id, 'scout')) aiEnqueueUnit(barracks, 'scout', 'combat');
+    if (lab && !lab.queue && !team.research.has('rangefinding') && canAffordResearch(team.id, 'rangefinding')) aiEnqueueResearch(lab, 'rangefinding');
+    else if (lab && !lab.queue && team.research.has('rangefinding') && !team.research.has('composite-armor') && canAffordResearch(team.id, 'composite-armor')) aiEnqueueResearch(lab, 'composite-armor');
+    else if (lab && !lab.queue && team.research.has('composite-armor') && !team.research.has('scanner') && canAffordResearch(team.id, 'scanner')) aiEnqueueResearch(lab, 'scanner');
+    else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('capture') && team.ai.phase !== 'normal' && canAffordResearch(team.id, 'capture')) aiEnqueueResearch(lab, 'capture');
+    else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('drone-tech') && canAffordResearch(team.id, 'drone-tech')) aiEnqueueResearch(lab, 'drone-tech');
+    else if (lab && !lab.queue && team.research.has('scanner') && !team.research.has('capture') && canAffordResearch(team.id, 'capture')) aiEnqueueResearch(lab, 'capture');
+    else if (lab && !lab.queue && team.research.has('scanner') && team.research.has('drone-tech') && team.research.has('capture') && !team.research.has('hacking') && canAffordResearch(team.id, 'hacking')) aiEnqueueResearch(lab, 'hacking');
+    else if (lab && !lab.queue && team.research.has('hacking') && !team.research.has('paradrop-tech') && canAffordResearch(team.id, 'paradrop-tech')) aiEnqueueResearch(lab, 'paradrop-tech');
+    else if (lab && !lab.queue && team.research.has('paradrop-tech') && !team.research.has('nuclear-silo-tech') && canAffordResearch(team.id, 'nuclear-silo-tech')) aiEnqueueResearch(lab, 'nuclear-silo-tech');
     if (factory && !factory.queue) {
-      if ((counts.ambulance || 0) < desiredAmbulances && canAfford(team.id, 'ambulance')) enqueueProduction(factory, 'unit', 'ambulance');
-      else if (canAfford(team.id, 'tank')) enqueueProduction(factory, 'unit', 'tank');
+      if ((counts.ambulance || 0) < desiredAmbulances && canAfford(team.id, 'ambulance')) aiEnqueueUnit(factory, 'ambulance', 'combat');
+      else if (canAfford(team.id, 'tank')) aiEnqueueUnit(factory, 'tank', 'combat');
     }
-    if (airfield && !airfield.queue && !airfield.assignedFighterId && canAfford(team.id, 'fighter')) enqueueProduction(airfield, 'unit', 'fighter');
+    if (airfield && !airfield.queue && !airfield.assignedFighterId && canAfford(team.id, 'fighter')) aiEnqueueUnit(airfield, 'fighter', 'special');
     tryAiOilOperations(team, counts, engineer);
     tryActivateAiScan(team, counts);
     tryDeployAiDrone(team, counts);
     tryActivateAiParadrop(team, counts);
     tryActivateAiNuke(team);
     assignAiFighterOrders(team);
+    // Adopt newly spawned units into squads BEFORE assigning scout orders, so
+    // squad-assigned scouts are not retasked by assignAiScoutOrders.
+    manageAiSquads(team);
     assignAiScoutOrders(team);
 
+    const friendlyHqs = state.buildings.filter((b) => b.hp > 0 && b.teamId === team.id && b.type === 'hq');
     for (const harvester of state.units.filter((unit) => unit.teamId === team.id && unit.type === 'harvester' && unit.hp > 0)) {
       if (harvester.order.type === 'idle') {
         const node = nearestResource(harvester.x, harvester.y);
-        if (node) harvester.order = { type: 'gather', targetId: node.id };
+        if (node) {
+          harvester.order = { type: 'gather', targetId: node.id };
+        } else if (friendlyHqs.length > 0) {
+          // No spice left — garrison harvesters near command hubs so they
+          // act as crushers against any infantry that wanders in.
+          // Only reposition if this harvester is not already near any hub.
+          const nearHub = friendlyHqs.some((hq) => {
+            const cx = hq.rally ? hq.rally.x : hq.x + hq.widthCells * CELL * 0.5;
+            const cy = hq.rally ? hq.rally.y : hq.y + hq.heightCells * CELL * 0.5;
+            return dist(harvester.x, harvester.y, cx, cy) < 5 * CELL;
+          });
+          if (!nearHub) {
+            // Pick the hub with the fewest harvesters already nearby.
+            let bestHq = friendlyHqs[0];
+            let bestCount = Infinity;
+            for (const hq of friendlyHqs) {
+              const cx = hq.rally ? hq.rally.x : hq.x + hq.widthCells * CELL * 0.5;
+              const cy = hq.rally ? hq.rally.y : hq.y + hq.heightCells * CELL * 0.5;
+              const nearby = state.units.filter((u) => u.teamId === team.id && u.type === 'harvester' && u.hp > 0 && dist(u.x, u.y, cx, cy) < 5 * CELL).length;
+              if (nearby < bestCount) { bestCount = nearby; bestHq = hq; }
+            }
+            const tx = bestHq.rally ? bestHq.rally.x : bestHq.x + bestHq.widthCells * CELL * 0.5;
+            const ty = bestHq.rally ? bestHq.rally.y : bestHq.y + bestHq.heightCells * CELL * 0.5;
+            harvester.order = { type: 'attack-move', x: tx, y: ty };
+          }
+        }
       }
     }
-    manageAiSquads(team);
   }
 
   function placeAiStructure(team, engineer, type) {
@@ -8190,7 +8442,14 @@ html{
     // --- Clean up destroyed HQ defense entries ---
     for (const hqIdStr of Object.keys(squads.defense)) {
       const hq = getEntityById(parseInt(hqIdStr));
-      if (!hq || hq.hp <= 0) delete squads.defense[hqIdStr];
+      if (!hq || hq.hp <= 0) {
+        // Release surviving units so they can be re-adopted into a new squad
+        for (const uid of squads.defense[hqIdStr].unitIds) {
+          const u = getEntityById(uid);
+          if (u && u.hp > 0) { u.aiSquadRole = null; u.aiSquadHqId = null; }
+        }
+        delete squads.defense[hqIdStr];
+      }
     }
 
     // --- Maintain defense squads ---
@@ -8237,6 +8496,12 @@ html{
           rallying: [],
           phase: 'building'
         };
+        // Record wipe in budget stats; halve counters every 8 events to keep a rolling window
+        const b = team.ai.budget;
+        if (b) {
+          b.recentWipes++;
+          if (b.recentWipes + b.recentDeploys > 8) { b.recentWipes = Math.floor(b.recentWipes * 0.5); b.recentDeploys = Math.floor(b.recentDeploys * 0.5); }
+        }
       }
     }
 
@@ -8253,6 +8518,8 @@ html{
           u.path.length = 0;
         }
         squads.attack.rallying = [];
+        // Record deploy in budget stats
+        if (team.ai.budget) team.ai.budget.recentDeploys++;
         toast('Raiders Incoming');
       }
     }
