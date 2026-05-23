@@ -170,6 +170,10 @@ self.addEventListener('fetch', (event) => {
     });
   }
 
+  const safePreloadResponse = event.request.mode === 'navigate' && event.preloadResponse
+    ? event.preloadResponse.catch(() => null)
+    : null;
+
   const handleRequest = async (isNavigation, preloadResponse, request) => {
     const cache = await caches.open(CACHE_NAME);
     const requestPath = new URL(request.url).pathname;
@@ -250,7 +254,7 @@ self.addEventListener('fetch', (event) => {
   };
 
   const isNavigation = event.request.mode === 'navigate';
-  event.respondWith(handleRequest(isNavigation, isNavigation ? event.preloadResponse : null, normalizedRequest));
+  event.respondWith(handleRequest(isNavigation, safePreloadResponse, normalizedRequest));
 });
 
 self.addEventListener('message', (event) => {
