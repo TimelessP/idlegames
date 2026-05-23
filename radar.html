@@ -726,10 +726,6 @@
       themeMode: 'system',
       maxFps: 24,
       rangeIndex: 1,
-      preferredTransports: {
-        adsblol: '',
-        opensky: ''
-      },
       providerBackoff: {
         adsblol: defaultBackoff('adsblol'),
         opensky: defaultBackoff('opensky')
@@ -757,10 +753,6 @@
         const merged = {
           ...DEFAULT_STATE,
           ...parsed,
-          preferredTransports: {
-            ...DEFAULT_STATE.preferredTransports,
-            ...(parsed.preferredTransports || {})
-          },
           providerBackoff: {
             adsblol: { ...defaultBackoff('adsblol'), ...(parsed.providerBackoff?.adsblol || {}) },
             opensky: { ...defaultBackoff('opensky'), ...(parsed.providerBackoff?.opensky || {}) }
@@ -904,13 +896,13 @@
       if (runtime.userLocation) {
         locationChip.textContent = formatLocationAccuracy(runtime.userLocation.accuracy);
       } else if (runtime.permissionState === 'denied') {
-        locationChip.textContent = 'Disabled';
+        locationChip.textContent = 'Denied';
       } else if (runtime.locationPending) {
         locationChip.textContent = 'Requesting…';
       } else {
         locationChip.textContent = 'Waiting';
       }
-      permissionMeta.textContent = `Location access: ${formatPermissionState(runtime.permissionState)}`;
+      permissionMeta.textContent = `Permission state: ${runtime.permissionState}`;
       if (runtime.userLocation) {
         const precision = runtime.userLocation.accuracy <= 120 ? 'fine-ish' : 'coarse';
         fixMeta.textContent = `Current fix ${runtime.userLocation.lat.toFixed(4)}, ${runtime.userLocation.lon.toFixed(4)} · ${precision} · ${formatLocationAccuracy(runtime.userLocation.accuracy)}`;
@@ -924,21 +916,6 @@
       statusSub.textContent = sub;
       statusSub.classList.toggle('is-warning', warning);
       updateStaticHud();
-    }
-
-    function formatPermissionState(stateValue) {
-      switch (stateValue) {
-        case 'granted':
-          return 'enabled';
-        case 'denied':
-          return 'disabled';
-        case 'prompt':
-          return 'not requested yet';
-        case 'unsupported':
-          return 'unavailable';
-        default:
-          return stateValue || 'unknown';
-      }
     }
 
     function resizeCanvas() {
@@ -1006,7 +983,9 @@
         return value.length ? value.map((entry) => formatRawDetailValue(entry)).join(', ') : '---';
       }
       if (typeof value === 'number') {
-        return Number.isInteger(value) ? String(value) : value.toFixed(5).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+        return Number.isInteger(value)
+          ? String(value)
+          : value.toFixed(5).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
       }
       if (typeof value === 'boolean') {
         return value ? 'Yes' : 'No';
@@ -1018,10 +997,7 @@
     }
 
     function buildAdsbLolDetails(item, derived) {
-      const rawDetails = [];
-      Object.entries(item).forEach(([key, value]) => {
-        rawDetails.push([key, formatRawDetailValue(value)]);
-      });
+      const rawDetails = Object.entries(item).map(([key, value]) => [key, formatRawDetailValue(value)]);
       return [
         ['Provider', derived.providerLabel],
         ['Transport', derived.transportLabel],
@@ -1164,30 +1140,6 @@
       return `${pattern}${targetUrl}`;
     }
 
-    function withCacheBust(targetUrl) {
-      const busted = new URL(targetUrl, location.href);
-      busted.searchParams.set('_radar_ts', String(Date.now()));
-      return busted.href;
-    }
-
-    function orderAttemptsByPreference(attempts, providerKey) {
-      const preferred = state.preferredTransports?.[providerKey];
-      if (!preferred) return attempts;
-      const preferredIndex = attempts.findIndex((attempt) => attempt.name === preferred);
-      if (preferredIndex <= 0) return attempts;
-      const ordered = [...attempts];
-      const [preferredAttempt] = ordered.splice(preferredIndex, 1);
-      ordered.unshift(preferredAttempt);
-      return ordered;
-    }
-
-    function clearPreferredTransport(providerKey, transport = null) {
-      if (!state.preferredTransports?.[providerKey]) return;
-      if (transport && state.preferredTransports[providerKey] !== transport) return;
-      state.preferredTransports[providerKey] = '';
-      saveState();
-    }
-
     class RateLimitError extends Error {
       constructor(message, retryAfterMs, transport) {
         super(message);
@@ -1223,30 +1175,26 @@
 
     async function fetchJsonWithStrategy(targetUrl, providerKey) {
       const provider = PROVIDERS[providerKey];
-      const cacheBustedTargetUrl = withCacheBust(targetUrl);
       const attempts = [];
       if (state.proxyMode === 'manual') {
         if (state.manualProxyUrl.trim()) {
-          attempts.push({ name: 'manual-proxy', url: buildProxyUrl(cacheBustedTargetUrl, state.manualProxyUrl.trim()) });
+          attempts.push({ name: 'manual-proxy', url: buildProxyUrl(targetUrl, state.manualProxyUrl.trim()) });
         } else {
-          attempts.push({ name: 'direct', url: cacheBustedTargetUrl });
+          attempts.push({ name: 'direct', url: targetUrl });
         }
       } else if (state.proxyMode === 'off') {
-        attempts.push({ name: 'direct', url: cacheBustedTargetUrl });
+        attempts.push({ name: 'direct', url: targetUrl });
       } else {
         if (provider.directBrowserFriendly) {
-          attempts.push({ name: 'direct', url: cacheBustedTargetUrl });
+          attempts.push({ name: 'direct', url: targetUrl });
         }
         PUBLIC_PROXIES.forEach((proxy) => {
-          attempts.push({ name: proxy.name, url: buildProxyUrl(cacheBustedTargetUrl, proxy.pattern) });
+          attempts.push({ name: proxy.name, url: buildProxyUrl(targetUrl, proxy.pattern) });
         });
       }
 
-      const orderedAttempts = orderAttemptsByPreference(attempts, providerKey);
-      const preferredTransport = state.preferredTransports?.[providerKey] || '';
-
       let lastError = null;
-      for (const attempt of orderedAttempts) {
+      for (const attempt of attempts) {
         try {
           const response = await fetchJson(attempt.url);
           if (response.status === 429) {
@@ -1254,10 +1202,7 @@
           }
           if (!response.ok) {
             lastError = new Error(`HTTP ${response.status} from ${attempt.name}`);
-            if (attempt.name === preferredTransport) {
-              clearPreferredTransport(providerKey, attempt.name);
-            }
-            if (state.proxyMode === 'auto') continue;
+            if (attempt.name === 'direct' && state.proxyMode === 'auto') continue;
             throw lastError;
           }
           const payload = await response.json();
@@ -1265,10 +1210,7 @@
         } catch (error) {
           if (error instanceof RateLimitError) throw error;
           lastError = error;
-          if (attempt.name === preferredTransport) {
-            clearPreferredTransport(providerKey, attempt.name);
-          }
-          const shouldContinue = state.proxyMode === 'auto';
+          const shouldContinue = attempt.name === 'direct' && state.proxyMode === 'auto';
           if (shouldContinue) continue;
         }
       }
@@ -1301,7 +1243,6 @@
       record.lastSuccessAt = Date.now();
       record.lastStatus = 'ok';
       record.lastTransport = transport;
-      state.preferredTransports[providerKey] = transport;
       saveState();
     }
 
@@ -1332,7 +1273,7 @@
     async function pollSelectedProvider() {
       if (runtime.fetchInFlight || document.visibilityState !== 'visible') return;
       if (!runtime.userLocation) {
-        updateStatus('Waiting for a location fix.', 'Location is requested on load. The browser will use whatever location it can provide.');
+        updateStatus('Waiting for a location fix.', 'Location permission is requested on load. Use the menu to retry if the browser dismissed it.');
         scheduleFetch(2500);
         return;
       }
@@ -1403,8 +1344,6 @@
       }
 
       runtime.locationPending = true;
-      // Keep the browser's normal geolocation pipeline alive so slower coarse fixes can still arrive.
-      ensureWatchPosition();
       updateStaticHud();
       navigator.geolocation.getCurrentPosition(
         (position) => {
@@ -1414,10 +1353,7 @@
         (error) => {
           runtime.locationPending = false;
           runtime.permissionState = error.code === error.PERMISSION_DENIED ? 'denied' : runtime.permissionState;
-          const fallbackHint = error.code === error.PERMISSION_DENIED
-            ? 'Location is disabled or unavailable on this device. Enable location to center the radar.'
-            : 'The browser did not return a fix yet. Try again if location becomes available.';
-          updateStatus('Location request did not complete.', fallbackHint, true);
+          updateStatus('Location request did not complete.', error.message || 'Open the menu and try location again.', true);
           updateStaticHud();
         },
         {
@@ -1434,23 +1370,16 @@
         (position) => {
           acceptLocation(position);
         },
-        (error) => {
-          if (error?.code === error.PERMISSION_DENIED) {
-            runtime.locationPending = false;
-            runtime.permissionState = 'denied';
-            updateStaticHud();
-          }
-        },
+        () => {},
         {
           enableHighAccuracy: false,
-          maximumAge: 120000,
-          timeout: 30000
+          maximumAge: 20000,
+          timeout: 20000
         }
       );
     }
 
     function acceptLocation(position) {
-      const hadLocation = Boolean(runtime.userLocation);
       runtime.locationPending = false;
       runtime.permissionState = 'granted';
       runtime.userLocation = {
@@ -1462,12 +1391,10 @@
         timestamp: position.timestamp || Date.now()
       };
       updateStaticHud();
-      if (!hadLocation && !runtime.lastUpdatedAt) {
+      if (!runtime.lastUpdatedAt) {
         updateStatus('Location acquired.', 'Fetching the first radar picture now.');
-        scheduleFetch(300);
-        return;
       }
-      scheduleFetch();
+      scheduleFetch(300);
     }
 
     async function observePermissionState() {
@@ -1725,7 +1652,7 @@
       const stat = document.createElement('div');
       stat.className = 'modal-stat';
       const labelEl = document.createElement('strong');
-      labelEl.textContent = label;
+      labelEl.textContent = formatValue(label);
       const valueEl = document.createElement('span');
       valueEl.textContent = formatValue(value);
       stat.append(labelEl, valueEl);
@@ -1738,9 +1665,7 @@
       planeModal.hidden = false;
       planeModal.classList.add('open');
       planeModalTitle.textContent = 'Aircraft Info';
-      const stats = plane.infoDetails?.length
-        ? plane.infoDetails
-        : [['Callsign', plane.label]];
+      const stats = plane.infoDetails?.length ? plane.infoDetails : [['Callsign', plane.label]];
       planeModalGrid.replaceChildren();
       stats.forEach(([label, value]) => {
         appendModalStat(label, value);
@@ -1835,7 +1760,7 @@
       syncControlsFromState();
       observePermissionState();
       requestLocation();
-      updateStatus('Waiting for a location fix.', 'Location is requested on load. The browser will use whatever location it can provide. The selected provider only polls while the page is visible.');
+      updateStatus('Waiting for a location fix.', 'Location permission is requested on load. The selected provider will poll only while the page is visible.');
 
       menuButton.addEventListener('click', () => setMenuOpen(true));
       closeMenuButton.addEventListener('click', () => setMenuOpen(false));
