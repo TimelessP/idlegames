@@ -473,6 +473,10 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
+    .modal-grid.is-guarded {
+      pointer-events: none;
+    }
+
     .modal-stat {
       padding: 10px 12px;
       border-radius: 16px;
@@ -557,19 +561,98 @@
       line-height: 1.4;
     }
 
+    .help-list li {
+      display: grid;
+      gap: 6px;
+    }
+
+    .help-jump-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .help-inline-link {
+      appearance: none;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(var(--accent-rgb), 0.18);
+      background: rgba(var(--accent-rgb), 0.06);
+      color: var(--text);
+      font-size: 0.76rem;
+      cursor: pointer;
+    }
+
+    .help-inline-link:hover,
+    .help-inline-link:focus-visible {
+      border-color: rgba(var(--accent-rgb), 0.45);
+      background: rgba(var(--accent-rgb), 0.12);
+      outline: none;
+    }
+
     .help-related {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
     }
 
+    .help-appendix {
+      display: grid;
+      gap: 8px;
+    }
+
+    .help-appendix-intro {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
+    .help-appendix-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .help-appendix-item {
+      display: grid;
+      gap: 4px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .help-appendix-item strong {
+      font-size: 0.8rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text);
+    }
+
+    .help-appendix-item span {
+      font-size: 0.88rem;
+      line-height: 1.4;
+      color: var(--muted);
+    }
+
     .help-chip {
+      appearance: none;
       padding: 6px 10px;
       border-radius: 999px;
       border: 1px solid rgba(var(--accent-rgb), 0.24);
       background: rgba(var(--accent-rgb), 0.08);
       font-size: 0.82rem;
       color: var(--text);
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+
+    .help-chip:hover,
+    .help-chip:focus-visible {
+      border-color: rgba(var(--accent-rgb), 0.52);
+      background: rgba(var(--accent-rgb), 0.14);
+      transform: translateY(-1px);
+      outline: none;
     }
 
     .hidden {
@@ -680,6 +763,15 @@
               <input id="radarColorInput" type="color" value="#7cffb2" />
             </div>
             <div class="field">
+              <label for="specialSquawkColorInput">Special squawk tint</label>
+              <input id="specialSquawkColorInput" type="color" value="#ffd36e" />
+            </div>
+            <div class="field">
+              <label for="emergencySquawkColorInput">Emergency squawk tint</label>
+              <input id="emergencySquawkColorInput" type="color" value="#ff8f7c" />
+              <small>Theme mode changes the UI chrome. These marker colours stay shared across themes so unusual squawks mean the same thing in System, Light, and Dark.</small>
+            </div>
+            <div class="field">
               <label for="fpsSelect">Radar frame rate</label>
               <select id="fpsSelect">
                 <option value="12">12 FPS</option>
@@ -697,6 +789,9 @@
               <label class="radio-option"><input type="radio" name="themeMode" value="light" /> Light</label>
               <label class="radio-option"><input type="radio" name="themeMode" value="dark" /> Dark</label>
             </fieldset>
+            <div class="button-row">
+              <button id="resetColorsButton" type="button">Reset marker colours</button>
+            </div>
           </section>
 
           <section class="card">
@@ -755,6 +850,10 @@
             </div>
           </div>
           <section class="help-section">
+            <h3>Value details</h3>
+            <ul id="fieldHelpValueDetails" class="help-list"></ul>
+          </section>
+          <section class="help-section">
             <h3>Meaning</h3>
             <div id="fieldHelpMeaning" class="help-copy"></div>
           </section>
@@ -770,6 +869,10 @@
             <h3>Related fields</h3>
             <div id="fieldHelpRelated" class="help-related"></div>
           </section>
+          <section id="fieldHelpAppendixSection" class="help-section hidden">
+            <h3>Appendix</h3>
+            <div id="fieldHelpAppendix" class="help-appendix"></div>
+          </section>
         </div>
       </section>
     </div>
@@ -782,6 +885,7 @@
     const RANGE_OPTIONS_NM = [5, 10, 15, 25, 50, 100, 150];
     const FETCH_TIMEOUT_MS = 12000;
     const SWEEP_PERIOD_MS = 9000;
+    const PROXY_ERROR_COOLDOWN_MS = 4 * 60 * 1000;
     const PUBLIC_PROXIES = [
       { name: 'AllOrigins', pattern: 'https://api.allorigins.win/raw?url=%s' },
       { name: 'corsproxy.io', pattern: 'https://corsproxy.io/?url=%s' },
@@ -798,9 +902,9 @@
         buildUrl(origin, rangeNm) {
           return `https://api.adsb.lol/v2/lat/${origin.lat.toFixed(4)}/lon/${origin.lon.toFixed(4)}/dist/${Math.max(10, Math.ceil(rangeNm * 1.15))}`;
         },
-        parse(payload, origin, rangeNm) {
+        parse(payload, origin, rangeNm, snapshotAtMs, predictionWindowMs) {
           const aircraft = Array.isArray(payload?.ac) ? payload.ac : [];
-          return aircraft.map((item) => normalizeAdsbLolPlane(item, origin, rangeNm)).filter(Boolean);
+          return aircraft.map((item) => normalizeAdsbLolPlane(item, origin, rangeNm, snapshotAtMs, predictionWindowMs)).filter(Boolean);
         }
       },
       opensky: {
@@ -816,9 +920,9 @@
           const lonDelta = span / (60 * lonFactor);
           return `https://opensky-network.org/api/states/all?lamin=${(origin.lat - latDelta).toFixed(4)}&lomin=${(origin.lon - lonDelta).toFixed(4)}&lamax=${(origin.lat + latDelta).toFixed(4)}&lomax=${(origin.lon + lonDelta).toFixed(4)}`;
         },
-        parse(payload, origin, rangeNm) {
+        parse(payload, origin, rangeNm, snapshotAtMs, predictionWindowMs) {
           const states = Array.isArray(payload?.states) ? payload.states : [];
-          return states.map((item) => normalizeOpenSkyPlane(item, origin, rangeNm)).filter(Boolean);
+          return states.map((item) => normalizeOpenSkyPlane(item, origin, rangeNm, snapshotAtMs, predictionWindowMs)).filter(Boolean);
         }
       }
     };
@@ -841,10 +945,13 @@
     const manualProxyField = document.getElementById('manualProxyField');
     const manualProxyInput = document.getElementById('manualProxyInput');
     const radarColorInput = document.getElementById('radarColorInput');
+    const specialSquawkColorInput = document.getElementById('specialSquawkColorInput');
+    const emergencySquawkColorInput = document.getElementById('emergencySquawkColorInput');
     const fpsSelect = document.getElementById('fpsSelect');
     const requestLocationButton = document.getElementById('requestLocationButton');
     const recenterButton = document.getElementById('recenterButton');
     const resetSettingsButton = document.getElementById('resetSettingsButton');
+    const resetColorsButton = document.getElementById('resetColorsButton');
     const permissionMeta = document.getElementById('permissionMeta');
     const fixMeta = document.getElementById('fixMeta');
     const providerHint = document.getElementById('providerHint');
@@ -862,10 +969,13 @@
     const fieldHelpTitle = document.getElementById('fieldHelpTitle');
     const fieldHelpValue = document.getElementById('fieldHelpValue');
     const fieldHelpContext = document.getElementById('fieldHelpContext');
+    const fieldHelpValueDetails = document.getElementById('fieldHelpValueDetails');
     const fieldHelpMeaning = document.getElementById('fieldHelpMeaning');
     const fieldHelpHistory = document.getElementById('fieldHelpHistory');
     const fieldHelpExamples = document.getElementById('fieldHelpExamples');
     const fieldHelpRelated = document.getElementById('fieldHelpRelated');
+    const fieldHelpAppendixSection = document.getElementById('fieldHelpAppendixSection');
+    const fieldHelpAppendix = document.getElementById('fieldHelpAppendix');
 
     const runtime = {
       width: 0,
@@ -892,14 +1002,29 @@
       fieldHelpOpen: false,
       selectedPlane: null,
       selectedFieldDetail: null,
-      modalHistoryDepth: 0
+      modalHistoryDepth: 0,
+      lastAnimationAt: 0,
+      planeTrailMap: new Map(),
+      planeModalJustOpened: false,
+      planeModalInteractionFrame: 0,
+      pendingPlaneModalFrame: 0
     };
 
     const DEFAULT_STATE = {
       provider: 'adsblol',
       proxyMode: 'auto',
       manualProxyUrl: '',
+      preferredAutoProxy: {
+        adsblol: '',
+        opensky: ''
+      },
+      autoProxyCooldowns: {
+        adsblol: {},
+        opensky: {}
+      },
       radarColor: '#7cffb2',
+      specialSquawkColor: '#ffd36e',
+      emergencySquawkColor: '#ff8f7c',
       themeMode: 'system',
       maxFps: 24,
       rangeIndex: 1,
@@ -930,6 +1055,14 @@
         const merged = {
           ...DEFAULT_STATE,
           ...parsed,
+          preferredAutoProxy: {
+            adsblol: parsed.preferredAutoProxy?.adsblol || '',
+            opensky: parsed.preferredAutoProxy?.opensky || ''
+          },
+          autoProxyCooldowns: {
+            adsblol: sanitizeProxyCooldowns(parsed.autoProxyCooldowns?.adsblol),
+            opensky: sanitizeProxyCooldowns(parsed.autoProxyCooldowns?.opensky)
+          },
           providerBackoff: {
             adsblol: { ...defaultBackoff('adsblol'), ...(parsed.providerBackoff?.adsblol || {}) },
             opensky: { ...defaultBackoff('opensky'), ...(parsed.providerBackoff?.opensky || {}) }
@@ -938,6 +1071,11 @@
         if (!PROVIDERS[merged.provider]) merged.provider = DEFAULT_STATE.provider;
         merged.rangeIndex = clamp(Math.round(merged.rangeIndex || 0), 0, RANGE_OPTIONS_NM.length - 1);
         merged.maxFps = clamp(Math.round(merged.maxFps || DEFAULT_STATE.maxFps), 12, 60);
+        merged.radarColor = normalizeColorChoice(merged.radarColor, DEFAULT_STATE.radarColor);
+        merged.specialSquawkColor = normalizeColorChoice(merged.specialSquawkColor, DEFAULT_STATE.specialSquawkColor);
+        merged.emergencySquawkColor = normalizeColorChoice(merged.emergencySquawkColor, DEFAULT_STATE.emergencySquawkColor);
+        merged.preferredAutoProxy.adsblol = normalizeAutoProxyName(merged.preferredAutoProxy.adsblol);
+        merged.preferredAutoProxy.opensky = normalizeAutoProxyName(merged.preferredAutoProxy.opensky);
         return merged;
       } catch (error) {
         return structuredClone(DEFAULT_STATE);
@@ -946,6 +1084,65 @@
 
     function saveState() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function normalizeAutoProxyName(name) {
+      const normalized = String(name || '').trim();
+      return PUBLIC_PROXIES.some((proxy) => proxy.name === normalized) ? normalized : '';
+    }
+
+    function getPreferredAutoProxy(providerKey) {
+      const stored = state.preferredAutoProxy?.[providerKey];
+      return normalizeAutoProxyName(stored);
+    }
+
+    function setPreferredAutoProxy(providerKey, proxyName) {
+      if (!state.preferredAutoProxy) {
+        state.preferredAutoProxy = { adsblol: '', opensky: '' };
+      }
+      const normalized = normalizeAutoProxyName(proxyName);
+      if ((state.preferredAutoProxy[providerKey] || '') === normalized) return;
+      state.preferredAutoProxy[providerKey] = normalized;
+      saveState();
+    }
+
+    function sanitizeProxyCooldowns(value) {
+      const result = {};
+      const source = value && typeof value === 'object' ? value : {};
+      PUBLIC_PROXIES.forEach((proxy) => {
+        const nextAllowedAt = Number(source[proxy.name]);
+        if (Number.isFinite(nextAllowedAt) && nextAllowedAt > Date.now()) {
+          result[proxy.name] = nextAllowedAt;
+        }
+      });
+      return result;
+    }
+
+    function getAutoProxyCooldowns(providerKey) {
+      if (!state.autoProxyCooldowns) {
+        state.autoProxyCooldowns = { adsblol: {}, opensky: {} };
+      }
+      if (!state.autoProxyCooldowns[providerKey]) {
+        state.autoProxyCooldowns[providerKey] = {};
+      }
+      return state.autoProxyCooldowns[providerKey];
+    }
+
+    function markAutoProxyCooldown(providerKey, proxyName, cooldownMs = PROXY_ERROR_COOLDOWN_MS) {
+      const normalized = normalizeAutoProxyName(proxyName);
+      if (!normalized) return;
+      const cooldowns = getAutoProxyCooldowns(providerKey);
+      cooldowns[normalized] = Date.now() + cooldownMs;
+      saveState();
+    }
+
+    function clearAutoProxyCooldown(providerKey, proxyName) {
+      const normalized = normalizeAutoProxyName(proxyName);
+      if (!normalized) return;
+      const cooldowns = getAutoProxyCooldowns(providerKey);
+      if (!(normalized in cooldowns)) return;
+      delete cooldowns[normalized];
+      saveState();
     }
 
     function currentProviderBackoff(providerKey = state.provider) {
@@ -1032,6 +1229,10 @@
       };
     }
 
+    function normalizeColorChoice(value, fallback) {
+      return /^#[0-9a-f]{6}$/i.test(String(value || '').trim()) ? String(value).trim() : fallback;
+    }
+
     function setMenuOpen(open) {
       runtime.menuOpen = open;
       menuButton.setAttribute('aria-expanded', String(open));
@@ -1049,6 +1250,8 @@
       proxyModeSelect.value = state.proxyMode;
       manualProxyInput.value = state.manualProxyUrl || '';
       radarColorInput.value = state.radarColor;
+      specialSquawkColorInput.value = state.specialSquawkColor;
+      emergencySquawkColorInput.value = state.emergencySquawkColor;
       fpsSelect.value = String(state.maxFps);
       manualProxyField.classList.toggle('hidden', state.proxyMode !== 'manual');
       document.querySelectorAll('input[name="themeMode"]').forEach((input) => {
@@ -1299,6 +1502,205 @@
       }
     };
 
+    const SQUAWK_CODE_GUIDE = {
+      '0000': '0000 is generally not a normal operational conspicuity code and often indicates missing, invalid, or special handling in tracking data.',
+      '1000': '1000 is used in some European procedures to indicate receipt of a discrete code or certain conspicuity/transfer situations, depending on local practice.',
+      '1200': '1200 is the standard VFR squawk in the United States.',
+      '2000': '2000 is commonly used in parts of Europe for IFR aircraft entering from areas where no discrete code has yet been assigned.',
+      '7000': '7000 is a common VFR conspicuity code in much of Europe.',
+      '7500': '7500 is the internationally recognized unlawful interference or hijack code.',
+      '7600': '7600 is the internationally recognized radio communication failure code.',
+      '7700': '7700 is the internationally recognized general emergency code.'
+    };
+
+    const FIELD_VALUE_LABELS = {
+      gs: 'ground speed',
+      track: 'ground track',
+      baro_rate: 'barometric climb rate',
+      geom_rate: 'geometric climb rate',
+      lat: 'latitude',
+      lon: 'longitude',
+      nic: 'navigation integrity category',
+      rc: 'radius of containment',
+      spi: 'special position identification',
+      alert: 'alert flag',
+      nac_p: 'position accuracy category',
+      nac_v: 'velocity accuracy category',
+      sil: 'surveillance integrity level',
+      sda: 'system design assurance',
+      gva: 'geometric vertical accuracy',
+      ias: 'indicated airspeed',
+      tas: 'true airspeed',
+      wd: 'wind direction',
+      ws: 'wind speed',
+      nav_qnh: 'selected pressure setting',
+      nav_altitude_mcp: 'selected MCP altitude',
+      nav_altitude_fms: 'selected FMS altitude'
+    };
+
+    const NAV_MODE_GUIDE = {
+      vnav: 'Vertical navigation mode is active, so the aircraft automation is following a vertical path or target profile.',
+      lnav: 'Lateral navigation mode is active, so the automation is following a route laterally.',
+      alt_hold: 'Altitude hold means the automation is trying to maintain the current altitude.',
+      heading: 'Heading mode means the aircraft is steering toward a selected heading rather than route tracking.',
+      approach: 'Approach mode means the aircraft is configured to capture an approach guidance source.'
+    };
+
+    const EMITTER_CATEGORY_GUIDE = {
+      A0: 'No specific ADS-B emitter category information is available.',
+      A1: 'Light aircraft, typically under about 15,500 lb / 7,000 kg.',
+      A2: 'Small aircraft, roughly above the light class but below transport-sized heavy categories.',
+      A3: 'Large fixed-wing aircraft such as common airliners.',
+      A4: 'High-vortex large aircraft, a special class often associated with types like the Boeing 757.',
+      A5: 'Heavy aircraft, the broad heavy-jet class.',
+      A6: 'High-performance aircraft, often used for unusually fast or high-energy aircraft classes.',
+      A7: 'Rotorcraft such as helicopters.',
+      B0: 'No specific surface/emergency vehicle category information is available.',
+      B1: 'Glider or sailplane.',
+      B2: 'Lighter-than-air aircraft such as balloons or airships.',
+      B3: 'Parachutist or skydiver-related emitter category.',
+      B4: 'Ultralight, hang-glider, or paraglider-style class.',
+      B5: 'Reserved or uncommon category depending on implementation.',
+      B6: 'Unmanned aerial vehicle / drone-style class in some mappings.',
+      B7: 'Space or trans-atmospheric vehicle class in some mappings.'
+    };
+
+    const SIL_TYPE_GUIDE = {
+      perhour: 'The SIL probability claim is interpreted over an hour of operation.',
+      persample: 'The SIL probability claim is interpreted per transmitted sample or message event.'
+    };
+
+    const FIELD_APPENDIX_GUIDES = {
+      'shared:squawk': {
+        intro: 'Squawk codes are four octal digits. Some are globally special, some are regional conspicuity codes, and many are just locally assigned discrete ATC codes.',
+        entries: [
+          { code: '0000', meaning: 'Usually missing, invalid, reset, or otherwise non-routine in public tracking data.' },
+          { code: '1000', meaning: 'Used in some European contexts to indicate receipt of a discrete code or related conspicuity/transfer handling.' },
+          { code: '1200', meaning: 'Standard VFR conspicuity code in the United States.' },
+          { code: '2000', meaning: 'Common IFR entry code in parts of Europe before a local discrete code is assigned.' },
+          { code: '7000', meaning: 'Common VFR conspicuity code in much of Europe.' },
+          { code: '7500', meaning: 'Unlawful interference / hijack emergency code.' },
+          { code: '7600', meaning: 'Radio communication failure emergency code.' },
+          { code: '7700', meaning: 'General emergency code.' },
+          { code: '75xx / 76xx / 77xx', meaning: 'Blocks worth attention because they surround the headline international emergency codes.' },
+          { code: 'Most other four-digit octal codes', meaning: 'Usually ordinary discrete ATC assignments with local meaning rather than globally fixed semantics.' }
+        ]
+      },
+      'shared:category': {
+        intro: 'Emitter categories are broad buckets. They describe class and rough role, not exact aircraft model or operator.',
+        entries: [
+          { code: 'A0', meaning: 'No specific ADS-B aircraft category information.' },
+          { code: 'A1', meaning: 'Light aircraft.' },
+          { code: 'A2', meaning: 'Small aircraft.' },
+          { code: 'A3', meaning: 'Large fixed-wing aircraft, often common airliners.' },
+          { code: 'A4', meaning: 'High-vortex large aircraft.' },
+          { code: 'A5', meaning: 'Heavy aircraft.' },
+          { code: 'A6', meaning: 'High-performance aircraft.' },
+          { code: 'A7', meaning: 'Rotorcraft.' },
+          { code: 'B0', meaning: 'No specific non-standard/surface/emergency category information.' },
+          { code: 'B1', meaning: 'Glider or sailplane.' },
+          { code: 'B2', meaning: 'Lighter-than-air aircraft.' },
+          { code: 'B3', meaning: 'Parachutist / skydiver-related emitter.' },
+          { code: 'B4', meaning: 'Ultralight, hang-glider, or paraglider-style class.' },
+          { code: 'B5-B7', meaning: 'Reserved, uncommon, unmanned, or special-purpose classes depending on implementation.' }
+        ]
+      },
+      'opensky:positionSource': {
+        intro: 'OpenSky uses a small enumerated source code for where the position came from.',
+        entries: [
+          { code: '0', meaning: 'ADS-B self-reported position.' },
+          { code: '1', meaning: 'ASTERIX or ground-system surveillance feed.' },
+          { code: '2', meaning: 'MLAT / multilateration-derived position.' }
+        ]
+      },
+      'adsblol:sil_type': {
+        intro: 'SIL type does not change the SIL number itself. It changes how you interpret the failure-probability claim behind that number.',
+        entries: [
+          { code: 'perhour', meaning: 'Interpret the integrity claim over an hour of operation.' },
+          { code: 'persample', meaning: 'Interpret the integrity claim per transmitted sample/message event.' }
+        ]
+      },
+      'adsblol:emergency': {
+        intro: 'Emergency state labels are provider interpretations of transponder/emergency signaling.',
+        entries: [
+          { code: 'none', meaning: 'No emergency state flagged.' },
+          { code: 'general', meaning: 'General emergency.' },
+          { code: 'lifeguard', meaning: 'Medical/mercy-flight priority style handling.' },
+          { code: 'minfuel', meaning: 'Minimum-fuel urgency.' },
+          { code: 'nordo', meaning: 'Radio communication failure.' },
+          { code: 'unlawful', meaning: 'Unlawful interference / hijack state.' },
+          { code: 'downed', meaning: 'Downed-aircraft or crash-related state.' },
+          { code: 'reserved', meaning: 'Reserved emergency value.' }
+        ]
+      },
+      'adsblol:version': {
+        intro: 'ADS-B version values describe message-generation capability, not software releases.',
+        entries: [
+          { code: '0', meaning: 'Earliest ADS-B generation with fewer capability details.' },
+          { code: '1', meaning: 'Intermediate generation with more structured capability signaling.' },
+          { code: '2', meaning: 'Mature modern generation commonly seen on current equipment.' }
+        ]
+      },
+      'adsblol:nic_baro': {
+        intro: 'NIC-baro is a compact flag rather than a scale.',
+        entries: [
+          { code: '0', meaning: 'No barometric integrity flag asserted here.' },
+          { code: '1', meaning: 'Barometric altitude integrity information is asserted.' }
+        ]
+      },
+      'adsblol:spi': {
+        intro: 'SPI / IDENT is a binary state.',
+        entries: [
+          { code: '0 / false', meaning: 'IDENT not active.' },
+          { code: '1 / true', meaning: 'IDENT active so the target highlights for ATC.' }
+        ]
+      },
+      'opensky:spi': {
+        intro: 'SPI / IDENT is a binary state.',
+        entries: [
+          { code: '0 / false', meaning: 'IDENT not active.' },
+          { code: '1 / true', meaning: 'IDENT active so the target highlights for ATC.' }
+        ]
+      },
+      'adsblol:alert': {
+        intro: 'Alert is a binary transponder-style status bit.',
+        entries: [
+          { code: '0 / false', meaning: 'Alert flag clear.' },
+          { code: '1 / true', meaning: 'Alert flag set.' }
+        ]
+      },
+      'opensky:onGround': {
+        intro: 'On-ground is a binary state rather than a measured value.',
+        entries: [
+          { code: 'false', meaning: 'Airborne.' },
+          { code: 'true', meaning: 'On the surface: parked, taxiing, lining up, or rolling out.' }
+        ]
+      }
+    };
+
+    const POSITION_SOURCE_GUIDE = {
+      0: 'ADS-B position source. The aircraft itself is broadcasting the surveillance position.',
+      1: 'ASTERIX or ground-system surveillance source. This is not a direct ADS-B self-report in the same sense.',
+      2: 'Multilateration source. The position is inferred from timing across multiple receivers.'
+    };
+
+    const EMERGENCY_STATE_GUIDE = {
+      none: 'No emergency state is being flagged in this snapshot.',
+      general: 'A general emergency state is being flagged.',
+      lifeguard: 'The aircraft is indicating a medical or mercy-flight style priority state.',
+      minfuel: 'The aircraft is indicating minimum-fuel urgency, which is serious but not the same as a declared distress emergency.',
+      nordo: 'The aircraft is indicating radio communication failure.',
+      unlawful: 'The aircraft is indicating unlawful interference or hijack status.',
+      downed: 'The aircraft is indicating a downed-aircraft or crash-related emergency state.',
+      reserved: 'The emergency field is using a reserved state code.'
+    };
+
+    const ADSB_VERSION_GUIDE = {
+      0: 'Version 0 is the earliest ADS-B generation and carries fewer capability and integrity details.',
+      1: 'Version 1 adds more structured capability signaling than the earliest generation.',
+      2: 'Version 2 is the mature modern form most commonly seen on current transport and GA equipment.'
+    };
+
     function buildDetail(label, value, key, scope = 'shared', rawValue = value) {
       return {
         label,
@@ -1442,6 +1844,435 @@
       return `${detail.value} means this part of the track is about ${detail.rawValue} seconds old. Larger numbers mean staler data.`;
     }
 
+    function formatFeet(value) {
+      if (!Number.isFinite(value)) return '---';
+      return `${Math.round(value)} ft`;
+    }
+
+    function findKnowledgeByFieldKey(fieldKey) {
+      return FIELD_KNOWLEDGE.adsblol[fieldKey]
+        || FIELD_KNOWLEDGE.opensky[fieldKey]
+        || FIELD_KNOWLEDGE.shared[fieldKey]
+        || null;
+    }
+
+    function normalizeFieldToken(token) {
+      return String(token || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+    }
+
+    function findPlaneDetail(plane, token) {
+      if (!plane?.infoDetails?.length) return null;
+      const normalized = normalizeFieldToken(token);
+      return plane.infoDetails.find((detail) => {
+        const labelToken = normalizeFieldToken(detail.label);
+        const keyToken = normalizeFieldToken(detail.key);
+        const titleToken = normalizeFieldToken(findKnowledgeByFieldKey(detail.key)?.title || '');
+        return normalized && (normalized === labelToken || normalized === keyToken || normalized === titleToken);
+      }) || null;
+    }
+
+    function buildInsight(text, jumpLabels = []) {
+      return { text, jumpLabels };
+    }
+
+    function normalizeInsight(line) {
+      if (line && typeof line === 'object' && !Array.isArray(line)) {
+        return {
+          text: String(line.text || ''),
+          jumpLabels: Array.isArray(line.jumpLabels) ? line.jumpLabels : []
+        };
+      }
+      return { text: String(line || ''), jumpLabels: [] };
+    }
+
+    function addBitInsights(numeric) {
+      if (!Number.isInteger(numeric) || numeric < 0) return [];
+      const setBits = [];
+      let working = numeric;
+      let bitIndex = 0;
+      while (working > 0) {
+        if (working & 1) setBits.push(bitIndex);
+        working >>= 1;
+        bitIndex += 1;
+      }
+      if (!setBits.length) {
+        return ['No bits are set in this value, so every provider-defined flag is currently off.'];
+      }
+      return [`Set bit positions: ${setBits.map((bit) => bit.toString()).join(', ')}.`];
+    }
+
+    function describeArrayEntries(values) {
+      return values.map((entry) => {
+        const knowledge = findKnowledgeByFieldKey(entry);
+        const title = knowledge?.title || FIELD_VALUE_LABELS[entry] || 'provider field';
+        return `${entry} (${title.toLowerCase()})`;
+      });
+    }
+
+    function getArrayEntryMeaning(entry) {
+      const knowledge = findKnowledgeByFieldKey(entry);
+      if (!knowledge) {
+        return `${entry} is another provider field referenced by this list, but Pocket Radar does not yet have a dedicated explanation for it.`;
+      }
+      const firstMeaning = Array.isArray(knowledge.meaning) && knowledge.meaning.length ? knowledge.meaning[0] : '';
+      const title = knowledge.title || FIELD_VALUE_LABELS[entry] || entry;
+      return firstMeaning
+        ? `${entry} (${title}) means ${firstMeaning.charAt(0).toLowerCase()}${firstMeaning.slice(1)}`
+        : `${entry} refers to ${title.toLowerCase()}.`;
+    }
+
+    function describeQualityBucket(value, fieldName) {
+      if (!Number.isFinite(value)) return `${fieldName} is not populated in this snapshot.`;
+      if (value <= 0) return `${fieldName} is at the bottom end of its reported scale here, which usually means little or no quality claim.`;
+      if (value >= 8) return `${fieldName} is relatively high here, which usually indicates a stronger quality or integrity claim.`;
+      if (value >= 4) return `${fieldName} is mid-scale here: usable, but not the strongest claim available.`;
+      return `${fieldName} is on the lower side here, so treat the corresponding position or velocity quality more cautiously.`;
+    }
+
+    function getSquawkInsights(rawValue) {
+      const insights = [];
+      const squawk = String(rawValue || '').trim();
+      if (!squawk || squawk === '---') {
+        return ['No squawk code is available in this snapshot.'];
+      }
+      if (/[^0-7]/.test(squawk)) {
+        insights.push('Squawk codes are normally octal-style digits only, so digits 8 or 9 usually suggest bad or transformed data.');
+      } else {
+        insights.push('A squawk is a four-digit transponder code using digits 0 through 7, not ordinary decimal numbering.');
+      }
+      if (SQUAWK_CODE_GUIDE[squawk]) {
+        insights.push(SQUAWK_CODE_GUIDE[squawk]);
+      } else if (squawk.startsWith('75')) {
+        insights.push('Codes in the 75xx block are worth special attention because 7500 is the hijack/unlawful-interference code.');
+      } else if (squawk.startsWith('76')) {
+        insights.push('Codes in the 76xx block are worth special attention because 7600 is the radio-failure code.');
+      } else if (squawk.startsWith('77')) {
+        insights.push('Codes in the 77xx block are worth special attention because 7700 is the general emergency code.');
+      } else {
+        insights.push('This looks like a routine operational or locally assigned discrete code rather than one of the headline international emergency conspicuity codes.');
+      }
+      return insights;
+    }
+
+    function getAltitudeValueInsights(detail) {
+      if (detail.rawValue === 'ground') {
+        return ['The provider is explicitly saying the aircraft is on the ground rather than giving a pressure altitude.', 'That is different from a small positive altitude: it is a state-style value, not a height measurement.'];
+      }
+      if (!Number.isFinite(detail.rawValue)) {
+        return ['No usable altitude value is present in this snapshot.'];
+      }
+      if (detail.rawValue < 0) {
+        return ['Negative altitude is possible relative to mean sea level in places below sea level, so a negative number is not automatically wrong.', `Current raw altitude: ${formatFeet(detail.rawValue)}.`];
+      }
+      if (detail.rawValue < 1000) {
+        return [`${formatFeet(detail.rawValue)} is low altitude in aviation terms and may correspond to departure, approach, circuit work, or local traffic.`, 'AGL means above local ground. This field is not AGL; it is using the provider altitude reference, typically pressure or geometric altitude.'];
+      }
+      if (detail.value.startsWith('FL')) {
+        return [`${detail.value} is being shown as a flight level because the altitude is high enough for that shorthand to be useful.`, 'Flight levels are pressure-based and standardized; they are not AGL and are not exact terrain clearance.'];
+      }
+      return [`${formatFeet(detail.rawValue)} is a moderate altitude value in this snapshot.`, 'If you compare barometric and geometric altitude and they differ, that often reflects different sensor/reference sources rather than a bug.'];
+    }
+
+    function getSpeedValueInsights(detail) {
+      if (!Number.isFinite(detail.rawValue)) return ['No usable speed value is present in this snapshot.'];
+      const value = detail.rawValue;
+      const insights = [];
+      if (detail.key === 'velocityMetersPerSecond') {
+        insights.push(`That is about ${Math.round(value * 1.94384)} kt in aviation units.`);
+      }
+      if (value < 30) {
+        insights.push('This is very slow for an aircraft and may indicate taxiing, rollout, or a stale/low-energy track.');
+      } else if (value < 120) {
+        insights.push('This is slow-aircraft territory: common for light general aviation, helicopters, or aircraft in the circuit.');
+      } else if (value < 250) {
+        insights.push('This is a moderate speed range, common for approach, climb, descent, or lower-level cruise.');
+      } else if (value < 500) {
+        insights.push('This is normal transport or business-jet en-route performance territory.');
+      } else {
+        insights.push('This is high speed for a public feed and is more typical of fast jets or very high-performance transport conditions.');
+      }
+      return insights;
+    }
+
+    function getHeadingValueInsights(detail) {
+      if (!Number.isFinite(detail.rawValue)) return ['No usable directional value is present in this snapshot.'];
+      const normalized = ((detail.rawValue % 360) + 360) % 360;
+      const insights = [`Headings and tracks wrap around: 0° and 360° both point north, 90° east, 180° south, and 270° west.`];
+      if (normalized !== detail.rawValue) {
+        insights.push(`The raw value normalizes to ${normalized.toFixed(2)}° within the usual 0-359° compass circle.`);
+      }
+      if (normalized >= 315 || normalized < 45) insights.push('This current value points broadly northward.');
+      else if (normalized < 135) insights.push('This current value points broadly eastward.');
+      else if (normalized < 225) insights.push('This current value points broadly southward.');
+      else insights.push('This current value points broadly westward.');
+      return insights;
+    }
+
+    function getCoordinateValueInsights(detail) {
+      if (!Number.isFinite(detail.rawValue)) return ['No usable coordinate value is present in this snapshot.'];
+      const insights = [];
+      if (detail.key.includes('lat')) {
+        insights.push('Latitude normally stays between -90 and +90 degrees.');
+      } else {
+        insights.push('Longitude normally stays between -180 and +180 degrees.');
+      }
+      if (Math.abs(detail.rawValue) < 0.01) {
+        insights.push('This value is very close to zero on its axis, meaning the aircraft is near the equator or prime meridian for that coordinate.');
+      }
+      return insights;
+    }
+
+    function getAgeValueInsights(detail) {
+      if (!Number.isFinite(detail.rawValue)) return ['No usable age value is present in this snapshot.'];
+      if (detail.rawValue < 1) return ['This is extremely fresh data by public-feed standards.'];
+      if (detail.rawValue < 5) return ['This is still fresh enough to feel nearly live on a public web radar.'];
+      if (detail.rawValue < 20) return ['This data is a little old already, but still often usable for situational awareness.'];
+      return ['This is stale enough that the aircraft may already have moved noticeably from the plotted point.'];
+    }
+
+    function getSignalInsights(detail) {
+      if (!Number.isFinite(detail.rawValue)) return ['No usable signal-strength value is present in this snapshot.'];
+      if (detail.rawValue > -10) return ['This is a strong received signal relative to the weaker values commonly seen in public feeders.'];
+      if (detail.rawValue > -20) return ['This is a moderate signal strength.'];
+      return ['This is on the weaker side, which can correlate with noisier or more intermittent tracking.'];
+    }
+
+    function getListInsights(detail) {
+      if (!Array.isArray(detail.rawValue) || !detail.rawValue.length) {
+        return ['This list is empty in the current snapshot, so the provider is not flagging any values here.'];
+      }
+      const described = describeArrayEntries(detail.rawValue);
+      const intro = detail.key === 'nav_modes'
+        ? 'Each listed item is an active automation mode label rather than a measurement.'
+        : 'Each listed item names another field whose value was sourced, relayed, or modified through this mechanism.';
+      const insights = [intro, buildInsight(`This snapshot lists: ${described.join(', ')}.`, detail.rawValue)];
+      if (detail.key === 'nav_modes') {
+        detail.rawValue.forEach((mode) => {
+          if (NAV_MODE_GUIDE[mode]) insights.push(`${mode}: ${NAV_MODE_GUIDE[mode]}`);
+        });
+      } else {
+        detail.rawValue.forEach((entry) => {
+          insights.push(buildInsight(getArrayEntryMeaning(entry), [entry]));
+        });
+      }
+      return insights;
+    }
+
+    function getBooleanInsights(detail) {
+      if (typeof detail.rawValue !== 'boolean') return [];
+      return [detail.rawValue ? 'The current value is set or active.' : 'The current value is clear or inactive.'];
+    }
+
+    function getQualityInsights(detail) {
+      const fieldName = detail.label;
+      const insights = [describeQualityBucket(detail.rawValue, fieldName)];
+      if (detail.key === 'rc' && Number.isFinite(detail.rawValue)) {
+        insights.push(detail.rawValue <= 200 ? 'A smaller containment radius is better because it means the reported position is expected to be tightly bounded.' : 'A larger containment radius means more uncertainty around the exact horizontal position.');
+      }
+      if (detail.key === 'gva' && Number.isFinite(detail.rawValue)) {
+        insights.push('GVA is a category code, not a direct feet or meter value, so compare it as a class rather than a raw measurement.');
+      }
+      return insights;
+    }
+
+    function getVersionInsights(detail) {
+      if (!Number.isFinite(detail.rawValue)) return ['No ADS-B version value is present in this snapshot.'];
+      return ADSB_VERSION_GUIDE[detail.rawValue]
+        ? [ADSB_VERSION_GUIDE[detail.rawValue], 'Higher version numbers here mean newer message capability generations, not a software patch level.']
+        : [`Version ${detail.value} is not one of the common 0/1/2 values Pocket Radar currently explains explicitly.`];
+    }
+
+    function getEmergencyInsights(detail) {
+      const code = String(detail.rawValue || '').trim().toLowerCase();
+      if (!code || code === '---') {
+        return ['No emergency-state value is present in this snapshot.'];
+      }
+      const insight = EMERGENCY_STATE_GUIDE[code] || `${detail.value} is an emergency-state label not yet mapped by the current guide.`;
+      return [insight, code === 'none' ? 'This is the normal everyday value for most aircraft records.' : 'Emergency-state fields are provider interpretations and should be treated as important but not infallible.'];
+    }
+
+    function getAlertInsights(detail) {
+      if (typeof detail.rawValue !== 'boolean' && !Number.isFinite(detail.rawValue)) {
+        return ['No alert-flag value is present in this snapshot.'];
+      }
+      const active = detail.rawValue === true || detail.rawValue === 1;
+      return active
+        ? ['The alert flag is set in this snapshot.', 'This is a classic transponder status bit and can indicate special ATC alerting significance depending on the avionics and downstream decoder.']
+        : ['The alert flag is clear in this snapshot.', 'Most routine flights will show the non-alert state most of the time.'];
+    }
+
+    function getSpiInsights(detail) {
+      if (typeof detail.rawValue !== 'boolean' && !Number.isFinite(detail.rawValue)) {
+        return ['No SPI/IDENT value is present in this snapshot.'];
+      }
+      const active = detail.rawValue === true || detail.rawValue === 1;
+      return active
+        ? ['SPI/IDENT is active right now.', 'That usually means the pilot has triggered IDENT so the target highlights for ATC.']
+        : ['SPI/IDENT is not active in this snapshot.'];
+    }
+
+    function getOnGroundInsights(detail) {
+      if (typeof detail.rawValue !== 'boolean') return ['No on-ground flag is present in this snapshot.'];
+      return detail.rawValue
+        ? ['The provider currently considers the aircraft on the surface rather than airborne.', 'That can mean parked, taxiing, lining up, or rolling out after landing.']
+        : ['The provider currently considers the aircraft airborne.'];
+    }
+
+    function getCategoryInsights(detail) {
+      const code = String(detail.rawValue || '').trim().toUpperCase();
+      if (!code || code === '---') {
+        return ['No emitter category value is present in this snapshot.'];
+      }
+      const insights = [];
+      if (EMITTER_CATEGORY_GUIDE[code]) {
+        insights.push(`${code} usually means ${EMITTER_CATEGORY_GUIDE[code]}`);
+      } else {
+        insights.push(`${code} is an emitter-category-style code, but Pocket Radar does not yet have a dedicated mapping for this exact value.`);
+      }
+      insights.push('Emitter categories are broad buckets. They are useful for rough class and performance intuition, not exact model identification.');
+      if (code.startsWith('A')) {
+        insights.push('The A-series generally covers powered aircraft classes, often fixed-wing and rotorcraft groupings.');
+      } else if (code.startsWith('B')) {
+        insights.push('The B-series generally covers lighter, special, unmanned, or unusual emitter classes depending on the implementation.');
+      }
+      return insights;
+    }
+
+    function getSilTypeInsights(detail) {
+      const code = String(detail.rawValue || '').trim().toLowerCase();
+      if (!code || code === '---') {
+        return ['No SIL type is present in this snapshot.'];
+      }
+      return SIL_TYPE_GUIDE[code]
+        ? [SIL_TYPE_GUIDE[code], 'This does not change the SIL number itself; it tells you how to interpret the probability claim behind that number.']
+        : [`${detail.value} is a SIL interpretation mode not explicitly covered by the current guide.`];
+    }
+
+    function getNicBaroInsights(detail) {
+      if (!Number.isFinite(detail.rawValue)) return ['No NIC-baro flag is present in this snapshot.'];
+      return detail.rawValue === 1
+        ? ['A value of 1 usually means barometric altitude integrity information is available in the ADS-B quality signaling.']
+        : ['A value of 0 usually means the feed is not signaling barometric altitude integrity in that flag.'];
+    }
+
+    function getDbFlagsInsights(detail) {
+      if (!Number.isFinite(detail.rawValue)) return ['No provider database flags are present in this snapshot.'];
+      const numeric = Number(detail.rawValue);
+      const binary = `0b${numeric.toString(2)}`;
+      return [
+        `This is a provider-defined bitfield value of ${numeric} (${binary}).`,
+        ...addBitInsights(numeric),
+        'Bitfields pack several on/off flags into one number, so the exact meaning depends on provider internals unless they document each bit explicitly.'
+      ];
+    }
+
+    function getValueInsights(detail, plane) {
+      switch (`${detail.scope}:${detail.key}`) {
+        case 'adsblol:squawk':
+        case 'opensky:squawk':
+          return getSquawkInsights(detail.rawValue);
+        case 'adsblol:mlat':
+        case 'adsblol:tisb':
+        case 'adsblol:nav_modes':
+        case 'opensky:sensors':
+          return getListInsights(detail);
+        case 'shared:altitude':
+        case 'adsblol:alt_baro':
+        case 'adsblol:alt_geom':
+        case 'opensky:barometricAltitudeMeters':
+        case 'opensky:geometricAltitudeMeters':
+          return getAltitudeValueInsights(detail);
+        case 'shared:speed':
+        case 'adsblol:gs':
+        case 'adsblol:ias':
+        case 'adsblol:tas':
+        case 'opensky:velocityMetersPerSecond':
+          return getSpeedValueInsights(detail);
+        case 'shared:heading':
+        case 'adsblol:track':
+        case 'adsblol:true_heading':
+        case 'adsblol:mag_heading':
+        case 'opensky:trueTrack':
+        case 'shared:bearingFromYou':
+        case 'adsblol:dir':
+          return getHeadingValueInsights(detail);
+        case 'shared:latitude':
+        case 'shared:longitude':
+        case 'adsblol:lat':
+        case 'adsblol:lon':
+        case 'opensky:latitude':
+        case 'opensky:longitude':
+          return getCoordinateValueInsights(detail);
+        case 'adsblol:seen':
+        case 'adsblol:seen_pos':
+          return getAgeValueInsights(detail);
+        case 'adsblol:rssi':
+          return getSignalInsights(detail);
+        case 'adsblol:nic':
+        case 'adsblol:nac_p':
+        case 'adsblol:nac_v':
+        case 'adsblol:sil':
+        case 'adsblol:sda':
+        case 'adsblol:rc':
+        case 'adsblol:gva':
+          return getQualityInsights(detail);
+        case 'opensky:onGround':
+          return getOnGroundInsights(detail);
+        case 'opensky:spi':
+        case 'adsblol:spi':
+          return getSpiInsights(detail);
+        case 'adsblol:alert':
+          return getAlertInsights(detail);
+        case 'opensky:positionSource':
+          return typeof detail.rawValue === 'number'
+            ? [`Position source code ${detail.rawValue} is a small enumerated code, not a scale: ${POSITION_SOURCE_GUIDE[detail.rawValue] || 'this value is not recognized by the current guide.'}`]
+            : ['This position source code is not populated in the current snapshot.'];
+        case 'adsblol:category':
+        case 'opensky:category':
+          return getCategoryInsights(detail);
+        case 'adsblol:emergency':
+          return getEmergencyInsights(detail);
+        case 'adsblol:version':
+          return getVersionInsights(detail);
+        case 'adsblol:mach':
+          return Number.isFinite(detail.rawValue)
+            ? [`Mach ${detail.rawValue.toFixed(3)} means about ${Math.round(detail.rawValue * 100)}% of the local speed of sound.`, detail.rawValue >= 0.75 ? 'That is typical jet-cruise territory.' : 'That is below typical high-speed jet-cruise Mach numbers.']
+            : ['No usable Mach value is present in this snapshot.'];
+        case 'adsblol:messages':
+          return Number.isFinite(detail.rawValue)
+            ? [detail.rawValue < 100 ? 'This is a lightly established track so far.' : detail.rawValue < 5000 ? 'This is a reasonably established track in the provider view.' : 'This is a heavily seen track with lots of provider message history.']
+            : ['No usable message-count value is present in this snapshot.'];
+        case 'shared:range':
+          return Number.isFinite(detail.rawValue)
+            ? [detail.rawValue < 5 ? 'This aircraft is very close to your location.' : detail.rawValue < 25 ? 'This aircraft is nearby on the local scope.' : 'This aircraft is toward the outer part of the current radar range.']
+            : ['No usable range value is present in this snapshot.'];
+        case 'adsblol:sil_type':
+          return getSilTypeInsights(detail);
+        case 'adsblol:nic_baro':
+          return getNicBaroInsights(detail);
+        case 'adsblol:dbFlags':
+          return getDbFlagsInsights(detail);
+        default:
+          if (typeof detail.rawValue === 'number') {
+            return [`This is a numeric value. In this snapshot it is ${detail.value}.`, 'Whether higher or lower is “better” depends on the field; some are measurements, others are encoded categories.'];
+          }
+          if (Array.isArray(detail.rawValue)) {
+            return getListInsights(detail);
+          }
+          return detail.value === '---'
+            ? ['The provider did not populate this field in the current snapshot.']
+            : [`Current value: ${detail.value}.`];
+      }
+    }
+
+    function getFieldAppendix(detail) {
+      const exact = FIELD_APPENDIX_GUIDES[`${detail.scope}:${detail.key}`];
+      if (exact) return exact;
+      if (detail.key === 'squawk') return FIELD_APPENDIX_GUIDES['shared:squawk'];
+      if (detail.key === 'category') return FIELD_APPENDIX_GUIDES['shared:category'];
+      return null;
+    }
+
     function formatFieldContext(detail, plane) {
       switch (`${detail.scope}:${detail.key}`) {
         case 'shared:provider':
@@ -1540,17 +2371,85 @@
       });
     }
 
+    function renderHelpValueDetails(container, lines) {
+      container.replaceChildren();
+      (lines && lines.length ? lines : ['No extra value-specific notes are available yet.']).forEach((line) => {
+        const normalized = normalizeInsight(line);
+        const item = document.createElement('li');
+        const text = document.createElement('span');
+        text.textContent = normalized.text;
+        item.appendChild(text);
+        const jumpLabels = normalized.jumpLabels
+          .filter((label, index, labels) => labels.indexOf(label) === index)
+          .filter((label) => findPlaneDetail(runtime.selectedPlane, label));
+        if (jumpLabels.length) {
+          const links = document.createElement('div');
+          links.className = 'help-jump-links';
+          jumpLabels.forEach((label) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'help-inline-link';
+            button.textContent = label;
+            button.addEventListener('click', () => {
+              const targetDetail = findPlaneDetail(runtime.selectedPlane, label);
+              if (targetDetail && runtime.selectedPlane) {
+                openFieldHelp(targetDetail, runtime.selectedPlane, { replace: true });
+              }
+            });
+            links.appendChild(button);
+          });
+          item.appendChild(links);
+        }
+        container.appendChild(item);
+      });
+    }
+
     function renderHelpRelated(container, related) {
       container.replaceChildren();
       (related && related.length ? related : ['Provider']).forEach((label) => {
-        const chip = document.createElement('span');
+        const chip = document.createElement('button');
+        chip.type = 'button';
         chip.className = 'help-chip';
         chip.textContent = label;
+        chip.addEventListener('click', () => {
+          const targetDetail = findPlaneDetail(runtime.selectedPlane, label);
+          if (targetDetail && runtime.selectedPlane) {
+            openFieldHelp(targetDetail, runtime.selectedPlane, { replace: true });
+          }
+        });
         container.appendChild(chip);
       });
     }
 
-    function normalizeAdsbLolPlane(item, origin, rangeNm) {
+    function renderHelpAppendix(section, container, appendix) {
+      container.replaceChildren();
+      if (!appendix?.entries?.length) {
+        section.classList.add('hidden');
+        return;
+      }
+      section.classList.remove('hidden');
+      if (appendix.intro) {
+        const intro = document.createElement('p');
+        intro.className = 'help-appendix-intro';
+        intro.textContent = appendix.intro;
+        container.appendChild(intro);
+      }
+      const list = document.createElement('div');
+      list.className = 'help-appendix-list';
+      appendix.entries.forEach((entry) => {
+        const item = document.createElement('div');
+        item.className = 'help-appendix-item';
+        const code = document.createElement('strong');
+        code.textContent = entry.code;
+        const meaning = document.createElement('span');
+        meaning.textContent = entry.meaning;
+        item.append(code, meaning);
+        list.appendChild(item);
+      });
+      container.appendChild(list);
+    }
+
+    function normalizeAdsbLolPlane(item, origin, rangeNm, snapshotAtMs, predictionWindowMs) {
       if (!item || typeof item !== 'object') return null;
       const latitude = toFiniteNumber(item.lat);
       const longitude = toFiniteNumber(item.lon);
@@ -1560,6 +2459,7 @@
       const hex = item.hex;
       const registration = item.r;
       const aircraftType = item.t;
+      const squawk = formatSquawkCode(item.squawk);
       const baroAltitudeFeet = toFiniteNumber(item.alt_baro);
       const geometricAltitudeFeet = toFiniteNumber(item.alt_geom);
       const groundSpeedKt = toFiniteNumber(item.gs);
@@ -1585,14 +2485,25 @@
         altitudeFt,
         speedKt: groundSpeedKt,
         trackDeg,
+        squawk,
         distanceNm: relative.distanceNm,
-        bearingDeg: relative.bearingDeg
+        bearingDeg: relative.bearingDeg,
+        snapshotAtMs,
+        predictionWindowMs,
+        predictionLatitude: latitude,
+        predictionLongitude: longitude,
+        predictionDistanceNm: relative.distanceNm,
+        predictionBearingDeg: relative.bearingDeg,
+        predictionSnapshotAtMs: snapshotAtMs,
+        snapshotSignature: buildPlaneSnapshotSignature(latitude, longitude, groundSpeedKt, trackDeg, altitudeFt, squawk)
       };
+      plane.detailInfoLine = `${plane.detailHeading}  ${plane.detailAltitude}`;
+      plane.detailSquawk = `SQK ${plane.squawk}`;
       plane.infoDetails = buildAdsbLolDetails(item, plane);
       return plane;
     }
 
-    function normalizeOpenSkyPlane(item, origin, rangeNm) {
+    function normalizeOpenSkyPlane(item, origin, rangeNm, snapshotAtMs, predictionWindowMs) {
       if (!Array.isArray(item)) return null;
       const [
         icao24,
@@ -1608,7 +2519,8 @@
         trueTrack,
         ,
         ,
-        geoAltitudeMeters
+        geoAltitudeMeters,
+        squawk
       ] = item;
 
       const longitudeValue = toFiniteNumber(longitude);
@@ -1638,9 +2550,20 @@
         altitudeFt: altitudeFeet,
         speedKt,
         trackDeg,
+        squawk: formatSquawkCode(squawk),
         distanceNm: relative.distanceNm,
-        bearingDeg: relative.bearingDeg
+        bearingDeg: relative.bearingDeg,
+        snapshotAtMs,
+        predictionWindowMs,
+        predictionLatitude: latitudeValue,
+        predictionLongitude: longitudeValue,
+        predictionDistanceNm: relative.distanceNm,
+        predictionBearingDeg: relative.bearingDeg,
+        predictionSnapshotAtMs: snapshotAtMs,
+        snapshotSignature: buildPlaneSnapshotSignature(latitudeValue, longitudeValue, speedKt, trackDeg, altitudeFeet, formatSquawkCode(squawk))
       };
+      plane.detailInfoLine = `${plane.detailHeading}  ${plane.detailAltitude}`;
+      plane.detailSquawk = `SQK ${plane.squawk}`;
       plane.infoDetails = buildOpenSkyDetails(item, plane);
       return plane;
     }
@@ -1651,6 +2574,225 @@
       return String(fallback || 'UNKNOWN').toUpperCase();
     }
 
+    function formatSquawkCode(value) {
+      const squawk = String(value || '').trim();
+      return squawk || '---';
+    }
+
+    function buildPlaneSnapshotSignature(latitude, longitude, speedKt, trackDeg, altitudeFt, squawk) {
+      return [
+        Number.isFinite(latitude) ? latitude.toFixed(5) : '---',
+        Number.isFinite(longitude) ? longitude.toFixed(5) : '---',
+        Number.isFinite(speedKt) ? speedKt.toFixed(2) : '---',
+        Number.isFinite(trackDeg) ? trackDeg.toFixed(2) : '---',
+        Number.isFinite(altitudeFt) ? altitudeFt.toFixed(0) : '---',
+        squawk || '---'
+      ].join('|');
+    }
+
+    function getPredictedPlaneState(plane, timestamp) {
+      if (!runtime.userLocation) {
+        return {
+          latitude: plane.predictionLatitude ?? plane.latitude,
+          longitude: plane.predictionLongitude ?? plane.longitude,
+          distanceNm: plane.predictionDistanceNm ?? plane.distanceNm,
+          bearingDeg: plane.predictionBearingDeg ?? plane.bearingDeg
+        };
+      }
+      const baseLatitude = plane.predictionLatitude ?? plane.latitude;
+      const baseLongitude = plane.predictionLongitude ?? plane.longitude;
+      const baseDistanceNm = plane.predictionDistanceNm ?? plane.distanceNm;
+      const baseBearingDeg = plane.predictionBearingDeg ?? plane.bearingDeg;
+      const baseSnapshotAtMs = plane.predictionSnapshotAtMs ?? plane.snapshotAtMs;
+      if (!Number.isFinite(baseLatitude) || !Number.isFinite(baseLongitude) || !Number.isFinite(plane.speedKt) || !Number.isFinite(plane.trackDeg) || !Number.isFinite(baseSnapshotAtMs)) {
+        return {
+          latitude: baseLatitude,
+          longitude: baseLongitude,
+          distanceNm: baseDistanceNm,
+          bearingDeg: baseBearingDeg
+        };
+      }
+
+      const elapsedMs = clamp(timestamp - baseSnapshotAtMs, 0, plane.predictionWindowMs || 0);
+      const projectedDistanceNm = plane.speedKt * (elapsedMs / 3600000);
+      if (!(projectedDistanceNm > 0)) {
+        return {
+          latitude: baseLatitude,
+          longitude: baseLongitude,
+          distanceNm: baseDistanceNm,
+          bearingDeg: baseBearingDeg
+        };
+      }
+
+      const projected = destinationPoint(baseLatitude, baseLongitude, plane.trackDeg, projectedDistanceNm);
+      const relative = getBearingAndDistanceNm(runtime.userLocation.lat, runtime.userLocation.lon, projected.lat, projected.lon);
+      return {
+        latitude: projected.lat,
+        longitude: projected.lon,
+        distanceNm: relative.distanceNm,
+        bearingDeg: relative.bearingDeg
+      };
+    }
+
+    function destinationPoint(latitude, longitude, bearingDeg, distanceNm) {
+      const angularDistance = (distanceNm * 1852) / 6371000;
+      const bearing = toRadians(bearingDeg);
+      const lat1 = toRadians(latitude);
+      const lon1 = toRadians(longitude);
+      const sinLat1 = Math.sin(lat1);
+      const cosLat1 = Math.cos(lat1);
+      const sinAngular = Math.sin(angularDistance);
+      const cosAngular = Math.cos(angularDistance);
+
+      const lat2 = Math.asin((sinLat1 * cosAngular) + (cosLat1 * sinAngular * Math.cos(bearing)));
+      const lon2 = lon1 + Math.atan2(
+        Math.sin(bearing) * sinAngular * cosLat1,
+        cosAngular - (sinLat1 * Math.sin(lat2))
+      );
+
+      return {
+        lat: toDegrees(lat2),
+        lon: ((toDegrees(lon2) + 540) % 360) - 180
+      };
+    }
+
+    function classifySquawkColor(plane) {
+      if (!plane?.squawk || plane.squawk === '---') return state.radarColor;
+      if (plane.squawk === '7500' || plane.squawk === '7600' || plane.squawk === '7700') {
+        return state.emergencySquawkColor;
+      }
+      if (SQUAWK_CODE_GUIDE[plane.squawk]) {
+        return state.specialSquawkColor;
+      }
+      return state.radarColor;
+    }
+
+    function createTrailState(snapshotAtMs) {
+      return {
+        points: [],
+        lastSnapshotAt: snapshotAtMs || 0
+      };
+    }
+
+    function createTrailSample(plane, timestamp) {
+      return {
+        latitude: plane.latitude,
+        longitude: plane.longitude,
+        distanceNm: plane.distanceNm,
+        bearingDeg: plane.bearingDeg,
+        at: timestamp
+      };
+    }
+
+    function sameTrailSample(a, b) {
+      if (!a || !b) return false;
+      return a.latitude === b.latitude && a.longitude === b.longitude && a.at === b.at;
+    }
+
+    function projectTrailSample(sample) {
+      const relative = runtime.userLocation && Number.isFinite(sample.latitude) && Number.isFinite(sample.longitude)
+        ? getBearingAndDistanceNm(runtime.userLocation.lat, runtime.userLocation.lon, sample.latitude, sample.longitude)
+        : { distanceNm: sample.distanceNm, bearingDeg: sample.bearingDeg };
+      if (!Number.isFinite(relative.distanceNm) || !Number.isFinite(relative.bearingDeg)) return null;
+      return relative;
+    }
+
+    function midpoint(a, b) {
+      return {
+        x: (a.x + b.x) * 0.5,
+        y: (a.y + b.y) * 0.5
+      };
+    }
+
+    function drawSafeSmoothedTrail(points) {
+      if (points.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      if (points.length === 2) {
+        ctx.lineTo(points[1].x, points[1].y);
+        return;
+      }
+      for (let index = 1; index < points.length - 1; index += 1) {
+        const current = points[index];
+        const next = points[index + 1];
+        const end = midpoint(current, next);
+        ctx.quadraticCurveTo(current.x, current.y, end.x, end.y);
+      }
+      const tail = points[points.length - 1];
+      ctx.lineTo(tail.x, tail.y);
+    }
+
+    function attachPlaneTrails(nextPlanes) {
+      const previousPlanes = new Map(runtime.planes.map((plane) => [plane.id, plane]));
+      const nextTrailMap = new Map();
+      const planesWithTrails = nextPlanes.map((plane) => {
+        const previous = previousPlanes.get(plane.id);
+        const trail = runtime.planeTrailMap.get(plane.id) || createTrailState(plane.snapshotAtMs);
+        plane.trail = trail;
+        if (previous && previous.snapshotSignature === plane.snapshotSignature) {
+          const continued = getPredictedPlaneState(previous, plane.snapshotAtMs);
+          plane.predictionLatitude = continued.latitude;
+          plane.predictionLongitude = continued.longitude;
+          plane.predictionDistanceNm = continued.distanceNm;
+          plane.predictionBearingDeg = continued.bearingDeg;
+          plane.predictionSnapshotAtMs = plane.snapshotAtMs;
+        } else {
+          const nextSample = createTrailSample(plane, plane.snapshotAtMs);
+          const lastSample = trail.points[trail.points.length - 1];
+          if (!sameTrailSample(lastSample, nextSample)) {
+            trail.points.push(nextSample);
+          }
+          trail.lastSnapshotAt = plane.snapshotAtMs;
+        }
+        nextTrailMap.set(plane.id, trail);
+        return plane;
+      });
+      runtime.planeTrailMap = nextTrailMap;
+      return planesWithTrails;
+    }
+
+    function drawPlaneTrail(plane, markerRgb, predicted) {
+      const points = plane?.trail?.points;
+      if (!points || !points.length) return;
+      const rangeNm = RANGE_OPTIONS_NM[state.rangeIndex];
+      const trailPixels = [];
+      points.forEach((sample) => {
+        const projected = projectTrailSample(sample);
+        if (!projected || projected.distanceNm > rangeNm) return;
+        const ratio = projected.distanceNm / rangeNm;
+        const bearingRad = toRadians(projected.bearingDeg - 90);
+        trailPixels.push({
+          x: runtime.centerX + Math.cos(bearingRad) * runtime.radius * ratio,
+          y: runtime.centerY + Math.sin(bearingRad) * runtime.radius * ratio
+        });
+      });
+      if (trailPixels.length >= 2) {
+        ctx.strokeStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, 0.22)`;
+        ctx.lineWidth = 1.3;
+        drawSafeSmoothedTrail(trailPixels);
+        ctx.stroke();
+      }
+      const lastSample = points[points.length - 1];
+      const lastProjected = projectTrailSample(lastSample);
+      if (!lastProjected || !Number.isFinite(predicted.distanceNm) || predicted.distanceNm > rangeNm) return;
+      const lastRatio = lastProjected.distanceNm / rangeNm;
+      const lastBearingRad = toRadians(lastProjected.bearingDeg - 90);
+      const fromX = runtime.centerX + Math.cos(lastBearingRad) * runtime.radius * lastRatio;
+      const fromY = runtime.centerY + Math.sin(lastBearingRad) * runtime.radius * lastRatio;
+      const predictedRatio = predicted.distanceNm / rangeNm;
+      const predictedBearingRad = toRadians(predicted.bearingDeg - 90);
+      const toX = runtime.centerX + Math.cos(predictedBearingRad) * runtime.radius * predictedRatio;
+      const toY = runtime.centerY + Math.sin(predictedBearingRad) * runtime.radius * predictedRatio;
+      if (Math.hypot(toX - fromX, toY - fromY) >= 1) {
+        ctx.strokeStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, 0.52)`;
+        ctx.lineWidth = 1.7;
+        ctx.beginPath();
+        ctx.moveTo(fromX, fromY);
+        ctx.lineTo(toX, toY);
+        ctx.stroke();
+      }
+    }
+
     function buildProxyUrl(targetUrl, proxyPattern) {
       if (!proxyPattern) return targetUrl;
       const pattern = String(proxyPattern).trim();
@@ -1658,6 +2800,33 @@
       if (pattern.includes('%s')) return pattern.replace('%s', encodeURIComponent(targetUrl));
       if (/[=]$/.test(pattern) || /[?&]url=$/i.test(pattern)) return `${pattern}${encodeURIComponent(targetUrl)}`;
       return `${pattern}${targetUrl}`;
+    }
+
+    function buildAutoAttempts(targetUrl, providerKey) {
+      const provider = PROVIDERS[providerKey];
+      const preferredProxy = getPreferredAutoProxy(providerKey);
+      const cooldowns = getAutoProxyCooldowns(providerKey);
+      const now = Date.now();
+      const proxies = [...PUBLIC_PROXIES].filter((proxy) => {
+        const nextAllowedAt = Number(cooldowns[proxy.name]) || 0;
+        return nextAllowedAt <= now;
+      });
+      const usableProxies = proxies.length ? proxies : [...PUBLIC_PROXIES];
+      if (preferredProxy) {
+        usableProxies.sort((left, right) => {
+          if (left.name === preferredProxy) return -1;
+          if (right.name === preferredProxy) return 1;
+          return 0;
+        });
+      }
+      const attempts = [];
+      if (provider.directBrowserFriendly) {
+        attempts.push({ name: 'direct', url: targetUrl });
+      }
+      usableProxies.forEach((proxy) => {
+        attempts.push({ name: proxy.name, url: buildProxyUrl(targetUrl, proxy.pattern) });
+      });
+      return attempts;
     }
 
     class RateLimitError extends Error {
@@ -1693,8 +2862,13 @@
       return Number.isFinite(date) ? Math.max(0, date - Date.now()) : 0;
     }
 
+    function shouldContinueAutoAttempt(responseStatus, attemptName) {
+      if (state.proxyMode !== 'auto') return false;
+      if (attemptName === 'direct') return true;
+      return responseStatus >= 400;
+    }
+
     async function fetchJsonWithStrategy(targetUrl, providerKey) {
-      const provider = PROVIDERS[providerKey];
       const attempts = [];
       if (state.proxyMode === 'manual') {
         if (state.manualProxyUrl.trim()) {
@@ -1705,12 +2879,7 @@
       } else if (state.proxyMode === 'off') {
         attempts.push({ name: 'direct', url: targetUrl });
       } else {
-        if (provider.directBrowserFriendly) {
-          attempts.push({ name: 'direct', url: targetUrl });
-        }
-        PUBLIC_PROXIES.forEach((proxy) => {
-          attempts.push({ name: proxy.name, url: buildProxyUrl(targetUrl, proxy.pattern) });
-        });
+        attempts.push(...buildAutoAttempts(targetUrl, providerKey));
       }
 
       let lastError = null;
@@ -1722,15 +2891,25 @@
           }
           if (!response.ok) {
             lastError = new Error(`HTTP ${response.status} from ${attempt.name}`);
-            if (attempt.name === 'direct' && state.proxyMode === 'auto') continue;
+            if (state.proxyMode === 'auto' && attempt.name !== 'direct') {
+              markAutoProxyCooldown(providerKey, attempt.name);
+            }
+            if (shouldContinueAutoAttempt(response.status, attempt.name)) continue;
             throw lastError;
           }
           const payload = await response.json();
+          if (state.proxyMode === 'auto' && attempt.name !== 'direct') {
+            setPreferredAutoProxy(providerKey, attempt.name);
+            clearAutoProxyCooldown(providerKey, attempt.name);
+          }
           return { payload, transport: attempt.name };
         } catch (error) {
           if (error instanceof RateLimitError) throw error;
           lastError = error;
-          const shouldContinue = attempt.name === 'direct' && state.proxyMode === 'auto';
+          if (state.proxyMode === 'auto' && attempt.name !== 'direct' && attempt.name !== 'manual-proxy') {
+            markAutoProxyCooldown(providerKey, attempt.name);
+          }
+          const shouldContinue = state.proxyMode === 'auto' && attempt.name !== 'manual-proxy';
           if (shouldContinue) continue;
         }
       }
@@ -1820,11 +2999,14 @@
 
       try {
         const result = await fetchJsonWithStrategy(url, providerKey);
-        runtime.planes = provider.parse(result.payload, runtime.userLocation, rangeNm)
+        const snapshotAtMs = performance.now();
+        const refreshedAt = Date.now();
+        const predictionWindowMs = clamp(Math.round(record.currentIntervalMs * 1.2), provider.minIntervalMs, 45000);
+        runtime.planes = attachPlaneTrails(provider.parse(result.payload, runtime.userLocation, rangeNm, snapshotAtMs, predictionWindowMs))
           .sort((a, b) => a.distanceNm - b.distanceNm)
           .slice(0, 80);
         runtime.lastTransport = result.transport;
-        runtime.lastUpdatedAt = Date.now();
+        runtime.lastUpdatedAt = refreshedAt;
         runtime.lastError = '';
         settleBackoff(providerKey, result.transport);
         updateStatus(
@@ -1941,12 +3123,13 @@
       if (runtime.lastPaintAt && timestamp - runtime.lastPaintAt < frameInterval) {
         return;
       }
+      runtime.lastAnimationAt = runtime.lastPaintAt ? (timestamp - runtime.lastPaintAt) / 1000 : 0;
       runtime.lastPaintAt = timestamp;
       const angle = ((timestamp % SWEEP_PERIOD_MS) / SWEEP_PERIOD_MS) * Math.PI * 2;
       ctx.clearRect(0, 0, runtime.width, runtime.height);
       drawScopeBackground();
       drawSweep(angle);
-      drawAircraft(angle);
+      drawAircraft(angle, timestamp);
       drawCenterReticle();
     }
 
@@ -2028,9 +3211,8 @@
       ctx.restore();
     }
 
-    function drawAircraft(sweepAngle) {
+    function drawAircraft(sweepAngle, timestamp) {
       const rangeNm = RANGE_OPTIONS_NM[state.rangeIndex];
-      const rgb = hexToRgb(state.radarColor);
       runtime.planeHitRegions = [];
       ctx.save();
       ctx.font = '600 12px ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -2039,9 +3221,10 @@
       const labelEntries = [];
 
       runtime.planes.forEach((plane) => {
-        if (!Number.isFinite(plane.distanceNm) || plane.distanceNm > rangeNm) return;
-        const ratio = plane.distanceNm / rangeNm;
-        const bearingRad = toRadians(plane.bearingDeg - 90);
+        const predicted = getPredictedPlaneState(plane, timestamp);
+        if (!Number.isFinite(predicted.distanceNm) || predicted.distanceNm > rangeNm) return;
+        const ratio = predicted.distanceNm / rangeNm;
+        const bearingRad = toRadians(predicted.bearingDeg - 90);
         const x = runtime.centerX + Math.cos(bearingRad) * runtime.radius * ratio;
         const y = runtime.centerY + Math.sin(bearingRad) * runtime.radius * ratio;
         const planeAngle = Math.atan2(y - runtime.centerY, x - runtime.centerX) + Math.PI / 2;
@@ -2050,10 +3233,12 @@
         const side = x >= runtime.centerX ? 1 : -1;
         const leadX = x + side * 22;
         const leadY = y - 14;
+        const markerRgb = hexToRgb(classifySquawkColor(plane));
+        drawPlaneTrail(plane, markerRgb, predicted);
         const labelWidth = Math.max(
           ctx.measureText(plane.label).width,
-          ctx.measureText(plane.detailHeading).width,
-          ctx.measureText(plane.detailAltitude).width
+          ctx.measureText(plane.detailInfoLine).width,
+          ctx.measureText(plane.detailSquawk).width
         ) + 10;
         const labelX = leadX + (side > 0 ? 0 : -labelWidth);
         const labelY = leadY - 14;
@@ -2066,6 +3251,7 @@
           leadY,
           side,
           glow,
+          markerRgb,
           labelWidth,
           labelHeight: 42,
           labelX,
@@ -2073,12 +3259,12 @@
           preferredLabelY: labelY
         });
 
-        ctx.strokeStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${0.18 + glow * 0.62})`;
-        ctx.fillStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${0.22 + glow * 0.58})`;
+        ctx.strokeStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, ${0.18 + glow * 0.62})`;
+        ctx.fillStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, ${0.22 + glow * 0.58})`;
         ctx.lineWidth = 1.2;
         ctx.save();
         ctx.translate(x, y);
-        ctx.rotate(toRadians((plane.trackDeg || plane.bearingDeg) - 45));
+        ctx.rotate(toRadians((plane.trackDeg || predicted.bearingDeg) - 45));
         ctx.strokeRect(-4.5, -4.5, 9, 9);
         ctx.restore();
       });
@@ -2086,10 +3272,10 @@
       resolveLabelOverlaps(labelEntries);
 
       labelEntries.forEach((entry) => {
-        const { plane, x, y, leadX, leadY, side, glow, labelWidth, labelHeight, labelX, labelY } = entry;
+        const { plane, x, y, leadX, leadY, side, glow, markerRgb, labelWidth, labelHeight, labelX, labelY } = entry;
 
-        ctx.strokeStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${0.18 + glow * 0.62})`;
-        ctx.fillStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${0.22 + glow * 0.58})`;
+        ctx.strokeStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, ${0.18 + glow * 0.62})`;
+        ctx.fillStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, ${0.22 + glow * 0.58})`;
         ctx.lineWidth = 1.2;
         ctx.beginPath();
         ctx.moveTo(x, y);
@@ -2099,16 +3285,16 @@
 
         ctx.fillStyle = `rgba(3, 12, 7, ${0.46 + glow * 0.24})`;
         ctx.fillRect(labelX - 5, labelY - 4, labelWidth + 10, labelHeight);
-        ctx.strokeStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${0.25 + glow * 0.5})`;
+        ctx.strokeStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, ${0.25 + glow * 0.5})`;
         ctx.strokeRect(labelX - 5, labelY - 4, labelWidth + 10, labelHeight);
 
-        ctx.fillStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${0.74 + glow * 0.2})`;
+        ctx.fillStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, ${0.74 + glow * 0.2})`;
         ctx.textAlign = side > 0 ? 'left' : 'right';
         const textX = side > 0 ? labelX : labelX + labelWidth;
         ctx.fillText(plane.label, textX, labelY + 6);
-        ctx.fillStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${0.52 + glow * 0.18})`;
-        ctx.fillText(plane.detailHeading, textX, labelY + 18);
-        ctx.fillText(plane.detailAltitude, textX, labelY + 30);
+        ctx.fillStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, ${0.52 + glow * 0.18})`;
+        ctx.fillText(plane.detailInfoLine, textX, labelY + 18);
+        ctx.fillText(plane.detailSquawk, textX, labelY + 30);
 
         runtime.planeHitRegions.push({
           plane,
@@ -2133,6 +3319,16 @@
     function formatHeading(trackDeg) {
       if (!Number.isFinite(trackDeg)) return '---';
       return `${String(Math.round(trackDeg)).padStart(3, '0')}°`;
+    }
+
+    function resetMarkerColors() {
+      state.radarColor = DEFAULT_STATE.radarColor;
+      state.specialSquawkColor = DEFAULT_STATE.specialSquawkColor;
+      state.emergencySquawkColor = DEFAULT_STATE.emergencySquawkColor;
+      saveState();
+      applyRadarTint();
+      syncControlsFromState();
+      announce('Marker colours reset to defaults.');
     }
 
     function resolveLabelOverlaps(entries) {
@@ -2178,7 +3374,14 @@
       const valueEl = document.createElement('span');
       valueEl.textContent = formatValue(detail.value);
       stat.append(labelEl, valueEl);
-      stat.addEventListener('click', () => openFieldHelp(detail, plane));
+      stat.addEventListener('click', (event) => {
+        if (runtime.planeModalJustOpened) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        openFieldHelp(detail, plane);
+      });
       planeModalGrid.appendChild(stat);
     }
 
@@ -2189,6 +3392,7 @@
 
     function openFieldHelp(detail, plane, options = {}) {
       const knowledge = getFieldKnowledge(detail);
+      resetFieldHelpDom();
       runtime.fieldHelpOpen = true;
       runtime.selectedFieldDetail = detail;
       fieldHelpModal.hidden = false;
@@ -2197,31 +3401,91 @@
       fieldHelpTitle.textContent = knowledge.title || detail.label;
       fieldHelpValue.textContent = formatValue(detail.value);
       fieldHelpContext.textContent = formatFieldContext(detail, plane);
+      renderHelpValueDetails(fieldHelpValueDetails, getValueInsights(detail, plane));
       renderHelpParagraphs(fieldHelpMeaning, knowledge.meaning);
       renderHelpParagraphs(fieldHelpHistory, knowledge.history);
       renderHelpExamples(fieldHelpExamples, knowledge.examples);
       renderHelpRelated(fieldHelpRelated, knowledge.related);
-      if (!options.fromHistory) {
+      renderHelpAppendix(fieldHelpAppendixSection, fieldHelpAppendix, getFieldAppendix(detail));
+      if (!options.fromHistory && !options.replace) {
         pushModalHistoryState('field-help');
       }
       announce(`${detail.label} field guide opened.`);
     }
 
     function openPlaneModal(plane, options = {}) {
+      if (runtime.pendingPlaneModalFrame) {
+        cancelAnimationFrame(runtime.pendingPlaneModalFrame);
+        runtime.pendingPlaneModalFrame = 0;
+      }
+      if (runtime.fieldHelpOpen) {
+        closeFieldHelp({ fromHistory: true });
+      }
+      resetPlaneModalDom();
+      if (runtime.planeModalInteractionFrame) {
+        cancelAnimationFrame(runtime.planeModalInteractionFrame);
+      }
+      runtime.planeModalJustOpened = true;
       runtime.selectedPlane = plane;
       runtime.planeModalOpen = true;
       planeModal.hidden = false;
       planeModal.classList.add('open');
       planeModalTitle.textContent = 'Aircraft Info';
       const stats = plane.infoDetails?.length ? plane.infoDetails : [buildDetail('Callsign', plane.label, 'callsign')];
-      planeModalGrid.replaceChildren();
       stats.forEach((detail) => {
         appendModalStat(detail, plane);
+      });
+      planeModalGrid.classList.add('is-guarded');
+      runtime.planeModalInteractionFrame = requestAnimationFrame(() => {
+        runtime.planeModalInteractionFrame = requestAnimationFrame(() => {
+          runtime.planeModalInteractionFrame = 0;
+          runtime.planeModalJustOpened = false;
+          planeModalGrid.classList.remove('is-guarded');
+        });
       });
       if (!options.fromHistory) {
         pushModalHistoryState('plane');
       }
       announce(`${plane.label} details opened.`);
+    }
+
+    function clearPlaneModalInteractionGuard() {
+      if (runtime.planeModalInteractionFrame) {
+        cancelAnimationFrame(runtime.planeModalInteractionFrame);
+        runtime.planeModalInteractionFrame = 0;
+      }
+      runtime.planeModalJustOpened = false;
+      planeModalGrid.classList.remove('is-guarded');
+    }
+
+    function queuePlaneModalOpen(plane, options = {}) {
+      if (runtime.pendingPlaneModalFrame) {
+        cancelAnimationFrame(runtime.pendingPlaneModalFrame);
+      }
+      runtime.pendingPlaneModalFrame = requestAnimationFrame(() => {
+        runtime.pendingPlaneModalFrame = 0;
+        openPlaneModal(plane, options);
+      });
+    }
+
+    function resetFieldHelpDom() {
+      fieldHelpLabel.textContent = 'Field guide';
+      fieldHelpTitle.textContent = 'Field meaning';
+      fieldHelpValue.textContent = '---';
+      fieldHelpContext.textContent = '---';
+      fieldHelpValueDetails.replaceChildren();
+      fieldHelpMeaning.replaceChildren();
+      fieldHelpHistory.replaceChildren();
+      fieldHelpExamples.replaceChildren();
+      fieldHelpRelated.replaceChildren();
+      fieldHelpAppendix.replaceChildren();
+      fieldHelpAppendixSection.classList.add('hidden');
+    }
+
+    function resetPlaneModalDom() {
+      planeModalTitle.textContent = 'Aircraft Info';
+      planeModalGrid.replaceChildren();
+      clearPlaneModalInteractionGuard();
     }
 
     function closeFieldHelp(options = {}) {
@@ -2234,6 +3498,7 @@
       runtime.selectedFieldDetail = null;
       fieldHelpModal.classList.remove('open');
       fieldHelpModal.hidden = true;
+      resetFieldHelpDom();
       runtime.modalHistoryDepth = Math.max(0, runtime.modalHistoryDepth - 1);
     }
 
@@ -2244,10 +3509,16 @@
         return;
       }
       closeFieldHelp({ fromHistory: true });
+      clearPlaneModalInteractionGuard();
+      if (runtime.pendingPlaneModalFrame) {
+        cancelAnimationFrame(runtime.pendingPlaneModalFrame);
+        runtime.pendingPlaneModalFrame = 0;
+      }
       runtime.planeModalOpen = false;
       runtime.selectedPlane = null;
       planeModal.classList.remove('open');
       planeModal.hidden = true;
+      resetPlaneModalDom();
       runtime.modalHistoryDepth = Math.max(0, runtime.modalHistoryDepth - 1);
     }
 
@@ -2331,8 +3602,10 @@
       runtime.lastUpdatedAt = 0;
       runtime.lastError = '';
       runtime.lastPaintAt = 0;
+      runtime.lastAnimationAt = 0;
       runtime.planes = [];
       runtime.planeHitRegions = [];
+      runtime.planeTrailMap = new Map();
       applyTheme();
       applyRadarTint();
       syncControlsFromState();
@@ -2366,6 +3639,16 @@
         saveState();
         applyRadarTint();
       });
+      specialSquawkColorInput.addEventListener('input', () => {
+        state.specialSquawkColor = specialSquawkColorInput.value;
+        saveState();
+        syncControlsFromState();
+      });
+      emergencySquawkColorInput.addEventListener('input', () => {
+        state.emergencySquawkColor = emergencySquawkColorInput.value;
+        saveState();
+        syncControlsFromState();
+      });
       fpsSelect.addEventListener('change', () => {
         state.maxFps = clamp(Number(fpsSelect.value) || DEFAULT_STATE.maxFps, 12, 60);
         runtime.lastPaintAt = 0;
@@ -2378,6 +3661,7 @@
       requestLocationButton.addEventListener('click', () => requestLocation());
       recenterButton.addEventListener('click', () => scheduleFetch(50));
       resetSettingsButton.addEventListener('click', resetPageSettings);
+      resetColorsButton.addEventListener('click', resetMarkerColors);
       rangeDownButton.addEventListener('click', () => changeRange(-1));
       rangeUpButton.addEventListener('click', () => changeRange(1));
       window.addEventListener('resize', resizeCanvas, { passive: true });
@@ -2406,7 +3690,7 @@
       });
       canvas.addEventListener('click', (event) => {
         const plane = pickPlaneAt(event.clientX, event.clientY);
-        if (plane) openPlaneModal(plane);
+        if (plane) queuePlaneModalOpen(plane);
       });
       planeModal.addEventListener('click', (event) => {
         if (event.target === planeModal) closePlaneModal();
