@@ -452,6 +452,78 @@ function buildTransferCrewInInsufficientCreditsItems(options = {}) {
 ### 5) Root Menu Close vs Back
 If `isRoot` and the action is `Back`, render it as `Close` and set behavior to `close`.
 
+### 6) Guard Against Same-Gesture Activation
+When one click opens a menu, modal, or submenu containing new interactive children, do not let that same gesture activate a newly inserted button. This is how you get ghost/phantom clicks where the wrong submenu opens immediately.
+
+Use all three parts together when the UI swaps in fresh interactive DOM:
+- Defer the open one animation frame when the opener itself came from a pointer/click target.
+- Mark the new interactive container as guarded for 1-2 frames so its child buttons ignore the opening gesture.
+- Fully tear down interactive child DOM on close or before replace-navigation so hidden stale buttons cannot keep event listeners alive.
+
+```js
+const ui = {
+  pendingMenuFrame: 0,
+  menuJustOpened: false,
+  menuInteractionFrame: 0
+};
+
+function queueMenuOpen(menuKey, options = {}) {
+  if (ui.pendingMenuFrame) cancelAnimationFrame(ui.pendingMenuFrame);
+  ui.pendingMenuFrame = requestAnimationFrame(() => {
+    ui.pendingMenuFrame = 0;
+    openMenu(menuKey, options);
+  });
+}
+
+function openMenu(menuKey, options = {}) {
+  resetMenuDom();
+  ui.menuJustOpened = true;
+  panel.hidden = false;
+  panel.classList.add('open');
+  menuItems.classList.add('is-guarded');
+  renderUnifiedMenu(MENUS[menuKey], buildItems(menuKey), options);
+
+  ui.menuInteractionFrame = requestAnimationFrame(() => {
+    ui.menuInteractionFrame = requestAnimationFrame(() => {
+      ui.menuInteractionFrame = 0;
+      ui.menuJustOpened = false;
+      menuItems.classList.remove('is-guarded');
+    });
+  });
+}
+
+function bindMenuButton(button, action) {
+  button.addEventListener('click', (event) => {
+    if (ui.menuJustOpened) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    action();
+  });
+}
+
+function resetMenuDom() {
+  if (ui.pendingMenuFrame) {
+    cancelAnimationFrame(ui.pendingMenuFrame);
+    ui.pendingMenuFrame = 0;
+  }
+  if (ui.menuInteractionFrame) {
+    cancelAnimationFrame(ui.menuInteractionFrame);
+    ui.menuInteractionFrame = 0;
+  }
+  ui.menuJustOpened = false;
+  menuItems.classList.remove('is-guarded');
+  menuItems.replaceChildren();
+}
+```
+
+Implementation notes:
+- If a submenu replaces a child dialog/panel, close the child first and reset its DOM before opening the new one.
+- Prefer `replaceChildren()` over leaving hidden interactive nodes mounted.
+- If the opener is itself created during the same render pass, queue the open instead of opening synchronously from that click handler.
+- A CSS guard like `.is-guarded { pointer-events: none; }` is useful, but it is not enough on its own; keep the JS `menuJustOpened` guard too.
+
 ## Concurrency (Game Continues)
 Menus should **not pause** the simulation. Keep game state updates independent and let the menu update values via `refreshUnifiedMenuValues`.
 
@@ -486,6 +558,7 @@ if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
 - [ ] No action calls `openMenu` to refresh itself.
 - [ ] Root menus show **Close**, submenus show **Back**.
 - [ ] Focus returns to game canvas on close.
+- [ ] Newly opened/replaced interactive DOM is guarded against same-gesture activation.
 
 ## Use This Skill When
 
