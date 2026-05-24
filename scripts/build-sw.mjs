@@ -179,6 +179,16 @@ async function ensureFonts() {
   });
 
   await writeFontFaceSheet({
+    packageName: 'intel-one-mono',
+    family: 'Intel One Mono',
+    weights: [400, 500, 700],
+    filePattern: (weight) => `intel-one-mono-latin-${weight}-normal.woff2`,
+    cssFileName: 'intel-one-mono.css',
+    outputDirName: 'intel-one-mono',
+    licenseTarget: 'intel-one-mono-OFL.txt',
+  });
+
+  await writeFontFaceSheet({
     packageName: 'caveat',
     family: 'Caveat',
     weights: [400, 500, 600, 700],
