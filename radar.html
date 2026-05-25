@@ -4052,6 +4052,104 @@
       ctx.restore();
     }
 
+    function isEmergencySquawk(plane) {
+      return plane?.squawk === '7500' || plane?.squawk === '7600' || plane?.squawk === '7700';
+    }
+
+    function isSpecialSquawk(plane) {
+      return Boolean(plane?.squawk && plane.squawk !== '---' && SQUAWK_CODE_GUIDE[plane.squawk] && !isEmergencySquawk(plane));
+    }
+
+    function isGroundClusterPlane(plane) {
+      if (plane?.onGround === true) return true;
+      if (plane?.altitudeBaroRaw === 'ground') return true;
+      return Number.isFinite(plane?.speedKt) && plane.speedKt < 35;
+    }
+
+    function getHeadingDeltaDegrees(leftPlane, rightPlane) {
+      if (!Number.isFinite(leftPlane?.trackDeg) || !Number.isFinite(rightPlane?.trackDeg)) return 0;
+      return Math.abs(((leftPlane.trackDeg - rightPlane.trackDeg + 540) % 360) - 180);
+    }
+
+    function prioritizeLabelCandidates(candidates) {
+      // Label slots are intentionally allocated by operational salience rather than
+      // raw nearest-first order. The current priority balance is:
+      // 1) emergency squawks
+      // 2) special squawks
+      // 3) airborne near-miss / conflict-like situations
+      // 4) normal moving airborne traffic
+      // 5) recent sweep emphasis and nearby distance as softer tie-breakers
+      // Dense low-speed/on-ground clusters are penalized so airport queues do not
+      // crowd out more relevant airborne traffic, but sparse edge cases still keep
+      // some flexibility because the cluster penalty only ramps up with density.
+      return candidates
+        .map((candidate) => {
+          let nearbyCount = 0;
+          let busyGroundClusterCount = 0;
+          let nearMissCount = 0;
+
+          candidates.forEach((other) => {
+            if (candidate === other) return;
+            const markerDistancePx = Math.hypot(candidate.x - other.x, candidate.y - other.y);
+            if (markerDistancePx > 72) return;
+
+            nearbyCount += 1;
+
+            const candidateGroundish = isGroundClusterPlane(candidate.plane);
+            const otherGroundish = isGroundClusterPlane(other.plane);
+            if (candidateGroundish && otherGroundish && markerDistancePx <= 48) {
+              busyGroundClusterCount += 1;
+            }
+
+            const altitudeGapFt = Number.isFinite(candidate.plane.altitudeFt) && Number.isFinite(other.plane.altitudeFt)
+              ? Math.abs(candidate.plane.altitudeFt - other.plane.altitudeFt)
+              : Infinity;
+            const headingDelta = getHeadingDeltaDegrees(candidate.plane, other.plane);
+            const bothAirborne = !candidateGroundish && !otherGroundish;
+            const bothMoving = (candidate.plane.speedKt || 0) > 55 && (other.plane.speedKt || 0) > 55;
+            const converging = headingDelta >= 20 || markerDistancePx <= 34;
+            if (bothAirborne && bothMoving && markerDistancePx <= 64 && altitudeGapFt <= 2500 && converging) {
+              nearMissCount += 1;
+            }
+          });
+
+          const distanceNm = Number.isFinite(candidate.plane.distanceNm) ? candidate.plane.distanceNm : 999;
+          const movingBonus = Number.isFinite(candidate.plane.speedKt)
+            ? clamp(candidate.plane.speedKt / 18, 0, 18)
+            : 0;
+          const distanceBonus = Math.max(0, 12 - distanceNm * 0.28);
+          const busyGroundPenalty = Math.max(0, busyGroundClusterCount - 1) * 90;
+          const generalClusterPenalty = Math.max(0, nearbyCount - nearMissCount - 1) * (isGroundClusterPlane(candidate.plane) ? 16 : 6);
+          const score =
+            (isEmergencySquawk(candidate.plane) ? 1000 : 0)
+            + (isSpecialSquawk(candidate.plane) ? 240 : 0)
+            + nearMissCount * 140
+            + (candidate.plane.onGround === true ? 0 : 28)
+            + movingBonus
+            + candidate.glow * 28
+            + distanceBonus
+            + (candidate.hasPreviousLayout ? 8 : 0)
+            - busyGroundPenalty
+            - generalClusterPenalty;
+
+          return {
+            ...candidate,
+            labelPriorityScore: score,
+            nearMissCount,
+            busyGroundClusterCount,
+            nearbyCount
+          };
+        })
+        .sort((left, right) => {
+          return right.labelPriorityScore - left.labelPriorityScore
+            || right.nearMissCount - left.nearMissCount
+            || Number(isEmergencySquawk(right.plane)) - Number(isEmergencySquawk(left.plane))
+            || Number(isSpecialSquawk(right.plane)) - Number(isSpecialSquawk(left.plane))
+            || left.plane.distanceNm - right.plane.distanceNm
+            || right.glow - left.glow;
+        });
+    }
+
     function drawAircraft(sweepAngle, timestamp) {
       const rangeNm = RANGE_OPTIONS_NM[state.rangeIndex];
       runtime.planeHitRegions = [];
@@ -4060,13 +4158,13 @@
       ctx.textBaseline = 'middle';
 
       const labelEntries = [];
+      const labelCandidates = [];
       const markerTargets = [];
       const visiblePlanes = getFilteredPlanes()
         .map((plane) => ({ plane, predicted: getPredictedPlaneState(plane, timestamp) }))
         .filter(({ predicted }) => Number.isFinite(predicted.distanceNm) && predicted.distanceNm <= rangeNm);
       const showMarkerLabels = isLayerEnabled('markerLabels');
       const maxVisibleLabels = normalizeMaxVisibleLabels(state.maxVisibleLabels);
-      let remainingLabelSlots = maxVisibleLabels;
 
       visiblePlanes.forEach(({ plane, predicted }) => {
         const ratio = predicted.distanceNm / rangeNm;
@@ -4103,11 +4201,10 @@
           : clampLabelY(preferredLabelY, labelHeight);
         const canShowLabel = showMarkerLabels
           && !shouldHidePlaneLabel(plane)
-          && labelLines.length > 0
-          && (remainingLabelSlots === null || remainingLabelSlots > 0);
+          && labelLines.length > 0;
 
         if (canShowLabel) {
-          labelEntries.push({
+          labelCandidates.push({
             plane,
             x,
             y,
@@ -4125,9 +4222,6 @@
             preferredLabelX: clampedPreferredLabelX,
             preferredLabelY
           });
-          if (remainingLabelSlots !== null) {
-            remainingLabelSlots -= 1;
-          }
         }
 
         ctx.strokeStyle = `rgba(${markerRgb.r}, ${markerRgb.g}, ${markerRgb.b}, ${0.18 + glow * 0.62})`;
@@ -4159,6 +4253,10 @@
       });
 
       if (showMarkerLabels) {
+        const prioritizedLabelEntries = prioritizeLabelCandidates(labelCandidates);
+        labelEntries.push(...(maxVisibleLabels === null
+          ? prioritizedLabelEntries
+          : prioritizedLabelEntries.slice(0, maxVisibleLabels)));
         solveLabelLayouts(labelEntries, markerTargets);
         labelEntries.forEach((entry) => {
           entry.side = resolveStableLabelSide(entry);
