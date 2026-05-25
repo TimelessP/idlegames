@@ -459,6 +459,7 @@ Use all three parts together when the UI swaps in fresh interactive DOM:
 - Defer the open one animation frame when the opener itself came from a pointer/click target.
 - Mark the new interactive container as guarded for 1-2 frames so its child buttons ignore the opening gesture.
 - Fully tear down interactive child DOM on close or before replace-navigation so hidden stale buttons cannot keep event listeners alive.
+- When a panel closes, blur any focused control inside it and make the closed overlay structurally absent, not just visually hidden.
 
 ```js
 const ui = {
@@ -521,6 +522,8 @@ function resetMenuDom() {
 Implementation notes:
 - If a submenu replaces a child dialog/panel, close the child first and reset its DOM before opening the new one.
 - Prefer `replaceChildren()` over leaving hidden interactive nodes mounted.
+- Do not rely on opacity or off-screen transforms alone for closed overlays. Closed panels should use explicit removal semantics such as `[hidden] { display: none !important; }` and `element.inert = true` so they cannot keep residual click targets or keyboard focus.
+- If multiple overlays can coexist in code paths, close the old overlay before opening the new one and blur focus within the old container as part of teardown.
 - If the opener is itself created during the same render pass, queue the open instead of opening synchronously from that click handler.
 - A CSS guard like `.is-guarded { pointer-events: none; }` is useful, but it is not enough on its own; keep the JS `menuJustOpened` guard too.
 
@@ -531,6 +534,7 @@ Menus should **not pause** the simulation. Keep game state updates independent a
 - Use a single menu key handler tied to the panel.
 - Avoid stealing focus when closing menus.
 - If you close the panel, blur the active element and return focus to the game canvas.
+- If you hide or replace an overlay that owns form controls, blur focus inside that overlay before removing it so mobile browsers do not keep a ghost input focus alive.
 - Always stop propagation for menu Enter/Escape/Space so input does not leak to gameplay.
 
 ```js
