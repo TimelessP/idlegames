@@ -3878,6 +3878,7 @@
       ctx.textBaseline = 'middle';
 
       const labelEntries = [];
+      const markerTargets = [];
       const visiblePlanes = getFilteredPlanes()
         .map((plane) => ({ plane, predicted: getPredictedPlaneState(plane, timestamp) }))
         .filter(({ predicted }) => Number.isFinite(predicted.distanceNm) && predicted.distanceNm <= rangeNm);
@@ -3965,6 +3966,13 @@
         ctx.strokeRect(-4.5, -4.5, 9, 9);
         ctx.restore();
 
+        markerTargets.push({
+          planeId: plane.id,
+          x,
+          y,
+          markerRadius: 12
+        });
+
         runtime.planeHitRegions.push({
           plane,
           x,
@@ -3978,7 +3986,7 @@
       });
 
       if (showMarkerLabels) {
-        resolveLabelOverlaps(labelEntries);
+        resolveLabelOverlaps(labelEntries, markerTargets);
         labelEntries.forEach((entry) => {
           entry.side = resolveStableLabelSide(entry);
         });
@@ -4058,11 +4066,10 @@
       announce('Marker colours reset to defaults.');
     }
 
-    function resolveLabelOverlaps(entries) {
+    function resolveLabelOverlaps(entries, markerTargets) {
       const springStrengthX = 0.03;
       const springStrengthY = 0.035;
       const damping = 0.52;
-      const markerClearance = 8;
       entries.sort((left, right) => left.labelY - right.labelY || left.labelX - right.labelX);
       for (let iteration = 0; iteration < 6; iteration += 1) {
         entries.forEach((entry) => {
@@ -4088,48 +4095,10 @@
             const horizontalOverlap = Math.min(current.labelX + current.labelWidth + 10, other.labelX + other.labelWidth + 10) - Math.max(current.labelX, other.labelX);
             const verticalOverlap = Math.min(current.labelY + current.labelHeight + 6, other.labelY + other.labelHeight + 6) - Math.max(current.labelY, other.labelY);
             if (!(horizontalOverlap > 0) || !(verticalOverlap > 0)) continue;
-            const currentCenterX = current.labelX + current.labelWidth * 0.5;
-            const otherCenterX = other.labelX + other.labelWidth * 0.5;
-            const currentCenterY = current.labelY + current.labelHeight * 0.5;
-            const otherCenterY = other.labelY + other.labelHeight * 0.5;
-            const directionX = currentCenterX <= otherCenterX ? -1 : 1;
-            const directionY = currentCenterY <= otherCenterY ? -1 : 1;
-            if (horizontalOverlap <= verticalOverlap * 1.15) {
-              const pushX = horizontalOverlap * 0.11 + 0.6;
-              const pushY = Math.min(1.2, verticalOverlap * 0.025);
-              current.velocityX += directionX * pushX;
-              other.velocityX -= directionX * pushX;
-              current.velocityY += directionY * pushY;
-              other.velocityY -= directionY * pushY;
-            } else {
-              const pushY = verticalOverlap * 0.12 + 0.7;
-              const pushX = Math.min(1.4, horizontalOverlap * 0.03);
-              current.velocityY += directionY * pushY;
-              other.velocityY -= directionY * pushY;
-              current.velocityX += directionX * pushX;
-              other.velocityX -= directionX * pushX;
-            }
+            separateLabelPair(current, other, horizontalOverlap, verticalOverlap, 0.28, 0.18);
           }
 
-          const labelLeft = current.labelX - 5;
-          const labelRight = current.labelX + current.labelWidth + 5;
-          const labelTop = current.labelY - 4;
-          const labelBottom = current.labelY + current.labelHeight + 4;
-          for (let markerIndex = 0; markerIndex < entries.length; markerIndex += 1) {
-            const markerEntry = entries[markerIndex];
-            if (markerEntry === current) continue;
-            const markerRadius = 12 + markerClearance;
-            const closestX = clamp(markerEntry.x, labelLeft, labelRight);
-            const closestY = clamp(markerEntry.y, labelTop, labelBottom);
-            const dx = markerEntry.x - closestX;
-            const dy = markerEntry.y - closestY;
-            const distanceSq = (dx * dx) + (dy * dy);
-            if (distanceSq >= markerRadius * markerRadius) continue;
-            const distance = Math.sqrt(distanceSq) || 0.001;
-            const overlap = markerRadius - distance;
-            current.velocityX -= (dx / distance) * overlap * 0.22;
-            current.velocityY -= (dy / distance) * overlap * 0.22;
-          }
+          applyMarkerAvoidanceForces(current, markerTargets);
         }
 
         entries.forEach((entry) => {
@@ -4160,10 +4129,10 @@
         });
       }
 
-      settleStaticLabelOverlaps(entries);
+      settleStaticLabelOverlaps(entries, markerTargets);
     }
 
-    function settleStaticLabelOverlaps(entries) {
+    function settleStaticLabelOverlaps(entries, markerTargets) {
       for (let iteration = 0; iteration < 3; iteration += 1) {
         let moved = false;
         for (let index = 0; index < entries.length; index += 1) {
@@ -4175,31 +4144,136 @@
             const horizontalOverlap = Math.min(current.labelX + current.labelWidth + 10, other.labelX + other.labelWidth + 10) - Math.max(current.labelX, other.labelX);
             const verticalOverlap = Math.min(current.labelY + current.labelHeight + 6, other.labelY + other.labelHeight + 6) - Math.max(current.labelY, other.labelY);
             if (!(horizontalOverlap > 0) || !(verticalOverlap > 0)) continue;
+            separateLabelPair(current, other, horizontalOverlap, verticalOverlap, 0.5, 0.3);
+            moved = true;
+          }
 
-            const currentCenterX = current.labelX + current.labelWidth * 0.5;
-            const otherCenterX = other.labelX + other.labelWidth * 0.5;
-            const currentCenterY = current.labelY + current.labelHeight * 0.5;
-            const otherCenterY = other.labelY + other.labelHeight * 0.5;
-
-            if (horizontalOverlap <= verticalOverlap * 1.15) {
-              const pushX = horizontalOverlap * 0.5 + 1;
-              const directionX = currentCenterX <= otherCenterX ? -1 : 1;
-              current.labelX += directionX * pushX;
-              other.labelX -= directionX * pushX;
-            } else {
-              const pushY = verticalOverlap * 0.5 + 1;
-              const directionY = currentCenterY <= otherCenterY ? -1 : 1;
-              current.labelY += directionY * pushY;
-              other.labelY -= directionY * pushY;
-            }
-
-            clampLabelPosition(current);
-            clampLabelPosition(other);
+          if (nudgeLabelAwayFromMarkers(current, markerTargets)) {
             moved = true;
           }
         }
         if (!moved) break;
       }
+    }
+
+    function getLabelBounds(entry) {
+      return {
+        left: entry.labelX - 5,
+        right: entry.labelX + entry.labelWidth + 5,
+        top: entry.labelY - 4,
+        bottom: entry.labelY + entry.labelHeight + 4
+      };
+    }
+
+    function separateLabelPair(current, other, horizontalOverlap, verticalOverlap, primaryStrength, crossStrength) {
+      const currentCenterX = current.labelX + current.labelWidth * 0.5;
+      const otherCenterX = other.labelX + other.labelWidth * 0.5;
+      const currentCenterY = current.labelY + current.labelHeight * 0.5;
+      const otherCenterY = other.labelY + other.labelHeight * 0.5;
+      const directionX = currentCenterX <= otherCenterX ? -1 : 1;
+      const directionY = currentCenterY <= otherCenterY ? -1 : 1;
+
+      if (horizontalOverlap <= verticalOverlap * 1.15) {
+        const pushX = horizontalOverlap * primaryStrength + 0.6;
+        const pushY = Math.min(1.2, verticalOverlap * crossStrength);
+        current.labelX += directionX * pushX;
+        other.labelX -= directionX * pushX;
+        current.labelY += directionY * pushY;
+        other.labelY -= directionY * pushY;
+        current.velocityX = 0;
+        other.velocityX = 0;
+      } else {
+        const pushY = verticalOverlap * primaryStrength + 0.7;
+        const pushX = Math.min(1.4, horizontalOverlap * crossStrength);
+        current.labelY += directionY * pushY;
+        other.labelY -= directionY * pushY;
+        current.labelX += directionX * pushX;
+        other.labelX -= directionX * pushX;
+        current.velocityY = 0;
+        other.velocityY = 0;
+      }
+
+      clampLabelPosition(current);
+      clampLabelPosition(other);
+    }
+
+    function getMarkerAvoidanceProfile(entry, markerTarget) {
+      const isOwnMarker = markerTarget.planeId === entry.plane.id;
+      return {
+        clearance: isOwnMarker ? 10 : 6,
+        dynamicStrength: isOwnMarker ? 0.16 : 0.08,
+        staticStrength: isOwnMarker ? 0.34 : 0.18
+      };
+    }
+
+    function getMarkerLabelOverlap(entry, markerTarget, markerRadius) {
+      const bounds = getLabelBounds(entry);
+      const closestX = clamp(markerTarget.x, bounds.left, bounds.right);
+      const closestY = clamp(markerTarget.y, bounds.top, bounds.bottom);
+      let dx = markerTarget.x - closestX;
+      let dy = markerTarget.y - closestY;
+      let distanceSq = (dx * dx) + (dy * dy);
+
+      if (distanceSq === 0) {
+        const leftGap = Math.abs(markerTarget.x - bounds.left);
+        const rightGap = Math.abs(bounds.right - markerTarget.x);
+        const topGap = Math.abs(markerTarget.y - bounds.top);
+        const bottomGap = Math.abs(bounds.bottom - markerTarget.y);
+        const smallestGap = Math.min(leftGap, rightGap, topGap, bottomGap);
+
+        if (smallestGap === topGap) {
+          dx = 0;
+          dy = -1;
+          distanceSq = topGap * topGap;
+        } else if (smallestGap === bottomGap) {
+          dx = 0;
+          dy = 1;
+          distanceSq = bottomGap * bottomGap;
+        } else if (smallestGap === leftGap) {
+          dx = -1;
+          dy = 0;
+          distanceSq = leftGap * leftGap;
+        } else {
+          dx = 1;
+          dy = 0;
+          distanceSq = rightGap * rightGap;
+        }
+      }
+
+      if (distanceSq >= markerRadius * markerRadius) return null;
+      const distance = Math.sqrt(distanceSq) || 0.001;
+      return {
+        dx,
+        dy,
+        distance,
+        overlap: markerRadius - distance
+      };
+    }
+
+    function applyMarkerAvoidanceForces(entry, markerTargets) {
+      markerTargets.forEach((markerTarget) => {
+        const profile = getMarkerAvoidanceProfile(entry, markerTarget);
+        const markerRadius = markerTarget.markerRadius + profile.clearance;
+        const overlap = getMarkerLabelOverlap(entry, markerTarget, markerRadius);
+        if (!overlap) return;
+        entry.velocityX -= (overlap.dx / overlap.distance) * overlap.overlap * profile.dynamicStrength;
+        entry.velocityY -= (overlap.dy / overlap.distance) * overlap.overlap * profile.dynamicStrength;
+      });
+    }
+
+    function nudgeLabelAwayFromMarkers(entry, markerTargets) {
+      let moved = false;
+      markerTargets.forEach((markerTarget) => {
+        const profile = getMarkerAvoidanceProfile(entry, markerTarget);
+        const markerRadius = markerTarget.markerRadius + profile.clearance;
+        const overlap = getMarkerLabelOverlap(entry, markerTarget, markerRadius);
+        if (!overlap) return;
+        entry.labelX -= (overlap.dx / overlap.distance) * overlap.overlap * profile.staticStrength;
+        entry.labelY -= (overlap.dy / overlap.distance) * overlap.overlap * profile.staticStrength;
+        clampLabelPosition(entry);
+        moved = true;
+      });
+      return moved;
     }
 
     function cacheLabelLayouts(entries) {
