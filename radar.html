@@ -1480,6 +1480,7 @@
 
   <script type="module">
     const STORAGE_KEY = 'idlegames-pocket-radar-v1';
+    const TRAIL_STORAGE_KEY = 'idlegames-pocket-radar-trails-v1';
     const RANGE_OPTIONS_NM = [5, 10, 15, 25, 50, 100, 150];
     const FETCH_TIMEOUT_MS = 12000;
     const SWEEP_PERIOD_MS = 9000;
@@ -3741,6 +3742,77 @@
       return points.filter((sample) => Number.isFinite(sample?.recordedAtUtcMs) && sample.recordedAtUtcMs >= oldestAllowedUtcMs);
     }
 
+    function normalizePersistedTrailSample(sample) {
+      const latitude = Number(sample?.latitude);
+      const longitude = Number(sample?.longitude);
+      const distanceNm = Number(sample?.distanceNm);
+      const bearingDeg = Number(sample?.bearingDeg);
+      const at = Number(sample?.at);
+      const recordedAtUtcMs = Number(sample?.recordedAtUtcMs);
+      if (!Number.isFinite(latitude)
+        || !Number.isFinite(longitude)
+        || !Number.isFinite(distanceNm)
+        || !Number.isFinite(bearingDeg)
+        || !Number.isFinite(at)
+        || !Number.isFinite(recordedAtUtcMs)) {
+        return null;
+      }
+      return {
+        latitude,
+        longitude,
+        distanceNm,
+        bearingDeg,
+        snapshotSignature: typeof sample?.snapshotSignature === 'string' ? sample.snapshotSignature : '',
+        at,
+        recordedAtUtcMs
+      };
+    }
+
+    function sanitizeTrailState(value, nowUtcMs = getCurrentUtcTimestampMs()) {
+      const normalizedPoints = Array.isArray(value?.points)
+        ? value.points.map((sample) => normalizePersistedTrailSample(sample)).filter(Boolean)
+        : [];
+      const lastSnapshotAt = Number(value?.lastSnapshotAt);
+      return {
+        points: pruneTrailPoints(normalizedPoints, nowUtcMs),
+        lastSnapshotAt: Number.isFinite(lastSnapshotAt) ? lastSnapshotAt : 0
+      };
+    }
+
+    function loadPersistedTrailMap() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(TRAIL_STORAGE_KEY) || '{}');
+        if (!parsed || typeof parsed !== 'object') return new Map();
+        const nowUtcMs = getCurrentUtcTimestampMs();
+        return new Map(
+          Object.entries(parsed)
+            .map(([planeId, trail]) => [String(planeId), sanitizeTrailState(trail, nowUtcMs)])
+            .filter(([planeId, trail]) => planeId && trail.points.length)
+        );
+      } catch (error) {
+        return new Map();
+      }
+    }
+
+    function savePersistedTrailMap() {
+      try {
+        const serialized = {};
+        const nowUtcMs = getCurrentUtcTimestampMs();
+        runtime.planeTrailMap.forEach((trail, planeId) => {
+          const sanitized = sanitizeTrailState(trail, nowUtcMs);
+          if (!sanitized.points.length) return;
+          serialized[planeId] = sanitized;
+        });
+        if (Object.keys(serialized).length) {
+          localStorage.setItem(TRAIL_STORAGE_KEY, JSON.stringify(serialized));
+        } else {
+          localStorage.removeItem(TRAIL_STORAGE_KEY);
+        }
+      } catch (error) {
+        // Ignore storage quota or transient persistence failures; live trails still continue in memory.
+      }
+    }
+
     function createTrailSample(plane, timestamp) {
       const recordedAtUtcMs = getCurrentUtcTimestampMs();
       return {
@@ -3835,6 +3907,7 @@
         return plane;
       });
       runtime.planeTrailMap = nextTrailMap;
+      savePersistedTrailMap();
       return planesWithTrails;
     }
 
@@ -4410,6 +4483,7 @@
 
     function drawAircraft(sweepAngle, timestamp) {
       const rangeNm = RANGE_OPTIONS_NM[state.rangeIndex];
+      const markerHitRadius = 12;
       runtime.planeHitRegions = [];
       ctx.save();
       ctx.font = '600 12px "Intel One Mono", "Inter", ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -4420,7 +4494,7 @@
       const markerTargets = [];
       const visiblePlanes = getFilteredPlanes()
         .map((plane) => ({ plane, predicted: getPredictedPlaneState(plane, timestamp) }))
-        .filter(({ predicted }) => Number.isFinite(predicted.distanceNm) && predicted.distanceNm <= rangeNm);
+        .filter(({ predicted }) => Number.isFinite(predicted.distanceNm));
       const showMarkerLabels = isLayerEnabled('markerLabels');
       const maxVisibleLabels = normalizeMaxVisibleLabels(state.maxVisibleLabels);
 
@@ -4429,6 +4503,7 @@
         const bearingRad = toRadians(predicted.bearingDeg - 90);
         const x = runtime.centerX + Math.cos(bearingRad) * runtime.radius * ratio;
         const y = runtime.centerY + Math.sin(bearingRad) * runtime.radius * ratio;
+        const isMarkerOnScreen = x >= 0 && x <= runtime.width && y >= 0 && y <= runtime.height;
         const planeAngle = Math.atan2(y - runtime.centerY, x - runtime.centerX) + Math.PI / 2;
         const diff = smallestAngleDifference(planeAngle, sweepAngle);
         const glow = clamp(1 - diff / 0.6, 0.18, 1);
@@ -4458,6 +4533,7 @@
           ? clampLabelY(previousLayout.labelY, labelHeight)
           : clampLabelY(preferredLabelY, labelHeight);
         const canShowLabel = showMarkerLabels
+          && isMarkerOnScreen
           && !shouldHidePlaneLabel(plane)
           && labelLines.length > 0;
 
@@ -4491,23 +4567,25 @@
         ctx.strokeRect(-4.5, -4.5, 9, 9);
         ctx.restore();
 
-        markerTargets.push({
-          planeId: plane.id,
-          x,
-          y,
-          markerRadius: 12
-        });
+        if (isMarkerOnScreen) {
+          markerTargets.push({
+            planeId: plane.id,
+            x,
+            y,
+            markerRadius: markerHitRadius
+          });
 
-        runtime.planeHitRegions.push({
-          plane,
-          x,
-          y,
-          labelX: 0,
-          labelY: 0,
-          labelWidth: 0,
-          labelHeight: 0,
-          markerRadius: 12
-        });
+          runtime.planeHitRegions.push({
+            plane,
+            x,
+            y,
+            labelX: 0,
+            labelY: 0,
+            labelWidth: 0,
+            labelHeight: 0,
+            markerRadius: markerHitRadius
+          });
+        }
       });
 
       if (showMarkerLabels) {
@@ -4554,7 +4632,7 @@
             labelY: labelY - 8,
             labelWidth: labelWidth + 16,
             labelHeight: labelHeight + 8,
-            markerRadius: 12
+            markerRadius: markerHitRadius
           });
         });
       } else {
@@ -5884,6 +5962,7 @@
 
     function resetPageSettings() {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(TRAIL_STORAGE_KEY);
       state = structuredClone(DEFAULT_STATE);
       runtime.lastTransport = 'direct';
       runtime.activeProviderKey = '';
@@ -5909,6 +5988,8 @@
     }
 
     function init() {
+      runtime.planeTrailMap = loadPersistedTrailMap();
+      savePersistedTrailMap();
       applyTheme();
       applyRadarTint();
       resizeCanvas();
