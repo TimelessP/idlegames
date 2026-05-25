@@ -1142,6 +1142,7 @@
             <div class="field">
               <label for="providerSelect">Provider</label>
               <select id="providerSelect">
+                <option value="auto">Auto selection</option>
                 <option value="adsblol">adsb.lol</option>
                 <option value="opensky">OpenSky</option>
               </select>
@@ -1491,6 +1492,8 @@
       { name: 'CodeTabs', pattern: 'https://api.codetabs.com/v1/proxy?quest=%s' }
     ];
 
+    const AUTO_PROVIDER_KEY = 'auto';
+
     const PROVIDERS = {
       adsblol: {
         label: 'adsb.lol',
@@ -1525,6 +1528,8 @@
         }
       }
     };
+
+    const PROVIDER_KEYS = Object.keys(PROVIDERS);
 
     const canvas = document.getElementById('radarCanvas');
     const ctx = canvas.getContext('2d');
@@ -1740,7 +1745,7 @@
             opensky: { ...defaultBackoff('opensky'), ...(parsed.providerBackoff?.opensky || {}) }
           }
         };
-        if (!PROVIDERS[merged.provider]) merged.provider = DEFAULT_STATE.provider;
+        merged.provider = normalizeProviderSelection(merged.provider);
         merged.proxyMode = normalizeProxyMode(merged.proxyMode);
         merged.rangeIndex = clamp(Math.round(merged.rangeIndex || 0), 0, RANGE_OPTIONS_NM.length - 1);
         merged.maxFps = clamp(Math.round(merged.maxFps || DEFAULT_STATE.maxFps), 12, 60);
@@ -1765,6 +1770,13 @@
 
     function saveState() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function normalizeProviderSelection(value) {
+      const normalized = String(value || '').trim();
+      return normalized === AUTO_PROVIDER_KEY || PROVIDERS[normalized]
+        ? normalized
+        : DEFAULT_STATE.provider;
     }
 
     function sanitizeVisibleLayers(value) {
@@ -1872,6 +1884,59 @@
         state.providerBackoff[providerKey] = defaultBackoff(providerKey);
       }
       return state.providerBackoff[providerKey];
+    }
+
+    function isAutoProviderSelection(providerKey = state.provider) {
+      return providerKey === AUTO_PROVIDER_KEY;
+    }
+
+    function getProviderStatusRank(status) {
+      switch (status) {
+        case 'ok':
+          return 0;
+        case 'idle':
+          return 1;
+        case 'error':
+          return 2;
+        case 'rate-limited':
+          return 3;
+        default:
+          return 4;
+      }
+    }
+
+    function getAutoProviderCandidates(now = Date.now()) {
+      return [...PROVIDER_KEYS].sort((leftKey, rightKey) => {
+        const left = currentProviderBackoff(leftKey);
+        const right = currentProviderBackoff(rightKey);
+        const leftCooling = left.nextAllowedAt > now;
+        const rightCooling = right.nextAllowedAt > now;
+        if (leftCooling !== rightCooling) return leftCooling ? 1 : -1;
+        if (leftCooling && rightCooling && left.nextAllowedAt !== right.nextAllowedAt) {
+          return left.nextAllowedAt - right.nextAllowedAt;
+        }
+        const statusRankDiff = getProviderStatusRank(left.lastStatus) - getProviderStatusRank(right.lastStatus);
+        if (statusRankDiff) return statusRankDiff;
+        if (left.lastSuccessAt !== right.lastSuccessAt) return right.lastSuccessAt - left.lastSuccessAt;
+        if (left.attempt !== right.attempt) return left.attempt - right.attempt;
+        if (left.currentIntervalMs !== right.currentIntervalMs) return left.currentIntervalMs - right.currentIntervalMs;
+        return PROVIDER_KEYS.indexOf(leftKey) - PROVIDER_KEYS.indexOf(rightKey);
+      });
+    }
+
+    function getPreferredProviderKey(now = Date.now()) {
+      return isAutoProviderSelection() ? getAutoProviderCandidates(now)[0] : state.provider;
+    }
+
+    function formatProviderSelectionLabel(providerKey = state.provider, now = Date.now()) {
+      if (!isAutoProviderSelection(providerKey)) return PROVIDERS[providerKey].label;
+      const preferredProviderKey = getPreferredProviderKey(now);
+      return `Auto selection (${PROVIDERS[preferredProviderKey].label})`;
+    }
+
+    function getProviderPollDueAt(providerKey, now = Date.now()) {
+      const record = currentProviderBackoff(providerKey);
+      return Math.max(now + 250, record.nextAllowedAt || 0, (record.lastPollAt || 0) + record.currentIntervalMs);
     }
 
     function clamp(value, min, max) {
@@ -2030,21 +2095,33 @@
     }
 
     function updateStaticHud() {
+      const now = Date.now();
       const rangeNm = RANGE_OPTIONS_NM[state.rangeIndex];
-      const chipProviderKey = runtime.activeProviderKey || state.provider;
+      const preferredProviderKey = getPreferredProviderKey(now);
+      const chipProviderKey = runtime.activeProviderKey || preferredProviderKey;
       const chipTransport = runtime.activeTransport
         ? `trying ${formatTransportLabel(runtime.activeTransport)}`
         : formatTransportLabel(runtime.lastTransport);
       rangeReadout.textContent = `${rangeNm} NM`;
-      providerChip.textContent = `${PROVIDERS[chipProviderKey].label} · ${chipTransport}`;
-      providerHint.textContent = state.provider === 'opensky'
-        ? 'OpenSky is global and no-key, but static browser pages typically need proxy fallback.'
-        : 'adsb.lol is no-key, but current browser clients usually need proxy fallback from static hosts too.';
-      const backoff = currentProviderBackoff(state.provider);
-      if (backoff.nextAllowedAt > Date.now()) {
-        providerBackoffMeta.textContent = `Cooling ${PROVIDERS[state.provider].label} for ${formatBackoffMs(backoff.nextAllowedAt - Date.now())} after ${backoff.lastStatus}.`;
+      providerChip.textContent = `${formatProviderSelectionLabel(runtime.activeProviderKey || state.provider, now)} · ${chipTransport}`;
+      if (isAutoProviderSelection()) {
+        providerHint.textContent = 'Auto selection prefers the healthiest provider and falls through to the other one after failures or cooldowns.';
+        const preferredBackoff = currentProviderBackoff(preferredProviderKey);
+        if (preferredBackoff.nextAllowedAt > now) {
+          providerBackoffMeta.textContent = `Auto selection cooling. Next provider: ${PROVIDERS[preferredProviderKey].label} in ${formatBackoffMs(preferredBackoff.nextAllowedAt - now)}.`;
+        } else {
+          providerBackoffMeta.textContent = `Auto selection currently prefers ${PROVIDERS[preferredProviderKey].label}. Next cadence: ${formatBackoffMs(preferredBackoff.currentIntervalMs)} (${preferredBackoff.lastTransport}).`;
+        }
       } else {
-        providerBackoffMeta.textContent = `Next poll cadence: ${formatBackoffMs(backoff.currentIntervalMs)} (${backoff.lastTransport}).`;
+        providerHint.textContent = state.provider === 'opensky'
+          ? 'OpenSky is global and no-key, but static browser pages typically need proxy fallback.'
+          : 'adsb.lol is no-key, but current browser clients usually need proxy fallback from static hosts too.';
+        const backoff = currentProviderBackoff(state.provider);
+        if (backoff.nextAllowedAt > now) {
+          providerBackoffMeta.textContent = `Cooling ${PROVIDERS[state.provider].label} for ${formatBackoffMs(backoff.nextAllowedAt - now)} after ${backoff.lastStatus}.`;
+        } else {
+          providerBackoffMeta.textContent = `Next poll cadence: ${formatBackoffMs(backoff.currentIntervalMs)} (${backoff.lastTransport}).`;
+        }
       }
       if (runtime.userLocation) {
         locationChip.textContent = formatLocationAccuracy(runtime.userLocation.accuracy);
@@ -4030,6 +4107,37 @@
       return responseStatus >= 400;
     }
 
+    function summarizeResponseBody(text) {
+      const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!normalized) return 'empty response body';
+      return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
+    }
+
+    function responseBodyLooksRateLimited(text) {
+      return /too many requests|rate[ -]?limit|slow down/i.test(String(text || ''));
+    }
+
+    async function parseJsonPayload(response, providerKey, attemptName) {
+      const bodyText = await response.text();
+      const trimmedBody = bodyText.trim();
+      if (response.status === 429 || responseBodyLooksRateLimited(trimmedBody)) {
+        throw new RateLimitError(`${PROVIDERS[providerKey].label} rate limited the request.`, parseRetryAfterMs(response), attemptName);
+      }
+      if (!trimmedBody) {
+        throw new Error(`Empty response body from ${attemptName}.`);
+      }
+      const contentType = response.headers.get('content-type') || '';
+      const likelyJson = /(?:application|text)\/[^;]*json/i.test(contentType) || /^[\[{]/.test(trimmedBody);
+      if (!likelyJson) {
+        throw new Error(`Non-JSON response from ${attemptName}: ${summarizeResponseBody(trimmedBody)}`);
+      }
+      try {
+        return JSON.parse(trimmedBody);
+      } catch (error) {
+        throw new Error(`Invalid JSON from ${attemptName}: ${summarizeResponseBody(trimmedBody)}`);
+      }
+    }
+
     async function fetchJsonWithStrategy(targetUrl, providerKey) {
       const attempts = [];
       if (state.proxyMode === 'manual') {
@@ -4064,7 +4172,7 @@
             if (shouldContinueAutoAttempt(response.status, attempt.name)) continue;
             throw lastError;
           }
-          const payload = await response.json();
+          const payload = await parseJsonPayload(response, providerKey, attempt.name);
           if (state.proxyMode === 'auto' && attempt.name !== 'direct') {
             setPreferredAutoProxy(providerKey, attempt.name);
             clearAutoProxyCooldown(providerKey, attempt.name);
@@ -4124,12 +4232,12 @@
     function scheduleFetch(delayMs = null) {
       window.clearTimeout(runtime.fetchTimer);
       if (document.visibilityState !== 'visible') return;
-      const providerKey = state.provider;
-      const record = currentProviderBackoff(providerKey);
       const now = Date.now();
       const dueAt = delayMs !== null
         ? now + delayMs
-        : Math.max(now + 250, record.nextAllowedAt || 0, (record.lastPollAt || 0) + record.currentIntervalMs);
+        : (isAutoProviderSelection()
+          ? getAutoProviderCandidates(now).reduce((soonest, providerKey) => Math.min(soonest, getProviderPollDueAt(providerKey, now)), Number.POSITIVE_INFINITY)
+          : getProviderPollDueAt(state.provider, now));
       runtime.fetchTimer = window.setTimeout(() => {
         void pollSelectedProvider();
       }, Math.max(0, dueAt - now));
@@ -4144,61 +4252,101 @@
         return;
       }
 
-      const providerKey = state.provider;
-      const provider = PROVIDERS[providerKey];
-      const record = currentProviderBackoff(providerKey);
-      if (record.nextAllowedAt > Date.now()) {
+      const rangeNm = RANGE_OPTIONS_NM[state.rangeIndex];
+      runtime.fetchInFlight = true;
+      const now = Date.now();
+      const candidateProviderKeys = isAutoProviderSelection() ? getAutoProviderCandidates(now) : [state.provider];
+      const readyProviderKeys = candidateProviderKeys.filter((providerKey) => currentProviderBackoff(providerKey).nextAllowedAt <= now);
+      if (!readyProviderKeys.length) {
+        const nextProviderKey = candidateProviderKeys[0];
+        const nextRecord = currentProviderBackoff(nextProviderKey);
+        runtime.fetchInFlight = false;
         updateStatus(
-          `${provider.label} is cooling down.`,
-          `Retrying in ${formatBackoffMs(record.nextAllowedAt - Date.now())} to avoid hammering shared limits.`,
+          isAutoProviderSelection() ? 'Providers are cooling down.' : `${PROVIDERS[nextProviderKey].label} is cooling down.`,
+          isAutoProviderSelection()
+            ? `Auto selection will retry ${PROVIDERS[nextProviderKey].label} in ${formatBackoffMs(nextRecord.nextAllowedAt - now)}.`
+            : `Retrying in ${formatBackoffMs(nextRecord.nextAllowedAt - now)} to avoid hammering shared limits.`,
           true
         );
         scheduleFetch();
         return;
       }
 
-      const rangeNm = RANGE_OPTIONS_NM[state.rangeIndex];
-      const url = provider.buildUrl(runtime.userLocation, rangeNm);
-
-      runtime.fetchInFlight = true;
-      record.lastPollAt = Date.now();
-      saveState();
-
       try {
-        const result = await fetchJsonWithStrategy(url, providerKey);
-        const snapshotAtMs = performance.now();
-        const refreshedAt = Date.now();
-        const predictionWindowMs = clamp(Math.round(record.currentIntervalMs * 1.2), provider.minIntervalMs, 45000);
-        runtime.planes = attachPlaneTrails(provider.parse(result.payload, runtime.userLocation, rangeNm, snapshotAtMs, predictionWindowMs))
-          .sort((a, b) => a.distanceNm - b.distanceNm)
-          .slice(0, 80);
-        if (runtime.filterModalOpen) {
-          renderFilterModal();
+        let lastError = null;
+        let lastFailedProviderKey = '';
+        for (const providerKey of readyProviderKeys) {
+          const provider = PROVIDERS[providerKey];
+          const record = currentProviderBackoff(providerKey);
+          const url = provider.buildUrl(runtime.userLocation, rangeNm);
+          record.lastPollAt = Date.now();
+          saveState();
+          try {
+            const result = await fetchJsonWithStrategy(url, providerKey);
+            const snapshotAtMs = performance.now();
+            const refreshedAt = Date.now();
+            const predictionWindowMs = clamp(Math.round(record.currentIntervalMs * 1.2), provider.minIntervalMs, 45000);
+            runtime.planes = attachPlaneTrails(provider.parse(result.payload, runtime.userLocation, rangeNm, snapshotAtMs, predictionWindowMs))
+              .sort((a, b) => a.distanceNm - b.distanceNm)
+              .slice(0, 80);
+            if (runtime.filterModalOpen) {
+              renderFilterModal();
+            }
+            runtime.lastTransport = result.transport;
+            runtime.lastUpdatedAt = refreshedAt;
+            runtime.lastError = '';
+            settleBackoff(providerKey, result.transport);
+            updateStatus(
+              `${runtime.planes.length} aircraft inside ${rangeNm} NM.`,
+              `${provider.label} via ${result.transport}. Last sweep refresh ${new Date(runtime.lastUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.`
+            );
+            return;
+          } catch (error) {
+            lastError = error;
+            lastFailedProviderKey = providerKey;
+            runtime.lastError = error instanceof Error ? error.message : String(error);
+            if (error instanceof RateLimitError) {
+              increaseBackoff(providerKey, error.retryAfterMs, error.transport);
+            } else {
+              softenErrorBackoff(providerKey);
+            }
+            if (!isAutoProviderSelection()) {
+              if (error instanceof RateLimitError) {
+                updateStatus(
+                  `${provider.label} asked us to slow down.`,
+                  `Cooling for ${formatBackoffMs(currentProviderBackoff(providerKey).nextAllowedAt - Date.now())} after a 429 on ${error.transport}.`,
+                  true
+                );
+              } else {
+                updateStatus(
+                  `Unable to refresh ${provider.label} right now.`,
+                  runtime.lastError || 'The request failed before data returned. Auto proxy mode may help.',
+                  true
+                );
+              }
+              break;
+            }
+          }
         }
-        runtime.lastTransport = result.transport;
-        runtime.lastUpdatedAt = refreshedAt;
-        runtime.lastError = '';
-        settleBackoff(providerKey, result.transport);
-        updateStatus(
-          `${runtime.planes.length} aircraft inside ${rangeNm} NM.`,
-          `${provider.label} via ${result.transport}. Last sweep refresh ${new Date(runtime.lastUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.`
-        );
-      } catch (error) {
-        runtime.lastError = error instanceof Error ? error.message : String(error);
-        if (error instanceof RateLimitError) {
-          increaseBackoff(providerKey, error.retryAfterMs, error.transport);
-          updateStatus(
-            `${provider.label} asked us to slow down.`,
-            `Cooling for ${formatBackoffMs(currentProviderBackoff(providerKey).nextAllowedAt - Date.now())} after a 429 on ${error.transport}.`,
-            true
-          );
-        } else {
-          softenErrorBackoff(providerKey);
-          updateStatus(
-            `Unable to refresh ${provider.label} right now.`,
-            runtime.lastError || 'The request failed before data returned. Auto proxy mode may help.',
-            true
-          );
+
+        if (isAutoProviderSelection()) {
+          const nextProviderKey = getAutoProviderCandidates()[0];
+          const nextRecord = currentProviderBackoff(nextProviderKey);
+          if (lastError instanceof RateLimitError && nextRecord.nextAllowedAt > Date.now()) {
+            updateStatus(
+              'Auto selection is cooling down.',
+              `Last provider rate-limited. Next retry: ${PROVIDERS[nextProviderKey].label} in ${formatBackoffMs(nextRecord.nextAllowedAt - Date.now())}.`,
+              true
+            );
+          } else {
+            updateStatus(
+              'Auto selection could not refresh right now.',
+              lastFailedProviderKey
+                ? `${PROVIDERS[lastFailedProviderKey].label}: ${runtime.lastError || 'The request failed before data returned.'}`
+                : (runtime.lastError || 'The request failed before data returned.'),
+              true
+            );
+          }
         }
       } finally {
         runtime.fetchInFlight = false;
@@ -5929,10 +6077,10 @@
     }
 
     function handleProviderChange() {
-      state.provider = providerSelect.value;
+      state.provider = normalizeProviderSelection(providerSelect.value);
       saveState();
       syncControlsFromState();
-      announce(`Provider changed to ${PROVIDERS[state.provider].label}.`);
+      announce(`Provider changed to ${formatProviderSelectionLabel(state.provider)}.`);
       scheduleFetch(250);
     }
 
