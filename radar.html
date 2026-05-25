@@ -796,19 +796,37 @@
       cursor: grab;
       user-select: none;
       -webkit-user-select: none;
+      touch-action: none;
     }
 
     .label-order-row.is-dragging {
-      opacity: 0.58;
-      border-color: rgba(var(--accent-rgb), 0.42);
-      background: rgba(var(--accent-rgb), 0.08);
+      opacity: 0.18;
+      border-color: rgba(var(--accent-rgb), 0.24);
+      background: rgba(var(--accent-rgb), 0.04);
       cursor: grabbing;
     }
 
-    .label-order-row.is-drop-target {
+    .label-order-row.is-drag-preview {
+      position: fixed;
+      left: 0;
+      top: 0;
+      z-index: 8;
+      width: 0;
+      margin: 0;
+      opacity: 0.96;
       border-color: rgba(var(--accent-rgb), 0.46);
-      box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.28);
+      background: rgba(var(--accent-rgb), 0.12);
+      box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+      pointer-events: none;
+      cursor: grabbing;
+    }
+
+    .label-order-placeholder {
+      border-radius: 16px;
+      border: 1px dashed rgba(var(--accent-rgb), 0.46);
       background: rgba(var(--accent-rgb), 0.08);
+      box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.18);
+      transition: height 140ms ease, background 140ms ease, border-color 140ms ease;
     }
 
     .label-order-handle {
@@ -817,6 +835,7 @@
       letter-spacing: 0.08em;
       color: var(--muted);
       touch-action: none;
+      cursor: grab;
     }
 
     .label-order-content {
@@ -1603,6 +1622,11 @@
       pendingLabelFieldsModalFrame: 0,
       pendingLabelOrderModalFrame: 0,
       draggingLabelFieldId: '',
+      labelOrderPointerId: null,
+      labelOrderDragOffsetY: 0,
+      labelOrderDragRow: null,
+      labelOrderPlaceholder: null,
+      labelOrderDragHandle: null,
       filterSearchTerm: '',
       filterSortOrder: []
     };
@@ -5024,10 +5048,128 @@
     }
 
     function clearLabelOrderDragState() {
+      const dragRow = runtime.labelOrderDragRow;
+      const placeholder = runtime.labelOrderPlaceholder;
+      if (dragRow && placeholder && placeholder.parentNode) {
+        placeholder.replaceWith(dragRow);
+      }
+      if (dragRow) {
+        dragRow.classList.remove('is-dragging', 'is-drag-preview');
+        dragRow.style.width = '';
+        dragRow.style.left = '';
+        dragRow.style.top = '';
+      }
+      if (runtime.labelOrderDragHandle && runtime.labelOrderPointerId !== null && typeof runtime.labelOrderDragHandle.releasePointerCapture === 'function') {
+        try {
+          runtime.labelOrderDragHandle.releasePointerCapture(runtime.labelOrderPointerId);
+        } catch {
+          // Pointer capture may already be released.
+        }
+      }
+      if (placeholder?.parentNode) {
+        placeholder.remove();
+      }
       runtime.draggingLabelFieldId = '';
-      labelOrderList.querySelectorAll('.label-order-row').forEach((row) => {
-        row.classList.remove('is-dragging', 'is-drop-target');
+      runtime.labelOrderPointerId = null;
+      runtime.labelOrderDragOffsetY = 0;
+      runtime.labelOrderDragRow = null;
+      runtime.labelOrderPlaceholder = null;
+      runtime.labelOrderDragHandle = null;
+      syncLabelOrderIndices();
+    }
+
+    function syncLabelOrderIndices() {
+      const rows = [...labelOrderList.querySelectorAll('.label-order-row[data-label-field-id]')]
+        .filter((row) => row !== runtime.labelOrderDragRow);
+      rows.forEach((row, index) => {
+        const indexEl = row.querySelector('.label-order-index');
+        if (indexEl) {
+          indexEl.textContent = `${index + 1}`;
+        }
       });
+    }
+
+    function moveLabelOrderPlaceholder(clientY) {
+      const placeholder = runtime.labelOrderPlaceholder;
+      const dragRow = runtime.labelOrderDragRow;
+      if (!placeholder || !dragRow) return;
+      const rows = [...labelOrderList.querySelectorAll('.label-order-row[data-label-field-id]')]
+        .filter((row) => row !== dragRow);
+      const nextTarget = rows.find((row) => {
+        const rect = row.getBoundingClientRect();
+        return clientY < rect.top + rect.height / 2;
+      });
+      if (nextTarget) {
+        if (placeholder !== nextTarget.previousSibling) {
+          labelOrderList.insertBefore(placeholder, nextTarget);
+        }
+      } else if (labelOrderList.lastChild !== placeholder) {
+        labelOrderList.appendChild(placeholder);
+      }
+      syncLabelOrderIndices();
+    }
+
+    function syncDraggedLabelOrderRow(clientY) {
+      const dragRow = runtime.labelOrderDragRow;
+      if (!dragRow) return;
+      dragRow.style.top = `${clientY - runtime.labelOrderDragOffsetY}px`;
+      moveLabelOrderPlaceholder(clientY);
+    }
+
+    function commitLabelOrderFromDom() {
+      const dragRow = runtime.labelOrderDragRow;
+      const placeholder = runtime.labelOrderPlaceholder;
+      if (dragRow && placeholder && placeholder.parentNode) {
+        placeholder.replaceWith(dragRow);
+      }
+      const nextOrder = [...labelOrderList.querySelectorAll('.label-order-row[data-label-field-id]')]
+        .map((row) => row.dataset.labelFieldId)
+        .filter(Boolean);
+      if (nextOrder.length) {
+        state.visibleLabelFields = nextOrder;
+        saveState();
+        updateStaticHud();
+      }
+    }
+
+    function handleLabelOrderPointerMove(event) {
+      if (runtime.labelOrderPointerId === null || event.pointerId !== runtime.labelOrderPointerId) return;
+      event.preventDefault();
+      syncDraggedLabelOrderRow(event.clientY);
+    }
+
+    function handleLabelOrderPointerRelease(event) {
+      if (runtime.labelOrderPointerId === null || event.pointerId !== runtime.labelOrderPointerId) return;
+      event.preventDefault();
+      commitLabelOrderFromDom();
+      clearLabelOrderDragState();
+      renderLabelOrderModal();
+    }
+
+    function beginLabelOrderDrag(event, row, fieldId) {
+      if (state.visibleLabelFields.length < 2) return;
+      if (event.button !== undefined && event.button !== 0) return;
+      clearLabelOrderDragState();
+      const rect = row.getBoundingClientRect();
+      const placeholder = document.createElement('div');
+      placeholder.className = 'label-order-placeholder';
+      placeholder.style.height = `${rect.height}px`;
+      labelOrderList.insertBefore(placeholder, row);
+      runtime.draggingLabelFieldId = fieldId;
+      runtime.labelOrderPointerId = event.pointerId;
+      runtime.labelOrderDragOffsetY = event.clientY - rect.top;
+      runtime.labelOrderDragRow = row;
+      runtime.labelOrderPlaceholder = placeholder;
+      runtime.labelOrderDragHandle = labelOrderList;
+      row.classList.add('is-dragging', 'is-drag-preview');
+      row.style.width = `${rect.width}px`;
+      row.style.left = `${rect.left}px`;
+      row.style.top = `${rect.top}px`;
+      if (typeof labelOrderList.setPointerCapture === 'function') {
+        labelOrderList.setPointerCapture(event.pointerId);
+      }
+      syncDraggedLabelOrderRow(event.clientY);
+      event.preventDefault();
     }
 
     function reorderVisibleLabelFields(draggedFieldId, targetFieldId, placeAfter = false) {
@@ -5053,7 +5195,7 @@
       selectedFields.forEach((field, index) => {
         const row = document.createElement('div');
         row.className = 'label-order-row';
-        row.draggable = selectedFields.length > 1;
+        row.draggable = false;
         row.dataset.labelFieldId = field.id;
 
         const handle = document.createElement('span');
@@ -5073,36 +5215,11 @@
         position.className = 'label-order-index';
         position.textContent = `${index + 1}`;
 
+        row.addEventListener('pointerdown', (event) => {
+          beginLabelOrderDrag(event, row, field.id);
+        });
         row.addEventListener('dragstart', (event) => {
-          runtime.draggingLabelFieldId = field.id;
-          row.classList.add('is-dragging');
-          if (event.dataTransfer) {
-            event.dataTransfer.effectAllowed = 'move';
-            event.dataTransfer.setData('text/plain', field.id);
-          }
-        });
-        row.addEventListener('dragover', (event) => {
-          if (!runtime.draggingLabelFieldId || runtime.draggingLabelFieldId === field.id) return;
           event.preventDefault();
-          labelOrderList.querySelectorAll('.label-order-row').forEach((entry) => entry.classList.remove('is-drop-target'));
-          row.classList.add('is-drop-target');
-          if (event.dataTransfer) {
-            event.dataTransfer.dropEffect = 'move';
-          }
-        });
-        row.addEventListener('dragleave', () => {
-          row.classList.remove('is-drop-target');
-        });
-        row.addEventListener('drop', (event) => {
-          if (!runtime.draggingLabelFieldId || runtime.draggingLabelFieldId === field.id) return;
-          event.preventDefault();
-          const rect = row.getBoundingClientRect();
-          const placeAfter = event.clientY > rect.top + rect.height / 2;
-          reorderVisibleLabelFields(runtime.draggingLabelFieldId, field.id, placeAfter);
-          renderLabelOrderModal();
-        });
-        row.addEventListener('dragend', () => {
-          clearLabelOrderDragState();
         });
 
         row.append(handle, content, position);
@@ -5756,9 +5873,13 @@
           setMenuOpen(false);
         }
       });
+      document.addEventListener('pointermove', handleLabelOrderPointerMove, { passive: false });
+      document.addEventListener('pointerup', handleLabelOrderPointerRelease, { passive: false });
+      document.addEventListener('pointercancel', handleLabelOrderPointerRelease, { passive: false });
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState !== 'visible') {
           blurOverlayFocus();
+          clearLabelOrderDragState();
         }
       });
       canvas.addEventListener('click', (event) => {
