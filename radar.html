@@ -51,6 +51,10 @@
       box-sizing: border-box;
     }
 
+    [hidden] {
+      display: none !important;
+    }
+
     html,
     body {
       width: 100%;
@@ -1767,18 +1771,40 @@
       return /^#[0-9a-f]{6}$/i.test(String(value || '').trim()) ? String(value).trim() : fallback;
     }
 
+    function blurActiveElementWithin(container) {
+      const activeElement = document.activeElement;
+      if (!activeElement || !(activeElement instanceof HTMLElement)) return;
+      if (!container.contains(activeElement)) return;
+      activeElement.blur();
+    }
+
+    function blurOverlayFocus() {
+      blurActiveElementWithin(settingsSheet);
+      blurActiveElementWithin(filterModal);
+      blurActiveElementWithin(layersModal);
+      blurActiveElementWithin(planeModal);
+      blurActiveElementWithin(fieldHelpModal);
+    }
+
+    function setOverlayOpen(element, open) {
+      element.hidden = !open;
+      element.inert = !open;
+      element.classList.toggle('open', open);
+    }
+
     function setMenuOpen(open, options = {}) {
       if (runtime.menuOpen === open) return;
       if (!open && !options.fromHistory) {
         history.back();
         return;
       }
+      if (!open) {
+        blurActiveElementWithin(settingsSheet);
+      }
       runtime.menuOpen = open;
       menuButton.setAttribute('aria-expanded', String(open));
-      settingsSheet.hidden = !open;
-      menuBackdrop.hidden = !open;
-      settingsSheet.classList.toggle('open', open);
-      menuBackdrop.classList.toggle('open', open);
+      setOverlayOpen(settingsSheet, open);
+      setOverlayOpen(menuBackdrop, open);
       if (open) {
         syncControlsFromState();
         if (!options.fromHistory) {
@@ -3921,12 +3947,6 @@
         const labelY = previousLayout && Number.isFinite(previousLayout.labelY)
           ? clampLabelY(previousLayout.labelY, labelHeight)
           : clampLabelY(preferredLabelY, labelHeight);
-        const velocityX = previousLayout && Number.isFinite(previousLayout.velocityX)
-          ? previousLayout.velocityX
-          : 0;
-        const velocityY = previousLayout && Number.isFinite(previousLayout.velocityY)
-          ? previousLayout.velocityY
-          : 0;
         const canShowLabel = showMarkerLabels
           && !shouldHidePlaneLabel(plane)
           && (remainingLabelSlots === null || remainingLabelSlots > 0);
@@ -3947,8 +3967,6 @@
             labelHeight,
             labelX,
             labelY,
-            velocityX,
-            velocityY,
             preferredLabelX: clampedPreferredLabelX,
             preferredLabelY
           });
@@ -3986,7 +4004,7 @@
       });
 
       if (showMarkerLabels) {
-        resolveLabelOverlaps(labelEntries, markerTargets);
+        solveLabelLayouts(labelEntries, markerTargets);
         labelEntries.forEach((entry) => {
           entry.side = resolveStableLabelSide(entry);
         });
@@ -4066,94 +4084,84 @@
       announce('Marker colours reset to defaults.');
     }
 
-    function resolveLabelOverlaps(entries, markerTargets) {
-      const springStrengthX = 0.03;
-      const springStrengthY = 0.035;
-      const damping = 0.52;
+    function solveLabelLayouts(entries, markerTargets) {
+      // Keep label solving on one mutable array of live positions.
+      // Future passes should update current coordinates directly rather than
+      // computing a separate deferred "next state", which previously caused
+      // jittery flip-flop behaviour when nearby labels or markers reacted to
+      // stale geometry from the same frame.
       entries.sort((left, right) => left.labelY - right.labelY || left.labelX - right.labelX);
-      for (let iteration = 0; iteration < 6; iteration += 1) {
-        entries.forEach((entry) => {
-          const maxForceX = entry.hasPreviousLayout ? 0.75 : 1.6;
-          const maxForceY = entry.hasPreviousLayout ? 0.9 : 1.9;
-          const offsetX = entry.preferredLabelX - entry.labelX;
-          const offsetY = entry.preferredLabelY - entry.labelY;
-          const tetherSlackX = entry.hasPreviousLayout ? 40 : 24;
-          const tetherSlackY = entry.hasPreviousLayout ? 26 : 16;
-          const excessX = Math.abs(offsetX) - tetherSlackX;
-          const excessY = Math.abs(offsetY) - tetherSlackY;
-          if (excessX > 0) {
-            entry.velocityX += clamp(Math.sign(offsetX) * excessX * springStrengthX, -maxForceX, maxForceX);
-          }
-          if (excessY > 0) {
-            entry.velocityY += clamp(Math.sign(offsetY) * excessY * springStrengthY, -maxForceY, maxForceY);
-          }
-        });
-        for (let index = 0; index < entries.length; index += 1) {
-          const current = entries[index];
-          for (let otherIndex = index + 1; otherIndex < entries.length; otherIndex += 1) {
-            const other = entries[otherIndex];
-            const horizontalOverlap = Math.min(current.labelX + current.labelWidth + 10, other.labelX + other.labelWidth + 10) - Math.max(current.labelX, other.labelX);
-            const verticalOverlap = Math.min(current.labelY + current.labelHeight + 6, other.labelY + other.labelHeight + 6) - Math.max(current.labelY, other.labelY);
-            if (!(horizontalOverlap > 0) || !(verticalOverlap > 0)) continue;
-            separateLabelPair(current, other, horizontalOverlap, verticalOverlap, 0.28, 0.18);
-          }
 
-          applyMarkerAvoidanceForces(current, markerTargets);
-        }
-
-        entries.forEach((entry) => {
-          entry.velocityX *= damping;
-          entry.velocityY *= damping;
-          if (Math.abs(entry.velocityX) < 0.12) entry.velocityX = 0;
-          if (Math.abs(entry.velocityY) < 0.12) entry.velocityY = 0;
-          if (Math.abs(entry.preferredLabelX - entry.labelX) < (entry.hasPreviousLayout ? 40 : 24)
-            && Math.abs(entry.preferredLabelY - entry.labelY) < (entry.hasPreviousLayout ? 26 : 16)) {
-            entry.velocityX = 0;
-            entry.velocityY = 0;
-          }
-
-          const nextLabelX = entry.labelX + entry.velocityX;
-          const nextLabelY = entry.labelY + entry.velocityY;
-          const clampedLabelX = clampLabelX(nextLabelX, entry.labelWidth);
-          const clampedLabelY = clampLabelY(nextLabelY, entry.labelHeight);
-
-          entry.labelX = clampedLabelX;
-          entry.labelY = clampedLabelY;
-
-          if (clampedLabelX !== nextLabelX) {
-            entry.velocityX = 0;
-          }
-          if (clampedLabelY !== nextLabelY) {
-            entry.velocityY = 0;
-          }
-        });
-      }
-
-      settleStaticLabelOverlaps(entries, markerTargets);
-    }
-
-    function settleStaticLabelOverlaps(entries, markerTargets) {
-      for (let iteration = 0; iteration < 3; iteration += 1) {
+      for (let iteration = 0; iteration < 8; iteration += 1) {
         let moved = false;
         for (let index = 0; index < entries.length; index += 1) {
           const current = entries[index];
-          if (Math.abs(current.velocityX) > 0.2 || Math.abs(current.velocityY) > 0.2) continue;
+          if (nudgeLabelTowardPreferredPosition(current)) {
+            moved = true;
+          }
           for (let otherIndex = index + 1; otherIndex < entries.length; otherIndex += 1) {
             const other = entries[otherIndex];
-            if (Math.abs(other.velocityX) > 0.2 || Math.abs(other.velocityY) > 0.2) continue;
             const horizontalOverlap = Math.min(current.labelX + current.labelWidth + 10, other.labelX + other.labelWidth + 10) - Math.max(current.labelX, other.labelX);
             const verticalOverlap = Math.min(current.labelY + current.labelHeight + 6, other.labelY + other.labelHeight + 6) - Math.max(current.labelY, other.labelY);
             if (!(horizontalOverlap > 0) || !(verticalOverlap > 0)) continue;
-            separateLabelPair(current, other, horizontalOverlap, verticalOverlap, 0.5, 0.3);
-            moved = true;
+            if (separateLabelPair(current, other, horizontalOverlap, verticalOverlap, 0.28, 0.18)) {
+              moved = true;
+            }
           }
 
-          if (nudgeLabelAwayFromMarkers(current, markerTargets)) {
+          if (nudgeLabelAwayFromMarkers(current, markerTargets, 'dynamic')) {
             moved = true;
           }
         }
         if (!moved) break;
       }
+
+      for (let iteration = 0; iteration < 3; iteration += 1) {
+        let moved = false;
+        for (let index = 0; index < entries.length; index += 1) {
+          const current = entries[index];
+          for (let otherIndex = index + 1; otherIndex < entries.length; otherIndex += 1) {
+            const other = entries[otherIndex];
+            const horizontalOverlap = Math.min(current.labelX + current.labelWidth + 10, other.labelX + other.labelWidth + 10) - Math.max(current.labelX, other.labelX);
+            const verticalOverlap = Math.min(current.labelY + current.labelHeight + 6, other.labelY + other.labelHeight + 6) - Math.max(current.labelY, other.labelY);
+            if (!(horizontalOverlap > 0) || !(verticalOverlap > 0)) continue;
+            if (separateLabelPair(current, other, horizontalOverlap, verticalOverlap, 0.5, 0.3)) {
+              moved = true;
+            }
+          }
+
+          if (nudgeLabelAwayFromMarkers(current, markerTargets, 'static')) {
+            moved = true;
+          }
+        }
+        if (!moved) break;
+      }
+    }
+
+    function nudgeLabelTowardPreferredPosition(entry) {
+      const tetherSlackX = entry.hasPreviousLayout ? 40 : 24;
+      const tetherSlackY = entry.hasPreviousLayout ? 26 : 16;
+      const maxStepX = entry.hasPreviousLayout ? 0.75 : 1.6;
+      const maxStepY = entry.hasPreviousLayout ? 0.9 : 1.9;
+      const offsetX = entry.preferredLabelX - entry.labelX;
+      const offsetY = entry.preferredLabelY - entry.labelY;
+      let moved = false;
+
+      if (Math.abs(offsetX) > tetherSlackX) {
+        const stepX = clamp((Math.abs(offsetX) - tetherSlackX) * 0.03, 0, maxStepX) * Math.sign(offsetX);
+        entry.labelX += stepX;
+        moved = moved || stepX !== 0;
+      }
+      if (Math.abs(offsetY) > tetherSlackY) {
+        const stepY = clamp((Math.abs(offsetY) - tetherSlackY) * 0.035, 0, maxStepY) * Math.sign(offsetY);
+        entry.labelY += stepY;
+        moved = moved || stepY !== 0;
+      }
+
+      if (moved) {
+        clampLabelPosition(entry);
+      }
+      return moved;
     }
 
     function getLabelBounds(entry) {
@@ -4172,6 +4180,10 @@
       const otherCenterY = other.labelY + other.labelHeight * 0.5;
       const directionX = currentCenterX <= otherCenterX ? -1 : 1;
       const directionY = currentCenterY <= otherCenterY ? -1 : 1;
+      const beforeCurrentX = current.labelX;
+      const beforeCurrentY = current.labelY;
+      const beforeOtherX = other.labelX;
+      const beforeOtherY = other.labelY;
 
       if (horizontalOverlap <= verticalOverlap * 1.15) {
         const pushX = horizontalOverlap * primaryStrength + 0.6;
@@ -4180,8 +4192,6 @@
         other.labelX -= directionX * pushX;
         current.labelY += directionY * pushY;
         other.labelY -= directionY * pushY;
-        current.velocityX = 0;
-        other.velocityX = 0;
       } else {
         const pushY = verticalOverlap * primaryStrength + 0.7;
         const pushX = Math.min(1.4, horizontalOverlap * crossStrength);
@@ -4189,12 +4199,14 @@
         other.labelY -= directionY * pushY;
         current.labelX += directionX * pushX;
         other.labelX -= directionX * pushX;
-        current.velocityY = 0;
-        other.velocityY = 0;
       }
 
       clampLabelPosition(current);
       clampLabelPosition(other);
+      return current.labelX !== beforeCurrentX
+        || current.labelY !== beforeCurrentY
+        || other.labelX !== beforeOtherX
+        || other.labelY !== beforeOtherY;
     }
 
     function getMarkerAvoidanceProfile(entry, markerTarget) {
@@ -4250,26 +4262,16 @@
       };
     }
 
-    function applyMarkerAvoidanceForces(entry, markerTargets) {
-      markerTargets.forEach((markerTarget) => {
-        const profile = getMarkerAvoidanceProfile(entry, markerTarget);
-        const markerRadius = markerTarget.markerRadius + profile.clearance;
-        const overlap = getMarkerLabelOverlap(entry, markerTarget, markerRadius);
-        if (!overlap) return;
-        entry.velocityX -= (overlap.dx / overlap.distance) * overlap.overlap * profile.dynamicStrength;
-        entry.velocityY -= (overlap.dy / overlap.distance) * overlap.overlap * profile.dynamicStrength;
-      });
-    }
-
-    function nudgeLabelAwayFromMarkers(entry, markerTargets) {
+    function nudgeLabelAwayFromMarkers(entry, markerTargets, mode = 'static') {
       let moved = false;
       markerTargets.forEach((markerTarget) => {
         const profile = getMarkerAvoidanceProfile(entry, markerTarget);
         const markerRadius = markerTarget.markerRadius + profile.clearance;
         const overlap = getMarkerLabelOverlap(entry, markerTarget, markerRadius);
         if (!overlap) return;
-        entry.labelX -= (overlap.dx / overlap.distance) * overlap.overlap * profile.staticStrength;
-        entry.labelY -= (overlap.dy / overlap.distance) * overlap.overlap * profile.staticStrength;
+        const strength = mode === 'dynamic' ? profile.dynamicStrength : profile.staticStrength;
+        entry.labelX -= (overlap.dx / overlap.distance) * overlap.overlap * strength;
+        entry.labelY -= (overlap.dy / overlap.distance) * overlap.overlap * strength;
         clampLabelPosition(entry);
         moved = true;
       });
@@ -4282,9 +4284,7 @@
         nextLayoutMap.set(entry.plane.id, {
           labelX: entry.labelX,
           labelY: entry.labelY,
-          side: entry.side,
-          velocityX: entry.velocityX,
-          velocityY: entry.velocityY
+          side: entry.side
         });
       });
       runtime.planeLabelLayoutMap = nextLayoutMap;
@@ -4641,6 +4641,9 @@
         cancelAnimationFrame(runtime.pendingFilterModalFrame);
         runtime.pendingFilterModalFrame = 0;
       }
+      if (runtime.menuOpen) {
+        setMenuOpen(false, { fromHistory: true });
+      }
       if (runtime.fieldHelpOpen) {
         closeFieldHelp({ fromHistory: true });
       }
@@ -4654,8 +4657,7 @@
       }
       runtime.filterModalJustOpened = true;
       runtime.filterModalOpen = true;
-      filterModal.hidden = false;
-      filterModal.classList.add('open');
+      setOverlayOpen(filterModal, true);
       renderFilterModal();
       filterTableBody.classList.add('is-guarded');
       runtime.filterModalInteractionFrame = requestAnimationFrame(() => {
@@ -4677,6 +4679,9 @@
         cancelAnimationFrame(runtime.pendingLayersModalFrame);
         runtime.pendingLayersModalFrame = 0;
       }
+      if (runtime.menuOpen) {
+        setMenuOpen(false, { fromHistory: true });
+      }
       if (runtime.fieldHelpOpen) {
         closeFieldHelp({ fromHistory: true });
       }
@@ -4687,8 +4692,7 @@
         closeFilterModal({ fromHistory: true });
       }
       runtime.layersModalOpen = true;
-      layersModal.hidden = false;
-      layersModal.classList.add('open');
+      setOverlayOpen(layersModal, true);
       renderLayersModal();
       if (!options.fromHistory) {
         pushModalHistoryState('layers');
@@ -4713,13 +4717,13 @@
         history.back();
         return;
       }
+      blurActiveElementWithin(layersModal);
       if (runtime.pendingLayersModalFrame) {
         cancelAnimationFrame(runtime.pendingLayersModalFrame);
         runtime.pendingLayersModalFrame = 0;
       }
       runtime.layersModalOpen = false;
-      layersModal.classList.remove('open');
-      layersModal.hidden = true;
+      setOverlayOpen(layersModal, false);
       layersList.replaceChildren();
       runtime.modalHistoryDepth = Math.max(0, runtime.modalHistoryDepth - 1);
       updateStaticHud();
@@ -4741,14 +4745,14 @@
         history.back();
         return;
       }
+      blurActiveElementWithin(filterModal);
       clearFilterModalInteractionGuard();
       if (runtime.pendingFilterModalFrame) {
         cancelAnimationFrame(runtime.pendingFilterModalFrame);
         runtime.pendingFilterModalFrame = 0;
       }
       runtime.filterModalOpen = false;
-      filterModal.classList.remove('open');
-      filterModal.hidden = true;
+      setOverlayOpen(filterModal, false);
       resetFilterModalDom();
       runtime.modalHistoryDepth = Math.max(0, runtime.modalHistoryDepth - 1);
       updateStaticHud();
@@ -4760,12 +4764,14 @@
     }
 
     function openFieldHelp(detail, plane, options = {}) {
+      if (runtime.menuOpen) {
+        setMenuOpen(false, { fromHistory: true });
+      }
       const knowledge = getFieldKnowledge(detail);
       resetFieldHelpDom();
       runtime.fieldHelpOpen = true;
       runtime.selectedFieldDetail = detail;
-      fieldHelpModal.hidden = false;
-      fieldHelpModal.classList.add('open');
+      setOverlayOpen(fieldHelpModal, true);
       fieldHelpLabel.textContent = detail.label;
       fieldHelpTitle.textContent = knowledge.title || detail.label;
       fieldHelpValue.textContent = formatValue(detail.value);
@@ -4787,6 +4793,9 @@
         cancelAnimationFrame(runtime.pendingPlaneModalFrame);
         runtime.pendingPlaneModalFrame = 0;
       }
+      if (runtime.menuOpen) {
+        setMenuOpen(false, { fromHistory: true });
+      }
       if (runtime.fieldHelpOpen) {
         closeFieldHelp({ fromHistory: true });
       }
@@ -4797,8 +4806,7 @@
       runtime.planeModalJustOpened = true;
       runtime.selectedPlane = plane;
       runtime.planeModalOpen = true;
-      planeModal.hidden = false;
-      planeModal.classList.add('open');
+      setOverlayOpen(planeModal, true);
       planeModalTitle.textContent = 'Aircraft Info';
       const stats = plane.infoDetails?.length ? plane.infoDetails : [buildDetail('Callsign', plane.label, 'callsign')];
       stats.forEach((detail) => {
@@ -4863,10 +4871,10 @@
         history.back();
         return;
       }
+      blurActiveElementWithin(fieldHelpModal);
       runtime.fieldHelpOpen = false;
       runtime.selectedFieldDetail = null;
-      fieldHelpModal.classList.remove('open');
-      fieldHelpModal.hidden = true;
+      setOverlayOpen(fieldHelpModal, false);
       resetFieldHelpDom();
       runtime.modalHistoryDepth = Math.max(0, runtime.modalHistoryDepth - 1);
     }
@@ -4877,6 +4885,7 @@
         history.back();
         return;
       }
+      blurActiveElementWithin(planeModal);
       closeFieldHelp({ fromHistory: true });
       clearPlaneModalInteractionGuard();
       if (runtime.pendingPlaneModalFrame) {
@@ -4885,8 +4894,7 @@
       }
       runtime.planeModalOpen = false;
       runtime.selectedPlane = null;
-      planeModal.classList.remove('open');
-      planeModal.hidden = true;
+      setOverlayOpen(planeModal, false);
       resetPlaneModalDom();
       runtime.modalHistoryDepth = Math.max(0, runtime.modalHistoryDepth - 1);
     }
@@ -5102,6 +5110,11 @@
           closeLayersModal();
         } else if (event.key === 'Escape' && runtime.menuOpen) {
           setMenuOpen(false);
+        }
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible') {
+          blurOverlayFocus();
         }
       });
       canvas.addEventListener('click', (event) => {
