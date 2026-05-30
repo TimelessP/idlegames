@@ -130,6 +130,23 @@
       transition: width 0.2s ease;
     }
 
+    .progress.installing > span {
+      width: 100% !important;
+      background: repeating-linear-gradient(
+        90deg,
+        var(--brand-deep) 0,
+        var(--brand-deep) 14px,
+        var(--brand) 14px,
+        var(--brand) 28px
+      );
+      animation: installPulse 1s linear infinite;
+    }
+
+    @keyframes installPulse {
+      from { background-position: 0 0; }
+      to { background-position: 28px 0; }
+    }
+
     button {
       border: 1px solid var(--line);
       background: var(--bg-elev-2);
@@ -278,7 +295,7 @@
       </form>
     </section>
 
-    <p class="note">Chrome setup from the referenced article: enable flags in chrome://flags for Prompt API and on-device model support, then restart Chrome.</p>
+    <p class="note">Chrome setup from the referenced article: enable flags in chrome://flags for Prompt API and on-device model support, then restart Chrome. Debug pages: chrome://chrome-urls/?host=chrome://on-device-internals/#internal-debug-pages and chrome://on-device-internals/</p>
   </main>
 
   <script>
@@ -286,6 +303,7 @@
 
     const statusEl = $("status");
     const progressWrapEl = $("progressWrap");
+    const progressTrackEl = progressWrapEl.querySelector(".progress");
     const progressBarEl = $("progressBar");
     const progressTextEl = $("progressText");
     const initBtn = $("initBtn");
@@ -310,11 +328,13 @@
       inProgress: false,
       lastProgressAt: 0,
       lastPercent: 0,
+      installPhase: false,
       stallTimerId: null,
       createAbortController: null
     };
 
     const DOWNLOAD_STALL_MS = 90000;
+    const INSTALL_STALL_MS = 240000;
 
     const MODEL_IO_OPTIONS = {
       expectedInputs: [{ type: "text", languages: ["en"] }],
@@ -331,6 +351,14 @@
       const safe = Math.max(0, Math.min(100, pct));
       progressBarEl.style.width = safe + "%";
       progressTextEl.textContent = safe.toFixed(0) + "%";
+    }
+
+    function setInstallPhase(active) {
+      downloadState.installPhase = active;
+      progressTrackEl.classList.toggle("installing", active);
+      if (active) {
+        progressTextEl.textContent = "Installing...";
+      }
     }
 
     function setBusy(v) {
@@ -351,6 +379,19 @@
         if (!downloadState.inProgress) return;
         const elapsed = Date.now() - downloadState.lastProgressAt;
         if (elapsed >= DOWNLOAD_STALL_MS) {
+          if (downloadState.installPhase) {
+            if (elapsed < INSTALL_STALL_MS) {
+              setStatus("Download complete. Chrome is installing/loading the model. This can take a few minutes.", "warn");
+              return;
+            }
+            setStatus(
+              "Installation appears stuck after download completion. Click Retry Download, or inspect chrome://on-device-internals for model status.",
+              "err"
+            );
+            retryBtn.disabled = false;
+            cancelBtn.disabled = false;
+            return;
+          }
           setStatus(
             "Download appears stalled. You can click Retry Download, then if needed restart Chrome and inspect chrome://on-device-internals.",
             "err"
@@ -419,6 +460,7 @@
       setBusy(true);
       setStatus("Creating local AI session...", "warn");
       progressWrapEl.classList.remove("hidden");
+      setInstallPhase(false);
       setProgress(0);
       retryBtn.disabled = true;
       downloadState.lastPercent = 0;
@@ -449,13 +491,20 @@
                 downloadState.lastPercent = pct;
                 downloadState.lastProgressAt = Date.now();
               }
-              setStatus("Downloading on-device model...", "warn");
+              if (pct >= 100) {
+                setInstallPhase(true);
+                setStatus("Download complete. Installing/loading model...", "warn");
+              } else {
+                setInstallPhase(false);
+                setStatus("Downloading on-device model...", "warn");
+              }
             });
           }
         });
 
         state.session = session;
         state.initialized = true;
+        setInstallPhase(false);
         setProgress(100);
         setStatus("Model ready. Chat is local to this device.", "ok");
         pushMessage("bot", "Session ready. Ask a prompt to test the Chrome Prompt API.");
@@ -470,6 +519,7 @@
         retryBtn.disabled = false;
       } finally {
         stopStallWatch();
+        setInstallPhase(false);
         downloadState.createAbortController = null;
         setBusy(false);
       }
