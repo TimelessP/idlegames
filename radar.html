@@ -601,6 +601,10 @@
       flex: 0 0 auto;
     }
 
+    .filter-auto-select-row {
+      margin-top: 2px;
+    }
+
     .filter-search input {
       width: 100%;
       padding: 11px 42px 11px 14px;
@@ -1365,6 +1369,13 @@
             </label>
             <button id="filterClearSort" class="filter-clear-sort" type="button">Clear sort</button>
           </div>
+          <label class="toggle-row filter-auto-select-row">
+            <span>
+              <strong>Auto select matches</strong>
+              <small>Keep adding aircraft that match the current search into the visible selection as new sweeps arrive.</small>
+            </span>
+            <input id="filterAutoSelectMatchesInput" type="checkbox" />
+          </label>
           <div id="filterTableWrap" class="filter-table-wrap">
             <table id="filterTable" class="filter-table">
               <thead>
@@ -1634,7 +1645,9 @@
     const filterSearchInput = document.getElementById('filterSearchInput');
     const filterSearchClear = document.getElementById('filterSearchClear');
     const filterSearchModeSelect = document.getElementById('filterSearchModeSelect');
+    const filterAutoSelectMatchesInput = document.getElementById('filterAutoSelectMatchesInput');
     const filterClearSort = document.getElementById('filterClearSort');
+    const filterTableWrap = document.getElementById('filterTableWrap');
     const filterTableBody = document.getElementById('filterTableBody');
     const filterSelectAll = document.getElementById('filterSelectAll');
     const filterEmpty = document.getElementById('filterEmpty');
@@ -1694,6 +1707,7 @@
       labelOrderDragHandle: null,
       filterSearchTerm: '',
       filterSearchMode: 'terms',
+      filterAutoSelectMatches: false,
       filterSortOrder: []
     };
 
@@ -1742,7 +1756,9 @@
       visibleLayers: AVAILABLE_LAYERS.map((layer) => layer.id),
       aircraftFilterMode: 'all',
       filteredPlaneIds: [],
+      filterSearchTerm: '',
       filterSearchMode: 'terms',
+      filterAutoSelectMatches: false,
       filterSortOrder: [...DEFAULT_FILTER_SORT_ORDER],
       providerBackoff: {
         adsblol: defaultBackoff('adsblol'),
@@ -1794,7 +1810,9 @@
         merged.specialSquawkColor = normalizeColorChoice(merged.specialSquawkColor, DEFAULT_STATE.specialSquawkColor);
         merged.emergencySquawkColor = normalizeColorChoice(merged.emergencySquawkColor, DEFAULT_STATE.emergencySquawkColor);
         merged.aircraftFilterMode = merged.aircraftFilterMode === 'subset' ? 'subset' : 'all';
+        merged.filterSearchTerm = String(merged.filterSearchTerm || '');
         merged.filterSearchMode = normalizeFilterSearchMode(merged.filterSearchMode);
+        merged.filterAutoSelectMatches = Boolean(merged.filterAutoSelectMatches);
         merged.filterSortOrder = sanitizePersistedFilterSortOrder(merged.filterSortOrder);
         merged.filteredPlaneIds = Array.isArray(merged.filteredPlaneIds)
           ? merged.filteredPlaneIds.map((value) => String(value)).filter(Boolean)
@@ -2628,7 +2646,9 @@
 
     const AVAILABLE_LABEL_FIELDS = buildAvailableLabelFields();
     let state = loadState();
+    runtime.filterSearchTerm = state.filterSearchTerm;
     runtime.filterSearchMode = state.filterSearchMode;
+    runtime.filterAutoSelectMatches = state.filterAutoSelectMatches;
     runtime.filterSortOrder = [...state.filterSortOrder];
 
     const NAV_MODE_GUIDE = {
@@ -4347,6 +4367,7 @@
             runtime.planes = attachPlaneTrails(provider.parse(result.payload, runtime.userLocation, rangeNm, snapshotAtMs, predictionWindowMs))
               .sort((a, b) => a.distanceNm - b.distanceNm)
               .slice(0, 80);
+            applyAutoSelectMatchingFromPlanes(runtime.planes);
             if (runtime.filterModalOpen) {
               renderFilterModal();
             }
@@ -5257,9 +5278,16 @@
     }
 
     function persistFilterPreferences() {
+      state.filterSearchTerm = runtime.filterSearchTerm;
       state.filterSearchMode = runtime.filterSearchMode;
+      state.filterAutoSelectMatches = runtime.filterAutoSelectMatches;
       state.filterSortOrder = sanitizePersistedFilterSortOrder(runtime.filterSortOrder);
       saveState();
+    }
+
+    function setFilterSearchTerm(value) {
+      runtime.filterSearchTerm = String(value || '');
+      persistFilterPreferences();
     }
 
     function setFilterSearchMode(mode) {
@@ -5289,6 +5317,68 @@
       return runtime.filterSearchMode === 'regex'
         ? 'Regex search across display identity, flight ID, registration, type, squawk...'
         : 'Space-separated substrings across display identity, flight ID, registration, type, squawk...';
+    }
+
+    function getFilterSearchResult(planes, searchTerm = runtime.filterSearchTerm, searchMode = runtime.filterSearchMode) {
+      const rawSearchTerm = String(searchTerm || '').trim();
+      const searchActive = Boolean(rawSearchTerm);
+      let searchError = '';
+      let visiblePlanes = planes;
+      if (searchActive) {
+        if (searchMode === 'regex') {
+          const regex = compileFilterRegex(rawSearchTerm);
+          if (!regex) {
+            visiblePlanes = [];
+            searchError = 'Invalid regular expression.';
+          } else {
+            visiblePlanes = planes.filter((plane) => regex.test(buildRawFilterSearchText(plane)));
+          }
+        } else {
+          const searchTerms = buildFilterSearchTerms(rawSearchTerm);
+          visiblePlanes = searchTerms.length
+            ? planes.filter((plane) => {
+              const searchText = buildFilterSearchText(plane);
+              return searchTerms.every((term) => searchText.includes(term));
+            })
+            : planes;
+        }
+      }
+      return { visiblePlanes, searchActive, searchError };
+    }
+
+    function preserveFilterTableScroll(callback) {
+      const previousScrollTop = filterTableWrap ? filterTableWrap.scrollTop : 0;
+      callback();
+      if (filterTableWrap) {
+        filterTableWrap.scrollTop = previousScrollTop;
+      }
+    }
+
+    function isFilterAutoSelectEnabled() {
+      return Boolean(runtime.filterAutoSelectMatches);
+    }
+
+    function applyAutoSelectMatchingFromPlanes(planes = runtime.planes) {
+      if (!isFilterAutoSelectEnabled()) return;
+      const { visiblePlanes, searchActive, searchError } = getFilterSearchResult([...planes], state.filterSearchTerm, state.filterSearchMode);
+      if (!searchActive || searchError || !visiblePlanes.length) return;
+      const matchingIds = visiblePlanes.map((plane) => plane.id);
+      if (!matchingIds.length) return;
+      if (!isSubsetFilterActive()) {
+        setAircraftFilterSelection(matchingIds);
+        return;
+      }
+      const next = new Set(state.filteredPlaneIds || []);
+      let changed = false;
+      matchingIds.forEach((id) => {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      });
+      if (changed) {
+        setAircraftFilterSelection([...next]);
+      }
     }
 
     function compareFilterValues(left, right) {
@@ -5325,29 +5415,7 @@
 
     function getVisibleFilterPlanes() {
       const planes = [...runtime.planes];
-      const rawSearchTerm = String(runtime.filterSearchTerm || '').trim();
-      const searchActive = Boolean(rawSearchTerm);
-      let searchError = '';
-      let visiblePlanes = planes;
-      if (searchActive) {
-        if (runtime.filterSearchMode === 'regex') {
-          const regex = compileFilterRegex(rawSearchTerm);
-          if (!regex) {
-            visiblePlanes = [];
-            searchError = 'Invalid regular expression.';
-          } else {
-            visiblePlanes = planes.filter((plane) => regex.test(buildRawFilterSearchText(plane)));
-          }
-        } else {
-          const searchTerms = buildFilterSearchTerms(rawSearchTerm);
-          visiblePlanes = searchTerms.length
-            ? planes.filter((plane) => {
-              const searchText = buildFilterSearchText(plane);
-              return searchTerms.every((term) => searchText.includes(term));
-            })
-            : planes;
-        }
-      }
+      const { visiblePlanes, searchActive, searchError } = getFilterSearchResult(planes);
       const activeSorts = runtime.filterSortOrder.filter((entry) => FILTER_SORT_CONFIG[entry.key]);
       if (!activeSorts.length) {
         return { planes, visiblePlanes, searchActive, searchError };
@@ -5430,6 +5498,7 @@
       filterSearchInput.value = runtime.filterSearchTerm;
       filterSearchInput.placeholder = buildFilterSearchPlaceholder();
       filterSearchModeSelect.value = runtime.filterSearchMode;
+      filterAutoSelectMatchesInput.checked = isFilterAutoSelectEnabled();
       filterSearchClear.classList.toggle('hidden', !runtime.filterSearchTerm);
     }
 
@@ -5453,9 +5522,11 @@
         checkbox.checked = !isSubsetFilterActive() || selectedIds.has(plane.id);
         checkbox.setAttribute('aria-label', `Show or hide ${plane.label}`);
         checkbox.addEventListener('change', () => {
-          toggleAircraftFilterSelection(plane.id, checkbox.checked);
-          syncFilterRowSelection(plane.id, checkbox);
-          updateFilterSummary(planes, visiblePlanes, searchActive, searchError);
+          preserveFilterTableScroll(() => {
+            toggleAircraftFilterSelection(plane.id, checkbox.checked);
+            syncFilterRowSelection(plane.id, checkbox);
+            updateFilterSummary(planes, visiblePlanes, searchActive, searchError);
+          });
         });
         selectedCell.appendChild(checkbox);
         row.appendChild(selectedCell);
@@ -6265,8 +6336,9 @@
       runtime.planeHitRegions = [];
       runtime.planeTrailMap = new Map();
       runtime.planeLabelLayoutMap = new Map();
-      runtime.filterSearchTerm = '';
+      runtime.filterSearchTerm = state.filterSearchTerm;
       runtime.filterSearchMode = state.filterSearchMode;
+      runtime.filterAutoSelectMatches = state.filterAutoSelectMatches;
       runtime.filterSortOrder = [...state.filterSortOrder];
       closeLabelOrderModal({ fromHistory: true });
       closeLabelFieldsModal({ fromHistory: true });
@@ -6362,8 +6434,10 @@
         } else {
           visibleIds.forEach((id) => next.delete(id));
         }
-        setAircraftFilterSelection([...next]);
-        renderFilterModal();
+        preserveFilterTableScroll(() => {
+          setAircraftFilterSelection([...next]);
+          renderFilterModal();
+        });
       });
       window.addEventListener('resize', resizeCanvas, { passive: true });
       document.addEventListener('visibilitychange', () => {
@@ -6454,15 +6528,25 @@
         announce('Filter table sort cleared.');
       });
       filterSearchInput.addEventListener('input', () => {
-        runtime.filterSearchTerm = filterSearchInput.value;
+        setFilterSearchTerm(filterSearchInput.value);
+        applyAutoSelectMatchingFromPlanes();
         renderFilterModal();
       });
       filterSearchModeSelect.addEventListener('change', () => {
         setFilterSearchMode(filterSearchModeSelect.value);
+        applyAutoSelectMatchingFromPlanes();
+        renderFilterModal();
+      });
+      filterAutoSelectMatchesInput.addEventListener('change', () => {
+        runtime.filterAutoSelectMatches = filterAutoSelectMatchesInput.checked;
+        persistFilterPreferences();
+        if (runtime.filterAutoSelectMatches) {
+          applyAutoSelectMatchingFromPlanes();
+        }
         renderFilterModal();
       });
       filterSearchClear.addEventListener('click', () => {
-        runtime.filterSearchTerm = '';
+        setFilterSearchTerm('');
         renderFilterModal();
         filterSearchInput.focus();
       });
