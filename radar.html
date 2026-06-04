@@ -421,6 +421,19 @@
       padding: 10px 12px;
     }
 
+    .field select,
+    .filter-search-mode select {
+      color-scheme: dark;
+    }
+
+    .field select option,
+    .field select optgroup,
+    .filter-search-mode select option,
+    .filter-search-mode select optgroup {
+      background: var(--panel-strong);
+      color: var(--text);
+    }
+
     .field input[type="color"] {
       padding: 4px;
       min-height: 48px;
@@ -584,6 +597,10 @@
       min-width: 220px;
     }
 
+    .filter-search-mode {
+      flex: 0 0 auto;
+    }
+
     .filter-search input {
       width: 100%;
       padding: 11px 42px 11px 14px;
@@ -599,10 +616,17 @@
     }
 
     .filter-search-clear,
+    .filter-search-mode select,
     .filter-clear-sort {
       border: 1px solid rgba(255, 255, 255, 0.1);
       background: rgba(255, 255, 255, 0.04);
       color: var(--text);
+    }
+
+    .filter-search-mode select {
+      min-height: 44px;
+      padding: 10px 38px 10px 14px;
+      border-radius: 14px;
     }
 
     .filter-search-clear {
@@ -1332,6 +1356,13 @@
               <input id="filterSearchInput" type="text" placeholder="Search display identity, flight ID, registration, type, squawk..." autocomplete="off" spellcheck="false" />
               <button id="filterSearchClear" class="filter-search-clear hidden" type="button" aria-label="Clear filter table search">×</button>
             </label>
+            <label class="filter-search-mode" for="filterSearchModeSelect">
+              <span class="sr-only">Filter search mode</span>
+              <select id="filterSearchModeSelect" aria-label="Filter search mode">
+                <option value="terms">Substrings</option>
+                <option value="regex">Regular expression</option>
+              </select>
+            </label>
             <button id="filterClearSort" class="filter-clear-sort" type="button">Clear sort</button>
           </div>
           <div id="filterTableWrap" class="filter-table-wrap">
@@ -1602,6 +1633,7 @@
     const filterSummary = document.getElementById('filterSummary');
     const filterSearchInput = document.getElementById('filterSearchInput');
     const filterSearchClear = document.getElementById('filterSearchClear');
+    const filterSearchModeSelect = document.getElementById('filterSearchModeSelect');
     const filterClearSort = document.getElementById('filterClearSort');
     const filterTableBody = document.getElementById('filterTableBody');
     const filterSelectAll = document.getElementById('filterSelectAll');
@@ -1661,6 +1693,7 @@
       labelOrderPlaceholder: null,
       labelOrderDragHandle: null,
       filterSearchTerm: '',
+      filterSearchMode: 'terms',
       filterSortOrder: []
     };
 
@@ -1682,6 +1715,8 @@
     };
 
     const DEFAULT_VISIBLE_LABEL_FIELDS = ['shared:displayIdentity', 'shared:altitude', 'shared:squawk'];
+    const DEFAULT_FILTER_SORT_ORDER = [{ key: 'distanceNm', direction: 'asc' }];
+    const FILTER_SORT_KEYS = ['label', 'flightId', 'registration', 'aircraftType', 'squawk', 'distanceNm', 'trackDeg', 'altitudeFt', 'speedKt'];
 
     const DEFAULT_STATE = {
       provider: 'adsblol',
@@ -1707,6 +1742,8 @@
       visibleLayers: AVAILABLE_LAYERS.map((layer) => layer.id),
       aircraftFilterMode: 'all',
       filteredPlaneIds: [],
+      filterSearchMode: 'terms',
+      filterSortOrder: [...DEFAULT_FILTER_SORT_ORDER],
       providerBackoff: {
         adsblol: defaultBackoff('adsblol'),
         opensky: defaultBackoff('opensky')
@@ -1757,6 +1794,8 @@
         merged.specialSquawkColor = normalizeColorChoice(merged.specialSquawkColor, DEFAULT_STATE.specialSquawkColor);
         merged.emergencySquawkColor = normalizeColorChoice(merged.emergencySquawkColor, DEFAULT_STATE.emergencySquawkColor);
         merged.aircraftFilterMode = merged.aircraftFilterMode === 'subset' ? 'subset' : 'all';
+        merged.filterSearchMode = normalizeFilterSearchMode(merged.filterSearchMode);
+        merged.filterSortOrder = sanitizePersistedFilterSortOrder(merged.filterSortOrder);
         merged.filteredPlaneIds = Array.isArray(merged.filteredPlaneIds)
           ? merged.filteredPlaneIds.map((value) => String(value)).filter(Boolean)
           : [];
@@ -1770,6 +1809,23 @@
 
     function saveState() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function normalizeFilterSearchMode(value) {
+      return String(value || '').trim() === 'regex' ? 'regex' : 'terms';
+    }
+
+    function sanitizePersistedFilterSortOrder(value) {
+      const seen = new Set();
+      const next = Array.isArray(value)
+        ? value
+          .map((entry) => ({
+            key: String(entry?.key || ''),
+            direction: entry?.direction === 'desc' ? 'desc' : entry?.direction === 'asc' ? 'asc' : ''
+          }))
+          .filter((entry) => entry.direction && FILTER_SORT_KEYS.includes(entry.key) && !seen.has(entry.key) && seen.add(entry.key))
+        : [...DEFAULT_FILTER_SORT_ORDER];
+      return next;
     }
 
     function normalizeProviderSelection(value) {
@@ -2572,6 +2628,8 @@
 
     const AVAILABLE_LABEL_FIELDS = buildAvailableLabelFields();
     let state = loadState();
+    runtime.filterSearchMode = state.filterSearchMode;
+    runtime.filterSortOrder = [...state.filterSortOrder];
 
     const NAV_MODE_GUIDE = {
       vnav: 'Vertical navigation mode is active, so the aircraft automation is following a vertical path or target profile.',
@@ -5178,7 +5236,11 @@
     }
 
     function buildFilterSearchText(plane) {
-      return normalizeFilterSearchValue([
+      return normalizeFilterSearchValue(buildRawFilterSearchText(plane));
+    }
+
+    function buildRawFilterSearchText(plane) {
+      return [
         plane.label,
         plane.displayIdentity || '',
         plane.flightId || '',
@@ -5191,7 +5253,42 @@
         formatHeading(plane.trackDeg),
         formatAltitudeFeet(plane.altitudeFt),
         formatSpeedKnots(plane.speedKt)
-      ].join(' '));
+      ].join(' ');
+    }
+
+    function persistFilterPreferences() {
+      state.filterSearchMode = runtime.filterSearchMode;
+      state.filterSortOrder = sanitizePersistedFilterSortOrder(runtime.filterSortOrder);
+      saveState();
+    }
+
+    function setFilterSearchMode(mode) {
+      const normalized = normalizeFilterSearchMode(mode);
+      if (runtime.filterSearchMode === normalized) return;
+      runtime.filterSearchMode = normalized;
+      persistFilterPreferences();
+    }
+
+    function buildFilterSearchTerms(searchTerm) {
+      return String(searchTerm || '')
+        .trim()
+        .split(/\s+/)
+        .map((term) => normalizeFilterSearchValue(term))
+        .filter(Boolean);
+    }
+
+    function compileFilterRegex(searchTerm) {
+      try {
+        return new RegExp(searchTerm, 'i');
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function buildFilterSearchPlaceholder() {
+      return runtime.filterSearchMode === 'regex'
+        ? 'Regex search across display identity, flight ID, registration, type, squawk...'
+        : 'Space-separated substrings across display identity, flight ID, registration, type, squawk...';
     }
 
     function compareFilterValues(left, right) {
@@ -5215,24 +5312,45 @@
       } else {
         runtime.filterSortOrder = runtime.filterSortOrder.filter((entry) => entry.key !== sortKey);
       }
+      persistFilterPreferences();
       renderFilterModal();
     }
 
     function clearFilterSort() {
       if (!runtime.filterSortOrder.length) return;
       runtime.filterSortOrder = [];
+      persistFilterPreferences();
       renderFilterModal();
     }
 
     function getVisibleFilterPlanes() {
       const planes = [...runtime.planes];
-      const searchNeedle = normalizeFilterSearchValue(runtime.filterSearchTerm);
-      const visiblePlanes = searchNeedle
-        ? planes.filter((plane) => buildFilterSearchText(plane).includes(searchNeedle))
-        : planes;
+      const rawSearchTerm = String(runtime.filterSearchTerm || '').trim();
+      const searchActive = Boolean(rawSearchTerm);
+      let searchError = '';
+      let visiblePlanes = planes;
+      if (searchActive) {
+        if (runtime.filterSearchMode === 'regex') {
+          const regex = compileFilterRegex(rawSearchTerm);
+          if (!regex) {
+            visiblePlanes = [];
+            searchError = 'Invalid regular expression.';
+          } else {
+            visiblePlanes = planes.filter((plane) => regex.test(buildRawFilterSearchText(plane)));
+          }
+        } else {
+          const searchTerms = buildFilterSearchTerms(rawSearchTerm);
+          visiblePlanes = searchTerms.length
+            ? planes.filter((plane) => {
+              const searchText = buildFilterSearchText(plane);
+              return searchTerms.every((term) => searchText.includes(term));
+            })
+            : planes;
+        }
+      }
       const activeSorts = runtime.filterSortOrder.filter((entry) => FILTER_SORT_CONFIG[entry.key]);
       if (!activeSorts.length) {
-        return { planes, visiblePlanes, searchActive: Boolean(searchNeedle) };
+        return { planes, visiblePlanes, searchActive, searchError };
       }
       const sortedPlanes = [...visiblePlanes].sort((left, right) => {
         for (const sortEntry of activeSorts) {
@@ -5243,7 +5361,49 @@
         }
         return 0;
       });
-      return { planes, visiblePlanes: sortedPlanes, searchActive: Boolean(searchNeedle) };
+      return { planes, visiblePlanes: sortedPlanes, searchActive, searchError };
+    }
+
+    function updateFilterSummary(planes, visiblePlanes, searchActive, searchError = '') {
+      const selectedIds = new Set(state.filteredPlaneIds || []);
+      const visibleIds = visiblePlanes.map((plane) => plane.id);
+      const visibleSelectedCount = isSubsetFilterActive()
+        ? visibleIds.filter((id) => selectedIds.has(id)).length
+        : visibleIds.length;
+      const allSelected = visibleIds.length > 0 && visibleSelectedCount === visibleIds.length;
+      filterSelectAll.checked = allSelected;
+      filterSelectAll.indeterminate = visibleSelectedCount > 0 && !allSelected;
+      filterSearchInput.setAttribute('aria-invalid', searchError ? 'true' : 'false');
+      filterEmpty.classList.toggle('hidden', visiblePlanes.length > 0);
+      if (!planes.length) {
+        filterSummary.textContent = 'All currently visible aircraft are shown.';
+        filterEmpty.textContent = 'No aircraft are available yet. Once a sweep returns targets, you can narrow the scope here.';
+        return;
+      }
+
+      if (!visiblePlanes.length) {
+        filterEmpty.textContent = searchError
+          ? 'The regular expression is invalid. Fix it or switch back to substring mode.'
+          : searchActive
+            ? 'No aircraft match the current search. Clear the search or try a looser identity/type/squawk guess.'
+            : 'No aircraft are available yet. Once a sweep returns targets, you can narrow the scope here.';
+      }
+
+      const filteredCount = getFilteredPlanes().length;
+      const matchSummary = searchError
+        ? 'Search has an invalid regular expression.'
+        : searchActive
+          ? `Matching <span class="filter-pill">${visiblePlanes.length} of ${planes.length}</span> rows in the table.`
+          : `Table shows <span class="filter-pill">${planes.length}</span> aircraft.`;
+      filterSummary.innerHTML = isSubsetFilterActive()
+        ? `${matchSummary} Scope is currently showing <span class="filter-pill">${filteredCount} of ${planes.length}</span> aircraft. Use the header checkbox to clear the filter and follow everything again.`
+        : `${matchSummary} All <span class="filter-pill">${planes.length}</span> aircraft are currently shown on the scope. Tick only the aircraft you want to keep on the scope.`;
+    }
+
+    function syncFilterRowSelection(planeId, checkbox) {
+      const checked = !isSubsetFilterActive() || (state.filteredPlaneIds || []).includes(planeId);
+      checkbox.checked = checked;
+      checkbox.setAttribute('aria-checked', checked ? 'true' : 'false');
     }
 
     function updateFilterSortUi() {
@@ -5268,44 +5428,34 @@
       });
       filterClearSort.disabled = runtime.filterSortOrder.length === 0;
       filterSearchInput.value = runtime.filterSearchTerm;
+      filterSearchInput.placeholder = buildFilterSearchPlaceholder();
+      filterSearchModeSelect.value = runtime.filterSearchMode;
       filterSearchClear.classList.toggle('hidden', !runtime.filterSearchTerm);
     }
 
     function renderFilterModal() {
       filterTableBody.replaceChildren();
-      const { planes, visiblePlanes, searchActive } = getVisibleFilterPlanes();
-      const selectedIds = new Set(state.filteredPlaneIds || []);
-      const visibleIds = visiblePlanes.map((plane) => plane.id);
-      const visibleSelectedCount = isSubsetFilterActive()
-        ? visibleIds.filter((id) => selectedIds.has(id)).length
-        : visibleIds.length;
-      const allSelected = visibleIds.length > 0 && visibleSelectedCount === visibleIds.length;
+      const { planes, visiblePlanes, searchActive, searchError } = getVisibleFilterPlanes();
       updateFilterSortUi();
-      filterSelectAll.checked = allSelected;
-      filterSelectAll.indeterminate = visibleSelectedCount > 0 && !allSelected;
-      filterEmpty.classList.toggle('hidden', visiblePlanes.length > 0);
+      updateFilterSummary(planes, visiblePlanes, searchActive, searchError);
       if (!planes.length) {
-        filterSummary.textContent = 'All currently visible aircraft are shown.';
-        filterEmpty.textContent = 'No aircraft are available yet. Once a sweep returns targets, you can narrow the scope here.';
         return;
       }
 
-      if (!visiblePlanes.length) {
-        filterEmpty.textContent = searchActive
-          ? 'No aircraft match the current search. Clear the search or try a looser identity/type/squawk guess.'
-          : 'No aircraft are available yet. Once a sweep returns targets, you can narrow the scope here.';
-      }
+      const selectedIds = new Set(state.filteredPlaneIds || []);
 
       visiblePlanes.forEach((plane) => {
         const row = document.createElement('tr');
         const selectedCell = document.createElement('td');
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
+        checkbox.dataset.planeId = plane.id;
         checkbox.checked = !isSubsetFilterActive() || selectedIds.has(plane.id);
         checkbox.setAttribute('aria-label', `Show or hide ${plane.label}`);
         checkbox.addEventListener('change', () => {
           toggleAircraftFilterSelection(plane.id, checkbox.checked);
-          renderFilterModal();
+          syncFilterRowSelection(plane.id, checkbox);
+          updateFilterSummary(planes, visiblePlanes, searchActive, searchError);
         });
         selectedCell.appendChild(checkbox);
         row.appendChild(selectedCell);
@@ -5328,14 +5478,6 @@
         });
         filterTableBody.appendChild(row);
       });
-
-      const filteredCount = getFilteredPlanes().length;
-      const matchSummary = searchActive
-        ? `Matching <span class="filter-pill">${visiblePlanes.length} of ${planes.length}</span> rows in the table.`
-        : `Table shows <span class="filter-pill">${planes.length}</span> aircraft.`;
-      filterSummary.innerHTML = isSubsetFilterActive()
-        ? `${matchSummary} Scope is currently showing <span class="filter-pill">${filteredCount} of ${planes.length}</span> aircraft. Use the header checkbox to clear the filter and follow everything again.`
-        : `${matchSummary} All <span class="filter-pill">${planes.length}</span> aircraft are currently shown on the scope. Tick only the aircraft you want to keep on the scope.`;
     }
 
     function renderLayersModal() {
@@ -5649,6 +5791,7 @@
       filterSummary.textContent = 'All currently visible aircraft are shown.';
       filterTableBody.replaceChildren();
       filterEmpty.classList.add('hidden');
+      filterSearchInput.removeAttribute('aria-invalid');
       updateFilterSortUi();
       clearFilterModalInteractionGuard();
     }
@@ -5668,7 +5811,6 @@
         closePlaneModal({ fromHistory: true });
       }
       resetFilterModalDom();
-      runtime.filterSortOrder = [{ key: 'distanceNm', direction: 'asc' }];
       if (runtime.filterModalInteractionFrame) {
         cancelAnimationFrame(runtime.filterModalInteractionFrame);
       }
@@ -6123,6 +6265,9 @@
       runtime.planeHitRegions = [];
       runtime.planeTrailMap = new Map();
       runtime.planeLabelLayoutMap = new Map();
+      runtime.filterSearchTerm = '';
+      runtime.filterSearchMode = state.filterSearchMode;
+      runtime.filterSortOrder = [...state.filterSortOrder];
       closeLabelOrderModal({ fromHistory: true });
       closeLabelFieldsModal({ fromHistory: true });
       closeLayersModal({ fromHistory: true });
@@ -6310,6 +6455,10 @@
       });
       filterSearchInput.addEventListener('input', () => {
         runtime.filterSearchTerm = filterSearchInput.value;
+        renderFilterModal();
+      });
+      filterSearchModeSelect.addEventListener('change', () => {
+        setFilterSearchMode(filterSearchModeSelect.value);
         renderFilterModal();
       });
       filterSearchClear.addEventListener('click', () => {
