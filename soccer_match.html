@@ -69,7 +69,11 @@
   }
   #subtitle{
     position:absolute;
-    left:0; right:0; bottom:5%;
+    left:50%; bottom:5%;
+    transform:translateX(-50%);
+    /* clamp to the visible band so long lines wrap instead of running into the
+       cropped stage edges; bottom-anchored so wrapped text grows upward */
+    width:min(100vw,100%);
     display:flex; justify-content:center;
     pointer-events:none;
   }
@@ -88,7 +92,8 @@
   #banner{
     position:absolute;
     top:36%;
-    left:0; right:0;
+    left:50%;
+    width:min(100vw,100%);
     text-align:center;
     font-size:clamp(28px,6vw,54px);
     font-weight:900;
@@ -96,11 +101,30 @@
     text-shadow:0 0 10px #000,0 0 22px #000, 0 3px 0 #000;
     opacity:0;
     transition:opacity .25s ease, transform .25s ease;
-    transform:scale(.85);
+    transform:translateX(-50%) scale(.85);
     pointer-events:none;
     letter-spacing:2px;
   }
-  #banner.show{opacity:1; transform:scale(1);}
+  #banner.show{opacity:1; transform:translateX(-50%) scale(1);}
+  #banner .bannerLine{
+    margin-top:14px;
+    font-size:clamp(15px,2.6vw,24px);
+    font-weight:700;
+    letter-spacing:.5px;
+    color:#fff;
+  }
+  #banner .bannerTable{
+    display:inline-grid;
+    grid-template-columns:auto auto;
+    column-gap:.9em;
+    row-gap:2px;
+    margin-top:16px;
+    font-size:clamp(16px,3vw,28px);
+    line-height:1.25;
+    letter-spacing:.5px;
+  }
+  #banner .bt-n{text-align:left;}
+  #banner .bt-s{text-align:right;font-variant-numeric:tabular-nums;}
   #fsWrap{
     position:absolute;
     top:0; left:50%;
@@ -109,9 +133,8 @@
     height:100%;
     pointer-events:none;
   }
-  #fsBtn{
+  .glassBtn{
     position:absolute;
-    right:16px;
     /* bottom edge sits just above the ad boards (board top = 78/560 of stage height) */
     top:max(10px, calc(13.93% - 50px));
     width:42px; height:42px;
@@ -126,11 +149,22 @@
     color:#eee;
     cursor:pointer;
     pointer-events:auto;
-    transition:background .2s ease, transform .15s ease;
+    transition:background .2s ease, transform .15s ease, opacity .2s ease;
   }
-  #fsBtn:hover{background:rgba(255,255,255,0.18);}
-  #fsBtn:active{transform:scale(.92);}
-  #fsBtn svg{width:20px; height:20px; display:block;}
+  .glassBtn:hover{background:rgba(255,255,255,0.18);}
+  .glassBtn:active{transform:scale(.92);}
+  .glassBtn svg{width:20px; height:20px; display:block;}
+  .glassBtn.dim{opacity:.55;}
+  #fsBtn{right:16px;}
+  #audioBtn{right:66px;}
+  #voiceBtn{
+    right:116px;
+    font-family:inherit;
+    font-size:10px;
+    font-weight:700;
+    letter-spacing:.3px;
+    text-shadow:0 1px 2px #000;
+  }
 </style>
 </head>
 <body>
@@ -145,7 +179,11 @@
   </div>
   <div id="statsOverlay"><span id="statsText">Half 1 · 0:00</span></div>
   <div id="fsWrap">
-    <button id="fsBtn" aria-label="Toggle fullscreen" title="Toggle fullscreen">
+    <button id="voiceBtn" class="glassBtn" aria-label="Commentator voice" title="Commentator voice">Web</button>
+    <button id="audioBtn" class="glassBtn" aria-label="Toggle audio" title="Toggle audio">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="audioIcon" d="M11 5 6 9H3v6h3l5 4V5zM16 9l6 6M22 9l-6 6"/></svg>
+    </button>
+    <button id="fsBtn" class="glassBtn" aria-label="Toggle fullscreen" title="Toggle fullscreen">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="fsIcon" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     </button>
   </div>
@@ -189,10 +227,6 @@ const ADS=[
  {name:"Token Budget", quote:"That shot cost more than expected."}
 ];
 
-const ADVERBS=["amazingly","brilliantly","swiftly","cleverly","boldly","gracefully","furiously","calmly","cheekily",
-"expertly","recklessly","smoothly","sharply","daringly","confidently","playfully","fiercely","precisely","casually",
-"spectacularly","frantically","elegantly","stubbornly","cheerfully","wildly"];
-const adv=()=>choice(ADVERBS);
 
 /* ---------- world constants ---------- */
 const FW=1000, FH=640;
@@ -303,26 +337,237 @@ const GOAL_RESET_MIN=2.6, GOAL_RESET_MAX=8.5, CUTSCENE_ZOOM=3;
 let restartTeam=0, goalScorer=null, kickoffTaker=null, ballHandedOff=false, goalResetElapsed=0, cutsceneActive=false;
 
 /* ---------- commentary ---------- */
+// Short, TTS-friendly lines with heavy variation. pick() never serves the same
+// variant twice in a row for a key, and say() cuts off long runs of one
+// category so a drawn-out duel or passing chain doesn't become a broken record.
+const PHRASES={
+  kickShort:[
+    a=>`${a} plays it forward`, a=>`${a} knocks it on`, a=>`${a} pushes upfield`,
+    a=>`${a} moves it along`, a=>`forward from ${a}`, a=>`${a} keeps it moving`,
+    a=>`${a} taps it ahead`, a=>`${a} nudges it on`, `on it goes`,
+    a=>`${a} keeps the tempo up`, a=>`patient stuff from ${a}`, a=>`${a} probes forward`,
+  ],
+  kickLong:[
+    a=>`${a} goes long`, a=>`${a} launches it`, a=>`${a} sends it deep`,
+    a=>`up and over from ${a}`, a=>`${a} hits it long`, a=>`route one from ${a}`,
+    a=>`big ball from ${a}`, a=>`${a} swings it downfield`, a=>`long one from ${a}`,
+    a=>`${a} goes over the top`, a=>`high and deep from ${a}`, `into the clouds it goes`,
+    a=>`aerial ball from ${a}`, a=>`${a} switches the field`,
+  ],
+  pass:[
+    (a,b)=>`${a} passes it to ${b}`, (a,b)=>`${a} finds ${b}`, (a,b)=>`${a} to ${b}`,
+    (a,b)=>`over to ${b}`, (a,b)=>`${a} slides it to ${b}`, (a,b)=>`${a} picks out ${b}`,
+    (a,b)=>`lovely ball to ${b}`, (a,b)=>`${b}`, (a,b)=>`${b} now`,
+    (a,b)=>`through to ${b}`, (a,b)=>`${a} feeds ${b}`, (a,b)=>`${a} squares it`,
+    (a,b)=>`${a} threads it to ${b}`, (a,b)=>`clever ball — ${b}`, (a,b)=>`${a} lays it off to ${b}`,
+    (a,b)=>`${b} wants it, ${b} gets it`, (a,b)=>`simple ball to ${b}`, (a,b)=>`${a} rolls it to ${b}`,
+    (a,b)=>`sprayed out to ${b}`, (a,b)=>`into the path of ${b}`, (a,b)=>`${b} takes over`,
+    (a,b)=>`${a} keeps it tidy — ${b}`, (a,b)=>`give and go with ${b}`, (a,b)=>`nicely done — ${b}`,
+  ],
+  shoot:[
+    a=>`${a} shoots!`, a=>`${a} lets fly!`, a=>`${a} has a go!`,
+    a=>`${a} pulls the trigger!`, `he shoots!`, a=>`strike from ${a}!`,
+    a=>`${a} goes for goal!`, a=>`${a} tries his luck!`, `here's the shot!`,
+    a=>`${a} winds up… and shoots!`, `he lets one rip!`, a=>`${a} unloads!`,
+    a=>`${a} takes aim!`, `shot away!`, a=>`${a} doesn't hesitate — bang!`,
+    a=>`${a} snaps one off!`, `the keeper won't like this!`, a=>`go on, ${a}!`,
+  ],
+  chip:[
+    a=>`${a} chips the keeper!`, a=>`${a} lifts it over!`, a=>`audacious from ${a}!`,
+    a=>`${a} floats one in!`, `over the keeper!`, a=>`cheeky, from ${a}!`,
+    a=>`${a} spots the keeper off his line!`, a=>`the delicate touch from ${a}!`,
+    a=>`${a} dinks it!`, `up… and over!`, a=>`${a} tries the impossible!`,
+    `oh, the cheek of it!`,
+  ],
+  closingin:[
+    a=>`${a} is closing in!`, a=>`here comes ${a}!`, a=>`${a} with space!`,
+    `danger here!`, `can he finish this?`, a=>`${a} smells a goal!`,
+    a=>`${a} drives forward!`, `the crowd rises!`, a=>`${a} is in behind!`,
+    a=>`watch out — ${a}!`, `the defence is scrambling!`, a=>`${a} bearing down on goal!`,
+    `one on one!`, `hearts in mouths here!`, `this could be it!`,
+    a=>`${a} won't get a better chance!`,
+  ],
+  goal:[
+    `GOAL!`, `it's in!`, t=>`GOAL for ${t}!`, `what a finish!`, `they've done it!`,
+    `unstoppable!`, `the net bulges!`, `oh, that's beautiful!`, `get in!`,
+    `scenes!`, t=>`pandemonium for ${t}!`, `he's buried it!`, `no chance for the keeper!`,
+    `clinical!`, `they'll be dancing in the streets!`, t=>`${t} have their moment!`,
+    `that is why we watch this game!`, `absolutely lethal!`,
+  ],
+  gain:[
+    a=>`${a} intercepts`, a=>`${a} sees it coming`, a=>`${a} reads it`,
+    a=>`stolen by ${a}`, a=>`${a} steps in`, `turnover!`, a=>`${a} cuts it out`,
+    a=>`${a} says no`, a=>`won back by ${a}`, a=>`${a} pounces`,
+    a=>`${a} with the pickpocket`, a=>`cut out — ${a}`, a=>`${a} smells the danger`,
+    a=>`anticipation from ${a}`, a=>`${a} was having none of that`,
+    a=>`read like a book by ${a}`, a=>`${a} snuffs it out`, a=>`possession flips — ${a}`,
+  ],
+  receive:[
+    a=>`${a}`, a=>`${a} takes it`, a=>`${a} collects`, a=>`with ${a}`,
+    a=>`${a} on the ball`, a=>`good touch from ${a}`, a=>`${a} settles it`,
+    a=>`nice and easy for ${a}`, a=>`${a} brings it down`, a=>`kept alive by ${a}`,
+    a=>`${a} tidies up`, a=>`safe feet, ${a}`, a=>`${a} takes charge`,
+    a=>`${a} in stride`,
+  ],
+  tackle:[
+    (a,b)=>`${a} strips it from ${b}`, a=>`${a} wins it!`, a=>`crunching challenge from ${a}!`,
+    (a,b)=>`${a} takes it off ${b}`, (a,b)=>`${b} loses it!`, `what a tackle!`,
+    a=>`${a} muscles in`, `robbed him!`, a=>`${a} crashes in!`,
+    a=>`won fair and square by ${a}`, (a,b)=>`${b} didn't see him coming!`,
+    (a,b)=>`the ball's gone — so is ${b}!`, a=>`no nonsense from ${a}`,
+    a=>`${a} slams the door`, a=>`textbook from ${a}`, `that's a booking, surely?!`,
+  ],
+  stumble:[
+    `what a stumble!`, a=>`${a} goes down!`, `that's gotta hurt!`,
+    a=>`${a} loses his footing!`, `where's the ref?!`, a=>`down goes ${a}!`,
+    `he's hit the turf!`, `no whistle — play on!`, `he's gone head over heels!`,
+    a=>`${a} ends up on his backside!`, `the turf wins that one!`, `ouch!`,
+    a=>`${a} needs a moment!`, `legs everywhere!`, `oh, the indignity!`,
+    `he'll feel that in the morning!`,
+  ],
+  scramble:[
+    `it squirts loose!`, `scramble!`, `loose ball!`, `nobody's ball!`,
+    `can they get it?`, `it's anyone's!`, (a,b)=>`${a} and ${b} scrapping for it!`,
+    `chaos in there!`, `pinball in the middle!`, `bodies flying in!`,
+    `somebody claim it!`, `it's a lottery in there!`, `the ball has a mind of its own!`,
+    `pure chaos!`,
+  ],
+  pressurePass:[
+    (a,b)=>`${a} sees it coming — ${b}!`, (a,b)=>`${a} under pressure, finds ${b}`,
+    a=>`quick feet from ${a}`, (a,b)=>`${a} escapes — ${b}`,
+    (a,b)=>`out of trouble, to ${b}`, a=>`${a} just in time`,
+    (a,b)=>`${a} feels the breath on his neck — ${b}`, (a,b)=>`no time — off to ${b}`,
+    (a,b)=>`${a} wriggles out — ${b}`, (a,b)=>`released just in time to ${b}`,
+    a=>`${a} keeps his cool`, a=>`panic? Not from ${a}`,
+  ],
+  forced:[
+    a=>`${a} has to let it go`, (a,b)=>`forced out to ${b}`,
+    (a,b)=>`${a} gives it up — ${b}`, (a,b)=>`nowhere to go — ${b}`,
+    (a,b)=>`crowded out, to ${b}`, (a,b)=>`smothered — it breaks to ${b}`,
+    a=>`${a} runs out of road`, a=>`${a} can't hold it any longer`,
+    (a,b)=>`prised away — ${b} collects`, (a,b)=>`the pressure tells — ${b}`,
+  ],
+  gkClear:[
+    a=>`${a} clears!`, a=>`big boot from ${a}!`, a=>`${a} launches it!`,
+    `up and away!`, a=>`${a} hammers it clear!`, a=>`${a} wants none of that!`,
+    `away with it!`, a=>`no messing from ${a}!`, a=>`${a} sends it into orbit!`,
+    a=>`row Z, courtesy of ${a}!`, a=>`${a} deals with it`, `safe hands, big boot`,
+  ],
+  gkRestart:[
+    a=>`${a} gets things moving`, (a,b)=>`${a} rolls it out to ${b}`,
+    `play resumes`, (a,b)=>`${a} to ${b}, and we're back`,
+    a=>`${a} calms things down`, `back to business`,
+    a=>`${a} waves them forward`, `and we go again`,
+  ],
+  miss:[
+    `so close!`, `just wide!`, `inches away!`, `off target!`, `over it goes!`,
+    `narrow miss!`, `not this time!`, `he'll want that one back!`,
+    `how did that stay out?!`, `a whisker away!`, `the post breathes a sigh!`,
+    `agonising!`, `wide! He can't believe it!`, `the keeper was beaten — the goal wasn't!`,
+    `so near, so far!`, `that's the chance of the half — gone!`,
+  ],
+  goalkick:[
+    `goal kick`, t=>`goal kick to ${t}`, t=>`${t} restart it`, `back with the keeper`,
+    `the keeper gathers himself`, t=>`${t} can breathe again`,
+    `reset from the back`, `danger over — for now`,
+  ],
+  throwin:[
+    `throw-in`, `out of play`, `over the line`, `out it goes`, `throw-in coming`,
+    `into the stands it goes`, `we'll restart from the line`, `a chance to reset`,
+    `shy from the sideline`, `chalk dust flying`,
+  ],
+  start:[
+    `kick off!`, `we're underway!`, `and away we go!`, `here we go!`,
+    `the whistle goes!`, `battle commences!`, `game on!`, `the wait is over!`,
+  ],
+  '2ndhalf':[
+    `second half!`, `back underway!`, `off we go again!`, `here comes the second half!`,
+    `forty-five more minutes!`, `no changes at the break!`, `they're back out!`,
+    `the second act begins!`,
+  ],
+  ht:[
+    `half time!`, `that's the half!`, `time for a breather!`,
+    `the whistle brings relief!`, `time to regroup!`, `we'll catch our breath!`,
+  ],
+};
+// avoid the most recent half of each bank, not just the last line —
+// with banks this size that's what actually prevents déjà vu
+const recentVariant={};
+function pick(key,...args){
+  const bank=PHRASES[key];
+  const recent=recentVariant[key]||(recentVariant[key]=[]);
+  const banned=new Set(recent);
+  let candidates=[];
+  for(let i=0;i<bank.length;i++) if(!banned.has(i)) candidates.push(i);
+  if(!candidates.length){ recent.length=0; candidates=bank.map((_,i)=>i); }
+  const i=candidates[Math.floor(Math.random()*candidates.length)];
+  recent.push(i);
+  const maxRecent=Math.max(1,Math.floor(bank.length/2));
+  while(recent.length>maxRecent) recent.shift();
+  const v=bank[i];
+  return typeof v==='function' ? v(...args) : v;
+}
+
+// keys grouped so "same kind of comment" is judged by category, not exact key
+const SAY_CATEGORY={
+  kick:'move', pass:'move', receive:'move', pressurePass:'move', forced:'move',
+  shoot:'chance', chip:'chance', closingin:'chance', miss:'chance',
+  tackle:'duel', stumble:'duel', scramble:'duel', gain:'duel',
+  goalkick:'restart', throwin:'restart', gkRestart:'restart', gkClear:'restart',
+};
 const subtitleEl=document.getElementById('subtitleText');
 const bannerEl=document.getElementById('banner');
 let lastSay={};
 let subtitleLockUntil=0;
+let lastCat=null, catRun=0, catRunAt=0;
 function say(msg,minGap,key,opts){
   opts=opts||{};
   key=key||msg;
   const now=performance.now();
+  // while TTS is synthesizing/playing, drop lines rather than let subtitles
+  // race ahead of the voice; the latest forced line waits its turn instead
+  if(ttsSpeaking){
+    if(opts.force) pendingLine={msg:msg,key:key};
+    return;
+  }
   if(!opts.force && now<subtitleLockUntil) return;
   if(minGap && lastSay[key] && now-lastSay[key]<minGap) return;
+  const cat=SAY_CATEGORY[key]||key;
+  if(!opts.force && cat===lastCat && now-catRunAt<7000){
+    catRun++;
+    if(catRun>=4) return; // the same kind of thing keeps happening — let the pictures do the talking
+  } else if(cat!==lastCat || now-catRunAt>=7000){
+    catRun=1;
+  }
+  lastCat=cat; catRunAt=now;
   lastSay[key]=now;
   subtitleEl.textContent=msg;
-  // longer lines earn a longer read before the next line is allowed to bump them
-  subtitleLockUntil = now + (opts.holdMs!=null ? opts.holdMs : clamp(msg.length*34, 650, 3200));
+  if(ttsActive()){
+    ttsSpeaking=true;
+    subtitleLockUntil=now+60000; // held by the speech channel; released below
+    speakLine(msg).finally(()=>{
+      ttsSpeaking=false;
+      subtitleLockUntil=performance.now()+250;
+      const p=pendingLine; pendingLine=null;
+      if(p) say(p.msg,0,p.key,{force:true});
+    });
+  } else {
+    // longer lines earn a longer read before the next line is allowed to bump them
+    subtitleLockUntil = now + (opts.holdMs!=null ? opts.holdMs : clamp(msg.length*34, 650, 3200));
+  }
 }
 function bigBanner(msg,duration){
   bannerEl.textContent=msg;
+  showBanner(duration);
+}
+function bigBannerHTML(html,duration){
+  bannerEl.innerHTML=html;
+  showBanner(duration);
+}
+function showBanner(duration){
   bannerEl.classList.add('show');
-  clearTimeout(bigBanner._t);
-  bigBanner._t=setTimeout(()=>bannerEl.classList.remove('show'), duration||2200);
+  clearTimeout(showBanner._t);
+  showBanner._t=setTimeout(()=>bannerEl.classList.remove('show'), duration||2200);
 }
 
 /* ---------- AI helpers ---------- */
@@ -353,17 +598,7 @@ function chooseKickType(distTo){
   return Math.random()<0.5?'lobFar':'groundFast';
 }
 
-function kickDesc(type){
-  switch(type){
-    case 'groundSlow': return 'rolls a gentle grounder';
-    case 'groundFast': return 'thumps a fast grounder';
-    case 'lobNear': return 'chips it up and over, a short hop';
-    case 'lobFar': return 'launches it up and over, deep downfield';
-    case 'gkClear': return 'hammers a towering clearance high out of the box';
-  }
-}
-
-function doKick(player,tx,ty,type,extra){
+function doKick(player,tx,ty,type,extra,extraKey){
   const dx=tx-player.x, dy=ty-player.y;
   const d=Math.hypot(dx,dy)||1;
   const ux=dx/d, uy=dy/d;
@@ -376,8 +611,8 @@ function doKick(player,tx,ty,type,extra){
   ball.vx=ux*speed; ball.vy=uy*speed; ball.vz=vz; ball.z=Math.max(ball.z,3);
   ball.owner=null; ball.controlTime=0; ball.lastKicker=player; duelCount=0;
   ball.kickGrace=0.18; // brief window where only the kicker's team can pick it back up, so a pass under pressure has a chance to actually reach a teammate
-  const msg = extra || `${player.name} ${adv()} ${kickDesc(type)} toward the ${type.startsWith('lob')?'far side':'attack'}!`;
-  say(msg,180,'kick');
+  const msg = extra || pick(type==='groundSlow'||type==='groundFast' ? 'kickShort' : 'kickLong', player.name);
+  say(msg,180,extraKey||'kick');
 }
 
 function ballCarrierDecision(player){
@@ -391,7 +626,7 @@ function ballCarrierDecision(player){
     shots[team]++;
     const ty=320+rand(-45,45);
     const type = distGoal<130 ? (Math.random()<0.5?'groundFast':'lobNear') : (Math.random()<0.5?'lobFar':'groundFast');
-    doKick(player,oppGoal,ty,type,`${player.name} shoots ${adv()} toward the goal!!`);
+    doKick(player,oppGoal,ty,type,pick('shoot',player.name),'shoot');
     player.actionTimer=rand(0.6,1.0);
     return;
   }
@@ -401,14 +636,13 @@ function ballCarrierDecision(player){
     const target = pickPassTarget(player,advanced.length? advanced : mates);
     const d=dist(player.x,player.y,target.x,target.y);
     const type=chooseKickType(d);
-    const msg = Math.random()<0.5 ? `${target.name}.` : `${player.name} ${adv()} ${kickDesc(type)} to ${target.name}!`;
-    doKick(player,target.x,target.y,type,msg);
+    doKick(player,target.x,target.y,type,pick('pass',player.name,target.name),'pass');
     player.actionTimer=rand(0.6,1.1);
     return;
   }
   // dribble onward
   if(distGoal<300 && Math.random()<0.4){
-    say(`${player.name} is ${adv()} closing in on goal!`,3200,'closingin');
+    say(pick('closingin',player.name),3200,'closingin');
   }
   player.actionTimer=rand(0.5,0.9);
 }
@@ -417,7 +651,7 @@ function gkDecision(gk){
   const team=gk.team;
   const mates=teamOf(team).filter(p=>p!==gk);
   const target=choice(mates.filter(m=>m.role==='MID'||m.role==='FWD').concat(mates)) ;
-  doKick(gk,target.x,target.y,'gkClear',`${gk.name} ${adv()} boots a huge clearance upfield toward ${target.name}!`);
+  doKick(gk,target.x,target.y,'gkClear',pick('gkClear',gk.name),'gkClear');
   gk.actionTimer=rand(0.8,1.2);
 }
 
@@ -440,12 +674,19 @@ function startKickoff(team){
 function handleGoal(scoringTeam){
   resumePhase = (phase==='live2') ? 'live2' : 'live1';
   score[scoringTeam]++;
-  bigBanner(`⚽ GOAL! ${teamCountries[scoringTeam]} ${adv()} finds the net!`, 2400);
-  say(`GOAL!!! ${teamCountries[scoringTeam]} ${adv()} scores!`,0,'goal',{force:true});
 
   restartTeam = 1-scoringTeam;
   goalScorer = (ball.lastKicker && ball.lastKicker.team===scoringTeam) ? ball.lastKicker
     : nearestPlayerTo({x:opponentGoalX(scoringTeam),y:FH/2}, teamOf(scoringTeam).filter(p=>!p.isGK));
+
+  bigBannerHTML(
+    `<div>Goal!</div>`+
+    `<div class="bannerLine">${goalScorer.name} scores for ${teamCountries[scoringTeam]}</div>`+
+    `<div class="bannerTable">`+
+      `<span class="bt-n">${teamCountries[0]}</span><span class="bt-s">${score[0]}</span>`+
+      `<span class="bt-n">${teamCountries[1]}</span><span class="bt-s">${score[1]}</span>`+
+    `</div>`, 3600);
+  say(pick('goal',teamCountries[scoringTeam]),0,'goal',{force:true});
   kickoffTaker = teamOf(restartTeam).find(p=>p.role==='FWD');
   ballHandedOff=false; goalResetElapsed=0;
   ball.owner=null; ball.controlTime=0;
@@ -484,7 +725,7 @@ function updateGoalReset(dt){
 
   if(!ballHandedOff && gk && !ball.owner && dist(gk.x,gk.y,ball.x,ball.y)<CAPTURE_R+6){
     ballHandedOff=true;
-    doKick(gk,kickSpotX,kickSpotY,'groundFast',`${gk.name} ${adv()} gathers it and rolls play back into motion, out to ${kickoffTaker.name}.`);
+    doKick(gk,kickSpotX,kickSpotY,'groundFast',pick('gkRestart',gk.name,kickoffTaker.name),'gkRestart');
   }
 
   const ready = ball.owner===kickoffTaker && goalResetElapsed>=GOAL_RESET_MIN;
@@ -505,13 +746,15 @@ function handleGoalKick(defendingTeam){
   ball.x=gk.x+attackDir(defendingTeam)*10; ball.y=gk.y; ball.z=0;
   ball.vx=0;ball.vy=0;ball.vz=0;
   ball.owner=gk; ball.controlTime=0.4;
-  say(`Goal kick to ${teamCountries[defendingTeam]}.`,400,'goalkick',{force:true});
+  // a shot that went wide earns a near-miss reaction; anything else is just a restart
+  const missedShot = ball.lastKicker && ball.lastKicker.team!==defendingTeam;
+  say(missedShot ? pick('miss') : pick('goalkick',teamCountries[defendingTeam]),400,missedShot?'miss':'goalkick',{force:true});
 }
 
 function handleThrowIn(){
   ball.y=clamp(ball.y,14,FH-14);
   ball.vx=0;ball.vy=0;ball.vz=0;ball.z=0;ball.owner=null;
-  say(`Out of play — throw-in ${adv()} taken.`,400,'throwin',{force:true});
+  say(pick('throwin'),400,'throwin',{force:true});
 }
 
 /* ---------- physics + AI update ---------- */
@@ -569,10 +812,9 @@ function capturePossession(dt){
   if(!ball.owner){
     ball.owner=claimant; ball.controlTime=0; duelCount=0; ball.pressureCooldown=0;
     if(ball.lastKicker && ball.lastKicker.team!==claimant.team){
-      say(`${claimant.name} ${adv()} collects it and takes control for ${teamCountries[claimant.team]}!`,300,'gain');
+      say(pick('gain',claimant.name),300,'gain');
     } else if(ball.lastKicker && ball.lastKicker!==claimant){
-      const msg = Math.random()<0.5 ? `${claimant.name}.` : `${claimant.name} ${adv()} receives it!`;
-      say(msg,400,'receive');
+      say(pick('receive',claimant.name),400,'receive');
     }
     return;
   }
@@ -590,16 +832,16 @@ function capturePossession(dt){
         ball.vx=Math.cos(ang)*220; ball.vy=Math.sin(ang)*220; ball.vz=160; ball.z=Math.max(ball.z,5);
         ball.owner=null; ball.controlTime=0; ball.lastKicker=null;
         duelCount=0; scrambleCooldown=0.5;
-        say(`It's a ${adv()} scramble between ${claimant.name} and ${prevOwner.name} — the ball squirts loose!`,0,'scramble');
+        say(pick('scramble',claimant.name,prevOwner.name),0,'scramble');
       } else {
-        say(`${claimant.name} ${adv()} strips it away from ${prevOwner.name}!`,300,'tackle');
+        say(pick('tackle',claimant.name,prevOwner.name),300,'tackle');
         ball.owner=claimant; ball.controlTime=0; ball.pressureCooldown=0;
       }
     } else if(roll<chance+stumbleChance){
       // the challenge goes wrong — the tackler stumbles and loses ground for a beat
       claimant.stumbleTimer=rand(0.8,1.2);
       claimant.vx*=0.15; claimant.vy*=0.15;
-      say(`${claimant.name} ${adv()} dives in for the tackle but stumbles, losing his footing!`,400,'stumble');
+      say(pick('stumble',claimant.name),400,'stumble');
     }
   }
 }
@@ -610,7 +852,7 @@ function forcePass(owner){
   const mate=pickPassTarget(owner,mates);
   const d=dist(owner.x,owner.y,mate.x,mate.y);
   const type=chooseKickType(d);
-  doKick(owner,mate.x,mate.y,type,`Three seconds of ${adv()} tussling — ${owner.name} is forced to let it go, squared to ${mate.name}!`);
+  doKick(owner,mate.x,mate.y,type,pick('forced',owner.name,mate.name),'forced');
   owner.actionTimer=rand(0.6,1.0);
 }
 
@@ -668,7 +910,7 @@ function updatePlayers(dt){
           const gk=players.find(pl=>pl.team!==p.team && pl.isGK);
           const gkY=gk?gk.y:(GOAL_Y0+GOAL_Y1)/2;
           const gty = gkY<(GOAL_Y0+GOAL_Y1)/2 ? GOAL_Y1-16 : GOAL_Y0+16;
-          doKick(p,oppGoal,gty,'lobNear',`${p.name} ${adv()} lifts it high into the unguarded corner!!`);
+          doKick(p,oppGoal,gty,'lobNear',pick('chip',p.name),'chip');
           p.actionTimer=rand(0.6,1.0);
         }
       }
@@ -685,7 +927,7 @@ function updatePlayers(dt){
               if(mate){
                 const d=dist(p.x,p.y,mate.x,mate.y);
                 const type=chooseKickType(d);
-                doKick(p,mate.x,mate.y,type,`${p.name}, sensing the tackle coming, ${adv()} squares it off to ${mate.name}!`);
+                doKick(p,mate.x,mate.y,type,pick('pressurePass',p.name,mate.name),'pressurePass');
                 p.actionTimer=rand(0.6,1.0);
               } else { ball.pressureCooldown=0.3; }
             } else { ball.pressureCooldown=0.3; } // still crowded — re-check shortly instead of clinging
@@ -747,17 +989,17 @@ function updatePhase(dt){
   if(phase==='kickoff'){
     phaseTimer-=dt;
     say(`Kick off in ${Math.max(0,Math.ceil(phaseTimer))}…`,900,'ko',{force:true});
-    if(phaseTimer<=0){ phase='live1'; halfClock=0; startKickoff(0); say('Kick off! And we are underway!',0,'start',{force:true}); }
+    if(phaseTimer<=0){ phase='live1'; halfClock=0; startKickoff(0); say(pick('start'),0,'start',{force:true}); }
     return;
   }
   if(phase==='halftime'){
     phaseTimer-=dt;
-    if(phaseTimer<=0){ phase='live2'; halfClock=0; startKickoff(1); say('Second half under way!',0,'2ndhalf',{force:true}); }
+    if(phaseTimer<=0){ phase='live2'; halfClock=0; startKickoff(1); say(pick('2ndhalf'),0,'2ndhalf',{force:true}); }
     return;
   }
   if(phase==='live1'){
     halfClock+=dt;
-    if(halfClock>=HALF_LEN){ phase='halftime'; phaseTimer=8; bigBanner('HALF TIME',2400); say('Half time!',0,'ht',{force:true}); }
+    if(halfClock>=HALF_LEN){ phase='halftime'; phaseTimer=8; bigBanner('HALF TIME',2400); say(pick('ht'),0,'ht',{force:true}); }
     return;
   }
   if(phase==='live2'){
@@ -775,10 +1017,10 @@ function updatePhase(dt){
       phase='presenter'; phaseTimer=5.5;
       const winner = score[0]===score[1] ? null : (score[0]>score[1]?0:1);
       const resultLine = winner===null
-        ? `A ${adv()} even contest — ${teamCountries[0]} and ${teamCountries[1]} ${adv()} share the points, ${score[0]}-${score[1]}.`
-        : `${teamCountries[winner]} ${adv()} take it, ${score[0]}-${score[1]}, over ${teamCountries[1-winner]}.`;
+        ? `All square — ${teamCountries[0]} and ${teamCountries[1]} share it, ${score[0]}–${score[1]}.`
+        : `${teamCountries[winner]} take it, ${score[winner]}–${score[1-winner]}.`;
       bigBanner(`${teamCountries[0]} ${score[0]} – ${score[1]} ${teamCountries[1]}`,4200);
-      say(`Full time here at the studio: ${resultLine}`,0,'presenter',{force:true});
+      say(resultLine,0,'presenter',{force:true});
     }
     return;
   }
@@ -788,7 +1030,7 @@ function updatePhase(dt){
       pendingNext=nextCountries();
       phase='nextup'; phaseTimer=4.5;
       bigBanner(`Up next: ${pendingNext[0]} vs ${pendingNext[1]}`,4000);
-      say(`Coming up next, ${pendingNext[0]} ${adv()} take on ${pendingNext[1]}! Stay with us!`,0,'nextup',{force:true});
+      say(`Up next — ${pendingNext[0]} versus ${pendingNext[1]}!`,0,'nextup',{force:true});
     }
     return;
   }
@@ -876,6 +1118,119 @@ if(document.documentElement.requestFullscreen){
 }else{
   fsBtn.style.display='none'; // e.g. iPhone Safari — no Fullscreen API
 }
+
+/* ---------- audio / TTS commentator ---------- */
+// Engine lives in assets/vendor/tts/tts-wrapper.js (shared with airmail.html).
+// browser mode resolves when the utterance ends; espeak/piper return PCM that
+// we play through an AudioContext and resolve on src.onended — so the say()
+// speech channel is released by real end-of-playback events, not timers.
+const VOICES=[
+  {mode:'none',   label:'None'},
+  {mode:'browser',label:'Web'},
+  {mode:'espeak', label:'eSpk'},
+  {mode:'piper',  label:'Piper'},
+  {mode:'piper',  label:'Pip 2', voice:'commentator-2'},
+  {mode:'piper',  label:'Pip 3', voice:'commentator-3'},
+];
+let audioOn=false, voiceIdx=1;
+let ttsSpeaking=false, pendingLine=null;
+const audioBtn=document.getElementById('audioBtn');
+const voiceBtn=document.getElementById('voiceBtn');
+const audioIcon=document.getElementById('audioIcon');
+const AUD_ON='M11 5 6 9H3v6h3l5 4V5zM15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13';
+const AUD_OFF='M11 5 6 9H3v6h3l5 4V5zM16 9l6 6M22 9l-6 6';
+
+function ttsActive(){ return audioOn && VOICES[voiceIdx].mode!=='none'; }
+
+let ttsLoadPromise=null;
+function loadTts(){
+  if(window.TTS_WASM) return Promise.resolve(true);
+  if(!ttsLoadPromise){
+    ttsLoadPromise=new Promise(res=>{
+      const s=document.createElement('script');
+      s.src='./assets/vendor/tts/tts-wrapper.js';
+      s.onload=()=>res(!!window.TTS_WASM);
+      s.onerror=()=>res(false);
+      document.head.appendChild(s);
+    });
+  }
+  return ttsLoadPromise;
+}
+function configureTts(){
+  const v=VOICES[voiceIdx];
+  if(v.mode==='none') return;
+  loadTts().then(ok=>{
+    // configure() pre-warms piper (model download + worker) so the first
+    // spoken line doesn't pay the whole startup cost
+    if(ok && window.TTS_WASM.configure) window.TTS_WASM.configure({mode:v.mode});
+  });
+}
+
+let audioCtx=null;
+function playPcm(pcm,sampleRate){
+  return new Promise(res=>{
+    try{
+      if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+      if(audioCtx.state==='suspended') audioCtx.resume();
+      const f32=new Float32Array(pcm.length);
+      for(let i=0;i<pcm.length;i++) f32[i]=pcm[i]/32768;
+      const buf=audioCtx.createBuffer(1,f32.length,sampleRate);
+      buf.getChannelData(0).set(f32);
+      const src=audioCtx.createBufferSource();
+      src.buffer=buf;
+      src.connect(audioCtx.destination);
+      // safety: an autoplay-blocked (suspended) context never fires onended —
+      // don't let that hold the commentary channel forever
+      const t=setTimeout(res, pcm.length/sampleRate*1000+3000);
+      src.onended=()=>{ clearTimeout(t); res(); };
+      src.start();
+    }catch(e){ res(); }
+  });
+}
+window.addEventListener('pointerdown',()=>{
+  if(audioCtx && audioCtx.state==='suspended') audioCtx.resume();
+});
+
+function speakLine(text){
+  const v=VOICES[voiceIdx];
+  const attempt=(async()=>{
+    const ok=await loadTts();
+    if(!ok || !ttsActive()) return;
+    const res=await window.TTS_WASM.speak(text,{mode:v.mode, tower:!!v.voice, voiceIdentity:v.voice||null});
+    if(!ttsActive()) return; // audio toggled off while synthesizing
+    if(res && res.pcm && res.pcm.length && res.sampleRate) await playPcm(res.pcm,res.sampleRate);
+    // res.handled (browser mode) has already played to completion
+  })().catch(()=>{ /* silent — subtitles carry on */ });
+  // hard ceiling: piper synthesis can take seconds and some browser engines
+  // never fire onend — either way the commentary channel must come back
+  const ceiling=new Promise(r=>setTimeout(r, Math.max(2500,text.length*90)+12000));
+  return Promise.race([attempt,ceiling]);
+}
+
+function updateAudioUI(){
+  audioIcon.setAttribute('d', audioOn?AUD_ON:AUD_OFF);
+  audioBtn.classList.toggle('dim',!audioOn);
+  voiceBtn.textContent=VOICES[voiceIdx].label;
+  voiceBtn.classList.toggle('dim',!ttsActive());
+}
+audioBtn.addEventListener('click',()=>{
+  audioOn=!audioOn;
+  if(audioOn){
+    configureTts();
+    if(audioCtx && audioCtx.state==='suspended') audioCtx.resume();
+  } else if(window.speechSynthesis){
+    window.speechSynthesis.cancel();
+  }
+  updateAudioUI();
+  saveState();
+});
+voiceBtn.addEventListener('click',()=>{
+  voiceIdx=(voiceIdx+1)%VOICES.length;
+  if(window.speechSynthesis) window.speechSynthesis.cancel();
+  if(audioOn) configureTts();
+  updateAudioUI();
+  saveState();
+});
 
 function drawSky(){
   const g=ctx.createLinearGradient(0,0,0,TOP_PAD);
@@ -1146,7 +1501,78 @@ function loop(ts){
   renderUI();
   requestAnimationFrame(loop);
 }
-say(`Welcome to the match — ${teamCountries[0]} versus ${teamCountries[1]}!`,0,'welcome',{force:true});
+/* ---------- persistence ---------- */
+const LS_KEY='soccer_match_state_v1';
+const PHASES_SAVABLE=['kickoff','live1','halftime','live2','fulltime','presenter','nextup'];
+function saveState(){
+  try{
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      v:1, savedAt:Date.now(),
+      settings:{audioOn:audioOn, voiceIdx:voiceIdx},
+      match:{
+        countries:teamCountries.slice(),
+        colors:teamColors.slice(),
+        names:players.map(p=>p.name),
+        score:score.slice(), shots:shots.slice(), poss:possessionTicks.slice(),
+        // the transient goal cutscene resumes as its underlying live phase
+        phase: phase==='goalreset' ? resumePhase : phase,
+        phaseTimer:phaseTimer, halfClock:halfClock,
+        resumePhase:resumePhase, kickoffTeam:kickoffTeam,
+        pendingNext:pendingNext, queue:countryQueue.slice(),
+      }
+    }));
+  }catch(e){ /* storage blocked/full — nonfatal */ }
+}
+function restoreState(){
+  let s=null;
+  try{ s=JSON.parse(localStorage.getItem(LS_KEY)||'null'); }catch(e){}
+  if(!s) return false;
+  if(s.settings){
+    audioOn=!!s.settings.audioOn;
+    const vi=s.settings.voiceIdx|0;
+    if(vi>=0 && vi<VOICES.length) voiceIdx=vi;
+  }
+  const m=s.match;
+  if(!m || !Array.isArray(m.countries) || m.countries.length!==2) return false;
+  try{
+    if(Array.isArray(m.queue) && m.queue.length) countryQueue=m.queue;
+    applyTeams(m.countries[0],m.countries[1]);
+    if(Array.isArray(m.colors) && m.colors.length===2){
+      teamColors=[m.colors[0],m.colors[1]];
+      document.getElementById('sw0').style.background=teamColors[0];
+      document.getElementById('sw1').style.background=teamColors[1];
+    }
+    if(Array.isArray(m.names) && m.names.length===players.length){
+      players.forEach((p,i)=>{ p.name=m.names[i]; });
+    }
+    score[0]=m.score?.[0]|0;   score[1]=m.score?.[1]|0;
+    shots[0]=m.shots?.[0]|0;   shots[1]=m.shots?.[1]|0;
+    possessionTicks[0]=+m.poss?.[0]||0.001; possessionTicks[1]=+m.poss?.[1]||0.001;
+    halfClock=+m.halfClock||0;
+    phaseTimer=+m.phaseTimer||0;
+    resumePhase=(m.resumePhase==='live2')?'live2':'live1';
+    kickoffTeam=(m.kickoffTeam===1)?1:0;
+    pendingNext=(Array.isArray(m.pendingNext) && m.pendingNext.length===2)?m.pendingNext:null;
+    phase=PHASES_SAVABLE.includes(m.phase)?m.phase:'kickoff';
+    if(phase==='nextup' && !pendingNext){ phase='kickoff'; phaseTimer=3; }
+    if(phase==='kickoff' && !(phaseTimer>0)) phaseTimer=2.2;
+    // the match clock is restored as-is, never wall-clock adjusted — real time
+    // passing while the page was closed doesn't burn match time
+    startKickoff(kickoffTeam);
+    return true;
+  }catch(e){ return false; }
+}
+setInterval(saveState,3000);
+window.addEventListener('pagehide',saveState);
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') saveState(); });
+
+/* ---------- boot ---------- */
+const resumed=restoreState();
+updateAudioUI();
+if(audioOn) configureTts();
+say(resumed
+  ? `Welcome back — ${teamCountries[0]} versus ${teamCountries[1]}!`
+  : `Welcome to the match — ${teamCountries[0]} versus ${teamCountries[1]}!`,0,'welcome',{force:true});
 requestAnimationFrame(loop);
 
 })();
