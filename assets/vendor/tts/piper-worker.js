@@ -10,6 +10,7 @@ let piperEngine = null;
 let piperVoiceMeta = null;
 let piperProvider = null;
 let piperLoadPromise = null;
+let gpuDisabled = false;
 
 const speechCache = new Map();
 const SPEECH_CACHE_LIMIT = 18;
@@ -30,6 +31,23 @@ function hashString(value) {
   }
   return hash >>> 0;
 }
+
+// piper-tts-web.js sometimes leaves detached async work running internally
+// (e.g. a wasm abort during WebGPU session teardown) that isn't part of any
+// promise we're awaiting. Left alone these surface as uncaught worker errors
+// and — because piperEngine was cached forever — every request after one of
+// these would silently keep failing for the rest of the page's life. Catch
+// them here and force the engine to rebuild on the next request instead.
+self.addEventListener('unhandledrejection', (event) => {
+  event.preventDefault();
+  console.warn('[piper-worker] unhandled rejection, resetting engine', event.reason);
+  if (/adapter/i.test(String(event.reason?.message || event.reason || ''))) gpuDisabled = true;
+  void destroyEngine();
+});
+self.addEventListener('error', (event) => {
+  console.warn('[piper-worker] uncaught error, resetting engine', event.error || event.message);
+  void destroyEngine();
+});
 
 class PiperCacheProvider {
   constructor() {
@@ -186,7 +204,7 @@ async function ensureEngine(initData = null) {
       piperVoiceMeta = null;
     }
     let onnxRuntime = null;
-    if ('gpu' in navigator) {
+    if ('gpu' in navigator && !gpuDisabled) {
       try {
         onnxRuntime = new OnnxWebGPURuntime({ basePath: config.piperOnnxBaseUrl, numThreads: 1 });
       } catch {
@@ -221,10 +239,20 @@ async function ensureEngine(initData = null) {
 async function generateSpeech(text, options = {}) {
   const engine = await ensureEngine();
   const speakerId = piperSpeakerIdFor(options);
-  const response = await engine.generate(text, config.modelId, speakerId);
-  if (!response?.file) throw new Error('Piper returned no audio');
-  const decoded = await wavBlobToPcm(response.file);
-  return { ...decoded, mode: 'piper', speakerId };
+  try {
+    const response = await engine.generate(text, config.modelId, speakerId);
+    if (!response?.file) throw new Error('Piper returned no audio');
+    const decoded = await wavBlobToPcm(response.file);
+    return { ...decoded, mode: 'piper', speakerId };
+  } catch (error) {
+    // A dropped WebGPU adapter (or any other fatal onnx/wasm fault) leaves this
+    // engine permanently broken — every future call would just fail the same
+    // way forever. Tear it down so the *next* request rebuilds a fresh one
+    // instead of hammering a dead session for the rest of the session.
+    if (/adapter/i.test(String(error?.message || error))) gpuDisabled = true;
+    await destroyEngine();
+    throw error;
+  }
 }
 
 function queueSpeech(text, options = {}) {
@@ -296,6 +324,6 @@ self.onmessage = async ({ data }) => {
         throw new Error(`Unknown Piper worker message type: ${type}`);
     }
   } catch (error) {
-    reply({ ok: false, error: String(error) });
+    reply({ ok: false, error: String(error), state: currentState() });
   }
 };

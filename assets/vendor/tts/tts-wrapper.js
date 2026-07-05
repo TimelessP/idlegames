@@ -245,6 +245,12 @@
     piperWorker.onerror = (event) => {
       const error = new Error(event.message || 'Piper worker crashed');
       lastPiperError = error;
+      // Without this reset, piperWorkerState.ready stays true forever and
+      // tryLoadPiper() short-circuits past reinitialization on every future
+      // call — a one-off crash would otherwise silence TTS for good.
+      piperWorkerState = { ready: false, speakerCount: 0 };
+      try { piperWorker.terminate(); } catch {}
+      piperWorker = null;
       for (const pending of pendingPiperRequests.values()) {
         pending.reject(error);
       }
