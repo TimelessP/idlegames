@@ -15,6 +15,15 @@
   let piperWorkerState = { ready: false, speakerCount: 0 };
   const piperSpeechCache = new Map();
 
+  let pocketWorker = null;
+  let pocketLoadPromise = null;
+  let pocketLoadResolver = null;
+  let pocketLoadRejecter = null;
+  let pocketLastError = null;
+  let pocketActiveGeneration = null;
+  let pocketWorkerState = { ready: false, sampleRate: 24000, voiceCount: 0 };
+  let pocketBundleSampleRate = 24000;
+
   const currentScriptSrc = document.currentScript?.src || new URL('./tts-wrapper.js', window.location.href).toString();
   const wrapperBaseUrl = new URL('./', currentScriptSrc);
   const piperVendorBaseUrl = new URL('../piper/', wrapperBaseUrl).toString();
@@ -29,7 +38,7 @@
 
   function normalizeMode(mode) {
     const value = String(mode || 'auto').toLowerCase();
-    return ['auto', 'browser', 'espeak', 'tones', 'piper', 'none'].includes(value) ? value : 'auto';
+    return ['auto', 'browser', 'espeak', 'tones', 'piper', 'pocket', 'none'].includes(value) ? value : 'auto';
   }
 
   function utf8ByteLength(text) {
@@ -268,6 +277,148 @@
     });
   }
 
+  function ensurePocketWorker() {
+    if (pocketWorker) return pocketWorker;
+    const workerUrl = new URL('pocket-tts/inference-worker.js', wrapperBaseUrl);
+    pocketWorker = new Worker(workerUrl, { type: 'module', name: 'pocket-tts' });
+    pocketWorker.onmessage = ({ data }) => {
+      const message = data || {};
+      if (message.type === 'loaded' || message.type === 'bundle_loaded') {
+        if (message.sampleRate) pocketBundleSampleRate = Number(message.sampleRate) || pocketBundleSampleRate;
+        pocketWorkerState = { ready: true, sampleRate: pocketBundleSampleRate, voiceCount: pocketWorkerState.voiceCount };
+        if (pocketLoadResolver) {
+          const resolveLoad = pocketLoadResolver;
+          pocketLoadResolver = null;
+          pocketLoadRejecter = null;
+          resolveLoad(true);
+        }
+        return;
+      }
+      if (message.type === 'voices_loaded') {
+        pocketWorkerState = {
+          ready: pocketWorkerState.ready,
+          sampleRate: pocketBundleSampleRate,
+          voiceCount: Array.isArray(message.voices) ? message.voices.length : 0,
+        };
+        return;
+      }
+      if (message.type === 'audio_chunk' && pocketActiveGeneration) {
+        pocketActiveGeneration.chunks.push(new Float32Array(message.data || []));
+        return;
+      }
+      if (message.type === 'stream_ended' && pocketActiveGeneration) {
+        const generation = pocketActiveGeneration;
+        pocketActiveGeneration = null;
+        const totalSamples = generation.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+        const pcm = new Float32Array(totalSamples);
+        let offset = 0;
+        for (const chunk of generation.chunks) {
+          pcm.set(chunk, offset);
+          offset += chunk.length;
+        }
+        const pcmInt16 = new Int16Array(totalSamples);
+        for (let index = 0; index < totalSamples; index++) {
+          const value = pcm[index];
+          const clamped = Math.max(-1, Math.min(1, Number.isFinite(value) ? value : 0));
+          pcmInt16[index] = Math.max(-32768, Math.min(32767, Math.round(clamped * 32767)));
+        }
+        generation.resolve({ pcm: pcmInt16, sampleRate: pocketBundleSampleRate, mode: 'pocket' });
+        return;
+      }
+      if (message.type === 'error') {
+        const error = new Error(message.error || 'Pocket TTS generation failed');
+        pocketLastError = error;
+        if (pocketLoadRejecter) {
+          const rejectLoad = pocketLoadRejecter;
+          pocketLoadResolver = null;
+          pocketLoadRejecter = null;
+          rejectLoad(error);
+          return;
+        }
+        if (pocketActiveGeneration) {
+          const generation = pocketActiveGeneration;
+          pocketActiveGeneration = null;
+          generation.reject(error);
+        }
+      }
+    };
+    pocketWorker.onerror = (event) => {
+      const error = new Error(event.message || 'Pocket TTS worker crashed');
+      pocketLastError = error;
+      if (pocketLoadRejecter) {
+        const rejectLoad = pocketLoadRejecter;
+        pocketLoadResolver = null;
+        pocketLoadRejecter = null;
+        rejectLoad(error);
+      }
+      if (pocketActiveGeneration) {
+        const generation = pocketActiveGeneration;
+        pocketActiveGeneration = null;
+        generation.reject(error);
+      }
+      pocketWorkerState = { ready: false, sampleRate: pocketBundleSampleRate, voiceCount: 0 };
+      try { pocketWorker.terminate(); } catch {}
+      pocketWorker = null;
+    };
+    return pocketWorker;
+  }
+
+  async function tryLoadPocket() {
+    if (pocketWorkerState.ready) return true;
+    if (pocketLoadPromise) return pocketLoadPromise;
+    pocketLoadPromise = new Promise((resolve, reject) => {
+      pocketLoadResolver = resolve;
+      pocketLoadRejecter = reject;
+      const worker = ensurePocketWorker();
+      const timeout = setTimeout(() => {
+        if (pocketLoadPromise) {
+          const rejectLoad = pocketLoadRejecter;
+          pocketLoadResolver = null;
+          pocketLoadRejecter = null;
+          pocketLoadPromise = null;
+          rejectLoad(new Error('Pocket TTS load timed out'));
+        }
+      }, 30000);
+      worker.postMessage({ type: 'load' });
+      const clearLoad = () => {
+        clearTimeout(timeout);
+        pocketLoadResolver = null;
+        pocketLoadRejecter = null;
+      };
+      const originalResolve = pocketLoadResolver;
+      const originalReject = pocketLoadRejecter;
+      pocketLoadResolver = (value) => {
+        clearLoad();
+        if (typeof originalResolve === 'function') originalResolve(value);
+      };
+      pocketLoadRejecter = (error) => {
+        clearLoad();
+        if (typeof originalReject === 'function') originalReject(error);
+      };
+    });
+    return pocketLoadPromise;
+  }
+
+  async function generatePocketSpeech(text, options = {}) {
+    const ready = await tryLoadPocket();
+    if (!ready) {
+      throw pocketLastError || new Error('Pocket TTS unavailable');
+    }
+    const voiceIdentity = options.voiceIdentity || 'alba';
+    return new Promise((resolve, reject) => {
+      const worker = ensurePocketWorker();
+      pocketActiveGeneration = { chunks: [], resolve, reject };
+      worker.postMessage({ type: 'generate', data: { text, voice: voiceIdentity } });
+    });
+  }
+
+  async function preparePocketVoice(voiceIdentity) {
+    if (!voiceIdentity || voiceIdentity === 'alba') return true;
+    const worker = ensurePocketWorker();
+    worker.postMessage({ type: 'set_voice', data: { voiceName: voiceIdentity } });
+    return true;
+  }
+
   async function tryLoadPiper() {
     if (piperWorkerState.ready) return true;
     if (piperLoadPromise) return piperLoadPromise;
@@ -350,20 +501,37 @@
         void tryLoadPiper();
         return true;
       }
+      if (configuredMode === 'pocket') {
+        const voiceIdentity = options.voiceIdentity || 'alba';
+        void tryLoadPocket().then(() => preparePocketVoice(voiceIdentity)).catch(() => {});
+        return true;
+      }
       await maybeEvictStalePiperAssets();
       return true;
     },
     prepare: async function (text = '', options = {}) {
       const mode = normalizeMode(options.mode || configuredMode);
-      if (mode !== 'piper') return false;
-      if (!text) {
-        void tryLoadPiper();
+      if (mode === 'piper') {
+        if (!text) {
+          void tryLoadPiper();
+          return true;
+        }
+        void getPiperSpeech(text, options).catch((error) => {
+          lastPiperError = error;
+        });
         return true;
       }
-      void getPiperSpeech(text, options).catch((error) => {
-        lastPiperError = error;
-      });
-      return true;
+      if (mode === 'pocket') {
+        if (!text) {
+          void tryLoadPocket();
+          return true;
+        }
+        void generatePocketSpeech(text, options).catch((error) => {
+          pocketLastError = error;
+        });
+        return true;
+      }
+      return false;
     },
     probe: async function () {
       const api = await tryLoadEspeak();
@@ -377,8 +545,12 @@
         piperSpeakerCount: piperWorkerState.speakerCount || 0,
         piperSelectedMode: configuredMode,
         piperCachedMeta: loadPiperMeta(),
+        pocketReady: pocketWorkerState.ready,
+        pocketSampleRate: pocketBundleSampleRate,
+        pocketVoiceCount: pocketWorkerState.voiceCount || 0,
         lastError: lastEspeakError ? String(lastEspeakError) : null,
         lastPiperError: lastPiperError ? String(lastPiperError) : null,
+        lastPocketError: pocketLastError ? String(pocketLastError) : null,
       };
     },
     speak: async function (text, options = {}) {
@@ -410,6 +582,9 @@
       const tryPiper = async () => {
         return getPiperSpeech(text, options);
       };
+      const tryPocket = async () => {
+        return generatePocketSpeech(text, options);
+      };
 
       const routes = {
         auto: [tryBrowser, tryEspeak, tryTones],
@@ -417,6 +592,7 @@
         espeak: [tryEspeak],
         tones: [tryTones],
         piper: [tryPiper],
+        pocket: [tryPocket],
       };
       const selectedRoute = routes[mode] || routes.auto;
       let lastError = null;

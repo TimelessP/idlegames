@@ -73,6 +73,17 @@ await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'README.md'))
 await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'espeak-build'));
 await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'assets'));
 
+// Remove non-English Pocket TTS language bundles (keep only english_2026-04)
+const pocketOnnxDir = path.join(distDir, 'assets', 'vendor', 'tts', 'pocket-tts', 'onnx');
+if (await fileExists(pocketOnnxDir)) {
+  const entries = await fs.readdir(pocketOnnxDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name !== 'english_2026-04') {
+      await fs.rm(path.join(pocketOnnxDir, entry.name), { recursive: true, force: true });
+    }
+  }
+}
+
 async function copyModuleFile(moduleSegments, destinationSegments) {
   const src = path.join(projectRoot, 'node_modules', ...moduleSegments);
   const dest = path.join(distDir, ...destinationSegments);
@@ -207,7 +218,7 @@ if (await fileExists(gitignoreInDist)) {
   await fs.rm(gitignoreInDist);
 }
 
-const PRECACHE_EXTENSIONS = new Set(['.html', '.css', '.js', '.json', '.webmanifest', '.png', '.svg', '.ico', '.txt', '.woff2', '.wasm', '.data']);
+const PRECACHE_EXTENSIONS = new Set(['.html', '.css', '.js', '.json', '.webmanifest', '.png', '.svg', '.ico', '.txt', '.woff2', '.wasm', '.data', '.onnx', '.bin', '.npy', '.model', '.safetensors']);
 const precacheSet = new Set();
 
 async function collectPrecache(currentDir) {
