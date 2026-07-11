@@ -974,6 +974,20 @@ async function runGenerationPipeline(voiceName, chunks, framesAfterEos) {
 
                 chunkDecodedFrames += decodeSize;
                 const audioFloat32 = new Float32Array(decodeResult[mimiDecoderSession.outputNames[0]].data);
+                
+                // Normalize audio to prevent clipping - find peak and scale if needed
+                let peak = 0;
+                for (let i = 0; i < audioFloat32.length; i++) {
+                    const absVal = Math.abs(audioFloat32[i]);
+                    if (absVal > peak) peak = absVal;
+                }
+                if (peak > 1.0) {
+                    const scale = 1.0 / peak;
+                    for (let i = 0; i < audioFloat32.length; i++) {
+                        audioFloat32[i] *= scale;
+                    }
+                }
+                
                 const isLastChunk = shouldStop && chunkIdx === chunks.length - 1;
 
                 postMessage({
