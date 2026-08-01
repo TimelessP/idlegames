@@ -208,6 +208,7 @@
             grid-auto-rows: 1fr;
             width: 100%; height: 100%; padding: 0.25rem;
             max-width: 100%; max-height: 100%; box-sizing: border-box;
+            touch-action: none;
         }
         @media (max-width: 480px) {
             .board { gap: 0.35rem; }
@@ -240,17 +241,21 @@
             box-shadow: inset 0 0 0 2px var(--border-color);
             cursor: pointer;
         }
-        /* Hover on empty cell shows placement intent */
         .cell.empty:hover, .cell.empty.drop-hover {
             box-shadow: inset 0 0 0 3px var(--accent-primary);
             background: var(--merge-glow-soft);
         }
-        /* Occupied cell hover */
         .cell:not(.empty):hover {
             transform: scale(1.02);
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
         }
         .cell:not(.empty):active { transform: scale(0.98); }
+        
+        .cell.selected {
+            box-shadow: 0 0 0 4px var(--accent-primary), 0 4px 16px rgba(0, 0, 0, 0.2);
+            transform: scale(1.05);
+            z-index: 10;
+        }
 
         .cell.merging {
             animation: merge-pop 350ms ease-out;
@@ -267,14 +272,6 @@
             0% { transform: scale(0.3); opacity: 0; }
             60% { transform: scale(1.1); }
             100% { transform: scale(1); opacity: 1; }
-        }
-        .cell.chain-merge {
-            animation: chain-pop 300ms ease-out;
-        }
-        @keyframes chain-pop {
-            0% { transform: scale(1); }
-            35% { transform: scale(1.25); box-shadow: 0 0 18px var(--merge-glow-strong); }
-            100% { transform: scale(1); }
         }
         .cell.vanish {
             animation: cell-vanish 200ms ease-in forwards;
@@ -445,7 +442,6 @@
             </div>
         </div>
 
-        <!-- Piece queue: current piece to place + next previews -->
         <div class="piece-queue" id="pieceQueue">
             <span class="queue-label">Place:</span>
             <div class="queue-pieces" id="queuePieces"></div>
@@ -506,10 +502,10 @@
     <!-- Game Over Modal -->
     <div class="modal" id="gameOverModal" role="dialog" aria-modal="true" aria-label="Game over">
         <div class="modal-content">
-            <div class="modal-header" style="text-align: center;">Board Full!</div>
+            <div class="modal-header" style="text-align: center;">Game Over!</div>
             <div class="modal-body">
                 <div class="completion-message">
-                    <p>No empty cells left to place a piece.</p>
+                    <p>No empty cells left and no merges available.</p>
                     <div class="score-display" id="finalScore">Score: 0</div>
                     <p id="finalStats"></p>
                 </div>
@@ -552,14 +548,14 @@
         <div class="modal-content">
             <div class="modal-header">About Merge Game</div>
             <div class="modal-body">
-                <p>Place pieces onto the board. When two or more matching pieces end up adjacent, they automatically merge into the next tier — and chains can cascade!</p>
+                <p>Place pieces onto the board. No automatic merging happens!</p>
                 <p><strong>How to play:</strong></p>
                 <ul style="margin-left: 1.25rem; margin-bottom: 1rem;">
-                    <li>Click any empty cell to <strong>place</strong> the current piece there</li>
-                    <li>If it lands next to a tile of the same level, they <strong>auto-merge</strong> into the next level</li>
-                    <li>Merges can <strong>chain</strong> — the new tile checks its neighbours too</li>
-                    <li>Plan ahead using the <strong>next piece queue</strong></li>
-                    <li>Game ends when the board is <strong>completely full</strong></li>
+                    <li>Click any empty cell to <strong>place</strong> the current piece there.</li>
+                    <li>To merge, <strong>click to select</strong> an occupied cell, then <strong>click an adjacent cell</strong> of the exact same level.</li>
+                    <li>Alternatively, <strong>drag and drop</strong> a piece onto a matching neighbor.</li>
+                    <li>The piece will merge at the destination and upgrade to the next level.</li>
+                    <li>Game ends when the board is <strong>completely full</strong> and <strong>no merges are possible</strong>.</li>
                 </ul>
                 <p>Created with ❤️ as part of the Idle Games collection.</p>
                 <div class="bmac-link">
@@ -610,7 +606,6 @@
         };
 
         const GAME_STATE_KEY = 'idlegames-merge-game-state';
-        // Score for each level
         const LEVEL_SCORES = [0, 10, 30, 60, 100, 150, 210, 280, 360, 450, 550, 660, 780, 910, 1050, 1200];
 
         // ========================================
@@ -618,7 +613,7 @@
         // ========================================
 
         let gameState = {
-            board: [],               // flat array: 0 = empty, N = tile level
+            board: [],
             score: 0,
             merges: 0,
             highestLevel: 1,
@@ -629,14 +624,16 @@
             selectedThemes: new Set(),
             currentTheme: 'numbers',
             lastShareText: '',
-            // The piece queue: array of { level, theme } objects
-            // queue[0] = current piece to place, queue[1..2] = previews
             queue: [],
         };
 
-        let moveHistory = [];        // For undo (one step back)
-        let animating = false;       // Lock during cascade animations
+        let moveHistory = [];
         let gameOverTimeoutId = null;
+        
+        let selectedIndex = null;
+        let dragSourceIndex = null;
+        let dragHasMoved = false;
+        let justDragged = false;
 
         // ========================================
         // PERSISTENCE
@@ -808,7 +805,6 @@
         // PIECE QUEUE
         // ========================================
 
-        // How often a level-2 piece appears (10% by default, more interesting at higher levels)
         function randomPieceLevel() {
             const r = Math.random();
             if (r < 0.80) return 1;
@@ -890,27 +886,20 @@
         }
 
         // ========================================
-        // MERGE LOGIC (the heart of it)
+        // MERGE LOGIC (MANUAL)
         // ========================================
 
-        // Place the current piece at `index`.
-        // Returns false if invalid. Otherwise performs placement + cascade.
         function placePiece(index) {
-            if (animating) return false;
-            if (gameState.board[index] !== 0) return false;
             if (gameState.gameCompleted) return false;
+            if (gameState.board[index] !== 0) return false;
             const piece = currentPiece();
             if (!piece) return false;
 
-            // Save undo state before any mutation
             saveMoveHistory();
 
-            // Place
             gameState.board[index] = piece.level;
             consumePiece();
 
-            // Animate placement, then cascade
-            animating = true;
             const placedEl = getCellElement(index);
             if (placedEl) {
                 updateCellVisual(placedEl, index);
@@ -918,117 +907,61 @@
                 placedEl.addEventListener('animationend', () => placedEl.classList.remove('placed'), { once: true });
             }
 
-            // Run cascade after a short delay so placement animation is visible
-            setTimeout(() => {
-                runMergeCascade(index, () => {
-                    animating = false;
-                    // Check game over
-                    if (getEmptyCells().length === 0) {
-                        endGame();
-                    }
-                    renderQueue();
-                    updateStats();
-                    updateUndoButton();
-                    persistGameState();
-                });
-            }, 180);
-
             renderQueue();
             updateStats();
+            updateUndoButton();
             persistGameState();
+
+            checkGameOver();
             return true;
         }
 
-        // Smart merge cascade.
-        //
-        // All participants in a merge (the active cell + every matching neighbour)
-        // are candidates to become the pivot. We score each candidate by how many
-        // of its *surviving* neighbours will match the NEW level after the merge —
-        // that's the chain-continuation potential. The candidate with the highest
-        // chain score wins. Ties broken by: most same-level neighbours at the
-        // current level (it was already well-connected), then lowest index (top-left).
-        //
-        // This means the direction of every merge is chosen to maximise the chance
-        // of the next chain link firing, regardless of where the piece was placed.
-        function runMergeCascade(activeIndex, done) {
-            const level = gameState.board[activeIndex];
-            if (level === 0) { done(); return; }
+        function isValidMerge(source, target) {
+            if (source === target) return false;
+            if (gameState.board[source] === 0 || gameState.board[target] === 0) return false;
+            if (gameState.board[source] !== gameState.board[target]) return false;
+            
+            const nbrs = getNeighbours(source);
+            return nbrs.includes(target);
+        }
 
-            const matchingNeighbours = getNeighbours(activeIndex)
-                .filter(n => gameState.board[n] === level);
-
-            if (matchingNeighbours.length === 0) { done(); return; }
-
+        function executeMerge(source, target) {
+            saveMoveHistory();
+            const level = gameState.board[source];
             const newLevel = level + 1;
+            
+            gameState.board[source] = 0;
+            gameState.board[target] = newLevel;
 
-            // All cells that will participate in this merge step.
-            const participants = [activeIndex, ...matchingNeighbours];
+            setSelectedIndex(null);
 
-            // Score each candidate pivot:
-            // after the merge, all non-pivot participants become empty.
-            // The pivot's surviving neighbours are everyone NOT in participants.
-            // Count how many of those will equal newLevel (immediate chain hit).
-            function scorePivot(candidate) {
-                const consumed = participants.filter(p => p !== candidate);
-                const consumedSet = new Set(consumed);
-                const survivingNeighbours = getNeighbours(candidate)
-                    .filter(n => !consumedSet.has(n));
-
-                // Primary: how many surviving neighbours match newLevel → chain continues
-                const chainScore = survivingNeighbours
-                    .filter(n => gameState.board[n] === newLevel).length;
-
-                // Secondary: how many current-level neighbours (connection density)
-                const densityScore = matchingNeighbours.filter(n => n !== candidate).length;
-
-                return { chainScore, densityScore };
-            }
-
-            const pivot = participants.reduce((best, candidate) => {
-                const cs = scorePivot(candidate);
-                const bs = scorePivot(best);
-                if (cs.chainScore  > bs.chainScore)  return candidate;
-                if (cs.chainScore  < bs.chainScore)  return best;
-                if (cs.densityScore > bs.densityScore) return candidate;
-                if (cs.densityScore < bs.densityScore) return best;
-                return candidate < best ? candidate : best; // top-left tiebreak
-            });
-
-            const consumed = participants.filter(p => p !== pivot);
             const mergeScore = LEVEL_SCORES[newLevel] || (newLevel * 50);
-            gameState.score += mergeScore * consumed.length;
-            gameState.merges += consumed.length;
+            gameState.score += mergeScore * 2; 
+            gameState.merges += 1;
             if (newLevel > gameState.highestLevel) gameState.highestLevel = newLevel;
 
-            // Animate consumed cells vanishing
-            consumed.forEach(n => {
-                gameState.board[n] = 0;
-                const el = getCellElement(n);
-                if (el) {
-                    el.classList.add('vanish');
-                    el.addEventListener('animationend', () => {
-                        el.classList.remove('vanish');
-                        updateCellVisual(el, n);
-                    }, { once: true });
-                }
-            });
+            const sourceEl = getCellElement(source);
+            const targetEl = getCellElement(target);
 
-            // Upgrade pivot
-            gameState.board[pivot] = newLevel;
-            const pivotEl = getCellElement(pivot);
-            if (pivotEl) {
-                showScorePop(pivotEl, `+${mergeScore * consumed.length}`);
-                setTimeout(() => {
-                    updateCellVisual(pivotEl, pivot);
-                    pivotEl.classList.add('chain-merge');
-                    pivotEl.addEventListener('animationend', () => pivotEl.classList.remove('chain-merge'), { once: true });
-                }, 150);
+            if (sourceEl) {
+                sourceEl.classList.add('vanish');
+                sourceEl.addEventListener('animationend', () => {
+                    sourceEl.classList.remove('vanish');
+                    updateCellVisual(sourceEl, source);
+                }, { once: true });
+            }
+            if (targetEl) {
+                updateCellVisual(targetEl, target);
+                showScorePop(targetEl, `+${mergeScore * 2}`);
+                targetEl.classList.add('merging');
+                targetEl.addEventListener('animationend', () => targetEl.classList.remove('merging'), { once: true });
             }
 
-            // Recurse from pivot with its new level
-            setTimeout(() => {
-                runMergeCascade(pivot, done);
-            }, 350);
+            updateStats();
+            updateUndoButton();
+            persistGameState();
+
+            checkGameOver();
         }
 
         function showScorePop(cell, text) {
@@ -1036,6 +969,22 @@
             pop.className = 'score-pop'; pop.textContent = text;
             cell.appendChild(pop);
             setTimeout(() => pop.remove(), 900);
+        }
+
+        // ========================================
+        // SELECTION
+        // ========================================
+
+        function setSelectedIndex(index) {
+            if (selectedIndex !== null) {
+                const el = getCellElement(selectedIndex);
+                if (el) el.classList.remove('selected');
+            }
+            selectedIndex = index;
+            if (selectedIndex !== null) {
+                const el = getCellElement(selectedIndex);
+                if (el) el.classList.add('selected');
+            }
         }
 
         // ========================================
@@ -1053,7 +1002,7 @@
         }
 
         function undoMove() {
-            if (moveHistory.length === 0 || animating || gameState.gameCompleted) return;
+            if (moveHistory.length === 0 || gameState.gameCompleted) return;
             const last = moveHistory[0];
             gameState.board = [...last.board];
             gameState.score = last.score;
@@ -1061,6 +1010,9 @@
             gameState.highestLevel = last.highestLevel;
             gameState.queue = JSON.parse(JSON.stringify(last.queue));
             moveHistory = [];
+            
+            setSelectedIndex(null);
+            
             renderBoard();
             renderQueue();
             updateStats();
@@ -1084,11 +1036,12 @@
         function updateCellVisual(el, index) {
             const level = gameState.board[index];
             el.className = 'cell' + (level === 0 ? ' empty' : '');
+            if (selectedIndex === index) el.classList.add('selected');
+
             el.setAttribute('aria-label', level > 0
                 ? `Level ${level} ${getEmojiForLevel(level, gameState.currentTheme)}`
                 : 'Empty cell — click to place');
 
-            // Clear children
             el.innerHTML = '';
             if (level > 0) {
                 const v = document.createElement('span');
@@ -1115,6 +1068,7 @@
             gameState.board.forEach((level, index) => {
                 const cell = document.createElement('button');
                 cell.className = 'cell' + (level === 0 ? ' empty' : '');
+                if (selectedIndex === index) cell.classList.add('selected');
                 cell.dataset.index = index;
                 cell.setAttribute('aria-label', level > 0
                     ? `Level ${level} ${getEmojiForLevel(level, gameState.currentTheme)}`
@@ -1131,17 +1085,19 @@
                     cell.appendChild(badge);
                 }
 
-                cell.addEventListener('click', () => handleCellClick(index));
-                cell.addEventListener('keydown', e => {
-                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCellClick(index); }
-                });
-
-                // Touch-friendly hover effect on empty cells
                 cell.addEventListener('pointerenter', () => {
                     if (gameState.board[index] === 0) cell.classList.add('drop-hover');
                 });
                 cell.addEventListener('pointerleave', () => {
                     cell.classList.remove('drop-hover');
+                });
+                
+                cell.addEventListener('pointerdown', e => {
+                    if (gameState.gameCompleted) return;
+                    if (gameState.board[index] !== 0) {
+                        dragSourceIndex = index;
+                        dragHasMoved = false;
+                    }
                 });
 
                 board.appendChild(cell);
@@ -1182,18 +1138,91 @@
         }
 
         // ========================================
-        // INTERACTION
+        // INTERACTION (CLICK & DRAG)
         // ========================================
 
-        function handleCellClick(index) {
-            if (animating || gameState.gameCompleted) return;
-            if (gameState.board[index] !== 0) return; // only empty cells accepted
-            placePiece(index);
-        }
+        document.addEventListener('pointermove', e => {
+            if (dragSourceIndex !== null) {
+                dragHasMoved = true;
+            }
+        });
+
+        document.addEventListener('pointerup', e => {
+            if (dragSourceIndex !== null && dragHasMoved) {
+                justDragged = true;
+                setTimeout(() => justDragged = false, 50);
+
+                const targetEl = document.elementFromPoint(e.clientX, e.clientY);
+                if (targetEl) {
+                    const cell = targetEl.closest('.cell');
+                    if (cell && cell.dataset.index !== undefined) {
+                        const targetIndex = parseInt(cell.dataset.index);
+                        if (targetIndex !== dragSourceIndex && isValidMerge(dragSourceIndex, targetIndex)) {
+                            executeMerge(dragSourceIndex, targetIndex);
+                        }
+                    }
+                }
+            }
+            dragSourceIndex = null;
+            dragHasMoved = false;
+        });
+
+        document.getElementById('gameBoard').addEventListener('click', e => {
+            if (gameState.gameCompleted || justDragged) return;
+            const cell = e.target.closest('.cell');
+            if (!cell || cell.dataset.index === undefined) return;
+            
+            const index = parseInt(cell.dataset.index);
+
+            if (gameState.board[index] === 0) {
+                if (selectedIndex !== null) {
+                    setSelectedIndex(null);
+                } else {
+                    placePiece(index);
+                }
+            } else {
+                if (selectedIndex === index) {
+                    setSelectedIndex(null);
+                } else if (selectedIndex !== null) {
+                    if (isValidMerge(selectedIndex, index)) {
+                        executeMerge(selectedIndex, index);
+                    } else {
+                        setSelectedIndex(index);
+                    }
+                } else {
+                    setSelectedIndex(index);
+                }
+            }
+        });
+        
+        // Handle enter/space for accessibility on cells
+        document.getElementById('gameBoard').addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.target.click();
+            }
+        });
 
         // ========================================
         // GAME FLOW
         // ========================================
+
+        function checkGameOver() {
+            if (getEmptyCells().length > 0) return false;
+            
+            // Allow manual merges if available even on full board
+            for (let i = 0; i < gameState.board.length; i++) {
+                const level = gameState.board[i];
+                if (level === 0) continue;
+                const nbrs = getNeighbours(i);
+                for (const n of nbrs) {
+                    if (gameState.board[n] === level) return false;
+                }
+            }
+
+            endGame();
+            return true;
+        }
 
         function startNewGame() {
             closeMenu();
@@ -1208,8 +1237,9 @@
             gameState.gameCompleted = false;
             gameState.lastShareText = '';
             gameState.queue = [];
-            animating = false;
             moveHistory = [];
+            
+            setSelectedIndex(null);
 
             if (gameOverTimeoutId) clearTimeout(gameOverTimeoutId);
             gameOverTimeoutId = null;
@@ -1230,6 +1260,7 @@
         function endGame() {
             gameState.gameActive = false;
             gameState.gameCompleted = true;
+            setSelectedIndex(null);
             setHighScore(gameState.score);
 
             document.getElementById('finalScore').textContent = `Score: ${gameState.score}`;
@@ -1376,7 +1407,6 @@
             }
         });
 
-        // Click on completed board -> re-show modal
         document.getElementById('gameBoard').addEventListener('click', e => {
             if (gameState.gameCompleted && e.target === document.getElementById('gameBoard')) {
                 document.getElementById('gameOverModal').classList.add('open');
@@ -1413,7 +1443,6 @@
                     startNewGame(); resizeBoard(); return;
                 }
                 syncBoardSizeButtons();
-                // Ensure we have a queue after loading
                 if (!gameState.queue || gameState.queue.length === 0) ensureQueue(3);
                 renderBoard();
                 renderQueue();
