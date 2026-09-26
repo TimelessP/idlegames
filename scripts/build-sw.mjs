@@ -208,6 +208,46 @@ async function ensureFonts() {
     outputDirName: 'caveat',
     licenseTarget: 'caveat-OFL.txt',
   });
+
+  await writeFontFaceSheet({
+    packageName: 'nunito',
+    family: 'Nunito',
+    weights: [400, 600, 700, 800, 900],
+    filePattern: (weight) => `nunito-latin-${weight}-normal.woff2`,
+    cssFileName: 'nunito.css',
+    outputDirName: 'nunito',
+    licenseTarget: 'nunito-OFL.txt',
+  });
+
+  await writeFontFaceSheet({
+    packageName: 'bangers',
+    family: 'Bangers',
+    weights: [400],
+    filePattern: (weight) => `bangers-latin-${weight}-normal.woff2`,
+    cssFileName: 'bangers.css',
+    outputDirName: 'bangers',
+    licenseTarget: 'bangers-OFL.txt',
+  });
+
+  await writeFontFaceSheet({
+    packageName: 'special-elite',
+    family: 'Special Elite',
+    weights: [400],
+    filePattern: (weight) => `special-elite-latin-${weight}-normal.woff2`,
+    cssFileName: 'special-elite.css',
+    outputDirName: 'special-elite',
+    licenseTarget: 'special-elite-OFL.txt',
+  });
+
+  await writeFontFaceSheet({
+    packageName: 'comic-neue',
+    family: 'Comic Neue',
+    weights: [300, 400, 700],
+    filePattern: (weight) => `comic-neue-latin-${weight}-normal.woff2`,
+    cssFileName: 'comic-neue.css',
+    outputDirName: 'comic-neue',
+    licenseTarget: 'comic-neue-OFL.txt',
+  });
 }
 
 await ensureVendorAssets();
