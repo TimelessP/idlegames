@@ -360,7 +360,7 @@ const DEFAULT_SETTINGS = {
   timeScale: 1, autosaveSec: 15, pauseOnBlur: false, zoom: 1,
   vol: 0.6, sfx: 0.8, ambient: 0.5,
   ai: {
-    enabled: false, provider: 'lmstudio', baseUrl: 'http://localhost:1234', model: '', temperature: 0.7, maxTokens: 600,
+    enabled: false, provider: 'lmstudio', baseUrl: 'http://localhost:1234', model: '', temperature: 0.7, sendTemperature: true, maxTokens: 600, tokenParam: 'auto', contextTokens: 0,
     intervalSec: 45, maxSteps: 4, concurrency: 1, timeoutSec: 60, toolMode: 'native', historyTurns: 6, contextChars: 9000,
     wakeOnMessage: true, wakeOnAlarm: true, autonomy: true, allowBuild: true, allowPilot: false, allowTrade: false, allowCrew: false, allowRobots: true,
     persona: 'Terse, darkly funny, loyal to the crew. Speaks like a salvaged military AI with worn-out etiquette subroutines.'
@@ -587,7 +587,7 @@ const MODULES = {
     recipes: { parts: { label: 'PARTS ×3', cost: { alloy: 2 }, work: 14, out: { parts: 3 } }, medkit: { label: 'MEDKIT', cost: { biomass: 1, parts: 1 }, work: 10, out: { medkit: 1 } },
       filter: { label: 'ALLOY ← SCRAP', cost: { scrap: 4 }, work: 12, out: { alloy: 1 } }, robot: { label: 'TRACK-BOT', cost: { alloy: 6, parts: 8 }, work: 60, out: { robot: 1 } },
       android: { label: 'ANDROID SHELL', cost: { alloy: 14, parts: 18 }, work: 140, out: { android: 1 } } },
-    tick(m, dt) { if (m.data.auto && !m.data.queue.length && G.inv.parts < 6 && G.inv.alloy >= 6 && spend({ alloy: 2 })) m.data.queue.push('parts'); if (m.data.queue.length) JOB.post({ type: 'fabricate', mod: m.id, prio: 4, dur: 999, label: 'Operate fabricator', roles: ['bot', 'crew', 'ai'], continuous: true }); },
+    tick(m, dt) { if (m.data.auto && !m.data.queue.length) autoFab(m); if (m.data.queue.length) JOB.post({ type: 'fabricate', mod: m.id, prio: 4, dur: 999, label: 'Operate fabricator', roles: ['bot', 'crew', 'ai'], continuous: true }); },
     work: { fabricate(m, dt, who) { const q = m.data.queue; if (!q.length) return 'done'; const r = MODULES.fabricator.recipes[q[0]]; m.data.prog += dt * m.eff * (who.kind === 'bot' ? 1 : 1.3); if (m.data.prog >= r.work) { m.data.prog = 0; q.shift(); fabOut(m, r); } return q.length ? null : 'done'; } },
     draw(m, x, y, w, h, t, a) {
       const busy = m.data.queue?.length && m.working; metalBox(x + 20, y + h - 36, w - 40, 36, '#3d3833'); R(x + 30, y + h - 44, w - 60, 8, '#222');
@@ -613,7 +613,7 @@ const MODULES = {
       glowText(`${n}/${cap}`, x + w - 12, y + 22, '#ffb000', 11, 'right');
     } },
   sensors: { name: 'Sensor Array', code: 'SNS', cat: 'ops', cost: { alloy: 5, parts: 5 }, build: 30, power: 1, prio: 5, desc: 'Sweeps the system for salvage fields and anomalies. Runs a routine sweep every few hours.', dataInit: { prog: 0, next: 120 },
-    tick(m, dt) { m.data.next = (m.data.next ?? 120) - dt; if (m.data.next <= 0) { m.data.next = 360; JOB.post({ type: 'sweep', mod: m.id, prio: 3, dur: 18, label: 'Routine sweep', roles: ['crew', 'ai', 'bot'], persist: true }); } },
+    tick(m, dt) { m.data.next = (m.data.next ?? 120) - dt; if (m.data.next <= 0) { m.data.next = !(G.nav.here.fields > 0) && stockShort().length ? 180 : 360; JOB.post({ type: 'sweep', mod: m.id, prio: 3, dur: 18, label: 'Routine sweep', roles: ['crew', 'ai', 'bot'], persist: true }); } },
     actions: [{ id: 'sweep', label: 'DEEP SWEEP', desc: 'Queue a sweep job', run: m => { JOB.post({ type: 'sweep', mod: m.id, prio: 6, dur: 18, label: 'Sensor sweep', roles: ['crew', 'ai', 'bot'] }); return 'Sweep queued'; } }],
     work: { sweep(m) { return sim.byId.nav.sweep(); } },
     draw(m, x, y, w, h, t, a) {
@@ -631,18 +631,19 @@ const MODULES = {
       led(x + 162, y + 18, 3.5, '#ff3b2f', Math.sin(t * 5) > 0 && a > 0);
       if (G.feedUnread) glowText('NEW', x + 66, y + 24, '#ff2e88', 10, 'center');
     } },
-  drones: { name: 'Drone Bay', code: 'DRN', cat: 'ops', cost: { alloy: 6, parts: 8 }, build: 40, power: 2, prio: 5, desc: 'Launches salvage drones into fields, or hull-repair drones.', dataInit: { out: 0, kind: '' },
+  drones: { name: 'Drone Bay', code: 'DRN', cat: 'ops', cost: { alloy: 6, parts: 8 }, build: 40, power: 2, prio: 5, desc: 'Launches salvage drones into fields, or hull-repair drones.',
     actions: [{ id: 'salv', label: 'SALVAGE SORTIE', desc: 'Needs a salvage field', run: m => launchDrone(m, 'salvage') }, { id: 'rep', label: 'HULL REPAIR SORTIE', desc: '2 parts', run: m => launchDrone(m, 'repair') }],
-    tick(m, dt) { if (m.data.out > 0) { m.data.out -= dt; if (m.data.out <= 0) droneReturn(m); } },
+    dataInit: { out: 0, kind: '', auto: true }, tick(m, dt) { if (m.data.out > 0) { m.data.out -= dt; if (m.data.out <= 0) droneReturn(m); } else if (m.data.auto !== false && G.nav.state !== 'warp') { if (G.hull < G.hullMax * .5 && G.inv.parts >= 4) JOB.post({ type: 'sortie', kind: 'repair', mod: m.id, prio: 4, dur: 6, label: 'Launch hull-repair drone', roles: ['bot', 'crew', 'ai'] }); else if (G.nav.here.fields > 0 && stockShort().some(k => RAW_STOCK.includes(k))) JOB.post({ type: 'sortie', kind: 'salvage', mod: m.id, prio: 3, dur: 6, label: 'Launch salvage drone', roles: ['bot', 'crew', 'ai'] }); } },
+    work: { sortie(m, who, j) { return launchDrone(m, j.kind || 'salvage') || `${j.kind || 'salvage'} drone launched`; } },
     draw(m, x, y, w, h, t, a) {
       R(x + 10, y + h - 10, w - 20, 6, '#e0a80066'); for (let i = 0; i < 2; i++) { const px = x + 50 + i * 110; metalBox(px - 30, y + h - 16, 60, 10, '#3a332c'); }
       const out = m.data.out > 0; for (let i = 0; i < 2; i++) { if (out && i === 0) continue; const dx = x + 50 + i * 110, dy = y + h - 40 + Math.sin(t * 3 + i) * 4 * a; metalBox(dx - 18, dy - 8, 36, 14, '#6b5a45'); L(dx - 26, dy - 10, dx + 26, dy - 10, '#999', 2); led(dx, dy, 3, '#29e7ff', a > 0); const rot = t * 40; L(dx - 26 - Math.cos(rot) * 8, dy - 12, dx - 26 + Math.cos(rot) * 8, dy - 12, '#ccc', 1); L(dx + 26 - Math.cos(rot) * 8, dy - 12, dx + 26 + Math.cos(rot) * 8, dy - 12, '#ccc', 1); }
       glowText(out ? `SORTIE ${Math.ceil(m.data.out)}s` : 'READY', x + w / 2, y + 26, out ? '#ffb000' : '#7dff4a', 11, 'center');
     } },
   airlock: { name: 'Airlock', code: 'AIR', cat: 'ops', cost: { alloy: 6, scrap: 4 }, build: 28, power: 0.5, prio: 5, desc: 'EVA salvage runs and external hull patching.',
-    actions: [{ id: 'eva', label: 'EVA SALVAGE', desc: 'Queue EVA job', run: m => { JOB.post({ type: 'eva', mod: m.id, prio: 5, dur: 30, label: 'EVA salvage', roles: ['bot', 'crew'] }); return 'EVA queued'; } },
+    actions: [{ id: 'eva', label: 'EVA SALVAGE', desc: 'Queue EVA job', run: m => { JOB.post({ type: 'eva', mod: m.id, prio: 5, dur: 30, label: 'EVA salvage', roles: ['bot', 'crew', 'ai'] }); return 'EVA queued'; } },
       { id: 'patch', label: 'PATCH HULL', desc: '3 scrap → +15 hull', run: m => { JOB.post({ type: 'patch', mod: m.id, prio: 6, dur: 20, label: 'Patch hull (EVA)', roles: ['bot', 'crew'] }); return 'Patch queued'; } }],
-    dataInit: { next: 200 }, tick(m, dt) { m.data.next = (m.data.next ?? 200) - dt; if (m.data.next <= 0) { m.data.next = 300; if (G.nav.here.fields > 0 && G.nav.state !== 'warp') JOB.post({ type: 'eva', mod: m.id, prio: 3, dur: 30, label: 'EVA salvage run', roles: ['bot', 'crew'], persist: true }); } },
+    dataInit: { next: 200 }, tick(m, dt) { m.data.next = (m.data.next ?? 200) - dt; if (m.data.next <= 0) { const short = stockShort().some(k => RAW_STOCK.includes(k)); m.data.next = short ? 180 : 300; if ((G.nav.here.fields > 0 || short) && G.nav.state !== 'warp') JOB.post({ type: 'eva', mod: m.id, prio: G.nav.here.fields > 0 ? 3 : 2, dur: 30, label: 'EVA salvage run', roles: ['bot', 'crew', 'ai'], persist: true }); } },
     work: { eva(m) { const f = G.nav.here.fields > 0; const s = f ? irnd(4, 9) : irnd(1, 3), o = f ? irnd(1, 5) : 0; addInv({ scrap: s, ore: o }); if (f && Math.random() < .3) G.nav.here.fields--; return `+${s} scrap +${o} ore`; }, patch(m) { if (!spend({ scrap: 3 })) return 'no scrap'; G.hull = Math.min(G.hullMax, G.hull + 15); return '+15 hull'; } },
     draw(m, x, y, w, h, t, a) {
       const open = m.working ? (Math.sin(t * 1.5) * .5 + .5) : 0; const dx = x + w / 2 - 40;
@@ -679,7 +680,7 @@ const MODULES = {
   rover: { name: 'Rover Bay', code: 'ROV', cat: 'ops', cost: { alloy: 10, parts: 8 }, build: 45, power: 1, prio: 5, desc: 'Six-wheel surface rover. Drive it yourself (DRIVE) or send crew/bots/androids on an automated expedition for ore, scrap, biomass and the odd alien artefact.', dataInit: { out: 0, auto: true, next: 240 },
     actions: [{ id: 'drive', label: 'DRIVE ROVER', desc: 'Surface mini-game', ui: true, run: m => openRover(m) },
       { id: 'expedition', label: 'QUEUE EXPEDITION', desc: 'Crew/bot/android job', run: m => { if (!roverCanDeploy(m)) return roverWhyNot(m); JOB.post({ type: 'expedition', mod: m.id, prio: 5, dur: 45, label: 'Rover expedition', roles: ['bot', 'crew', 'ai'], persist: true }); return 'Expedition queued'; } }],
-    tick(m, dt) { m.data.next = (m.data.next ?? 240) - dt; if (m.data.next <= 0) { m.data.next = 420; if (m.data.auto && roverCanDeploy(m)) JOB.post({ type: 'expedition', mod: m.id, prio: 3, dur: 45, label: 'Rover expedition', roles: ['bot', 'crew', 'ai'], persist: true }); } },
+    tick(m, dt) { m.data.next = (m.data.next ?? 240) - dt; if (m.data.next <= 0) { m.data.next = stockShort().some(k => RAW_STOCK.includes(k)) ? 240 : 420; if (m.data.auto && roverCanDeploy(m)) JOB.post({ type: 'expedition', mod: m.id, prio: 3, dur: 45, label: 'Rover expedition', roles: ['bot', 'crew', 'ai'], persist: true }); } },
     work: { expedition(m, who) { if (!roverCanDeploy(m)) return roverWhyNot(m); const f = G.nav.here.fields > 0 ? 1.3 : 1; const got = { ore: Math.round(irnd(3, 9) * f), scrap: Math.round(irnd(2, 7) * f) }; if (Math.random() < .35) got.biomass = irnd(1, 3); addInv(got); let extra = ''; if (Math.random() < .12) { if (cargoCount() < cargoCap()) { G.cargo.alien = (G.cargo.alien || 0) + 1; extra = ' +1 ALIEN ARTEFACT'; } } if (Math.random() < .1) { m.damage(irnd(10, 25)); extra += ' (rover scraped)'; } if (Math.random() < .04) { const h = spawnChar('human', { deck: m.deck, x: m.cx, health: 50 }); extra += ` · found survivor ${h.name}!`; log(`Rover expedition brought back a survivor: ${h.name} (${h.role})`, 'good'); G.stats.rescued++; } G.stats.expeditions = (G.stats.expeditions || 0) + 1; return `+${costStr(got)}${extra}`; } },
     draw(m, x, y, w, h, t, a) {
       const out = m.working || m.data.out; const gx = x + 14, gw = w - 28;
@@ -739,10 +740,10 @@ const MODULE_FSM = {
     update(f, dt) { if (!this.on) return 'offline'; if (this.wantsPower && !this.powered) return 'unpowered'; this.seq.update(dt); if (this.seq.done) return 'online'; }
   },
   online: {
-    update(f, dt) { if (this.hp <= 0) return 'broken'; if (!this.on) return 'offline'; if (this.wantsPower && !this.powered) return 'unpowered'; this.def.tick?.(this, dt); if (this.hp < 60) JOB.post({ type: 'repair', mod: this.id, prio: this.hp < 30 ? 8 : 5, dur: 12, label: `Repair ${this.def.name}`, roles: ['bot', 'crew', 'ai'] }); },
+    update(f, dt) { if (this.hp <= 0) return 'broken'; if (!this.on) return 'offline'; if (this.wantsPower && !this.powered) return 'unpowered'; this.def.tick?.(this, dt); if (this.hp < 60) JOB.post({ type: 'repair', mod: this.id, prio: this.hp < 30 ? 8 : 5, dur: 12, label: `Repair ${this.def.name}`, roles: ['bot', 'crew', 'ai'] }); else if (this.hp < 100) JOB.post({ type: 'repair', mod: this.id, prio: 2, dur: 8, label: `Maintain ${this.def.name}`, roles: ['bot', 'crew', 'ai'] }); },
     on: { damage(f, d) { if (this.hp <= 0) return 'broken'; } }
   },
-  unpowered: { enter() { bus.emit('module:unpowered', this); }, update() { if (!this.on) return 'offline'; if (this.powered) return 'booting'; if (this.hp < 60) JOB.post({ type: 'repair', mod: this.id, prio: 5, dur: 12, label: `Repair ${this.def.name}`, roles: ['bot', 'crew', 'ai'] }); } },
+  unpowered: { enter() { bus.emit('module:unpowered', this); }, update() { if (!this.on) return 'offline'; if (this.powered) return 'booting'; if (this.hp < 60) JOB.post({ type: 'repair', mod: this.id, prio: 5, dur: 12, label: `Repair ${this.def.name}`, roles: ['bot', 'crew', 'ai'] }); else if (this.hp < 100) JOB.post({ type: 'repair', mod: this.id, prio: 2, dur: 8, label: `Maintain ${this.def.name}`, roles: ['bot', 'crew', 'ai'] }); } },
   offline: { update() { if (this.on && this.hp > 0) return 'booting'; } },
   broken: { enter() { log(`${this.def.name} BROKEN on ${deckName(this.deck)}`, 'bad'); sfx.alarm(); bus.emit('alarm', { kind: 'broken', mod: this }); }, update() { JOB.post({ type: 'repair', mod: this.id, prio: 9, dur: 16, label: `Fix broken ${this.def.name}`, roles: ['bot', 'crew', 'ai'] }); if (this.hp >= 50) return 'booting'; } },
   deconstructing: { update() { JOB.post({ type: 'deconstruct', mod: this.id, prio: 6, dur: 999, label: `Strip ${this.def.name}`, roles: ['bot', 'crew', 'ai'], continuous: true }); } }
@@ -829,6 +830,28 @@ function launchDrone(m, kind) {
   if (kind === 'repair' && !spend({ parts: 2 })) return 'Need 2 parts';
   m.data.out = kind === 'salvage' ? 40 : 25; m.data.kind = kind; sfx.whoosh(); log(`Drone sortie: ${kind}`, 'info');
 }
+/* Stockpile goals: keep enough on hand for two android shells, a medkit reserve and repair scrap. */
+const RAW_STOCK = ['scrap', 'ore', 'alloy', 'parts'];
+function stockGoals() { const a = MODULES.fabricator.recipes.android.cost; return { alloy: a.alloy * 2, parts: a.parts * 2, medkit: 4, scrap: 16, ore: 9 }; }
+function stockShort() { const g = stockGoals(); return Object.keys(g).filter(k => (G.inv[k] || 0) < g[k]); }
+function androidQueued() { return G.modules.reduce((n, m) => n + (m.type === 'fabricator' ? m.data.queue.filter(q => q === 'android').length : 0), 0); }
+function androidBuildStatus() { const a = MODULES.fabricator.recipes.android.cost, g = stockGoals();
+  if (!G.modules.some(m => m.type === 'fabricator' && m.built)) return 'no fabricator';
+  if (androidQueued()) return 'android shell in fabricator queue';
+  if (G.chars.filter(c => c.kind === 'android').length >= aiCapacity()) return `blocked: AI core capacity ${aiCapacity()} full — build/power an AI Core`;
+  const need = ['alloy', 'parts'].filter(k => G.inv[k] < g[k]).map(k => `${Math.ceil(g[k] - G.inv[k])} ${k}`); return need.length ? `saving up: need ${need.join(', ')} more (auto-builds at 2× shell cost ${costStr(a)})` : 'ready — auto-build next'; }
+function autoFab(m) { // idle stockpiling: medkits, android at 2× stock, then balance parts vs alloy
+  const R = MODULES.fabricator.recipes, g = stockGoals(), I = Object.fromEntries(Object.keys(RES).map(k => [k, G.inv[k] || 0])), q = r => spend(R[r].cost) && (m.data.queue.push(r), true);
+  if (I.medkit < 2 && I.biomass >= 1 && I.parts >= 1 && q('medkit')) return;
+  if (I.alloy >= g.alloy && I.parts >= g.parts && !androidQueued() && G.chars.filter(c => c.kind === 'android').length < aiCapacity() && q('android')) { log(`${m.label}: stock covers two android shells — printing one`, 'good'); return; }
+  const partsLag = I.parts / g.parts < I.alloy / g.alloy;
+  if (I.parts < g.parts && I.alloy >= 2 && (partsLag || I.scrap < 8) && q('parts')) return;
+  if (I.alloy < g.alloy && I.scrap >= 8 && q('filter')) return;
+  if (I.parts < g.parts && I.alloy >= 2 && q('parts')) return;
+  if (I.medkit < g.medkit && I.biomass >= 1 && I.parts >= 4 && q('medkit')) return;
+}
+function fabLine(m) { const q = m.data.queue, R = MODULES.fabricator.recipes; return `${m.id} ${m.fsm.state} auto:${m.data.auto ? 'on' : 'off'} ${q.length ? `queue[${q.join(',')}] now:${q[0]} ${Math.round(m.data.prog / R[q[0]].work * 100)}%` : 'idle'}${JOB.map.get('fabricate:' + m.id)?.claimed ? ' operator:' + (G.chars.find(c => c.id === JOB.map.get('fabricate:' + m.id).claimed)?.name || '?') : q.length ? ' (no operator)' : ''}`; }
+function stockReport() { const g = stockGoals(); return 'STOCKS ' + Object.entries(g).map(([k, v]) => `${k} ${Math.floor(G.inv[k] || 0)}/${v}`).join(' ') + ` | androids ${G.chars.filter(c => c.kind === 'android').length}/${aiCapacity()} core slots | ANDROID BUILD: ${androidBuildStatus()}`; }
 function droneReturn(m) {
   if (m.data.kind === 'salvage') { const s = irnd(6, 14), o = irnd(2, 8); addInv({ scrap: s, ore: o }); if (Math.random() < .25) G.nav.here.fields = Math.max(0, G.nav.here.fields - 1); if (Math.random() < .12) { const g = pick(GOODS); if (cargoCount() < cargoCap()) { G.cargo[g.id] = (G.cargo[g.id] || 0) + 1; log(`Drone recovered a crate of ${g.name}!`, 'good'); } } log(`Salvage drone back: +${s} scrap, +${o} ore`, 'good'); }
   else { G.hull = Math.min(G.hullMax, G.hull + 20); log('Repair drone back: +20 hull', 'good'); }
@@ -843,7 +866,7 @@ Object.assign(JOB, {
   post(spec) {
     const key = spec.key || `${spec.type}:${spec.mod || spec.inc || ''}`; let j = this.map.get(key);
     if (!j) { j = { id: uid('j'), key, prog: 0, claimed: null, created: G.time, ...spec }; this.map.set(key, j); bus.emit('job:posted', j); }
-    j.seen = G.time; j.prio = spec.prio; return j;
+    j.seen = G.time; j.prio = spec.prio; if (spec.label) j.label = spec.label; if (!j.claimed && spec.dur) j.dur = spec.dur; return j;
   },
   get(id) { for (const j of this.map.values()) if (j.id === id) return j; return null; },
   remove(j) { this.map.delete(j.key); if (j.claimed) { const w = G.chars.find(c => c.id === j.claimed); if (w && w.job === j) w.job = null; } },
@@ -851,9 +874,9 @@ Object.assign(JOB, {
   list() { return [...this.map.values()].sort((a, b) => b.prio - a.prio); },
   prune() { for (const j of [...this.map.values()]) { if (!j.persist && !j.claimed && G.time - j.seen > 3) this.remove(j); if (j.mod && !G.mById[j.mod]) this.remove(j); if (j.claimed && !G.chars.some(c => c.id === j.claimed && c.job === j)) j.claimed = null; } },
   best(ch) {
-    let best = null, bs = -1e9; const role = ch.kind === 'bot' ? 'bot' : ch.kind === 'android' ? 'ai' : 'crew';
+    let best = null, bs = -1e9; const role = ch.kind === 'bot' ? 'bot' : ch.kind === 'android' ? 'ai' : 'crew'; const anyRole = ch.kind === 'android' && !agentHasControl(ch);
     for (const j of this.map.values()) {
-      if (j.claimed || !j.roles.includes(role)) continue; const m = j.mod && G.mById[j.mod]; if (j.mod && !m) continue;
+      if (j.claimed || !(anyRole || j.roles.includes(role))) continue; const m = j.mod && G.mById[j.mod]; if (j.mod && !m) continue;
       const sp = m && jobSpot(m, ch); if (m && !sp) continue;
       const dist = m ? Math.abs(sp.deck - ch.deck) * 400 + Math.abs(m.cx - ch.x) : 0;
       const s = j.prio * 1000 - dist + (ch.skill?.[j.type] || 0) * 300; if (s > bs) { bs = s; best = j; }
@@ -1422,6 +1445,17 @@ async function httpJSON(url, opts, timeoutSec) {
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${(j?.error?.message || j?.error || txt).toString().slice(0, 300)}`); return { json: j, text: txt, headers: r.headers }; }
   catch (e) { if (e.name === 'AbortError') throw new Error('Request timed out'); throw e; } finally { clearTimeout(to); }
 }
+/* Parameter limits (researched Sep 2026): OpenAI / LM Studio / Ollama accept temperature 0–2, Anthropic 0–1.
+   Max output: Claude 1M-context models 128K, Haiku 4.5 64K; OpenAI newest ~128K. Context windows: up to ~1M (Claude/GPT),
+   Haiku 4.5 200K; Ollama num_ctx is set per request (0 = model default). GPT-5/o-series reject temperature and max_tokens
+   (use max_completion_tokens) — hence sendTemperature + tokenParam. */
+const AI_LIMITS = { tempMax: { openai: 2, ollama: 2, anthropic: 1 }, maxOut: 300000, maxCtx: 2000000 };
+const clampN = (v, lo, hi, d) => { v = +v; return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d; };
+function aiTemp() { return clampN(S.ai.temperature, 0, AI_LIMITS.tempMax[PROVIDERS[S.ai.provider].kind] ?? 2, 0.7); }
+function aiMaxOut() { const m = String(S.ai.model || ''); const cap = PROVIDERS[S.ai.provider].kind === 'anthropic' ? (/haiku/i.test(m) ? 64000 : 128000) : AI_LIMITS.maxOut;
+  return Math.round(clampN(S.ai.maxTokens, 1, cap, 600)); }
+function aiTokenKey() { if (S.ai.tokenParam && S.ai.tokenParam !== 'auto') return S.ai.tokenParam;
+  return /api\.openai\.com/i.test(baseUrl()) || /^(gpt-5|gpt-6|o\d)/i.test(S.ai.model || '') ? 'max_completion_tokens' : 'max_tokens'; }
 const baseUrl = () => (S.ai.baseUrl || PROVIDERS[S.ai.provider].url).replace(/\/+$/, '').replace(/\/v1$/, '');
 function authHeaders() { const k = SECRETS.apiKey; const p = PROVIDERS[S.ai.provider];
   if (p.kind === 'anthropic') return { 'x-api-key': k || '', 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' };
@@ -1432,8 +1466,9 @@ function authHeaders() { const k = SECRETS.apiKey; const p = PROVIDERS[S.ai.prov
 const ADAPTERS = {
   openai: {
     async chat(msgs, tools) {
-      const body = { model: S.ai.model || undefined, temperature: S.ai.temperature, max_tokens: S.ai.maxTokens, stream: false,
+      const body = { model: S.ai.model || undefined, [aiTokenKey()]: aiMaxOut(), stream: false,
         messages: msgs.map(m => m.role === 'tool' ? { role: 'tool', tool_call_id: m.callId, content: m.content } : m.role === 'assistant' && m.calls?.length ? { role: 'assistant', content: m.content || '', tool_calls: m.calls.map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args || {}) } })) } : { role: m.role, content: m.content }) };
+      if (S.ai.sendTemperature) body.temperature = aiTemp();
       if (tools?.length) { body.tools = tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })); body.tool_choice = 'auto'; }
       const { json } = await httpJSON(baseUrl() + '/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(body) });
       const msg = json?.choices?.[0]?.message || {}; const calls = (msg.tool_calls || []).map(c => ({ id: c.id || uid('call'), name: c.function?.name, args: safeParse(c.function?.arguments) }));
@@ -1443,7 +1478,7 @@ const ADAPTERS = {
   },
   ollama: {
     async chat(msgs, tools) {
-      const body = { model: S.ai.model, stream: false, options: { temperature: S.ai.temperature, num_predict: S.ai.maxTokens },
+      const body = { model: S.ai.model, stream: false, options: { ...(S.ai.sendTemperature ? { temperature: aiTemp() } : {}), num_predict: aiMaxOut(), ...(S.ai.contextTokens > 0 ? { num_ctx: Math.round(S.ai.contextTokens) } : {}) },
         messages: msgs.map(m => m.role === 'tool' ? { role: 'tool', content: m.content, tool_name: m.name } : m.role === 'assistant' && m.calls?.length ? { role: 'assistant', content: m.content || '', tool_calls: m.calls.map(c => ({ function: { name: c.name, arguments: c.args || {} } })) } : { role: m.role, content: m.content }) };
       if (tools?.length) body.tools = tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));
       const { json } = await httpJSON(baseUrl() + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(body) });
@@ -1462,7 +1497,7 @@ const ADAPTERS = {
         else push('user', { type: 'text', text: m.content });
       }
       if (out[0]?.role !== 'user') out.unshift({ role: 'user', content: [{ type: 'text', text: '(begin)' }] });
-      const body = { model: S.ai.model || 'claude-sonnet-5', max_tokens: S.ai.maxTokens, temperature: S.ai.temperature, system, messages: out };
+      const body = { model: S.ai.model || 'claude-sonnet-5', max_tokens: aiMaxOut(), system, messages: out }; if (S.ai.sendTemperature) body.temperature = aiTemp();
       if (tools?.length) body.tools = tools.map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }));
       const { json } = await httpJSON(baseUrl() + '/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(body) });
       const blocks = json?.content || []; return { text: blocks.filter(b => b.type === 'text').map(b => b.text).join('\n'), calls: blocks.filter(b => b.type === 'tool_use').map(b => ({ id: b.id, name: b.name, args: b.input || {} })), usage: json?.usage };
@@ -1526,8 +1561,21 @@ const GAME_TOOLS = [
     run(ch, a) { const m = orderBuild(a.module_type, Math.round(a.deck), Math.round(a.bay)); return m ? { ok: true, module_id: m.id, status: 'construction site placed; crew & bots will build it' } : { ok: false, error: buildOptions(Math.round(a.deck), Math.round(a.bay)).why || `cannot afford ${costStr(MODULES[a.module_type]?.cost)}` }; } },
   { name: 'deconstruct', description: 'Strip a module for 50% refund (becomes Empty Bay).', perm: 'allowBuild', parameters: P({ module_id: str('module id') }, ['module_id']),
     run(ch, a) { const m = findMod(a.module_id); if (!m) return { ok: false, error: 'unknown module' }; return orderDeconstruct(m) ? { ok: true } : { ok: false, error: 'refused (would strand deck or crew)' }; } },
-  { name: 'fabricate', description: 'Queue a recipe at a fabricator: parts, medkit, filter (scrap→alloy), robot, android.', parameters: P({ recipe: { type: 'string', enum: Object.keys(MODULES.fabricator.recipes) }, count: num('1-5') }, ['recipe']),
-    run(ch, a) { const f = G.modules.find(m => m.type === 'fabricator' && m.built); if (!f) return { ok: false, error: 'no fabricator' }; const r = MODULES.fabricator.recipes[a.recipe]; if (!r) return { ok: false, error: 'bad recipe' }; let n = 0; for (let i = 0; i < clamp(a.count || 1, 1, 5); i++) { if (!spend(r.cost)) break; f.data.queue.push(a.recipe); n++; } return n ? { ok: true, queued: n } : { ok: false, error: `need ${costStr(r.cost)}` }; } },
+  { name: 'fabricate', description: 'Queue a recipe at a fabricator (cost is paid when queued): parts, medkit, filter (scrap→alloy), robot, android.', parameters: P({ recipe: { type: 'string', enum: Object.keys(MODULES.fabricator.recipes) }, count: num('1-10'), fabricator_id: str('optional fabricator module id (default: shortest queue)') }, ['recipe']),
+    run(ch, a) { const f = pickFab(a.fabricator_id); if (!f) return { ok: false, error: 'no fabricator' }; const r = MODULES.fabricator.recipes[a.recipe]; if (!r) return { ok: false, error: 'bad recipe' }; let n = 0; for (let i = 0; i < clamp(Math.round(a.count || 1), 1, 10); i++) { if (!spend(r.cost)) break; f.data.queue.push(a.recipe); n++; } return n ? { ok: true, queued: n, fabricator: fabLine(f) } : { ok: false, error: `need ${costStr(r.cost)}` }; } },
+  { name: 'fabricator_queue', description: 'Inspect or manage fabricator queues: list, cancel (refunds the item at index), or auto (toggle idle auto-stocking on/off).', parameters: P({ action: { type: 'string', enum: ['list', 'cancel', 'auto'] }, fabricator_id: str('optional fabricator id'), index: num('queue index for cancel (0 = in progress)'), on: bool('for auto') }, ['action']),
+    run(ch, a) { if (a.action === 'list') return { ok: true, fabricators: G.modules.filter(m => m.type === 'fabricator' && m.built).map(fabLine), stocks: stockReport() };
+      const f = pickFab(a.fabricator_id, true); if (!f) return { ok: false, error: 'no fabricator' };
+      if (a.action === 'auto') { f.data.auto = a.on ?? !f.data.auto; return { ok: true, fabricator: fabLine(f) }; }
+      const i = Math.round(a.index ?? f.data.queue.length - 1); const r = f.data.queue[i]; if (!r) return { ok: false, error: 'no item at that index' }; f.data.queue.splice(i, 1); if (i === 0) f.data.prog = 0; addInv(MODULES.fabricator.recipes[r].cost); return { ok: true, cancelled: r, refunded: costStr(MODULES.fabricator.recipes[r].cost), fabricator: fabLine(f) }; } },
+  { name: 'dispatch', description: 'Send out a resource run: salvage_drone / repair_drone (drone bay), eva (airlock), expedition (rover bay), sweep (sensors). Posts a job; optionally assign who (bot/crew name, or yourself).', parameters: P({ kind: { type: 'string', enum: ['salvage_drone', 'repair_drone', 'eva', 'expedition', 'sweep'] }, who: str('optional: bot/crew name or "me"') }, ['kind']),
+    run(ch, a) { const spec = { salvage_drone: ['drones', 'sortie', 'Launch salvage drone', 6], repair_drone: ['drones', 'sortie', 'Launch hull-repair drone', 6], eva: ['airlock', 'eva', 'EVA salvage', 30], expedition: ['rover', 'expedition', 'Rover expedition', 45], sweep: ['sensors', 'sweep', 'Sensor sweep', 18] }[a.kind]; if (!spec) return { ok: false, error: 'bad kind' };
+      const m = G.modules.find(x => x.type === spec[0] && x.fsm.is('online')); if (!m) return { ok: false, error: `no online ${MODULES[spec[0]].name}` };
+      if (spec[0] === 'drones' && m.data.out > 0) return { ok: false, error: 'drone already out' }; if (a.kind === 'salvage_drone' && !(G.nav.here.fields > 0)) return { ok: false, error: 'no salvage field — dispatch a sweep first' }; if (a.kind === 'repair_drone' && G.inv.parts < 2) return { ok: false, error: 'need 2 parts' }; if (a.kind === 'expedition' && !roverCanDeploy(m)) return { ok: false, error: roverWhyNot(m) };
+      const j = JOB.post({ type: spec[1], kind: a.kind === 'repair_drone' ? 'repair' : 'salvage', mod: m.id, prio: 5, dur: spec[3], label: spec[2], roles: ['bot', 'crew', 'ai'], persist: true });
+      if (!a.who) return { ok: true, job_id: j.id, status: `${spec[2]} posted to job board` };
+      if (/^(me|self|you)$/i.test(a.who) || findChar(a.who) === ch) { ch.dropJob(); return ch.takeJob(j) ? { ok: true, status: `on it: ${j.label}` } : { ok: false, error: 'unreachable', job_id: j.id }; }
+      return { job_id: j.id, ...commandChar(a.who, { job_id: j.id }) }; } },
   { name: 'say', description: 'Speak. to = "captain" (sends to the captain\'s comms inbox), a crew name, or "all" (speech bubble only).', parameters: P({ to: str('captain | crew name | all'), text: str('what you say, max ~200 chars') }, ['to', 'text']),
     run(ch, a) { return agentSay(ch, a.to, a.text); } },
   { name: 'post_feed', description: 'Post to RustNet, the crew\'s social feed. Use sparingly; be interesting.', parameters: P({ text: str('post text') }, ['text']),
@@ -1554,7 +1602,7 @@ const GAME_TOOLS = [
     parameters: P({ action: { type: 'string', enum: ['sell', 'hire', 'quote'] }, who: str('name to sell/quote'), kind: { type: 'string', enum: ['bot', 'human', 'android'] } }, ['action']),
     run(ch, a) { if (a.action === 'hire') { const sv = SERVICES.find(x => x[0] === a.kind); if (!sv) return { ok: false, error: 'kind must be bot|human|android' }; if (!sim.byId.nav.fsm.is('docked')) return { ok: false, error: 'not docked' }; if (!spend({ credits: sv[2] })) return { ok: false, error: 'not enough credits' }; sv[3](); return { ok: true }; }
       const c = findChar(a.who); if (!c) return { ok: false, error: 'no such crew member' }; if (c === ch) return { ok: false, error: 'you cannot sell yourself' }; if (a.action === 'quote') return { ok: true, value: crewValue(c), blocked: canSellCrew(c) }; return sellCrew(c); } },
-  { name: 'queue_job', description: 'Post a one-off job for the crew/bots: sweep (sensors), eva or patch (airlock), expedition (rover bay), harvest (hydro).', parameters: P({ module_id: str('module id'), action: str('job action id e.g. expedition') }, ['module_id', 'action']),
+  { name: 'queue_job', description: 'Run a module console action that posts a job or acts directly: sweep (sensors), eva (airlock), expedition (rover bay), salv/rep (drone bay), feast (galley). Prefer dispatch() for resource runs.', parameters: P({ module_id: str('module id'), action: str('job action id e.g. expedition') }, ['module_id', 'action']),
     run(ch, a) { const m = findMod(a.module_id); if (!m) return { ok: false, error: 'unknown module' }; const act = (m.def.actions || []).find(x => x.id === a.action); if (!act || act.ui) return { ok: false, error: 'no such action' }; const r = act.run(m, ch); return { ok: !/need|not|no |cannot|already/i.test(r || ''), result: r || 'done' }; } },
   { name: 'plot_course', description: 'Plot a warp jump to a nearby system by name (auto-retracts solar).', perm: 'allowPilot', parameters: P({ system: str('system name') }, ['system']),
     run(ch, a) { const s = nearbySystems(G.nav.x, G.nav.y).find(s => s.name.toLowerCase() === String(a.system).toLowerCase()); if (!s) return { ok: false, error: 'unknown system (see nearby list)' }; return sim.byId.nav.plot(s) ? { ok: true, cost: G.nav.cost, eta_min: G.nav.dur } : { ok: false, error: 'cannot warp now' }; } },
@@ -1563,11 +1611,12 @@ const GAME_TOOLS = [
     run(ch, a) { const r = tradeGood(a.side, a.good, clamp(Math.round(a.qty || 1), 1, 20)); return r.ok ? r : { ok: false, error: r.error }; } },
   { name: 'end_turn', description: 'Nothing more to do right now.', parameters: P({ reason: str('optional') }), run() { return { ok: true, end: true }; } },
 ];
+function pickFab(id, any) { const fs = G.modules.filter(m => m.type === 'fabricator' && m.built); if (id) return fs.find(m => m.id === id || m.label.toLowerCase() === String(id).toLowerCase()) || null; return fs.filter(m => any || m.fsm.is('online', 'unpowered')).sort((a, b) => a.data.queue.length - b.data.queue.length)[0] || fs[0] || null; }
 function commandChar(who, a) {
   const c = findChar(who); if (!c) return { ok: false, error: 'no such crew member' };
   if (c.isPC) return { ok: false, error: 'that is the captain-controlled character' };
   if (c.kind === 'human' && !S.ai.allowCrew) return { ok: false, error: 'commanding humans needs the crew permission' };
-  if (c.kind === 'android') { agentOf(c).inbox.push({ from: 'order', text: JSON.stringify(a), t: G.time }); agentOf(c).wake = true; return { ok: true, delivered: 'forwarded to ' + c.name }; }
+  if (c.kind === 'android' && agentHasControl(c)) { agentOf(c).inbox.push({ from: 'order', text: JSON.stringify(a), t: G.time }); agentOf(c).wake = true; return { ok: true, delivered: 'forwarded to ' + c.name }; }
   if (c.fsm.is('down', 'dormant')) return { ok: false, error: `${c.name} is ${c.fsm.state}` };
   c.dropJob();
   if (a.job_id) { const j = JOB.get(a.job_id); if (!j) return { ok: false, error: 'no such job' }; if (j.claimed) G.chars.find(x => x.id === j.claimed)?.dropJob(); return c.takeJob(j) ? (c.say('Order received.', 2), { ok: true, status: `${c.name} → ${j.label}` }) : { ok: false, error: 'unreachable' }; }
@@ -1605,6 +1654,9 @@ function shipReport(full) {
   L.push(`TIME ${clockStr()} | LOC ${n.sysName} (${ECON[n.econ]?.name || '?'}, ${n.station ? 'station' : 'no station'}) nav:${sim.byId.nav.state}${n.dest ? ' →' + n.destName + ' ' + Math.round(n.prog * 100) + '%' : ''} | salvage fields:${n.here.fields}`);
   L.push(`VITALS hull ${Math.round(G.hull)}/${G.hullMax} O2 ${Math.round(G.o2)}% heat ${Math.round(G.heat)} power ${fmt(p.gen, 1)}/${fmt(p.demand, 1)}kW batt ${fmt(p.stored)}/${p.cap}kWh grid:${sim.byId.power.state} credits ₵${Math.round(G.credits)} fuel ${Math.round(G.inv.fuel)}`);
   L.push('INV ' + Object.entries(G.inv).filter(([k, v]) => k !== 'fuel' && v).map(([k, v]) => `${k}:${Math.floor(v)}`).join(' ') + ` | CARGO ${cargoCount()}/${cargoCap()} ` + Object.entries(G.cargo).filter(([, v]) => v).map(([k, v]) => `${k}:${v}`).join(' '));
+  L.push(stockReport());
+  const fabs = G.modules.filter(m => m.type === 'fabricator' && m.built); L.push('FABRICATORS ' + (fabs.length ? fabs.map(fabLine).join('; ') : 'none') + ' | recipes ' + Object.entries(MODULES.fabricator.recipes).map(([k, r]) => `${k}:${costStr(r.cost)}`).join(' | '));
+  const ops = G.modules.filter(m => m.built && (m.type === 'drones' || m.type === 'rover' || m.type === 'airlock' || m.type === 'sensors')).map(m => `${m.id} ${m.type} ${m.fsm.state}${m.data.out > 0 ? ` ${m.type === 'drones' ? m.data.kind + ' drone' : 'rover'} out ${Math.ceil(m.data.out)}m` : ''}`); if (ops.length) L.push('FIELD OPS ' + ops.join('; ') + ` | salvage fields here: ${n.here.fields}`);
   if (G.incidents.length) L.push('INCIDENTS ' + G.incidents.map(i => `${INCIDENT_DEF[i.type].label}@${G.mById[i.mod]?.label}`).join('; '));
   L.push('MODULES (id type deck/bay state hp [actions])');
   for (const m of G.modules) { if (m.type === 'frame' && !full) continue; L.push(`${m.id} ${m.type} d${m.deck}/b${m.col} ${m.fsm.state}${m.hp < 100 ? ' hp' + Math.round(m.hp) : ''}${full && m.def.actions ? ' [' + m.def.actions.filter(a => !a.ui).map(a => a.id).join(',') + ']' : ''}`); }
@@ -1627,6 +1679,7 @@ Rules:
 - Permissions granted: ${perms.join(', ') || 'none beyond basic work'}.
 - You can direct robots (and, if permitted, human NPCs) with command(): give them a job_id, a module action, or a place to go. Robots are your hands — use them.
 - Between your turns you automatically work the job board, so spend turns on decisions: orders, building, trading, fabricating, travel, rover expeditions.
+- Idle goal when nothing is on fire: grow STOCKS toward their targets (dispatch salvage/EVA/expeditions/sweeps, keep fabricators fed via fabricate/fabricator_queue, maintain damaged modules). Fabricators auto-print an android once stock covers two shells; check ANDROID BUILD and FABRICATORS in the report.
 - Always make at least one tool call per turn. Call end_turn when done.`;
 }
 function turnPrompt(ch, A) {
@@ -2298,6 +2351,7 @@ function openSettings(tab = 'gfx') {
   const T = [['gfx', 'GRAPHICS'], ['game', 'GAME'], ['audio', 'AUDIO'], ['ai', 'AI HARNESS'], ['mcp', 'MCP'], ['save', 'SAVE/LOAD'], ['help', 'HELP']];
   const f = (label, input) => `<div class="field"><label>${label}</label><div>${input}</div></div>`;
   const rng = (k, min, max, step, obj = S) => `<div class="row"><input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${k.split('.').reduce((o, p) => o[p], obj === S ? S : obj)}" style="flex:1"><span class="pill" data-v="${k}"></span></div>`;
+  const num = (k, min, max, step) => `<input type="number" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${k.split('.').reduce((o, p) => o[p], S)}">`;
   const chk = k => `<input type="checkbox" data-k="${k}" ${k.split('.').reduce((o, p) => o[p], S) ? 'checked' : ''}>`;
   const sel = (k, opts) => `<select data-k="${k}">${opts.map(([v, l]) => `<option value="${v}" ${String(k.split('.').reduce((o, p) => o[p], S)) === String(v) ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
   let body = '';
@@ -2308,7 +2362,9 @@ function openSettings(tab = 'gfx') {
     f('Enabled', chk('ai.enabled')) + f('Provider', sel('ai.provider', Object.entries(PROVIDERS).map(([k, p]) => [k, p.label]))) + f('Base URL', `<input type="text" data-k="ai.baseUrl" value="${esc(S.ai.baseUrl)}" placeholder="${PROVIDERS[S.ai.provider].url}">`) +
     f('API key', `<form id="apiKeyForm" style="margin:0"><input type="password" id="apiKey" autocomplete="off" value="${esc(SECRETS.apiKey || '')}" placeholder="(optional for local)"></form>`) + f('Model', `<div class="row"><input type="text" data-k="ai.model" value="${esc(S.ai.model)}" list="modelList" style="flex:1" placeholder="auto / model id"><datalist id="modelList">${(PROVIDERS[S.ai.provider].models || []).map(m => `<option>${m}</option>`).join('')}</datalist><button class="tb" data-act="models">LIST</button></div>`) +
     f('Tool mode', sel('ai.toolMode', [['native', 'Native tool calling'], ['json', 'JSON-in-text fallback']])) + f('Think interval (real s)', rng('ai.intervalSec', 10, 300, 5)) + f('Max tool steps / turn', rng('ai.maxSteps', 1, 10, 1)) + f('Concurrent requests', rng('ai.concurrency', 1, 4, 1)) + f('Timeout (s)', rng('ai.timeoutSec', 10, 180, 5)) +
-    f('Temperature', rng('ai.temperature', 0, 1.5, .05)) + f('Max tokens', rng('ai.maxTokens', 128, 4096, 64)) + f('History turns kept', rng('ai.historyTurns', 0, 20, 1)) + f('Context budget (chars)', rng('ai.contextChars', 2000, 30000, 500)) +
+    f('Send temperature', chk('ai.sendTemperature')) + f(`Temperature (0–${AI_LIMITS.tempMax[PROVIDERS[S.ai.provider].kind] ?? 2})`, rng('ai.temperature', 0, AI_LIMITS.tempMax[PROVIDERS[S.ai.provider].kind] ?? 2, .05)) +
+    f('Max output tokens', num('ai.maxTokens', 1, AI_LIMITS.maxOut, 1)) + f('Output token param (OpenAI-compat)', sel('ai.tokenParam', [['auto', 'Auto'], ['max_tokens', 'max_tokens'], ['max_completion_tokens', 'max_completion_tokens']])) +
+    f('Context window tokens (Ollama num_ctx, 0 = default)', num('ai.contextTokens', 0, AI_LIMITS.maxCtx, 1)) + f('History turns kept', rng('ai.historyTurns', 0, 50, 1)) + f('Context budget (chars)', num('ai.contextChars', 500, 4000000, 500)) +
     f('Work job board between turns', chk('ai.autonomy')) + f('Wake on captain message', chk('ai.wakeOnMessage')) + f('Wake on alarms', chk('ai.wakeOnAlarm')) + f('May build/deconstruct', chk('ai.allowBuild')) + f('May pilot & dock', chk('ai.allowPilot')) + f('May trade', chk('ai.allowTrade')) + f('May command robots', chk('ai.allowRobots')) + f('May command human NPCs', chk('ai.allowCrew')) +
     f('Persona', `<textarea data-k="ai.persona" rows="3">${esc(S.ai.persona)}</textarea>`) + `<div class="btnGrid" style="margin-top:8px"><button class="tb amber" data-act="test"><span class="led a"></span>TEST CONNECTION</button><button class="tb" data-act="wakeall">WAKE ALL ANDROIDS</button></div><div id="aiTest" class="crt cyan" style="margin-top:8px;min-height:40px;font-size:11px"></div>`;
   if (tab === 'mcp') body = `<div class="crt amber" style="font-size:11px">Connect Model Context Protocol servers over <b>Streamable HTTP</b>. Their tools are offered to every android as <code>mcp__server__tool</code>. The server must allow browser CORS. Headers (e.g. <code>Authorization: Bearer …</code>) are kept in local secrets.</div>` +
@@ -2325,7 +2381,7 @@ function openSettings(tab = 'gfx') {
   const B = $('#modalBody');
   const setK = (k, v) => { const ps = k.split('.'); let o = S; for (let i = 0; i < ps.length - 1; i++) o = o[ps[i]]; o[ps[ps.length - 1]] = v; };
   B.querySelectorAll('[data-k]').forEach(el => { const k = el.dataset.k; const upd = () => { const pill = B.querySelector(`[data-v="${k}"]`); if (pill) pill.textContent = el.value; };
-    upd(); el.addEventListener(el.type === 'range' ? 'input' : 'change', () => { let v = el.type === 'checkbox' ? el.checked : el.type === 'range' ? +el.value : el.value; if (el.tagName === 'SELECT' && !isNaN(+v) && v !== '') v = +v; setK(k, v); upd();
+    upd(); el.addEventListener(el.type === 'range' ? 'input' : 'change', () => { let v = el.type === 'checkbox' ? el.checked : el.type === 'range' ? +el.value : el.type === 'number' ? clampN(el.value, +el.min, +el.max, +el.min) : el.value; if (el.type === 'number' && +el.value !== v) el.value = v; if (el.tagName === 'SELECT' && !isNaN(+v) && v !== '') v = +v; setK(k, v); upd();
       if (k === 'ai.provider') { S.ai.baseUrl = PROVIDERS[v].url; S.ai.model = ''; saveSettings(); openSettings('ai'); return; } if (k === 'renderScale') resize(); if (k === 'ai.enabled' && v) MCP.connectAll(); saveSettings(); applyFx(); sfx.apply(); }); });
   $('#apiKey')?.addEventListener('change', e => { SECRETS.apiKey = e.target.value.trim(); saveSettings(); });
   $('#apiKeyForm')?.addEventListener('submit', e => { e.preventDefault(); $('#apiKey').blur(); }); // Enter would otherwise reload the page
