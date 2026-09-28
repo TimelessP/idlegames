@@ -116,6 +116,7 @@ main.dock-closed #dock{display:none}
 #alertBar{position:absolute;left:0;right:0;top:0;height:4px;z-index:6;display:none;background:repeating-linear-gradient(-45deg,var(--red) 0 10px,#200 10px 20px);animation:alertmove .6s linear infinite;box-shadow:0 0 14px var(--red)}
 @keyframes alertmove{to{background-position:28px 0}}
 #buildBanner{position:absolute;right:12px;bottom:12px;z-index:5;display:none;font-size:12px}
+#followBanner{position:absolute;left:12px;bottom:12px;z-index:6;display:none;font-size:11px;max-width:calc(100% - 24px)}
 /* ============ DOCK ============ */
 #dock{display:flex;flex-direction:column;padding:12px 10px 10px;min-height:0;gap:8px}
 #tabs{display:flex;flex-wrap:wrap;gap:6px}
@@ -198,6 +199,7 @@ footer .vent{width:60px}
         <div id="hudOverlay"><div class="crt" id="hudLeft"></div><div class="crt amber" id="hudRight"></div></div>
         <div id="toasts"></div>
         <div id="buildBanner" class="crt amber"></div>
+        <button id="followBanner" class="tb teal" title="Return the camera to your character (Esc, or just move)"></button>
       </div>
     </section>
     <aside id="dock" class="plate" data-screws>
@@ -959,7 +961,10 @@ const CHAR_FSM = {
     }
   },
   eat: { enter() { this.say(pick(['Chow time.', 'Nutrient paste again.', 'Tastes like rust.']), 3); }, update(f, dt) { if (f.time > 5) { if (spend({ rations: 1 })) { this.hunger = Math.max(0, this.hunger - 70); this.morale = Math.min(100, this.morale + 5); } else this.say('No rations...', 3); return 'idle'; } } },
-  sleep: { update(f, dt) { this.fatigue = Math.max(0, this.fatigue - dt * .35); this.morale = Math.min(100, this.morale + dt * .02); if (this.fatigue <= 2 && !this.shiftSleep()) return 'idle'; if (this.fatigue <= 0 && f.time > 60) return 'idle'; } },
+  sleep: { enter() { const m = modAt(this.deck, Math.floor(this.x / SW)), free = m?.type === 'quarters' && m.built ? freeBeds(m) : []; if (!free.length) return; // no bunk spare: sleep on the floor
+      const bx = i => bedXY(m, i).x + 45, i = free.reduce((a, b) => Math.abs(bx(b) - this.x) < Math.abs(bx(a) - this.x) ? b : a); this.bed = { mod: m.id, i }; this.x = bx(i); },
+    exit() { this.bed = null; },
+    update(f, dt) { this.fatigue = Math.max(0, this.fatigue - dt * .35); this.morale = Math.min(100, this.morale + dt * .02); if (this.fatigue <= 2 && !this.shiftSleep()) return 'idle'; if (this.fatigue <= 0 && f.time > 60) return 'idle'; } },
   heal: { update(f, dt) { if (f.time > 6 && !this.healed) { this.healed = true; if (spend({ medkit: 1 })) { this.health = 100; this.say('Patched up.', 3); } } if (this.health >= 95 || f.time > 240) { this.healed = false; return this.isPC ? 'manual' : 'idle'; } } },
   charge: { update(f, dt) { this.charge = Math.min(100, this.charge + dt * (this.dockMod?.type === 'workshop' ? 1.6 : .8)); if (this.dockMod) { this.dockMod.working = true; if (this.dockMod.type === 'workshop') this.dockMod.data['dock' + (this.dockSlot || 0)] = 1; } if (this.charge >= 99) { if (this.dockMod?.type === 'workshop') this.dockMod.data['dock' + (this.dockSlot || 0)] = 0; this.dockMod = null; return 'idle'; } } },
   dormant: { enter() { this.dropJob(); this.say('…core link lost…', 4); }, update() { if (!this.dormantCheck()) { this.say('Mind restored.', 3); return 'idle'; } } },
@@ -1004,7 +1009,8 @@ class Char {
     docks.sort((a, b) => (a.type === 'workshop' ? 0 : 1) - (b.type === 'workshop' ? 0 : 1) || Math.abs(a.deck - this.deck) - Math.abs(b.deck - this.deck)); this.dockSlot = irnd(0, 2); return docks.find(m => route(this, m.deck, m.cx)) || null;
   }
   goType(type, then) { const ms = G.modules.filter(m => m.type === type && m.fsm.is('online', 'unpowered')); ms.sort((a, b) => Math.abs(a.deck - this.deck) * 500 + Math.abs(a.cx - this.x) - Math.abs(b.deck - this.deck) * 500 - Math.abs(b.cx - this.x));
-    for (const m of ms) { if (this.goTo(m.deck, m.cx + rnd(-60, 60), then)) return 'walk'; }
+    if (then === 'sleep') ms.sort((a, b) => !freeBeds(a).length - !freeBeds(b).length);
+    for (const m of ms) { const fb = then === 'sleep' ? freeBeds(m) : []; if (this.goTo(m.deck, fb.length ? bedXY(m, fb[0]).x + 45 : m.cx + rnd(-60, 60), then)) return 'walk'; }
     if (then === 'sleep' && this.fatigue > 90) return 'sleep'; // sleep on the floor
     if (then === 'heal') return 'heal';
     return null; }
@@ -1036,12 +1042,23 @@ function clockMin() { return 360 + G.time; }
 function clockStr() { const m = Math.floor(clockMin()); const d = Math.floor(m / 1440) + 1, hh = Math.floor(m % 1440 / 60), mm = m % 60; return `D${d} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`; }
 
 /* ---------------- character rendering ---------------- */
+/* Bunks match quarters.draw(): bed i → column i&1, row i>>1 (row 0 = upper). (x,y) = frame's top-left; pillow at the left end. */
+const BED_ORDER = [2, 3, 0, 1];
+function bedXY(m, i) { return { x: colX(m.col) + 14 + (i & 1) * 100, y: deckTopY(m.deck) + CEIL + 50 + (i >> 1) * 56 }; }
+function freeBeds(m) { return BED_ORDER.filter(i => !G.chars.some(c => c.bed?.mod === m.id && c.bed.i === i)); }
+function bedPos(ch) { const m = ch.bed && G.mById[ch.bed.mod]; return m?.type === 'quarters' ? bedXY(m, ch.bed.i) : null; }
+function charBox(ch) { const b = bedPos(ch); return b ? { x: b.x + 45, top: b.y - 34, bot: b.y, w: 45 } : { x: ch.x, top: ch.wy - ch.h, bot: ch.wy, w: 18 }; }
+function charHit(ch, wx, wy) { const b = charBox(ch); return Math.abs(b.x - wx) < b.w && wy < b.bot && wy > b.top - 10; }
 function drawChar(ch, t) {
   const x = ch.x, y = ch.wy, f = ch.facing || 1, walk = ch.fsm.is('walk', 'manual') && (ch.fsm.is('walk') || INPUT.axis()) ? ch.walkT : 0, working = ch.fsm.is('work');
-  ctx.save(); ctx.translate(x, y);
-  ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.beginPath(); ctx.ellipse(0, 0, ch.kind === 'bot' ? 20 : 14, 3, 0, 0, 7); ctx.fill();
-  if (ch.fsm.is('sleep', 'down')) { ctx.rotate(-Math.PI / 2 * f); ctx.translate(-10, 6 * f); }
-  ctx.scale(f, 1);
+  const bed = bedPos(ch), lying = ch.fsm.is('sleep', 'down');
+  ctx.save();
+  // lying = rotate so the head points along -x and the chest faces up; bunk: head on pillow, back on mattress
+  if (bed) { ctx.translate(bed.x + 77, bed.y - 17); ctx.rotate(-Math.PI / 2); }
+  else {
+    ctx.translate(x, y); ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.beginPath(); ctx.ellipse(0, 0, lying ? 34 : ch.kind === 'bot' ? 20 : 14, 3, 0, 0, 7); ctx.fill();
+    if (lying) { ctx.translate(36 * f, -12); ctx.scale(f, 1); ctx.rotate(-Math.PI / 2); } else ctx.scale(f, 1);
+  }
   if (ch.kind === 'bot') drawBot(ch, t, walk, working); else if (ch.kind === 'android') drawAndroid(ch, t, walk, working); else drawHuman(ch, t, walk, working);
   ctx.restore();
   if (ch.isPC) { const bob = Math.sin(t * 4) * 2; lit(c => { c.fillStyle = '#ffb000'; c.beginPath(); c.moveTo(x - 5, y - ch.h - 22 + bob); c.lineTo(x + 5, y - ch.h - 22 + bob); c.lineTo(x, y - ch.h - 15 + bob); c.fill(); }); }
@@ -1058,7 +1075,7 @@ function drawHuman(ch, t, walk, working) {
   // backpack w/ tube
   RR(-15, -50, 7, 18, 2, '#4a4038'); led(-12, -46, 1.6, ch.isPC ? '#ffb000' : '#7dff4a');
   // arm
-  const arm = working ? Math.sin(t * 10) * .6 - 1 : s * .5;
+  const arm = working ? Math.sin(t * 10) * .6 - 1 : ch.fsm.is('sleep', 'down') ? -1.25 : s * .5;
   limb(4, -48, 4 + Math.sin(arm + 1.4) * 14, -48 + Math.cos(arm + 1.4) * 14, 4, shade(lk.coat, -15));
   // head
   RR(-2, -57, 5, 6, 1, lk.skin); C(1, -62, 7, lk.skin); ctx.fillStyle = lk.hair; ctx.beginPath(); ctx.arc(0, -64, 7.5, Math.PI, Math.PI * 2.1); ctx.fill(); R(-7, -65, 4, 7, lk.hair);
@@ -1115,17 +1132,17 @@ function drawBubble(ch) {
   if (!ch.bubble) return; const txt = ch.bubble.text; ctx.font = `11px ${FONT}`;
   const words = txt.split(' '), lines = []; let cur = ''; for (const w of words) { if ((cur + ' ' + w).length > 30) { lines.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w; } if (cur) lines.push(cur);
   const ls = lines.slice(0, 5), bw = Math.max(...ls.map(l => ctx.measureText(l).width)) + 14, bh = ls.length * 13 + 8;
-  const x = ch.x - bw / 2, y = ch.wy - ch.h - 30 - bh; const col = ch.kind === 'android' ? '#29e7ff' : ch.kind === 'bot' ? '#ffb000' : '#7dff4a';
+  const cb = charBox(ch), x = cb.x - bw / 2, y = cb.top - 30 - bh; const col = ch.kind === 'android' ? '#29e7ff' : ch.kind === 'bot' ? '#ffb000' : '#7dff4a';
   ctx.globalAlpha = Math.min(1, ch.bubble.t * 2);
   RR(x, y, bw, bh, 4, 'rgba(6,8,6,.92)'); ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.beginPath(); ctx.roundRect(x, y, bw, bh, 4); ctx.stroke();
-  ctx.fillStyle = 'rgba(6,8,6,.92)'; ctx.beginPath(); ctx.moveTo(ch.x - 5, y + bh); ctx.lineTo(ch.x + 5, y + bh); ctx.lineTo(ch.x, y + bh + 7); ctx.fill();
+  ctx.fillStyle = 'rgba(6,8,6,.92)'; ctx.beginPath(); ctx.moveTo(cb.x - 5, y + bh); ctx.lineTo(cb.x + 5, y + bh); ctx.lineTo(cb.x, y + bh + 7); ctx.fill();
   ctx.fillStyle = col; ctx.textAlign = 'left'; ls.forEach((l, i) => ctx.fillText(l, x + 7, y + 15 + i * 13)); ctx.globalAlpha = 1;
 }
 function drawTag(ch) {
-  ctx.font = `bold 9px ${FONT}`; ctx.textAlign = 'center'; const st = ch.job ? ch.job.label : ch.fsm.state.toUpperCase();
-  ctx.fillStyle = 'rgba(0,0,0,.6)'; const w = Math.max(ctx.measureText(ch.name).width, ctx.measureText(st).width) + 8; ctx.fillRect(ch.x - w / 2, ch.wy - ch.h - 14, w, 22);
-  ctx.fillStyle = ch.kind === 'android' ? '#29e7ff' : ch.kind === 'bot' ? '#ffb000' : '#e9dcc6'; ctx.fillText(ch.name, ch.x, ch.wy - ch.h - 5);
-  ctx.fillStyle = 'rgba(200,200,180,.7)'; ctx.font = `8px ${FONT}`; ctx.fillText(st.slice(0, 22), ch.x, ch.wy - ch.h + 5);
+  ctx.font = `bold 9px ${FONT}`; ctx.textAlign = 'center'; const st = ch.job ? ch.job.label : ch.fsm.state.toUpperCase(), { x, top } = charBox(ch);
+  ctx.fillStyle = 'rgba(0,0,0,.6)'; const w = Math.max(ctx.measureText(ch.name).width, ctx.measureText(st).width) + 8; ctx.fillRect(x - w / 2, top - 14, w, 22);
+  ctx.fillStyle = ch.kind === 'android' ? '#29e7ff' : ch.kind === 'bot' ? '#ffb000' : '#e9dcc6'; ctx.fillText(ch.name, x, top - 5);
+  ctx.fillStyle = 'rgba(200,200,180,.7)'; ctx.font = `8px ${FONT}`; ctx.fillText(st.slice(0, 22), x, top + 5);
 }
 
 /* =====================================================================
@@ -1855,7 +1872,8 @@ function drawBuildOverlay(t) {
 }
 function render(t, rdt) {
   BLOOM = S.bloom; updateParts(rdt);
-  const pc = player(); if (pc) { cam.tx = G.buildMode && G.buildCursor ? colX(G.buildCursor.c) + SW / 2 : pc.x; cam.ty = G.buildMode && G.buildCursor ? deckTopY(G.buildCursor.d) + DH / 2 : pc.wy - DH * .45; }
+  if (G.followId && INPUT.axis()) stopFollow();
+  const pc = followed() || player(); if (pc) { cam.tx = G.buildMode && G.buildCursor ? colX(G.buildCursor.c) + SW / 2 : pc.x; cam.ty = G.buildMode && G.buildCursor ? deckTopY(G.buildCursor.d) + DH / 2 : pc.wy - DH * .45; }
   const zTarget = clamp(VH / (DH * 2.3), .35, 2.2) * S.zoom; cam.z = lerp(cam.z, zTarget, clamp(rdt * 4, 0, 1));
   cam.x = lerp(cam.x, cam.tx, clamp(rdt * 5, 0, 1)); cam.y = lerp(cam.y, cam.ty, clamp(rdt * 5, 0, 1));
   shakeAmt *= Math.pow(.02, rdt); const sx = (Math.random() - .5) * shakeAmt, sy = (Math.random() - .5) * shakeAmt;
@@ -1883,7 +1901,7 @@ const modalOpen = () => $('#modal').classList.contains('open');
 addEventListener('keydown', e => {
   sfx.init(); if (e.target.matches?.('input,textarea,select')) { if (e.key === 'Escape') e.target.blur(); return; }
   if (!G || GAME.fsm.is('title')) return;
-  if (e.key === 'Escape') { e.preventDefault(); if (modalOpen()) closeModal(); else if (G.buildMode) toggleBuild(false); else openSettings(); return; }
+  if (e.key === 'Escape') { e.preventDefault(); if (modalOpen()) closeModal(); else if (G.buildMode) toggleBuild(false); else if (G.followId) stopFollow(); else openSettings(); return; }
   if (modalOpen()) return;
   INPUT.keys.add(e.code);
   if (G.buildMode) {
@@ -1915,21 +1933,43 @@ $('#bPause').onclick = () => togglePause(); $('#bSpeed').onclick = () => { const
 $('#bDock').onclick = () => { $('#main').classList.toggle('dock-closed'); setTimeout(resize, 50); }; $('#bMenu').onclick = () => openSettings();
 document.addEventListener('click', e => { if (e.target.closest('.tb')) { sfx.init(); sfx.click(); } });
 cv.addEventListener('wheel', e => { e.preventDefault(); S.zoom = clamp(S.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1), .4, 3); }, { passive: false });
-cv.addEventListener('pointerdown', e => {
-  sfx.init(); if (!G) return; const r = cv.getBoundingClientRect(); const [wx, wy] = screenToWorld(e.clientX - r.left, e.clientY - r.top);
+/* A press only counts if it starts and ends on the same thing: a click whose press began elsewhere
+   (e.g. a modal appeared under the finger mid-press, or the finger slid off) is swallowed. */
+const PRESS = { down: new Map(), start: null };
+addEventListener('pointerdown', e => PRESS.down.set(e.pointerId, e.target), true);
+addEventListener('pointerup', e => { PRESS.start = PRESS.down.get(e.pointerId) || null; PRESS.down.delete(e.pointerId); }, true);
+addEventListener('pointercancel', e => PRESS.down.delete(e.pointerId), true);
+addEventListener('click', e => { if (!e.detail) return; if (PRESS.start?.isConnected && e.target.contains(PRESS.start)) return; e.stopImmediatePropagation(); e.preventDefault(); }, true);
+const pressingIn = el => [...PRESS.down.values()].some(t => el.contains(t));
+
+function canvasHit(e) {
+  const r = cv.getBoundingClientRect(); const [wx, wy] = screenToWorld(e.clientX - r.left, e.clientY - r.top);
   const c = Math.floor(wx / SW), d = Math.floor(-(wy) / DH); // deck whose vertical span contains wy
+  const ch = G.buildMode ? null : G.chars.find(ch => !ch.isPC && charHit(ch, wx, wy));
+  return { wx, wy, c, d, ch, key: ch ? ch.id : d + ':' + c };
+}
+let cvPress = null;
+cv.addEventListener('pointerdown', e => { sfx.init(); cvPress = G ? { id: e.pointerId, key: canvasHit(e).key } : null; });
+cv.addEventListener('pointercancel', () => { cvPress = null; });
+cv.addEventListener('pointerup', e => {
+  const p = cvPress; cvPress = null; if (!G || !p || p.id !== e.pointerId || document.elementFromPoint(e.clientX, e.clientY) !== cv) return;
+  const { wx, c, d, ch, key } = canvasHit(e); if (key !== p.key) return;
   if (G.buildMode) { if (G.buildCursor.d === d && G.buildCursor.c === c) openBuildMenu(d, c); else G.buildCursor = { d, c }; return; }
-  // character click → inspect
-  const ch = G.chars.find(ch => Math.abs(ch.x - wx) < 18 && wy < ch.wy && wy > ch.wy - ch.h - 10); if (ch && !ch.isPC) { openCharPanel(ch); return; }
+  if (ch) { openCharPanel(ch); return; }
   const m = modAt(d, c); const pc = player(); if (!m || !pc) return;
   if (pc.deck === d && Math.floor(pc.x / SW) === c) { if (m.type !== 'frame') openConsole(m); return; }
-  if (pc.goTo(d, clamp(wx, colX(c) + 30, colX(c) + SW - 30))) { G.openOnArrive = m.type !== 'frame' ? m.id : null; } else toast('No route there', 'bad');
+  if (pc.goTo(d, clamp(wx, colX(c) + 30, colX(c) + SW - 30))) { stopFollow(); G.openOnArrive = m.type !== 'frame' ? m.id : null; } else toast('No route there', 'bad');
 });
-function interact() { const pc = player(); if (!pc) return; const hurt = G.chars.find(c => c !== pc && c.fsm.is('down') && c.deck === pc.deck && Math.abs(c.x - pc.x) < 40); if (hurt) { const j = [...JOB.map.values()].find(j => j.target === hurt.id); INCIDENT_WORK.rescue(null, pc, { target: hurt.id }); if (j) JOB.remove(j); log(`${pc.name} dragged ${hurt.name} back to their feet`, 'good'); sfx.ding(); return; } const m = modAt(pc.deck, Math.floor(pc.x / SW)); if (m && m.type !== 'frame') openConsole(m); else if (m) { G.buildCursor = { d: m.deck, c: m.col }; toggleBuild(true); } }
-function liftMove(dir) { const pc = player(); if (!pc || !pc.fsm.is('manual')) return; const m = modAt(pc.deck, Math.floor(pc.x / SW)); if (!m || m.type !== 'lift') { toast('Stand in a lift shaft to change decks', 'warn'); return; } const o = liftLink(m, dir); if (!o) { toast(dir > 0 ? 'No deck above — build a lift up there' : 'No deck below', 'warn'); return; } pc.path = [{ t: 'walk', x: m.cx }, { t: 'lift', to: o.deck, col: m.col }]; pc.then = 'manual'; pc.fsm.go('walk'); }
-function setPC(ch) { const old = player(); G.pcId = ch.id; if (old && old !== ch) old.fsm.go('idle'); ch.dropJob(); ch.fsm.go('manual'); toast(`Now controlling ${ch.name} (${ch.role})`); }
+function interact() { const pc = player(); if (!pc) return; stopFollow(); const hurt = G.chars.find(c => c !== pc && c.fsm.is('down') && c.deck === pc.deck && Math.abs(c.x - pc.x) < 40); if (hurt) { const j = [...JOB.map.values()].find(j => j.target === hurt.id); INCIDENT_WORK.rescue(null, pc, { target: hurt.id }); if (j) JOB.remove(j); log(`${pc.name} dragged ${hurt.name} back to their feet`, 'good'); sfx.ding(); return; } const m = modAt(pc.deck, Math.floor(pc.x / SW)); if (m && m.type !== 'frame') openConsole(m); else if (m) { G.buildCursor = { d: m.deck, c: m.col }; toggleBuild(true); } }
+function liftMove(dir) { const pc = player(); if (!pc || !pc.fsm.is('manual')) return; stopFollow(); const m = modAt(pc.deck, Math.floor(pc.x / SW)); if (!m || m.type !== 'lift') { toast('Stand in a lift shaft to change decks', 'warn'); return; } const o = liftLink(m, dir); if (!o) { toast(dir > 0 ? 'No deck above — build a lift up there' : 'No deck below', 'warn'); return; } pc.path = [{ t: 'walk', x: m.cx }, { t: 'lift', to: o.deck, col: m.col }]; pc.then = 'manual'; pc.fsm.go('walk'); }
+// camera follow: any non-PC character; ends on any player input, taking control, or the target leaving
+function followed() { const c = G?.followId && G.chars.find(c => c.id === G.followId); if (c && !c.isPC) return c; if (G?.followId || $('#followBanner').style.display !== 'none') stopFollow(); return null; }
+function startFollow(ch) { const pc = player(); G.followId = ch.id; $('#followBanner').textContent = `◉ FOLLOWING ${ch.name.toUpperCase()} · ✕ BACK TO ${(pc?.name || 'SHIP').toUpperCase()}`; $('#followBanner').style.display = 'inline-flex'; }
+function stopFollow() { if (G) G.followId = null; $('#followBanner').style.display = 'none'; }
+$('#followBanner').onclick = stopFollow;
+function setPC(ch) { stopFollow(); const old = player(); G.pcId = ch.id; if (old && old !== ch) old.fsm.go('idle'); ch.dropJob(); ch.fsm.go('manual'); toast(`Now controlling ${ch.name} (${ch.role})`); }
 function switchPC(dir) { const hs = humans().filter(h => !h.fsm.is('down')); if (!hs.length) return; const i = hs.findIndex(h => h.id === G.pcId); setPC(hs[(i + dir + hs.length) % hs.length]); }
-function toggleBuild(on) { G.buildMode = on ?? !G.buildMode; const pc = player(); if (G.buildMode && !G.buildCursor && pc) G.buildCursor = { d: pc.deck, c: Math.floor(pc.x / SW) }; if (G.buildMode && pc && !on) G.buildCursor = { d: pc.deck, c: Math.floor(pc.x / SW) }; $('#ledBuild').className = 'led' + (G.buildMode ? ' a blink' : ''); $('#buildBanner').style.display = G.buildMode ? 'block' : 'none'; $('#buildBanner').innerHTML = 'BUILD MODE · arrows move · E build · X strip · B exit'; }
+function toggleBuild(on) { G.buildMode = on ?? !G.buildMode; if (G.buildMode) stopFollow(); const pc = player(); if (G.buildMode && !G.buildCursor && pc) G.buildCursor = { d: pc.deck, c: Math.floor(pc.x / SW) }; if (G.buildMode && pc && !on) G.buildCursor = { d: pc.deck, c: Math.floor(pc.x / SW) }; $('#ledBuild').className = 'led' + (G.buildMode ? ' a blink' : ''); $('#buildBanner').style.display = G.buildMode ? 'block' : 'none'; $('#buildBanner').innerHTML = 'BUILD MODE · arrows move · E build · X strip · B exit'; }
 function togglePause() { GAME.fsm.go(GAME.fsm.is('paused') ? 'play' : 'paused'); }
 
 /* =====================================================================
@@ -1939,7 +1979,7 @@ function decorate(root = document) { root.querySelectorAll('[data-screws]').forE
 let modalOnClose = null;
 function openModal(title, html, led = 'a', onClose) { if (G) { G.consoleMod = null; G.consoleRender = null; } const prevClose = modalOnClose; modalOnClose = null; if (prevClose && modalOpen()) prevClose(); const same = modalOpen() && $('#modalTitle').textContent === title, sc = $('#modalBody').scrollTop; $('#modalTitle').textContent = title; $('#modalBody').innerHTML = html; if (same) $('#modalBody').scrollTop = sc; $('#modalLed').className = 'led ' + led; $('#modal').classList.add('open'); modalOnClose = onClose; INPUT.keys.clear(); }
 function closeModal() { $('#modal').classList.remove('open'); const f = modalOnClose; modalOnClose = null; f?.(); G && (G.consoleMod = null); }
-$('#modalX').onclick = closeModal; $('#modal').addEventListener('pointerdown', e => { if (e.target.id === 'modal') closeModal(); });
+$('#modalX').onclick = closeModal; $('#modal').addEventListener('click', e => { if (e.target.id === 'modal' && PRESS.start === e.target) closeModal(); });
 function bindActions(root, map) { root.querySelectorAll('[data-act]').forEach(b => b.onclick = e => { e.stopPropagation(); const fn = map[b.dataset.act]; if (fn) fn(b.dataset, b); }); }
 function choice(text, opts, title = 'INCOMING', timeout, onTimeout) {
   let done = false; const id = 'ch' + Math.random().toString(36).slice(2, 6);
@@ -2008,8 +2048,8 @@ function openCharPanel(ch) {
     <div class="crt amber">${ch.kind === 'human' ? `HEALTH ${bar(ch.health, '#ff3b2f')}HUNGER ${bar(ch.hunger, '#ffb000')}FATIGUE ${bar(ch.fatigue, '#29e7ff')}MORALE ${bar(ch.morale, '#7dff4a')}SHIFT ${['A', 'B', 'C'][ch.shift]}` : ch.kind === 'bot' ? `CHARGE ${bar(ch.charge, '#7dff4a')}TOOL ${ch.look.tool} · HEAD ${ch.look.head}` : `AGENT ${sim.byId.agents.ctrls[ch.id]?.fsm.state || 'off'}<br>MEMORIES ${A.mem.length} (${A.mem.filter(m => m.pinned).length} pinned)<br>HISTORY ${A.history.length} turns`}</div></div>
     <h3>LOG</h3><div class="crt" style="max-height:160px">${ch.log.slice().reverse().map(l => `<div><span class="dim">${esc(clockOf(l.t))}</span> ${esc(l.text)}</div>`).join('') || '<span class="dim">…</span>'}</div>
     ${A ? `<h3>MEMORY</h3><div class="crt cyan" style="max-height:140px">${A.mem.slice().reverse().map(m => `<div>${m.pinned ? '📌' : '·'} <span class="dim">${m.id}</span> ${esc(m.text)}</div>`).join('') || '<span class="dim">empty</span>'}</div>` : ''}
-    <div class="btnGrid" style="margin-top:10px">${ch.kind === 'human' ? `<button class="tb amber" data-act="ctl">TAKE CONTROL</button>` : ''}${ch.kind === 'android' ? `<button class="tb teal" data-act="msg">MESSAGE</button><button class="tb" data-act="wake">WAKE NOW</button><button class="tb red" data-act="wipe">WIPE MEMORY</button>` : ''}<button class="tb" data-act="follow">FOLLOW CAM</button></div>`, ch.kind === 'android' ? 'c' : 'a');
-  bindActions($('#modalBody'), { ctl: () => { setPC(ch); closeModal(); }, msg: () => openMessage(ch), wake: () => { A.wake = true; A.nextAt = 0; toast(`${ch.name} pinged`); }, wipe: () => { A.mem = []; A.history = []; toast('Memory wiped'); closeModal(); }, follow: () => { if (ch.kind === 'human') setPC(ch); closeModal(); } });
+    <div class="btnGrid" style="margin-top:10px">${ch.kind === 'human' ? `<button class="tb amber" data-act="ctl">TAKE CONTROL</button>` : ''}${ch.kind === 'android' ? `<button class="tb teal" data-act="msg">MESSAGE</button><button class="tb" data-act="wake">WAKE NOW</button><button class="tb red" data-act="wipe">WIPE MEMORY</button>` : ''}${ch.isPC ? '' : `<button class="tb" data-act="follow">${G.followId === ch.id ? 'STOP FOLLOWING' : 'FOLLOW CAM'}</button>`}</div>`, ch.kind === 'android' ? 'c' : 'a');
+  bindActions($('#modalBody'), { ctl: () => { setPC(ch); closeModal(); }, msg: () => openMessage(ch), wake: () => { A.wake = true; A.nextAt = 0; toast(`${ch.name} pinged`); }, wipe: () => { A.mem = []; A.history = []; toast('Memory wiped'); closeModal(); }, follow: () => { if (G.followId === ch.id) stopFollow(); else startFollow(ch); closeModal(); } });
 }
 const clockOf = t => { const m = Math.floor(360 + t); return `${String(Math.floor(m % 1440 / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`; };
 function openMessage(target) {
@@ -2266,7 +2306,7 @@ function openSettings(tab = 'gfx') {
   if (tab === 'audio') body = f('Master', rng('vol', 0, 1, .05)) + f('Effects', rng('sfx', 0, 1, .05)) + f('Ambient hum', rng('ambient', 0, 1, .05));
   if (tab === 'ai') body = `<div class="crt amber" style="font-size:11px;margin-bottom:8px">Androids think through an LLM using native tool calls (or a JSON fallback for models without tool support). Local servers (LM Studio / Ollama) need CORS enabled. API keys are stored only in this browser, never in saves or exports.</div>` +
     f('Enabled', chk('ai.enabled')) + f('Provider', sel('ai.provider', Object.entries(PROVIDERS).map(([k, p]) => [k, p.label]))) + f('Base URL', `<input type="text" data-k="ai.baseUrl" value="${esc(S.ai.baseUrl)}" placeholder="${PROVIDERS[S.ai.provider].url}">`) +
-    f('API key', `<input type="password" id="apiKey" value="${esc(SECRETS.apiKey || '')}" placeholder="(optional for local)">`) + f('Model', `<div class="row"><input type="text" data-k="ai.model" value="${esc(S.ai.model)}" list="modelList" style="flex:1" placeholder="auto / model id"><datalist id="modelList">${(PROVIDERS[S.ai.provider].models || []).map(m => `<option>${m}</option>`).join('')}</datalist><button class="tb" data-act="models">LIST</button></div>`) +
+    f('API key', `<form id="apiKeyForm" style="margin:0"><input type="password" id="apiKey" autocomplete="off" value="${esc(SECRETS.apiKey || '')}" placeholder="(optional for local)"></form>`) + f('Model', `<div class="row"><input type="text" data-k="ai.model" value="${esc(S.ai.model)}" list="modelList" style="flex:1" placeholder="auto / model id"><datalist id="modelList">${(PROVIDERS[S.ai.provider].models || []).map(m => `<option>${m}</option>`).join('')}</datalist><button class="tb" data-act="models">LIST</button></div>`) +
     f('Tool mode', sel('ai.toolMode', [['native', 'Native tool calling'], ['json', 'JSON-in-text fallback']])) + f('Think interval (real s)', rng('ai.intervalSec', 10, 300, 5)) + f('Max tool steps / turn', rng('ai.maxSteps', 1, 10, 1)) + f('Concurrent requests', rng('ai.concurrency', 1, 4, 1)) + f('Timeout (s)', rng('ai.timeoutSec', 10, 180, 5)) +
     f('Temperature', rng('ai.temperature', 0, 1.5, .05)) + f('Max tokens', rng('ai.maxTokens', 128, 4096, 64)) + f('History turns kept', rng('ai.historyTurns', 0, 20, 1)) + f('Context budget (chars)', rng('ai.contextChars', 2000, 30000, 500)) +
     f('Work job board between turns', chk('ai.autonomy')) + f('Wake on captain message', chk('ai.wakeOnMessage')) + f('Wake on alarms', chk('ai.wakeOnAlarm')) + f('May build/deconstruct', chk('ai.allowBuild')) + f('May pilot & dock', chk('ai.allowPilot')) + f('May trade', chk('ai.allowTrade')) + f('May command robots', chk('ai.allowRobots')) + f('May command human NPCs', chk('ai.allowCrew')) +
@@ -2288,6 +2328,7 @@ function openSettings(tab = 'gfx') {
     upd(); el.addEventListener(el.type === 'range' ? 'input' : 'change', () => { let v = el.type === 'checkbox' ? el.checked : el.type === 'range' ? +el.value : el.value; if (el.tagName === 'SELECT' && !isNaN(+v) && v !== '') v = +v; setK(k, v); upd();
       if (k === 'ai.provider') { S.ai.baseUrl = PROVIDERS[v].url; S.ai.model = ''; saveSettings(); openSettings('ai'); return; } if (k === 'renderScale') resize(); if (k === 'ai.enabled' && v) MCP.connectAll(); saveSettings(); applyFx(); sfx.apply(); }); });
   $('#apiKey')?.addEventListener('change', e => { SECRETS.apiKey = e.target.value.trim(); saveSettings(); });
+  $('#apiKeyForm')?.addEventListener('submit', e => { e.preventDefault(); $('#apiKey').blur(); }); // Enter would otherwise reload the page
   const arm = $('#armSw'); if (arm) arm.onclick = () => { arm.classList.toggle('on'); $('#newBtn').disabled = !arm.classList.contains('on'); };
   bindActions(B, {
     tab: ds => openSettings(ds.t),
@@ -2365,7 +2406,7 @@ function frame(now) {
   if (GAME.fsm.is('play')) acc += rawDt; stepSim();
   rt += rdt; render(rt, Math.min(rdt, .1));
   uiT += rdt; if (uiT > .25) { uiT = 0; updateGauges(); }
-  simT += rdt; if (simT > 1) { simT = 0; if (!modalOpen() || !G.consoleMod) renderPanel(); else if (G.consoleMod && G.consoleRender && !document.activeElement?.matches('input,textarea,select')) G.consoleRender(); }
+  simT += rdt; if (simT > 1) { simT = 0; if (!modalOpen() || !G.consoleMod) { if (!pressingIn($('#panel'))) renderPanel(); } else if (G.consoleMod && G.consoleRender && !pressingIn($('#modalBody')) && !document.activeElement?.matches('input,textarea,select')) G.consoleRender(); }
   saveT += rdt; if (saveT > S.autosaveSec) { saveT = 0; saveGame(); }
 }
 function stepSim() {
