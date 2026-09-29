@@ -855,7 +855,7 @@ function launchDrone(m, kind) {
   m.data.out = kind === 'salvage' ? 40 : 25; m.data.kind = kind; sfx.whoosh(); log(`Drone sortie: ${kind}`, 'info');
 }
 /* Stockpile goals: keep enough on hand for two android shells, a medkit reserve and repair scrap. */
-const RAW_STOCK = ['scrap', 'ore', 'alloy', 'parts'];
+const RAW_STOCK = ['scrap', 'ore', 'alloy', 'parts', 'rations', 'biomass', 'medkit', 'fuel'];
 /* Stock management: player/AI-configurable min (0 = don't auto-produce/gather) and max (auto-sell surplus while docked) per resource/good. */
 const CREW_KINDS = ['human', 'bot', 'android'];
 const CREW_LABEL = { human: 'Human Crew', bot: 'Track-Bots', android: 'Androids' };
@@ -871,7 +871,19 @@ function stockPol(k) { return G.stockPolicy?.[k] || { min: 0, max: null }; }
 function stockMin(k) { return stockPol(k).min || 0; }
 function stockMax(k) { const m = stockPol(k).max; return m == null ? Infinity : m; }
 function androidBuildGoal() { const a = MODULES.fabricator.recipes.android.cost; return { alloy: a.alloy * 2, parts: a.parts * 2 }; }
-function stockGoals() { return { alloy: stockMin('alloy'), parts: stockMin('parts'), medkit: stockMin('medkit'), scrap: stockMin('scrap'), ore: stockMin('ore') }; }
+function stockGoals() { 
+  // Include all base/manufactured resources so stock policy min/max works for everything
+  return { 
+    alloy: stockMin('alloy'), 
+    parts: stockMin('parts'), 
+    medkit: stockMin('medkit'), 
+    scrap: stockMin('scrap'), 
+    ore: stockMin('ore'),
+    rations: stockMin('rations'),
+    biomass: stockMin('biomass'),
+    fuel: stockMin('fuel')
+  }; 
+}
 function stockShort() { const g = stockGoals(); return Object.keys(g).filter(k => (G.inv[k] || 0) < g[k]); }
 function androidQueued() { return G.modules.reduce((n, m) => n + (m.type === 'fabricator' ? m.data.queue.filter(q => q === 'android').length : 0), 0); }
 function androidBuildStatus() { const a = MODULES.fabricator.recipes.android.cost, g = androidBuildGoal();
@@ -888,6 +900,8 @@ function autoFab(m) { // idle stockpiling: medkits, android at 2× stock, then b
   if (g.alloy > 0 && I.alloy < g.alloy && I.scrap >= 8 && q('filter')) return;
   if (g.parts > 0 && I.parts < g.parts && I.alloy >= 2 && q('parts')) return;
   if (g.medkit > 0 && I.medkit < g.medkit && I.biomass >= 1 && I.parts >= 4 && q('medkit')) return;
+  // Also produce rations if needed (via hydroponics harvest job, not fabricator)
+  // Fuel is handled by aux tanks and fuel cells, not fabricator
 }
 function pickSurplusCrew(kind) { // when over max headcount, choose which specific shell/spacer to let go rather than an arbitrary one
   const cands = G.chars.filter(c => c.kind === kind && !c.isPC && !canSellCrew(c)); if (!cands.length) return null;
@@ -895,18 +909,63 @@ function pickSurplusCrew(kind) { // when over max headcount, choose which specif
   return pool.reduce((a, b) => crewValue(b) < crewValue(a) ? b : a); // then whichever is least valuable (least experienced/equipped) to keep
 }
 let _autoSellAt = 0;
-function autoSellExcess() { // max stock exceeded → NPCs (human/bot/android) auto-sell the surplus while docked
+function autoSellExcess() { // max stock exceeded → NPCs auto-sell surplus; min stock not met → NPCs auto-buy (if docked & credits)
   if (G.time < _autoSellAt) return; _autoSellAt = G.time + 5;
   if (!sim.byId.nav.fsm.is('docked')) return;
   const seller = G.chars.find(c => !c.isPC && !c.fsm.is('down', 'dormant') && (c.kind === 'human' || c.kind === 'bot' || c.kind === 'android')) || player();
+  
+  // AUTO-SELL: surplus over max
   for (const k of Object.keys(SELL_RAW)) {
     const max = stockMax(k); if (max === Infinity) continue; const n = Math.floor(G.inv[k] || 0) - max; if (n <= 0) continue;
     G.inv[k] -= n; G.credits += n * SELL_RAW[k]; sfx.cash(); log(`${seller?.name || 'Crew'} auto-sold ${n} ${k} (over max stock) for ₵${n * SELL_RAW[k]}`, 'info');
+  }
+  for (const k of Object.keys(RES)) {
+    if (SELL_RAW[k]) continue;
+    const max = stockMax(k); if (max === Infinity) continue; const n = Math.floor(G.inv[k] || 0) - max; if (n <= 0) continue;
+    const fallbackPrice = Math.max(1, Math.round((G.inv[k] || 1) * 0.5));
+    G.inv[k] -= n; G.credits += n * fallbackPrice; sfx.cash(); log(`${seller?.name || 'Crew'} auto-sold ${n} ${k} (over max stock) for ₵${n * fallbackPrice}`, 'info');
   }
   for (const g of GOODS) {
     const max = stockMax(g.id); if (max === Infinity) continue; const have = G.cargo[g.id] || 0; const n = have - max; if (n <= 0) continue;
     const r = tradeGood('sell', g.id, n); if (r.ok) log(`${seller?.name || 'Crew'} auto-sold ${n} ${g.name} (over max stock) for ₵${r.total}`, 'info');
   }
+  
+  // AUTO-BUY: resources below min (only for resources that have a station service or market)
+  // Respects max cap - won't buy more than max allows
+  const buyableServices = { 
+    fuel: { svcId: 'fuel', qty: 50 },      // FUEL ×50 L
+    rations: { svcId: 'rations', qty: 5 }, // RATIONS ×5
+    parts: { svcId: 'parts', qty: 3 },     // PARTS ×3
+    alloy: { svcId: 'alloy', qty: 3 },     // ALLOY ×3
+    medkit: { svcId: 'medkit', qty: 1 },   // MEDKIT ×1
+    biomass: { svcId: 'biomass', qty: 2 }  // BIOMASS ×2
+  };
+  for (const [res, info] of Object.entries(buyableServices)) {
+    const min = stockMin(res); if (min <= 0) continue;
+    const max = stockMax(res); if (max === Infinity) continue; // no cap = don't auto-buy (unbounded)
+    const have = Math.floor(G.inv[res] || 0);
+    if (have >= min) continue; // already at or above min
+    const need = min - have;
+    const space = max - have; // how much we can actually hold without exceeding max
+    if (space <= 0) continue; // at or over max already
+    const sv = SERVICES.find(s => s[0] === info.svcId);
+    if (!sv) continue;
+    const qtyPerPurchase = info.qty;
+    // How many purchases to reach at least min, but not exceed max
+    const purchasesToMin = Math.ceil(need / qtyPerPurchase);
+    const purchasesToMax = Math.floor(space / qtyPerPurchase);
+    const purchasesNeeded = Math.min(purchasesToMin, purchasesToMax);
+    if (purchasesNeeded <= 0) continue;
+    const totalCost = purchasesNeeded * sv[2];
+    if (G.credits < totalCost) continue; // can't afford
+    if (!spend({ credits: totalCost })) continue;
+    // Purchase the service the required number of times
+    for (let i = 0; i < purchasesNeeded; i++) sv[3]();
+    const actualBought = purchasesNeeded * qtyPerPurchase;
+    log(`${seller?.name || 'Crew'} auto-bought ${actualBought} ${res} (below min stock, capped at max) for ₵${totalCost}`, 'good');
+  }
+  
+  // Crew hiring (existing logic)
   for (const kind of CREW_KINDS) {
     const min = stockMin(kind), max = stockMax(kind), count = G.chars.filter(c => c.kind === kind).length;
     if (count < min) { const sv = SERVICES.find(s => s[0] === kind); if (sv && spend({ credits: sv[2] })) { sv[3](); log(`${seller?.name || 'Crew'} auto-hired a ${CREW_SINGULAR[kind]} (below min stock)`, 'good'); } }
@@ -1663,7 +1722,7 @@ const GAME_TOOLS = [
         services: SERVICES.map(([id, l, p]) => `${id}: ${l} ₵${p}`), salvage_prices: SELL_RAW, contracts: contractsFor(s).map(k => `${k.id}: deliver ${k.qty} ${k.good} to ${k.destName} for ₵${k.reward}`), active_contracts: G.contracts.map(k => `${k.qty} ${k.good} → ${k.destName}`) }; } },
   { name: 'buy_service', description: 'While docked: buy a station service by id (fuel, rations, parts, alloy, medkit, biomass, hull, bot, human).', perm: 'allowTrade', parameters: P({ id: str('service id') }, ['id']),
     run(ch, a) { if (!sim.byId.nav.fsm.is('docked')) return { ok: false, error: 'not docked' }; const sv = SERVICES.find(x => x[0] === a.id); if (!sv) return { ok: false, error: 'unknown service' }; if ((a.id === 'bot' || a.id === 'human') && !S.ai.allowCrew) return { ok: false, error: 'hiring needs the crew permission' }; if (!spend({ credits: sv[2] })) return { ok: false, error: 'not enough credits' }; sv[3](); sfx.cash(); log(`${ch.name} bought ${sv[1]}`); return { ok: true, credits: Math.round(G.credits) }; } },
-  { name: 'sell_salvage', description: 'While docked: sell raw resources (scrap, ore, alloy, parts, rations, biomass).', perm: 'allowTrade', parameters: P({ resource: str('resource'), qty: num('amount') }, ['resource', 'qty']),
+  { name: 'sell_salvage', description: 'While docked: sell raw/manufactured resources (scrap, ore, alloy, parts, rations, biomass, medkit, fuel).', perm: 'allowTrade', parameters: P({ resource: str('resource'), qty: num('amount') }, ['resource', 'qty']),
     run(ch, a) { if (!sim.byId.nav.fsm.is('docked')) return { ok: false, error: 'not docked' }; const p = SELL_RAW[a.resource]; if (!p) return { ok: false, error: 'cannot sell that' }; const n = Math.min(Math.floor(G.inv[a.resource] || 0), Math.max(1, Math.round(a.qty))); if (!n) return { ok: false, error: 'none in stock' }; G.inv[a.resource] -= n; G.credits += n * p; sfx.cash(); log(`${ch.name} sold ${n} ${a.resource} for ₵${n * p}`); return { ok: true, sold: n, credits: Math.round(G.credits) }; } },
   { name: 'accept_contract', description: 'While docked: accept a delivery contract by id (max 4 active).', perm: 'allowTrade', parameters: P({ id: str('contract id') }, ['id']),
     run(ch, a) { if (!sim.byId.nav.fsm.is('docked')) return { ok: false, error: 'not docked' }; const st = sysState(sim.byId.nav.here()); const k = (st.contracts || []).find(x => x.id === a.id); if (!k) return { ok: false, error: 'no such contract' }; if (G.contracts.length >= 4) return { ok: false, error: 'max 4 contracts' }; st.contracts = st.contracts.filter(x => x !== k); G.contracts.push(k); log(`${ch.name} accepted contract: ${k.qty} ${k.good} → ${k.destName}`); return { ok: true }; } },
@@ -2178,7 +2237,11 @@ function openConsole(m) {
 }
 function confirmStrip(m) { choice(`${m.built ? 'Deconstruct' : 'Cancel'} ${m.label}? ${m.built ? 'Refund 50%: ' + costStr(Object.fromEntries(Object.entries(m.def.cost).map(([k, v]) => [k, Math.floor(v / 2)]))) : 'Full refund.'}`, [['CONFIRM', () => orderDeconstruct(m)], ['ABORT', () => { }]], 'SAFETY INTERLOCK'); }
 /* ---- stock management (min/max per resource + trade good; reachable from Cargo Hold) ---- */
-function stockSliderMax(k) { return ({ fuel: 1200, medkit: 50, human: 20, bot: 20, android: 20 })[k] || (k in RES ? 200 : 100); }
+function stockSliderMax(k) { 
+  // Fuel max should be main tank capacity (600L) since station service fills main tank first
+  // Medkits can stack higher
+  return ({ fuel: 600, medkit: 200, human: 20, bot: 20, android: 20 })[k] || (k in RES ? 1000 : 100); 
+}
 function openStockManager() {
   const row = (k, label, have) => {
     const p = stockPol(k), smax = stockSliderMax(k), step = smax >= 200 ? 5 : smax >= 100 ? 2 : 1, uncap = smax + step;
@@ -2392,7 +2455,7 @@ function sellCrew(c) {
   if (c.kind === 'human') humans().forEach(h => h.morale = Math.max(0, h.morale - 4));
   return { ok: true, price, credits: Math.round(G.credits) };
 }
-const SELL_RAW = { scrap: 6, ore: 9, alloy: 20, parts: 28, rations: 5, biomass: 8 };
+const SELL_RAW = { scrap: 6, ore: 9, alloy: 20, parts: 28, rations: 5, biomass: 8, medkit: 35, fuel: 2 };
 function openMarket() {
   if (!sim.byId.nav.fsm.is('docked')) return toast('Dock first', 'bad'); const s = sim.byId.nav.here(), mk = marketFor(s), e = ECON[s.econ];
   openModal(`MARKET // ${s.name.toUpperCase()} ${e.name.toUpperCase()}`, `<div class="row"><div class="crt amber readout">₵${Math.round(G.credits)}</div><div class="crt readout">HOLD ${cargoCount()}/${cargoCap()}</div></div>
