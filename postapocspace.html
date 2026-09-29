@@ -599,6 +599,7 @@ const MODULES = {
       glowText(m.data.queue?.length ? `Q:${m.data.queue.length} ${m.data.queue[0].toUpperCase()}` : 'IDLE', x + 24, y + 22, '#29e7ff', 10);
     } },
   refinery: { name: 'Refinery', code: 'REF', cat: 'industry', cost: { alloy: 8, scrap: 10 }, build: 45, power: 4, prio: 5, desc: 'Smelts ore into alloy (3:2). Hot, loud, essential.', dataInit: { prog: 0 },
+    actions: [{ id: 'run', label: 'OPERATE REFINERY', desc: 'Walk over and run it yourself (crew/bot/android job)', run: m => { const j = JOB.post({ type: 'refine', mod: m.id, prio: 6, dur: 999, label: 'Run refinery', roles: ['bot', 'crew', 'ai'], continuous: true }); if (j.claimed) { const w = G.chars.find(c => c.id === j.claimed); return w?.isPC ? 'already on it' : `already staffed by ${w?.name || 'someone'}`; } const pc = player(); if (!pc) return 'no captain aboard'; pc.dropJob(); return pc.takeJob(j) ? 'heading to the refinery' : 'no route to refinery'; } }],
     tick(m, dt) { if (G.inv.ore >= 3) JOB.post({ type: 'refine', mod: m.id, prio: 4, dur: 999, label: 'Run refinery', roles: ['bot', 'crew', 'ai'], continuous: true }); },
     work: { refine(m, dt) { if (G.inv.ore < 3) return 'done'; m.data.prog += dt * m.eff; G.heat += dt * .04; if (m.data.prog >= 12) { m.data.prog = 0; G.inv.ore -= 3; addInv({ alloy: 2 }); fx.burst(m, '#ff6a1a', 8); } return null; } },
     draw(m, x, y, w, h, t, a) {
@@ -644,7 +645,7 @@ const MODULES = {
     } },
   airlock: { name: 'Airlock', code: 'AIR', cat: 'ops', cost: { alloy: 6, scrap: 4 }, build: 28, power: 0.5, prio: 5, desc: 'EVA salvage runs and external hull patching.',
     actions: [{ id: 'eva', label: 'EVA SALVAGE', desc: 'Queue EVA job', run: m => { JOB.post({ type: 'eva', mod: m.id, prio: 5, dur: 30, label: 'EVA salvage', roles: ['bot', 'crew', 'ai'] }); return 'EVA queued'; } },
-      { id: 'patch', label: 'PATCH HULL', desc: '3 scrap → +15 hull', run: m => { JOB.post({ type: 'patch', mod: m.id, prio: 6, dur: 20, label: 'Patch hull (EVA)', roles: ['bot', 'crew'] }); return 'Patch queued'; } }],
+      { id: 'patch', label: 'PATCH HULL', desc: '3 scrap → +15 hull', run: m => { JOB.post({ type: 'patch', mod: m.id, prio: 6, dur: 20, label: 'Patch hull (EVA)', roles: ['bot', 'crew', 'ai'] }); return 'Patch queued'; } }],
     dataInit: { next: 200 }, tick(m, dt) { m.data.next = (m.data.next ?? 200) - dt; if (m.data.next <= 0) { const short = stockShort().some(k => RAW_STOCK.includes(k)); m.data.next = short ? 180 : 300; if ((G.nav.here.fields > 0 || short) && G.nav.state !== 'warp') JOB.post({ type: 'eva', mod: m.id, prio: G.nav.here.fields > 0 ? 3 : 2, dur: 30, label: 'EVA salvage run', roles: ['bot', 'crew', 'ai'], persist: true }); } },
     work: { eva(m) { const f = G.nav.here.fields > 0; const s = f ? irnd(4, 9) : irnd(1, 3), o = f ? irnd(1, 5) : 0; addInv({ scrap: s, ore: o }); if (f && Math.random() < .3) G.nav.here.fields--; return `+${s} scrap +${o} ore`; }, patch(m) { if (!spend({ scrap: 3 })) return 'no scrap'; G.hull = Math.min(G.hullMax, G.hull + 15); return '+15 hull'; } },
     draw(m, x, y, w, h, t, a) {
@@ -855,23 +856,62 @@ function launchDrone(m, kind) {
 }
 /* Stockpile goals: keep enough on hand for two android shells, a medkit reserve and repair scrap. */
 const RAW_STOCK = ['scrap', 'ore', 'alloy', 'parts'];
-function stockGoals() { const a = MODULES.fabricator.recipes.android.cost; return { alloy: a.alloy * 2, parts: a.parts * 2, medkit: 4, scrap: 16, ore: 9 }; }
+/* Stock management: player/AI-configurable min (0 = don't auto-produce/gather) and max (auto-sell surplus while docked) per resource/good. */
+const CREW_KINDS = ['human', 'bot', 'android'];
+const CREW_LABEL = { human: 'Human Crew', bot: 'Track-Bots', android: 'Androids' };
+const CREW_SINGULAR = { human: 'spacer', bot: 'track-bot', android: 'android' };
+function defaultStockPolicy() {
+  const a = MODULES.fabricator.recipes.android.cost, base = { alloy: a.alloy * 2, parts: a.parts * 2, medkit: 4, scrap: 16, ore: 9 }, pol = {};
+  for (const k of Object.keys(RES)) pol[k] = { min: base[k] || 0, max: null };
+  for (const g of GOODS) pol[g.id] = { min: 0, max: null };
+  for (const k of CREW_KINDS) pol[k] = { min: 0, max: null };
+  return pol;
+}
+function stockPol(k) { return G.stockPolicy?.[k] || { min: 0, max: null }; }
+function stockMin(k) { return stockPol(k).min || 0; }
+function stockMax(k) { const m = stockPol(k).max; return m == null ? Infinity : m; }
+function androidBuildGoal() { const a = MODULES.fabricator.recipes.android.cost; return { alloy: a.alloy * 2, parts: a.parts * 2 }; }
+function stockGoals() { return { alloy: stockMin('alloy'), parts: stockMin('parts'), medkit: stockMin('medkit'), scrap: stockMin('scrap'), ore: stockMin('ore') }; }
 function stockShort() { const g = stockGoals(); return Object.keys(g).filter(k => (G.inv[k] || 0) < g[k]); }
 function androidQueued() { return G.modules.reduce((n, m) => n + (m.type === 'fabricator' ? m.data.queue.filter(q => q === 'android').length : 0), 0); }
-function androidBuildStatus() { const a = MODULES.fabricator.recipes.android.cost, g = stockGoals();
+function androidBuildStatus() { const a = MODULES.fabricator.recipes.android.cost, g = androidBuildGoal();
   if (!G.modules.some(m => m.type === 'fabricator' && m.built)) return 'no fabricator';
   if (androidQueued()) return 'android shell in fabricator queue';
   if (G.chars.filter(c => c.kind === 'android').length >= aiCapacity()) return `blocked: AI core capacity ${aiCapacity()} full — build/power an AI Core`;
   const need = ['alloy', 'parts'].filter(k => G.inv[k] < g[k]).map(k => `${Math.ceil(g[k] - G.inv[k])} ${k}`); return need.length ? `saving up: need ${need.join(', ')} more (auto-builds at 2× shell cost ${costStr(a)})` : 'ready — auto-build next'; }
-function autoFab(m) { // idle stockpiling: medkits, android at 2× stock, then balance parts vs alloy
-  const R = MODULES.fabricator.recipes, g = stockGoals(), I = Object.fromEntries(Object.keys(RES).map(k => [k, G.inv[k] || 0])), q = r => spend(R[r].cost) && (m.data.queue.push(r), true);
-  if (I.medkit < 2 && I.biomass >= 1 && I.parts >= 1 && q('medkit')) return;
-  if (I.alloy >= g.alloy && I.parts >= g.parts && !androidQueued() && G.chars.filter(c => c.kind === 'android').length < aiCapacity() && q('android')) { log(`${m.label}: stock covers two android shells — printing one`, 'good'); return; }
-  const partsLag = I.parts / g.parts < I.alloy / g.alloy;
-  if (I.parts < g.parts && I.alloy >= 2 && (partsLag || I.scrap < 8) && q('parts')) return;
-  if (I.alloy < g.alloy && I.scrap >= 8 && q('filter')) return;
-  if (I.parts < g.parts && I.alloy >= 2 && q('parts')) return;
-  if (I.medkit < g.medkit && I.biomass >= 1 && I.parts >= 4 && q('medkit')) return;
+function autoFab(m) { // idle stockpiling: medkits, android at 2× stock, then balance parts vs alloy (all gated on stock policy min > 0)
+  const R = MODULES.fabricator.recipes, g = stockGoals(), ag = androidBuildGoal(), I = Object.fromEntries(Object.keys(RES).map(k => [k, G.inv[k] || 0])), q = r => spend(R[r].cost) && (m.data.queue.push(r), true);
+  if (g.medkit > 0 && I.medkit < 2 && I.biomass >= 1 && I.parts >= 1 && q('medkit')) return;
+  if (I.alloy >= ag.alloy && I.parts >= ag.parts && !androidQueued() && G.chars.filter(c => c.kind === 'android').length < aiCapacity() && q('android')) { log(`${m.label}: stock covers two android shells — printing one`, 'good'); return; }
+  const partsLag = g.parts > 0 && g.alloy > 0 ? I.parts / g.parts < I.alloy / g.alloy : I.parts < I.alloy;
+  if (g.parts > 0 && I.parts < g.parts && I.alloy >= 2 && (partsLag || I.scrap < 8) && q('parts')) return;
+  if (g.alloy > 0 && I.alloy < g.alloy && I.scrap >= 8 && q('filter')) return;
+  if (g.parts > 0 && I.parts < g.parts && I.alloy >= 2 && q('parts')) return;
+  if (g.medkit > 0 && I.medkit < g.medkit && I.biomass >= 1 && I.parts >= 4 && q('medkit')) return;
+}
+function pickSurplusCrew(kind) { // when over max headcount, choose which specific shell/spacer to let go rather than an arbitrary one
+  const cands = G.chars.filter(c => c.kind === kind && !c.isPC && !canSellCrew(c)); if (!cands.length) return null;
+  const pool = kind === 'android' ? (cands.some(c => c.fsm.is('dormant')) ? cands.filter(c => c.fsm.is('dormant')) : cands) : cands; // prefer dormant (mindless) android shells first
+  return pool.reduce((a, b) => crewValue(b) < crewValue(a) ? b : a); // then whichever is least valuable (least experienced/equipped) to keep
+}
+let _autoSellAt = 0;
+function autoSellExcess() { // max stock exceeded → NPCs (human/bot/android) auto-sell the surplus while docked
+  if (G.time < _autoSellAt) return; _autoSellAt = G.time + 5;
+  if (!sim.byId.nav.fsm.is('docked')) return;
+  const seller = G.chars.find(c => !c.isPC && !c.fsm.is('down', 'dormant') && (c.kind === 'human' || c.kind === 'bot' || c.kind === 'android')) || player();
+  for (const k of Object.keys(SELL_RAW)) {
+    const max = stockMax(k); if (max === Infinity) continue; const n = Math.floor(G.inv[k] || 0) - max; if (n <= 0) continue;
+    G.inv[k] -= n; G.credits += n * SELL_RAW[k]; sfx.cash(); log(`${seller?.name || 'Crew'} auto-sold ${n} ${k} (over max stock) for ₵${n * SELL_RAW[k]}`, 'info');
+  }
+  for (const g of GOODS) {
+    const max = stockMax(g.id); if (max === Infinity) continue; const have = G.cargo[g.id] || 0; const n = have - max; if (n <= 0) continue;
+    const r = tradeGood('sell', g.id, n); if (r.ok) log(`${seller?.name || 'Crew'} auto-sold ${n} ${g.name} (over max stock) for ₵${r.total}`, 'info');
+  }
+  for (const kind of CREW_KINDS) {
+    const min = stockMin(kind), max = stockMax(kind), count = G.chars.filter(c => c.kind === kind).length;
+    if (count < min) { const sv = SERVICES.find(s => s[0] === kind); if (sv && spend({ credits: sv[2] })) { sv[3](); log(`${seller?.name || 'Crew'} auto-hired a ${CREW_SINGULAR[kind]} (below min stock)`, 'good'); } }
+    else if (max !== Infinity && count > max) { const c = pickSurplusCrew(kind); if (c) sellCrew(c); }
+  }
 }
 function fabLine(m) { const q = m.data.queue, R = MODULES.fabricator.recipes; return `${m.id} ${m.fsm.state} auto:${m.data.auto ? 'on' : 'off'} ${q.length ? `queue[${q.join(',')}] now:${q[0]} ${Math.round(m.data.prog / R[q[0]].work * 100)}%` : 'idle'}${JOB.map.get('fabricate:' + m.id)?.claimed ? ' operator:' + (G.chars.find(c => c.id === JOB.map.get('fabricate:' + m.id).claimed)?.name || '?') : q.length ? ' (no operator)' : ''}`; }
 function stockReport() { const g = stockGoals(); return 'STOCKS ' + Object.entries(g).map(([k, v]) => `${k} ${Math.floor(G.inv[k] || 0)}/${v}`).join(' ') + ` | androids ${G.chars.filter(c => c.kind === 'android').length}/${aiCapacity()} core slots | ANDROID BUILD: ${androidBuildStatus()}`; }
@@ -1267,7 +1307,7 @@ class LifeSystem extends System {
 class CrewSystem extends System {
   constructor() { super('crew', 'Crew & Jobs', { working: {}, strained: {}, mutinous: {} }); }
   tick(dt) {
-    for (const c of G.chars) c.update(dt); JOB.prune();
+    for (const c of G.chars) c.update(dt); JOB.prune(); autoSellExcess();
     const hs = humans(); const mor = hs.length ? hs.reduce((a, c) => a + c.morale, 0) / hs.length : 70; G.morale = mor;
     this.fsm.go(mor < 20 ? 'mutinous' : mor < 45 ? 'strained' : 'working');
   }
@@ -1592,6 +1632,11 @@ const GAME_TOOLS = [
       const f = pickFab(a.fabricator_id, true); if (!f) return { ok: false, error: 'no fabricator' };
       if (a.action === 'auto') { f.data.auto = a.on ?? !f.data.auto; return { ok: true, fabricator: fabLine(f) }; }
       const i = Math.round(a.index ?? f.data.queue.length - 1); const r = f.data.queue[i]; if (!r) return { ok: false, error: 'no item at that index' }; f.data.queue.splice(i, 1); if (i === 0) f.data.prog = 0; addInv(MODULES.fabricator.recipes[r].cost); return { ok: true, cancelled: r, refunded: costStr(MODULES.fabricator.recipes[r].cost), fabricator: fabLine(f) }; } },
+  { name: 'stock_policy', description: 'Get or set min/max stock levels for a base/manufactured resource, trade good, or crew kind (human/bot/android) — the Cargo Hold\'s stock management. min=0 stops NPCs auto-producing/gathering/hiring it; setting max makes NPCs auto-sell the surplus over that amount (crew included) to the station market whenever docked. Setting levels for human/bot/android needs the crew permission.', parameters: P({ resource: { type: 'string', enum: [...Object.keys(RES), ...GOODS.map(g => g.id), ...CREW_KINDS] }, min: num('optional new minimum (omit to leave unchanged)'), max: num('optional new maximum (omit to leave unchanged; use -1 to clear the cap)') }, ['resource']),
+    run(ch, a) { const k = a.resource; if (!(k in RES) && !GOOD[k] && !CREW_KINDS.includes(k)) return { ok: false, error: 'unknown resource/good/crew kind' };
+      if (CREW_KINDS.includes(k) && !S.ai.allowCrew) return { ok: false, error: 'setting crew stock levels needs the crew permission' }; const next = { ...stockPol(k) };
+      if (a.min != null) next.min = Math.max(0, Math.round(a.min)); if (a.max != null) next.max = a.max < 0 ? null : Math.max(0, Math.round(a.max));
+      G.stockPolicy[k] = next; return { ok: true, resource: k, policy: next, have: CREW_KINDS.includes(k) ? G.chars.filter(c => c.kind === k).length : Math.floor((k in RES ? G.inv[k] : G.cargo[k]) || 0) }; } },
   { name: 'dispatch', description: 'Send out a resource run: salvage_drone / repair_drone (drone bay), eva (airlock), expedition (rover bay), sweep (sensors). Posts a job; optionally assign who (bot/crew name, or yourself).', parameters: P({ kind: { type: 'string', enum: ['salvage_drone', 'repair_drone', 'eva', 'expedition', 'sweep'] }, who: str('optional: bot/crew name or "me"') }, ['kind']),
     run(ch, a) { const spec = { salvage_drone: ['drones', 'sortie', 'Launch salvage drone', 6], repair_drone: ['drones', 'sortie', 'Launch hull-repair drone', 6], eva: ['airlock', 'eva', 'EVA salvage', 30], expedition: ['rover', 'expedition', 'Rover expedition', 45], sweep: ['sensors', 'sweep', 'Sensor sweep', 18] }[a.kind]; if (!spec) return { ok: false, error: 'bad kind' };
       const m = G.modules.find(x => x.type === spec[0] && x.fsm.is('online')); if (!m) return { ok: false, error: `no online ${MODULES[spec[0]].name}` };
@@ -2096,7 +2141,7 @@ function openConsole(m) {
     if (m.type === 'fabricator') extra = `<h3><span class="led c"></span>RECIPES</h3><div class="btnGrid">${Object.entries(d.recipes).map(([k, r]) => `<button class="tb teal" data-act="fab" data-id="${k}" ${canAfford(r.cost) ? '' : 'disabled'}>${r.label}<br><small style="opacity:.7">${costStr(r.cost)}</small></button>`).join('')}</div><div class="crt cyan" style="margin-top:8px">QUEUE: ${m.data.queue.map(q => q.toUpperCase()).join(' → ') || 'empty'}</div><div class="row" style="margin-top:8px"><div class="sw ${m.data.auto ? 'on' : ''}" data-act="auto"></div><span class="stencil">STANDING ORDER: keep ≥6 parts (uses alloy, keeps ≥6)</span></div>`;
     if (m.type === 'battery') extra = `<div class="crt">CHARGE ${fmt(m.data.charge, 1)} / 40 kWh · FLOW ${fmt(m.data.flow || 0, 1)} kW</div>`;
     if (m.type === 'hydro') extra = `<div class="crt">GROWTH ${Math.round(m.data.growth * 100)}% ${m.data.growth >= 1 ? '· <span class="hot">RIPE — harvest job posted</span>' : ''}</div>`;
-    if (m.type === 'cargo') extra = `<div class="crt amber">${Object.entries(G.cargo).filter(([, v]) => v).map(([k, v]) => `${GOOD[k].code} ${GOOD[k].name}: ${v}`).join('<br>') || 'EMPTY HOLD'}</div>`;
+    if (m.type === 'cargo') extra = `<div class="crt amber">${Object.entries(G.cargo).filter(([, v]) => v).map(([k, v]) => `${GOOD[k].code} ${GOOD[k].name}: ${v}`).join('<br>') || 'EMPTY HOLD'}</div><div class="btnGrid" style="margin-top:8px"><button class="tb teal" data-act="stockmgr">STOCK MANAGEMENT</button><button class="tb" data-act="market" ${sim.byId.nav.fsm.is('docked') ? '' : 'disabled'}>MARKET</button></div>`;
     if (m.type === 'rover') extra = `<div class="row"><div class="sw ${m.data.auto ? 'on' : ''}" data-act="auto"></div><span class="stencil">AUTO-EXPEDITIONS every ~7h while in orbit</span></div><div class="crt amber" style="margin-top:6px">${roverCanDeploy(m) ? 'READY' : esc(roverWhyNot(m))} · expeditions so far: ${G.stats.expeditions || 0}</div>`;
     if (m.type === 'auxfuel') { const f = m.data.fuel || 0, cells = G.cargo[FUEL_GOOD] || 0, pmp = m.data.pump;
       extra = `<h3><span class="led a"></span>FUEL TRANSFER (CAPTAIN ONLY)</h3><div class="crt amber">AUX ${fmt(f, 0)} / ${AUX_FUEL} L · MAIN ${fmt(G.inv.fuel, 0)} / ${MAIN_FUEL} L · SHIP TOTAL ${fmt(fuelTotal(), 0)} / ${fuelCap()} L<br>PUMP ${pmp === 'in' ? 'AUX → MAIN' : pmp === 'out' ? 'MAIN → AUX' : 'OFF'}${pmp && !m.fsm.is('online') ? ' <span class="bad">(stalled — module not online)</span>' : ''} · CARGO ${GOOD[FUEL_GOOD].name}: ${cells} (1 = ${CELL_FUEL} L)</div>
@@ -2123,15 +2168,38 @@ function openConsole(m) {
     bindActions($('#modalBody'), {
       a: ds => { const act = d.actions.find(a => a.id === ds.id); if (act.ui) { act.run(m, player()); return; } const r = act.run(m, player()); $('#conMsg').textContent = r || `${act.label} ✓`; if (r && /need|not|no /i.test(r)) sfx.deny(); render(); },
       fab: ds => { const r = d.recipes[ds.id]; if (spend(r.cost)) { m.data.queue.push(ds.id); sfx.clank(); } render(); },
-      pw: () => { m.on = !m.on; render(); }, auto: () => { m.data.auto = !m.data.auto; render(); }, repair: () => { const pc = player(); const j = JOB.post({ type: 'repair', mod: m.id, prio: 9, dur: 12, label: `Repair ${d.name}`, roles: ['crew'] }); closeModal(); pc.takeJob(j); },
+      pw: () => { m.on = !m.on; render(); }, auto: () => { m.data.auto = !m.data.auto; render(); }, repair: () => { const pc = player(); const j = JOB.post({ type: 'repair', mod: m.id, prio: 9, dur: 12, label: `Repair ${d.name}`, roles: ['bot', 'crew', 'ai'] }); closeModal(); pc.takeJob(j); },
       rename: () => { const n = prompt('Rename module', m.name || d.name); if (n !== null) { m.name = n.slice(0, 24); render(); } },
       pumpIn: () => auxPump(m, 'in', render), pumpOut: () => auxPump(m, 'out', render), cellIn: () => auxLoadCell(m, render), cellOut: () => auxStoreCell(m, render),
-      strip: () => confirmStrip(m), up: () => { closeModal(); liftMove(1); }, down: () => { closeModal(); liftMove(-1); }
+      strip: () => confirmStrip(m), up: () => { closeModal(); liftMove(1); }, down: () => { closeModal(); liftMove(-1); }, stockmgr: () => openStockManager(), market: () => { if (sim.byId.nav.fsm.is('docked')) openMarket(); }
     });
   };
   openModal(`${d.code} // ${m.label.toUpperCase()}`, '', 'a'); render(); G.consoleMod = m.id; G.consoleRender = render;
 }
 function confirmStrip(m) { choice(`${m.built ? 'Deconstruct' : 'Cancel'} ${m.label}? ${m.built ? 'Refund 50%: ' + costStr(Object.fromEntries(Object.entries(m.def.cost).map(([k, v]) => [k, Math.floor(v / 2)]))) : 'Full refund.'}`, [['CONFIRM', () => orderDeconstruct(m)], ['ABORT', () => { }]], 'SAFETY INTERLOCK'); }
+/* ---- stock management (min/max per resource + trade good; reachable from Cargo Hold) ---- */
+function stockSliderMax(k) { return ({ fuel: 1200, medkit: 50, human: 20, bot: 20, android: 20 })[k] || (k in RES ? 200 : 100); }
+function openStockManager() {
+  const row = (k, label, have) => {
+    const p = stockPol(k), smax = stockSliderMax(k), step = smax >= 200 ? 5 : smax >= 100 ? 2 : 1, uncap = smax + step;
+    const minV = clamp(Math.round(p.min / step) * step, 0, smax), maxV = p.max == null ? uncap : clamp(Math.round(p.max / step) * step, 0, uncap);
+    return `<div class="field"><label>${esc(label)}<br><span class="dim" style="font-size:10px">have ${Math.floor(have)}</span></label><div>
+      <div class="row"><span class="stencil" style="min-width:28px;font-size:10px">MIN</span><input type="range" data-k="${k}" data-f="min" min="0" max="${smax}" step="${step}" value="${minV}" style="flex:1"><span class="pill" data-v="${k}:min">${p.min}</span></div>
+      <div class="row" style="margin-top:2px"><span class="stencil" style="min-width:28px;font-size:10px">MAX</span><input type="range" data-k="${k}" data-f="max" min="0" max="${uncap}" step="${step}" value="${maxV}" style="flex:1"><span class="pill" data-v="${k}:max">${p.max == null ? '∞' : p.max}</span></div>
+    </div></div>`;
+  };
+  const body = `<div class="crt amber" style="font-size:11px;margin-bottom:8px">MIN — stock floor NPCs (human/track-bot/android) auto-produce, gather or (for crew) hire up to. Drag to 0 to stop them auto-producing/hiring it.<br>MAX — surplus above this is auto-sold to the station market by whichever crew is free, next time the ship is docked. Drag to the top (∞) to lift the cap.<br>Androids configuring crew levels themselves needs the "May command human NPCs" AI permission.</div>
+    <h3><span class="led c"></span>CREW (bought &amp; sold at the station)</h3>${CREW_KINDS.map(k => row(k, CREW_LABEL[k], G.chars.filter(c => c.kind === k).length)).join('')}
+    <h3><span class="led c"></span>BASE &amp; MANUFACTURED</h3>${Object.keys(RES).map(k => row(k, RES[k], G.inv[k] || 0)).join('')}
+    <h3><span class="led c"></span>TRADE GOODS</h3>${GOODS.map(g => row(g.id, g.name, G.cargo[g.id] || 0)).join('')}`;
+  openModal('CRG // STOCK MANAGEMENT', body, 'a');
+  $('#modalBody').querySelectorAll('input[type=range][data-k]').forEach(el => {
+    const k = el.dataset.k, f = el.dataset.f, smax = +el.max - (+el.step); const pill = $(`#modalBody [data-v="${k}:${f}"]`);
+    const disp = () => { const raw = +el.value; pill.textContent = f === 'max' && raw > smax ? '∞' : raw; };
+    el.addEventListener('input', disp);
+    el.addEventListener('change', () => { const raw = +el.value; const v = f === 'max' && raw > smax ? null : raw; G.stockPolicy[k] = { ...stockPol(k), [f]: v }; disp(); saveGame(); });
+  });
+}
 
 /* ---- build menu ---- */
 function openBuildMenu(d, c) {
@@ -2456,7 +2524,7 @@ function applyFx() { $('#fxScan').style.display = S.scanlines ? '' : 'none'; $('
    GAME STATE — new / save / load
    ===================================================================== */
 function blankState() {
-  return { time: 0, credits: 600, rep: 0, o2: 96, heat: 22, hull: 100, hullMax: 100, morale: 70, inv: { scrap: 20, ore: 6, alloy: 14, parts: 10, rations: 14, biomass: 3, medkit: 2, fuel: 420 },
+  return { time: 0, credits: 600, rep: 0, o2: 96, heat: 22, hull: 100, hullMax: 100, morale: 70, inv: { scrap: 20, ore: 6, alloy: 14, parts: 10, rations: 14, biomass: 3, medkit: 2, fuel: 420 }, stockPolicy: defaultStockPolicy(),
     cargo: {}, modules: [], mById: {}, cells: {}, decks: {}, chars: [], incidents: [], contracts: [], feed: [], inbox: [], agents: {}, sys: {}, stats: { visited: 1, traded: 0, pirates: 0, rescued: 0 },
     nav: { x: 0, y: 0, state: 'orbit', prog: 0, home: null }, pcId: null, buildMode: false, buildCursor: null, power: null };
 }
@@ -2477,14 +2545,14 @@ function newGame() {
 }
 function resetSystems(navState) { for (const s of sim.systems) { s.fsm.state = null; s.fsm.go(s.id === 'nav' ? (navState || 'orbit') : s.initial); } sim.byId.agents.ctrls = {}; sim.byId.agents.inflight = 0; G.agentBusy = null; }
 function serialize() {
-  return { v: 1, ver: VERSION, time: G.time, credits: G.credits, rep: G.rep, o2: G.o2, heat: G.heat, hull: G.hull, inv: G.inv, cargo: G.cargo, modules: G.modules.map(m => m.serialize()), chars: G.chars.map(c => c.serialize()),
+  return { v: 1, ver: VERSION, time: G.time, credits: G.credits, rep: G.rep, o2: G.o2, heat: G.heat, hull: G.hull, inv: G.inv, cargo: G.cargo, stockPolicy: G.stockPolicy, modules: G.modules.map(m => m.serialize()), chars: G.chars.map(c => c.serialize()),
     incidents: G.incidents.map(i => ({ id: i.id, type: i.type, mod: i.mod })), contracts: G.contracts, feed: G.feed.slice(0, 60), inbox: G.inbox.slice(-40), sys: G.sys, stats: G.stats, nav: { x: G.nav.x, y: G.nav.y, docked: sim.byId.nav.fsm.is('docked'), home: G.nav.home }, pcId: G.pcId,
     agents: Object.fromEntries(Object.entries(G.agents).map(([k, A]) => [k, { mem: A.mem, history: A.history, memSeq: A.memSeq }])) };
 }
 function loadGame(d) {
   if (!d || d.v !== 1) throw new Error('Unknown save format'); G = blankState(); JOB.map.clear(); PARTS.length = 0;
   for (const k of ['time', 'credits', 'rep', 'o2', 'heat', 'hull', 'contracts', 'feed', 'inbox', 'sys', 'stats', 'pcId']) if (d[k] !== undefined) G[k] = d[k];
-  Object.assign(G.inv, d.inv || {}); G.cargo = d.cargo || {};
+  Object.assign(G.inv, d.inv || {}); G.cargo = d.cargo || {}; G.stockPolicy = Object.assign(defaultStockPolicy(), d.stockPolicy || {});
   for (const ms of d.modules) { if (!MODULES[ms.type]) continue; const m = addModule(new Module(ms.type, ms.deck, ms.col, ms)); m.built = !['constructing'].includes(ms.state); }
   for (const cs of d.chars) G.chars.push(new Char(cs.kind, cs));
   for (const i of d.incidents || []) { if (G.mById[i.mod]) { const inc = { ...i, t: G.time }; G.incidents.push(inc); inc.fsm = new FSM('incident', inc, INCIDENT_FSM, 'active'); } }
