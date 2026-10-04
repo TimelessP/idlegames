@@ -1338,20 +1338,29 @@ const Day=machine('chronometer',{
 });
 Day.ctx.t=0.30;Day.start();
 const isNight=()=>Day.state==='night';
+function cyclePosition(t){
+  const day=t<0.75;
+  const progress=clamp(day?t/0.75:(t-0.75)/0.25,0,1);
+  return{day,progress,hour:(day?3:21)+progress*(day?18:6),arc:progress*Math.PI};
+}
 function phaseName(){
-  const t=Day.ctx.t;
-  if(t>=0.82)return t>0.93?'deep night':'night';
-  if(t>=0.75)return 'afterglow';
-  if(t<0.035)return 'first light';
-  if(t<0.11)return 'dawn';
-  if(t>0.70)return 'dusk';
-  if(t>0.60)return 'late sun';
-  return t>0.42?'afternoon':t>0.18?'high sun':'morning';
+  const cycle=cyclePosition(Day.ctx.t);
+  if(!cycle.day){
+    if(cycle.progress<1/6)return 'afterglow';
+    if(cycle.progress<0.5||cycle.progress>=5/6)return 'night';
+    return 'deep night';
+  }
+  if(cycle.hour<4)return 'first light';
+  if(cycle.hour<6)return 'dawn';
+  if(cycle.hour<9)return 'morning';
+  if(cycle.hour<13)return 'high sun';
+  if(cycle.hour<16)return 'afternoon';
+  if(cycle.hour<19)return 'late sun';
+  return 'dusk';
 }
 /* the day portion spans 06:00→18:00, the night quarter 18:00→06:00 */
 function clockStr(){
-  const t=Day.ctx.t;
-  const h=t<0.75?6+(t/0.75)*12:18+((t-0.75)/0.25)*12;
+  const h=cyclePosition(Day.ctx.t).hour;
   const mnt=Math.floor((h%1)*60);
   const hh=Math.floor(h)%24;
   return String(hh).padStart(2,'0')+':'+String(mnt).padStart(2,'0');
@@ -1359,15 +1368,13 @@ function clockStr(){
 const sunDir=new THREE.Vector3(),moonDir=new THREE.Vector3();
 const WINDMUL={value:1};let SHADOWS=true;
 function updateSky(dt,px,pz){
-  const t=Day.ctx.t,P=palette(t);
-  const isN=isNight();
-  if(!isN){
-    const a=(t/0.75)*Math.PI;
-    sunDir.set(Math.cos(a),Math.sin(a)*0.98,-0.32).normalize();
+  const t=Day.ctx.t,P=palette(t),cycle=cyclePosition(t);
+  const isN=!cycle.day;
+  if(cycle.day){
+    sunDir.set(Math.cos(cycle.arc),Math.sin(cycle.arc)*0.98,-0.32).normalize();
     moonDir.copy(sunDir).multiplyScalar(-1);
   }else{
-    const a=((t-0.75)/0.25)*Math.PI;
-    moonDir.set(Math.cos(a),Math.sin(a)*0.98,-0.32).normalize();
+    moonDir.set(Math.cos(cycle.arc),Math.sin(cycle.arc)*0.98,-0.32).normalize();
     sunDir.copy(moonDir);
   }
   skyMat.uniforms.uZen.value.copy(P.zen);
@@ -1382,7 +1389,7 @@ function updateSky(dt,px,pz){
   skyMesh.position.copy(camera.position);
   /* one shadow-casting light, whichever body is up */
   const L=sunLight,src=isN?moonDir:sunDir;
-  L.position.set(px+src.x*180,src.y*180+40,pz+src.z*180);
+  L.position.set(px+src.x*180,src.y*180,pz+src.z*180);
   L.target.position.set(px,0,pz);L.target.updateMatrixWorld();
   L.color.copy(P.sun);L.intensity=P.si;
   L.castShadow=SHADOWS&&src.y>0.02;
@@ -2323,7 +2330,7 @@ function flightStep(s,h,inp){
   }
   if(s.crashT>0)s.crashT-=h;
   /* readouts */
-  s.aoa=aoa;s.va=va;s.vs=v.y;s.alt=alt;
+  s.aoa=aoa;s.lift=L;s.va=va;s.vs=v.y;s.alt=alt;
   s.bank=Math.atan2(_L.set(1,0,0).applyQuaternion(q).y,_U.set(0,1,0).applyQuaternion(q).y);
   s.pitchA=Math.asin(clamp(_F.set(0,0,1).applyQuaternion(q).y,-1,1));
 }
@@ -2331,7 +2338,7 @@ function flightStep(s,h,inp){
 /* ── the cockpit: keys → control state → physics, plus camera, HUD and motor note ── */
 const _cv=new THREE.Vector3(),_cu=new THREE.Vector3(),_ce=new THREE.Vector3(),_ct=new THREE.Vector3(),_cb=new THREE.Vector3(),
       _cm=new THREE.Matrix4(),_cq=new THREE.Quaternion(),_cq2=new THREE.Quaternion(),_ceu=new THREE.Euler(),_Wup=new THREE.Vector3(0,1,0);
-const FL={hud:null,adi:null,rows:null,acc:0,eng:null,buggyEng:null,warn:0,evT:0};
+const FL={hud:null,adi:null,aoa:null,vsi:null,rows:null,acc:0,eng:null,buggyEng:null,warn:0,evT:0};
 const isPlane=()=>!!(G.drive&&G.drive.type==='plane');
 function enterPlane(s){
   closePanel();G.drive=s;
@@ -2478,37 +2485,75 @@ function planeCamera(s,dt){
 function planeHudShow(on){
   if(!FL.hud){
     const st=document.createElement('style');
-    st.textContent='#fhud{position:absolute;left:50%;bottom:74px;transform:translateX(-50%);display:none;gap:12px;align-items:flex-end;padding:8px 10px;background:rgba(10,9,8,.6);border:1px solid var(--line);font-family:var(--mono);color:var(--bone)}'+
-      '#fhud canvas{width:96px;height:96px;display:block}#fhud .rows{display:grid;grid-template-columns:auto auto;gap:2px 14px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;min-width:184px}'+
-      '#fhud .rows i{font-style:normal;color:var(--dim)}#fhud .rows b{font-weight:400;text-align:right}#fhud .warn{grid-column:1/3;height:16px;font-size:12px;letter-spacing:.2em;text-align:center}'+
-      '@media(max-width:700px){#fhud{bottom:132px;transform:translateX(-50%) scale(.82)}}';
+    st.textContent='#fhud{position:absolute;left:50%;bottom:64px;transform:translateX(-50%);display:none;flex-direction:column;align-items:center;gap:4px;width:min(330px,calc(100vw - 20px));padding:7px 9px 4px;background:rgba(10,9,8,.78);border:1px solid var(--line);font-family:var(--mono);color:var(--bone)}'+
+      '#fhud .dials{display:flex;justify-content:center;gap:7px;width:100%}#fhud .dial{display:flex;flex-direction:column;align-items:center;gap:1px;width:92px}'+
+      '#fhud canvas{width:82px;height:82px;display:block}#fhud .dial span{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}'+
+      '#fhud .readouts{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));width:100%;border-top:1px solid var(--line);padding-top:4px}'+
+      '#fhud .readouts span{display:flex;flex-direction:column;align-items:center;min-width:0}#fhud .readouts i{font-style:normal;font-size:9px;letter-spacing:.09em;color:var(--dim)}#fhud .readouts b{font-size:11px;font-weight:400;white-space:nowrap}'+
+      '#fhud .warn{height:13px;font-size:10px;letter-spacing:.16em;text-align:center}'+
+      '@media(max-width:700px){#fhud{bottom:158px;transform:translateX(-50%) scale(.86);transform-origin:bottom center}body.flying #hotbar{display:none}body.flying #tc{bottom:12px}body.flying #tc button:not([data-k=act]):not([data-k=jump]){display:none}}';
     document.head.appendChild(st);
     const el=document.createElement('div');el.id='fhud';
-    el.innerHTML='<canvas width="192" height="192"></canvas><div class="rows"><i>speed</i><b id="f-spd">0</b><i>altitude</i><b id="f-alt">0</b><i>climb</i><b id="f-vs">0</b><i>heading</i><b id="f-hdg">0</b><i>throttle</i><b id="f-thr">0</b><i>battery</i><b id="f-bat">0</b><div class="warn" id="f-warn"></div></div>';
+    el.innerHTML='<div class="dials"><div class="dial"><canvas id="f-aoa" width="160" height="160"></canvas><span>angle of attack</span></div><div class="dial"><canvas id="f-adi" width="192" height="192"></canvas><span>attitude</span></div><div class="dial"><canvas id="f-vsi" width="160" height="160"></canvas><span>vertical speed</span></div></div><div class="readouts"><span><i>speed</i><b id="f-spd">0</b></span><span><i>altitude</i><b id="f-alt">0</b></span><span><i>heading</i><b id="f-hdg">0</b></span><span><i>throttle</i><b id="f-thr">0</b></span><span><i>battery</i><b id="f-bat">0</b></span></div><div class="warn" id="f-warn"></div>';
     ($('#hud')||document.body).appendChild(el);
-    FL.hud=el;FL.adi=el.querySelector('canvas');FL.rows={};
-    for(const k of ['spd','alt','vs','hdg','thr','bat','warn'])FL.rows[k]=el.querySelector('#f-'+k);
+    FL.hud=el;FL.adi=el.querySelector('#f-adi');FL.aoa=el.querySelector('#f-aoa');FL.vsi=el.querySelector('#f-vsi');FL.rows={};
+    for(const k of ['spd','alt','hdg','thr','bat','warn'])FL.rows[k]=el.querySelector('#f-'+k);
   }
+  document.body.classList.toggle('flying',on);
   FL.hud.style.display=on?'flex':'none';
 }
 function planeHud(s,dt){
   drawADI(FL.adi,s);
+  drawAoADial(FL.aoa,s);
+  drawVerticalSpeedDial(FL.vsi,s);
   FL.acc+=dt;if(FL.acc<0.1)return;FL.acc=0;
   const R=FL.rows,sp=s.vel.length(),pc=Math.round(s.pow/PL.max*100);
   R.spd.textContent=(sp*1.943844492).toFixed(0)+' kts';
   R.alt.textContent=Math.max(0,s.alt).toFixed(0)+' m';
-  R.vs.textContent=(s.vs>=0?'+':'')+s.vs.toFixed(1)+' m/s';
   _cv.set(0,0,1).applyQuaternion(s.q);
   const plHdg=(((-Math.atan2(-_cv.x,-_cv.z)*180/Math.PI)%360)+360)%360;
   R.hdg.textContent=((Math.round(plHdg)+360)%360)+'°';
   const n=Math.round(s.thr*10);R.thr.textContent='▮'.repeat(n)+'▯'.repeat(10-n);
   R.bat.textContent=pc+'%';R.bat.style.color=pc<12?'var(--blood)':pc<30?'var(--amber)':'';
   let w='',c='';
-  if(s.stall>0.2){w=(Math.floor(now()*5)%2)?'STALL':'';c='var(--blood)'}
+  if(s.vs<=-7.5){w='SINK RATE';c='var(--blood)'}
+  else if(s.stall>0.2){w=(Math.floor(now()*5)%2)?'STALL':'';c='var(--blood)'}
   else if(s.pow<=0.3){w='BATTERY DEAD';c='var(--blood)'}
   else if(pc<12){w='LOW CHARGE';c='var(--amber)'}
   else if(s.gnd&&sp<4.5){w='E · STEP OUT';c='var(--dim)'}
   R.warn.textContent=w;R.warn.style.color=c;
+}
+function drawDial(cv,value,min,max,step,zones,color,readout,subtext,subcolor){
+  const c=cv.getContext('2d'),W=cv.width,R=W/2,cx=R,cy=R+6,r=R*0.72;
+  const angle=v=>(140+(clamp(v,min,max)-min)/(max-min)*260)*Math.PI/180;
+  c.clearRect(0,0,W,W);c.save();
+  c.fillStyle='rgba(10,9,8,.9)';c.beginPath();c.arc(cx,cy,r+13,0,TAU);c.fill();
+  c.lineCap='butt';c.lineWidth=9;c.strokeStyle='#3a3128';c.beginPath();c.arc(cx,cy,r,angle(min),angle(max));c.stroke();
+  for(const z of zones){c.strokeStyle=z.c;c.beginPath();c.arc(cx,cy,r,angle(z.a),angle(z.b));c.stroke()}
+  c.font='10px monospace';c.textAlign='center';c.textBaseline='middle';
+  for(let v=min;v<=max+0.001;v+=step){
+    const a=angle(v),major=Math.abs(v/step-Math.round(v/step))<0.001;
+    const x1=cx+Math.cos(a)*(r-5),y1=cy+Math.sin(a)*(r-5),x2=cx+Math.cos(a)*(r-(major?13:9)),y2=cy+Math.sin(a)*(r-(major?13:9));
+    c.strokeStyle=major?'#c4b79f':'#716657';c.lineWidth=major?1.5:1;c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();
+    if(major){const tx=cx+Math.cos(a)*(r-22),ty=cy+Math.sin(a)*(r-22);c.fillStyle='#9a8e7c';c.fillText(String(Math.round(v)),tx,ty)}
+  }
+  const a=angle(value);c.strokeStyle=color;c.lineWidth=2.5;c.beginPath();c.moveTo(cx,cy);c.lineTo(cx+Math.cos(a)*(r-17),cy+Math.sin(a)*(r-17));c.stroke();
+  c.fillStyle=color;c.beginPath();c.arc(cx,cy,4,0,TAU);c.fill();
+  c.textAlign='center';c.fillStyle='#f4ecdc';c.font='bold 17px monospace';c.fillText(readout,cx,cy+21);
+  c.fillStyle=subcolor||'#9a8e7c';c.font='9px monospace';c.fillText(subtext,cx,cy+34);
+  c.restore();
+}
+function drawAoADial(cv,s){
+  const degrees=s.aoa*180/Math.PI,stall=PL.aStall*180/Math.PI,zeroLift=-Math.asin(PL.cl0)*180/Math.PI,nearStall=stall*0.66;
+  const color=s.vs<=-7.5||degrees>=stall?'#ee6a52':degrees>=nearStall?'#f0b93f':s.lift>0?'#9aae6f':'#c4b79f';
+  const label=s.vs<=-7.5?'SINK':degrees>=stall?'STALL':s.lift>0?'LIFT':'LOW LIFT';
+  const labelColor=s.vs<=-7.5||degrees>=stall?'#ee6a52':degrees>=nearStall?'#f0b93f':s.lift>0?'#9aae6f':'#c4b79f';
+  drawDial(cv,degrees,-5,25,5,[{a:zeroLift,b:nearStall,c:'#9aae6f'},{a:nearStall,b:stall,c:'#f0b93f'},{a:stall,b:25,c:'#ee6a52'}],color,Math.round(degrees)+'°',label,labelColor);
+}
+function drawVerticalSpeedDial(cv,s){
+  const sink=s.vs<=-7.5,color=sink?'#ee6a52':s.vs<=-3.6?'#f0b93f':'#9aae6f';
+  const label=sink?'SINK':s.vs<=-3.6?'APPROACH':s.vs>=1?'CLIMB':'DESCENT';
+  drawDial(cv,s.vs,-10,10,2.5,[{a:-10,b:-7.5,c:'#ee6a52'},{a:-7.5,b:-3.6,c:'#f0b93f'},{a:-3.6,b:10,c:'#9aae6f'}],color,(s.vs>0?'+':'')+s.vs.toFixed(1),label,color);
 }
 /* artificial horizon — pitch ladder every 10°, rotates against bank */
 function drawADI(cv,s){
