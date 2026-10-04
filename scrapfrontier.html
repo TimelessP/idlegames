@@ -297,6 +297,11 @@ input[type=range]::-moz-range-thumb{width:11px;height:11px;background:var(--rust
 .tog i{position:absolute;top:1px;left:1px;width:14px;height:12px;background:var(--dim);transition:.15s}
 .tog.on{border-color:var(--rust);background:#2a1a10}
 .tog.on i{left:17px;background:var(--rust)}
+.save-drop{margin:12px 0;padding:16px 12px;text-align:center;border:1px dashed var(--line-hi);background:rgba(0,0,0,.16);transition:border-color .15s,background .15s}
+.save-drop.over{border-color:var(--amber);background:rgba(240,185,63,.08)}
+.save-drop b{display:block;font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--bone)}
+.save-drop p{margin:5px 0 10px;font-size:12px;line-height:1.5;color:var(--dim)}
+.save-actions{display:flex;justify-content:center;flex-wrap:wrap;gap:6px}
 .help p{font-size:13px;line-height:1.65;color:var(--dust);margin:7px 0;letter-spacing:.02em}
 .help p b{color:var(--bone);font-weight:400}
 .help ol{margin:8px 0 0 16px}
@@ -533,8 +538,13 @@ function hashStr(s){return xmur3(s)()}
    Every surface in the game is painted here at boot, pixel by pixel.
    ─────────────────────────────────────────────────────────────────────── */
 let THREE=null;
-for(const u of ['https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js','https://unpkg.com/three@0.161.0/build/three.module.js']){try{THREE=await import(/* @vite-ignore */ u);break}catch(e){}}
-if(!THREE){document.getElementById('bootlog').textContent='renderer unreachable - this file needs a CDN for three.js';throw new Error('no three')}
+try{
+  THREE=await import('./assets/vendor/three/three.module.js');
+}catch(e){
+  const bootlog=document.getElementById('bootlog');
+  if(bootlog)bootlog.textContent='renderer unavailable - the vendored Three.js module could not load';
+  throw e;
+}
 const TEX={};
 function cvs(n){const c=document.createElement('canvas');c.width=c.height=n;return c}
 function paint(n,fn){
@@ -855,24 +865,18 @@ const WORKS={
 };
 /* ───────────────────────────────────────────────────────────────────────
    §05a  RENDERER BOOT
-   three.js arrives from a CDN the first time you open this file.  If the
-   network is closed, say so plainly rather than showing a black void.
+  three.js is loaded from the build's local vendor directory.  If that
+  module is missing, say so plainly rather than showing a black void.
    ─────────────────────────────────────────────────────────────────────── */
-const CDNS=[
-  'https://unpkg.com/three@0.161.0/build/three.module.js',
-  'https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js',
-  'https://esm.sh/three@0.161.0'
-];
 async function loadThree(){
   if(THREE)return THREE;
-  let last=null;
-  for(const url of CDNS){
-    try{
-      const mod=await import(/* @vite-ignore */ url);
-      if(mod&&mod.WebGLRenderer){THREE=mod;return mod}
-    }catch(e){last=e}
+  try{
+    const mod=await import('./assets/vendor/three/three.module.js');
+    if(mod&&mod.WebGLRenderer){THREE=mod;return mod}
+  }catch(e){
+    throw new Error('vendored Three.js unavailable: '+(e&&e.message||'module load failed'));
   }
-  throw new Error('no renderer: '+((last&&last.message)||'all sources unreachable'));
+  throw new Error('vendored Three.js module did not expose a renderer');
 }
 
 let SEED=0x5CA7F00D,EPOCH=0;
@@ -3402,22 +3406,49 @@ function loadSettings(){
   try{const s=JSON.parse(localStorage.getItem(KEY_SET)||'{}');Object.assign(SET,s)}catch(e){}
   if(!SET.seen)SET.guide=true;
 }
+function gameSaveData(){
+  return {v:1,seed:SEED,ep:EPOCH,epd:G.epochDay||0,t:Day.ctx.t,day:Day.ctx.day,
+    p:{x:P.x,z:P.z,yaw:P.yaw},inv:G.inv,tool:G.tool,kiteFly:G.kiteFly,cash:G.cash||0,
+    spents:[...G.spents],stats:G.stats,wp:G.waypoints,
+    st:G.struct.filter(s=>!s.fixed).map(s=>({t:s.type,x:+s.x.toFixed(2),z:+s.z.toFixed(2),r:+s.rot.toFixed(3),
+      pow:+s.pow.toFixed(1),dew:+s.dew.toFixed(2),water:+s.water.toFixed(2),
+      fluid:+s.fluid.toFixed(2),grow:+s.grow.toFixed(3),seeded:!!s.seeded,ripe:!!s.ripe})),
+    tr:G.traders.map(t=>({x:t.x,z:t.z,name:t.name,title:t.title,stay:t.stayLeft||0}))};
+}
+function validateGameSave(d){
+  const finite=v=>typeof v==='number'&&Number.isFinite(v);
+  const owns=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
+  if(!d||typeof d!=='object'||Array.isArray(d)||d.v!==1)return 'unsupported save format';
+  if(!Number.isInteger(d.seed)||d.seed<0||d.seed>0xffffffff)return 'invalid world seed';
+  if(!finite(d.t)||d.t<0||d.t>=1||!Number.isInteger(d.day)||d.day<1)return 'invalid world time';
+  if(!d.p||!finite(d.p.x)||!finite(d.p.z)||!finite(d.p.yaw))return 'invalid player position';
+  if(!d.inv||typeof d.inv!=='object'||Array.isArray(d.inv))return 'invalid inventory';
+  for(const [id,count] of Object.entries(d.inv))
+    if(!owns(ITEMS,id)||!finite(count)||count<0||count>1000000)return 'invalid inventory contents';
+  if(d.tool!==undefined&&d.tool!=='hands'&&(!owns(ITEMS,d.tool)||ITEMS[d.tool].c!=='tool'))return 'invalid equipped tool';
+  if(d.cash!==undefined&&(!finite(d.cash)||d.cash<0))return 'invalid currency';
+  if(d.ep!==undefined&&(!Number.isInteger(d.ep)||d.ep<0))return 'invalid world epoch';
+  if(d.epd!==undefined&&(!Number.isInteger(d.epd)||d.epd<0))return 'invalid scrap epoch';
+  if(d.st!==undefined&&(!Array.isArray(d.st)||d.st.length>2000))return 'invalid structures';
+  for(const s of d.st||[])
+    if(!s||!owns(WORKS,s.t)||!finite(s.x)||!finite(s.z)||!finite(s.r)||
+      ['pow','dew','water','fluid','grow'].some(k=>s[k]!==undefined&&(!finite(s[k])||s[k]<0))||
+      (s.grow!==undefined&&s.grow>1))return 'invalid structure data';
+  if(d.spents!==undefined&&(!Array.isArray(d.spents)||d.spents.length>100000||d.spents.some(id=>typeof id!=='string')))return 'invalid salvage records';
+  if(d.stats!==undefined&&(!d.stats||typeof d.stats!=='object'||Array.isArray(d.stats)||Object.values(d.stats).some(v=>!finite(v)||v<0)))return 'invalid statistics';
+  if(d.wp!==undefined&&(!Array.isArray(d.wp)||d.wp.length>3||d.wp.some(p=>p&&(!finite(p.x)||!finite(p.z)||(p.y!==undefined&&!finite(p.y))))))return 'invalid waypoints';
+  return '';
+}
 function saveGame(){
   try{
-    const data={v:1,seed:SEED,ep:EPOCH,epd:G.epochDay||0,t:Day.ctx.t,day:Day.ctx.day,
-      p:{x:P.x,z:P.z,yaw:P.yaw},inv:G.inv,tool:G.tool,kiteFly:G.kiteFly,cash:G.cash||0,
-      spents:[...G.spents],stats:G.stats,wp:G.waypoints,
-      st:G.struct.filter(s=>!s.fixed).map(s=>({t:s.type,x:+s.x.toFixed(2),z:+s.z.toFixed(2),r:+s.rot.toFixed(3),
-        pow:+s.pow.toFixed(1),dew:+s.dew.toFixed(2),water:+s.water.toFixed(2),
-        fluid:+s.fluid.toFixed(2),grow:+s.grow.toFixed(3),seeded:!!s.seeded,ripe:!!s.ripe})),
-      tr:G.traders.map(t=>({x:t.x,z:t.z,name:t.name,title:t.title,stay:t.stayLeft||0}))};
+    const data=gameSaveData();
     localStorage.setItem(KEY_SAVE,JSON.stringify(data));
     SET.seen=true;saveSettings();
     return true;
   }catch(e){return false}
 }
 function readSave(){
-  try{const d=JSON.parse(localStorage.getItem(KEY_SAVE)||'null');return(d&&d.v===1)?d:null}catch(e){return null}
+  try{const d=JSON.parse(localStorage.getItem(KEY_SAVE)||'null');return validateGameSave(d)?null:d}catch(e){return null}
 }
 function applySave(d){
   SEED=d.seed>>>0;EPOCH=d.ep||0;G.epochDay=d.epd||0;
@@ -3457,6 +3488,34 @@ const MODAL={on:false,open(title,sub,body,btns){
   $('#modal').classList.add('on');MODAL.on=true;
   lookDrag=false;if(document.pointerLockElement)document.exitPointerLock();
 },close(){$('#modal').classList.remove('on');MODAL.on=false}};
+const saveFileInput=document.createElement('input');
+saveFileInput.type='file';saveFileInput.accept='application/json,.json';saveFileInput.hidden=true;
+document.body.appendChild(saveFileInput);
+function exportGameSave(){
+  const blob=new Blob([JSON.stringify(gameSaveData(),null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob),link=document.createElement('a');
+  link.href=url;link.download='scrap-frontier-'+new Date().toISOString().slice(0,10)+'.json';
+  document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  log('checkpoint downloaded','good');
+}
+async function importGameSave(file){
+  if(!file)return;
+  if(file.size>4*1024*1024){log('save file is larger than 4 MB','bad');return}
+  let data;
+  try{data=JSON.parse(await file.text())}catch(e){log('that file is not valid JSON','bad');return}
+  const problem=validateGameSave(data);
+  if(problem){log('cannot load checkpoint — '+problem,'bad');return}
+  MODAL.open('load checkpoint','replace the current camp',
+    '<p class="desc">This checkpoint is for seed 0x'+(data.seed>>>0).toString(16).toUpperCase().padStart(8,'0')+' on day '+data.day+'. Loading it replaces the current saved world and reloads the game.</p>',[
+      {label:'cancel',cls:'gho'},
+      {label:'load checkpoint',cls:'pri',fn(){
+        try{
+          localStorage.setItem(KEY_SAVE,JSON.stringify(data));
+          SET.seen=true;saveSettings();location.reload();
+        }catch(e){log('checkpoint could not be stored in this browser','bad')}
+      }}
+    ]);
+}
 function log(m,c){
   const d=document.createElement('div');
   d.className='e '+(c||'');d.innerHTML=m;
@@ -3741,6 +3800,15 @@ RENDER.set=()=>`<div class="setrow"><div class="t"><b>mouse sensitivity</b><i>0.
     <button class="btn sm gho" data-act="guide">show the guide</button>
     <button class="btn sm gho" data-act="wipe">burn this world</button>
   </div>
+  <div class="grp-h"><b>portable checkpoint</b></div>
+  <div class="save-drop" id="save-drop">
+    <b>Drop a Scrap Frontier JSON save</b>
+    <p>Move a checkpoint between devices, or keep a snapshot before testing.</p>
+    <div class="save-actions">
+      <button class="btn sm" data-act="export-save">download current save</button>
+      <button class="btn sm gho" data-act="import-save">choose JSON file</button>
+    </div>
+  </div>
   <p class="desc" style="margin-top:10px">Burning the world erases the saved camp and rolls a new seed. The desert does not mind.</p>
   <div class="rule"></div>
   <div class="kv" style="display:flex;justify-content:space-between"><span class="lbl">seed</span><span class="num">0x${(SEED>>>0).toString(16).toUpperCase()}</span></div>
@@ -3906,11 +3974,29 @@ $('#dbody').addEventListener('click',e=>{
       }
       refreshPanel();break}
     case 'save':saveGame()?log('camp written to local storage','good'):log('storage refused the write','bad');refreshPanel();break;
+    case 'export-save':exportGameSave();break;
+    case 'import-save':saveFileInput.click();break;
     case 'guide':showGuide();break;
     case 'wipe':MODAL.open('burn this world','this cannot be undone',
       '<p class="desc">The saved camp, the seed and every mark you have made on the desert will be erased.</p>',
       [{label:'keep it',cls:''},{label:'burn it',cls:'pri',fn(){wipeGame();location.reload()}}]);break;
   }
+});
+saveFileInput.addEventListener('change',()=>{
+  importGameSave(saveFileInput.files&&saveFileInput.files[0]);
+  saveFileInput.value='';
+});
+$('#dbody').addEventListener('dragover',e=>{
+  if(!Array.from(e.dataTransfer&&e.dataTransfer.types||[]).includes('Files'))return;
+  e.preventDefault();$('#save-drop')?.classList.add('over');
+});
+$('#dbody').addEventListener('dragleave',e=>{
+  if(!e.relatedTarget||!$('#dbody').contains(e.relatedTarget))$('#save-drop')?.classList.remove('over');
+});
+$('#dbody').addEventListener('drop',e=>{
+  if(!Array.from(e.dataTransfer&&e.dataTransfer.types||[]).includes('Files'))return;
+  e.preventDefault();$('#save-drop')?.classList.remove('over');
+  importGameSave(e.dataTransfer.files&&e.dataTransfer.files[0]);
 });
 $('#dbody').addEventListener('input',e=>{
   const r=e.target.closest('[data-set]');
@@ -4203,7 +4289,7 @@ async function boot(){
   if(saved)SEED=saved.seed>>>0;else SEED=(Math.random()*0xffffffff)>>>0;
   say('seed 0x'+(SEED>>>0).toString(16).toUpperCase()+(saved?' — a saved camp is waiting':' — rolling a fresh one'),'good');
   try{await loadThree()}catch(e){
-    say('<u>renderer unreachable</u> — this file needs one CDN for three.js.','');
+    say('<u>renderer unavailable</u> — the vendored Three.js module could not load.','');
     $('#bootgo').textContent='renderer unavailable';
     return;
   }
