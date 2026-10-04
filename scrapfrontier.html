@@ -485,6 +485,82 @@ input[type=range]::-moz-range-thumb{width:11px;height:11px;background:var(--rust
   <div class="bf" id="md-f"></div>
 </div></div>
 
+<!--
+═══════════════════════════════════════════════════════════════════════════════
+ ASSEMBLY STYLE GUIDE  —  how every built thing in Scrap Frontier should look
+ (keep this block up to date; new assemblies are written against it)
+═══════════════════════════════════════════════════════════════════════════════
+
+LOOK
+  Rusty, dusty, plausibly post-apocalyptic kit that someone really assembled from
+  salvage and has since left in the sun. Photographic, grunged, distressed — never
+  clean, never toy-like, never a primitive standing in for a thing.
+  Everything is scavenged, so neighbouring parts differ: a blue panel next to an
+  olive one next to bare galvanised, a rusted sheet beside a bright replacement.
+  Every object needs readable features, not just a silhouette: weld beads, rivet
+  rows, bolt heads, hinges, patch plates, rope lashings, cable runs, sight tubes,
+  gate wheels, foot pads, drifted sand, dust in the recesses, rain streaks below
+  every edge and fastener.
+
+MATERIALS  (all generated at boot in forgeAsm; nothing is a loaded asset)
+  • NEVER put a colour on an assembly material. A colour multiplier crushes the
+    whites in the texture (bare metal glints, dust, zinc rot, paint chips).
+    Every colour variant is its own generated texture sheet instead:
+      aPlate (olive) · aOchre · aBlue   chipped enamel over red primer, rivet rows;
+                                         grain:'panel' → UVs span each face 0‥1 so
+                                         the rivet border lands on the panel edge
+      aRust  heavy oxide, pitting, flaking     aGalv  zinc sheet, white rot, rust tears
+      aBare  scored dark steel, oil, spot rust aWood  sun-bleached timber, checks, knots
+      aCanvas / aOlive  woven fabric, tide-line stains, stitched patches
+      aRubber · aRope · aConc · aSoil · aCopper (verdigris) · aSolar (cracked, dusty)
+      aGlass (dust haze)   aRockS (bedded risers)   aRockT (weathered ledges)
+  • Each sheet carries colour + height → normal map + a packed rough/metal map.
+    Metal is where the paint is chipped through, never on clean paint.
+  • UVs are in METRES (tiledGeo / extrude tile) so a 3 m sheet and a 3 cm rail wear
+    at the same scale. Use grain:'long' for things that must grain along their length.
+  • Emissive lamp/ember materials (MAT.lampOn / MAT.glow) are the only coloured ones.
+
+GEOMETRY
+  • Profiles are extruded along paths — not scaled cylinders or cubes. Pipes use
+    pipe()/filletPath() so bends are radiused; posts and rails are real angle,
+    channel, I-beam or round sections; roofing is a real corrugated profile;
+    wings are airfoil sections; tanks and cones are lathed.
+  • Heavy things stand on something: pads, base plates, rock-weighted footings.
+  • Anything that must stay up has a plausible load path: posts under beams, beams
+    under rafters, rafters under sheets, braces in the plane of the frame.
+    Roofs sit ON the frame; they are never sunk into the walls.
+  • Ropes, cables and guys go from a real anchor on the structure to a real anchor
+    (peg, pad, block) OUTSIDE the footprint, with a sag.
+  • Z-FLUTTER RULE: no two surfaces facing the same way may share a plane. Beams,
+    boards, walls and sheets that meet or overlap get deliberately different
+    thicknesses, offsets and overlaps (a few mm is enough), e.g. 0.083 / 0.079 / 0.071,
+    never 0.08 / 0.08. Corrugated laps are staggered in height. Run
+    ASMDBG.on=true before building to log any coplanar box faces it can find.
+  • Each assembly is built by an asmXxx(K,s) function using asmKit(); static meshes
+    are baked to one mesh per material; anything the animator touches is registered
+    with K.dyn() and exposed as s.fan / s.blades / s.bulb / s.ember / s.flag /
+    s.dish / s.crop / s.wheels / s.pWheels / s.pProp … Keep those names.
+  • Keep each assembly roughly inside its WORKS footprint; target ≲ 6k triangles.
+
+ROCK & TERRAIN FEATURES
+  • Outcrops and spires are never stood on the sand. They are one heightfield built
+    from heightAt(): aligned to the local contour, strata dip with the ground, a
+    ridge of overlapping lobes with flat benches and short risers, joints cut through
+    the blocks, wind-drifted sand (tinted with groundTint, so it matches the terrain
+    exactly) burying the foot, a long wind-shadow tail, and fallen talus blocks.
+    On a slope they read as a scarp, on a flat as a whaleback, on a crest as a
+    stepped knoll. Base is always at least ~2.5× the height: no towers, no cones,
+    nothing that points.
+  • The ring at the edge of the mesh sinks below the terrain so it can never poke
+    through or fight the chunk surface.
+
+ADDING A NEW ASSEMBLY
+  1. Add its WORKS entry as usual.  2. Write asmName(K,s) and register it in ASMFN.
+  3. Reuse the sheets above; if it needs a new surface, add a painter + asmMat()
+     in forgeAsm (no colour on the material).  4. Extrude, fillet, lathe — and
+     check it from front, side, back and low before it goes in.
+═══════════════════════════════════════════════════════════════════════════════
+-->
 <script type="module">
 /* ═══════════════════════════════════════════════════════════════════════
    SCRAP FRONTIER
@@ -1080,27 +1156,1129 @@ const M=(g,m,x,y,z,rx,ry,rz,sx,sy,sz)=>{
   o.castShadow=true;o.receiveShadow=true;
   return o;
 };
+/* ───────────────────────────────────────────────────────────────────────
+   §05f  ASSEMBLY FORGE  —  worn, dusty, plausible kit
+   The rules live in the ASSEMBLY STYLE GUIDE comment at the top of this file.
+   Nothing here tints a material: every colour variant is its own generated
+   texture, so whites and highlights inside a texture survive lighting.
+   ─────────────────────────────────────────────────────────────────────── */
+/* periodic value noise — tiles seamlessly; x,y are 0..1 over the tile, px/py are lattice periods */
+function pnz(x,y,px,py,s){
+  const xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi;
+  const u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf);
+  const x0=((xi%px)+px)%px,x1=(x0+1)%px,y0=((yi%py)+py)%py,y1=(y0+1)%py;
+  const a=ihash(x0,y0,s),b=ihash(x1,y0,s),c=ihash(x0,y1,s),d=ihash(x1,y1,s);
+  return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v;
+}
+function pfb(x,y,px,py,s,oct){
+  let f=1,a=.5,sum=0,nn=0;
+  for(let i=0;i<oct;i++){sum+=a*pnz(x*px*f,y*py*f,px*f,py*f,s+i*131);nn+=a;f*=2;a*=.5}
+  return sum/nn;
+}
+const pridge=(x,y,px,py,s,oct)=>{const n=pfb(x,y,px,py,s,oct);return 1-Math.abs(n*2-1)};
+const BL=(q,c,t)=>{if(t<=0)return;if(t>1)t=1;q.r+=(c[0]-q.r)*t;q.g+=(c[1]-q.g)*t;q.b+=(c[2]-q.b)*t};
+const ST=(q,c)=>{q.r=c[0];q.g=c[1];q.b=c[2]};
+
+/* paint colour + height + roughness + metalness in one pass → map, normal map, ORM map */
+function asmSurf(n,fn,o){
+  o=o||{};
+  const col=new Uint8ClampedArray(n*n*4),orm=new Uint8ClampedArray(n*n*4),H=new Float32Array(n*n);
+  const q={r:0,g:0,b:0,h:0,ro:.85,me:0};
+  for(let j=0;j<n;j++)for(let i=0;i<n;i++){
+    q.r=q.g=q.b=0;q.h=.5;q.ro=.85;q.me=0;
+    fn(i/n,j/n,q,i,j);
+    const k=(j*n+i)*4;
+    col[k]=q.r;col[k+1]=q.g;col[k+2]=q.b;col[k+3]=255;
+    orm[k]=255;orm[k+1]=clamp(q.ro,0,1)*255;orm[k+2]=clamp(q.me,0,1)*255;orm[k+3]=255;
+    H[j*n+i]=q.h;
+  }
+  const nrm=new Uint8ClampedArray(n*n*4),st=(o.bump||3)*n/256;
+  for(let j=0;j<n;j++)for(let i=0;i<n;i++){
+    const hx=H[j*n+(i+1)%n]-H[j*n+(i-1+n)%n],hy=H[((j+1)%n)*n+i]-H[((j-1+n)%n)*n+i];
+    const dx=hx*st,dy=hy*st,l=Math.hypot(dx,dy,1),k=(j*n+i)*4;
+    nrm[k]=127.5*(-dx/l+1);nrm[k+1]=127.5*(dy/l+1);nrm[k+2]=127.5*(1/l+1);nrm[k+3]=255;
+  }
+  const mk=(arr)=>{const c=cvs(n),x=c.getContext('2d'),im=x.createImageData(n,n);im.data.set(arr);x.putImageData(im,0,0);return c};
+  return{map:mk(col),normal:mk(nrm),orm:mk(orm)};
+}
+const ASMCV={};   // kept so the harness (and curious people) can inspect the generated sheets
+function asmMat(name,n,tile,fn,o){
+  o=o||{};
+  const s=asmSurf(n,fn,o);ASMCV[name]=s;
+  const T=(c,srgb)=>{const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.anisotropy=8;if(srgb)t.colorSpace=THREE.SRGBColorSpace;t.needsUpdate=true;return t};
+  const m=new THREE.MeshStandardMaterial({map:T(s.map,true),normalMap:T(s.normal,false),roughnessMap:T(s.orm,false),metalnessMap:T(s.orm,false),
+    roughness:1,metalness:1,normalScale:new THREE.Vector2(o.ns||1,o.ns||1),side:o.side||THREE.FrontSide,
+    transparent:!!o.opacity,opacity:o.opacity||1});
+  m.userData.tile=tile;m.userData.grain=o.grain||'world';
+  MAT[name]=m;return m;
+}
+
+/* ── the texture sheets ── */
+const ASMPAL={
+  olive:{paint:[88,95,76],fade:[122,126,106],prime:[118,64,48]},
+  ochre:{paint:[168,136,60],fade:[204,178,108],prime:[124,70,46]},
+  blue :{paint:[54,88,104],fade:[102,132,138],prime:[110,60,46]}
+};
+function plateFn(pal,sd){
+  return (u,v,q)=>{
+    const wear=pfb(u,v,3,3,sd+1,3),chipN=pfb(u,v,28,28,sd+3,3),blot=pfb(u,v,7,7,sd+5,3),fine=pfb(u,v,90,90,sd+7,1);
+    const du=Math.min(u,1-u),dv=Math.min(v,1-v),ed=Math.min(du,dv),edgeW=1-sm_(0,.14,ed);
+    ST(q,pal.paint);BL(q,pal.fade,sm_(.3,.8,blot)*.65);
+    const g=(fine-.5)*14;q.r+=g;q.g+=g;q.b+=g;
+    let h=.56+(chipN-.5)*.05,ro=.6+fine*.12,me=0;
+    const wa=sm_(.6,.9,wear)*.5+edgeW*.42+(chipN-.5)*.5;
+    const chip=sm_(.44,.54,wa);
+    if(chip>0){
+      const rs=pfb(u,v,12,12,sd+9,3),bare=sm_(.72,.82,pridge(u,v,16,16,sd+11,2))*chip;
+      BL(q,pal.prime,chip);BL(q,[138,72,34],chip*sm_(.4,.7,rs));BL(q,[126,122,114],bare*.75);
+      h-=chip*.16;ro=lerp(ro,.9,chip);me=bare*.7;ro=lerp(ro,.42,bare);
+    }
+    // seam, weld bead, rivet rows (tile = 1 m, so a rivet is ~2 cm)
+    if(ed<.005){BL(q,[26,22,20],.85);h=.15}else if(ed<.02){h+=.12*(1-(ed-.005)/.015);BL(q,[92,58,40],.28)}
+    for(let a=0;a<2;a++){
+      const e=a?dv:du,t=(a?u:v)*10,fr=(t-Math.floor(t)-.5)*.1,dr=Math.hypot(e-.04,fr);
+      if(dr<.0125){const k=1-dr/.0125;h=.72+k*.28;BL(q,[168,156,136],.26*k);ro=.5;me=Math.max(me,.2)}
+      else if(dr<.017){BL(q,[34,28,24],.5);h-=.1}
+      else if(e<.1&&fr>-.05&&fr<.05&&e>.04&&dr<.05){BL(q,[100,56,34],(1-sm_(.017,.05,dr))*.3*(.3+blot))}   // rust tears below each rivet
+    }
+    BL(q,[44,38,30],sm_(.6,.84,pfb(u,v,14,2,sd+13,2))*.34);          // rain runs
+    BL(q,[178,148,106],sm_(.55,.9,pfb(u,v,5,5,sd+15,3))*.2);         // dust
+    q.h=h;q.ro=ro;q.me=me;
+  };
+}
+function sm_(a,b,x){return smooth(a,b,x)}
+const rustFn=(u,v,q)=>{
+  const ox=pfb(u,v,5,5,71,5),pit=pfb(u,v,22,22,73,3),fin=pfb(u,v,50,50,75,2),st=pfb(u,v,9,2,77,3);
+  ST(q,[82,46,30]);BL(q,[170,96,48],sm_(.25,.8,ox));
+  BL(q,[118,66,36],sm_(.45,.7,fin)*.35);
+  const pt=sm_(.58,.74,pit);BL(q,[46,28,22],pt*.6);
+  BL(q,[64,36,24],sm_(.55,.8,st)*.45);
+  BL(q,[164,134,98],sm_(.55,.88,pfb(u,v,4,4,79,3))*.34);                        // settled dust
+  const flk=sm_(.8,.86,pfb(u,v,12,12,81,3));BL(q,[40,26,22],flk*.5);
+  q.h=.45+ox*.3-pt*.25+fin*.12-flk*.12;q.ro=.9;q.me=.12;
+};
+const galvFn=(u,v,q)=>{
+  const sp=pfb(u,v,24,24,91,2),bl=pfb(u,v,6,3,93,4),st=pfb(u,v,16,2,95,3),ed=Math.min(v,1-v);
+  ST(q,[142,144,140]);BL(q,[176,178,170],sp*.6);
+  const rs=sm_(.54,.74,bl*.78+st*.3+(1-sm_(0,.04,ed))*.15);
+  BL(q,[98,60,36],rs*.9);BL(q,[158,84,36],rs*sm_(.5,.9,pfb(u,v,14,14,97,3))*.7);
+  BL(q,[204,202,192],sm_(.66,.8,pfb(u,v,7,7,99,3))*(1-rs)*.45);
+  BL(q,[46,38,30],sm_(.62,.82,st)*.3);BL(q,[170,142,106],sm_(.5,.9,pfb(u,v,4,4,101,3))*.2);
+  q.h=.5-rs*.1+sp*.05;q.ro=lerp(.45,.92,rs);q.me=lerp(.7,.1,rs);
+};
+const bareFn=(u,v,q)=>{
+  const f=pfb(u,v,12,12,111,4),rs=sm_(.58,.75,pfb(u,v,10,10,115,3)),oil=sm_(.6,.8,pfb(u,v,4,4,117,3)),sc=pfb(u,v,80,6,113,1);
+  ST(q,[80,78,76]);BL(q,[112,110,106],f*.6);BL(q,[46,44,44],oil*.5);
+  BL(q,[150,146,138],sm_(.78,.9,sc)*.35);
+  BL(q,[122,66,34],rs*.7);BL(q,[158,134,100],sm_(.6,.9,pfb(u,v,5,5,119,3))*.2);
+  q.h=.5+f*.1-rs*.1;q.ro=lerp(.42,.84,rs+oil*.4);q.me=lerp(.9,.15,rs);
+};
+const woodFn=(u,v,q)=>{
+  // grain runs along v (canvas vertical)
+  const warp=pfb(u,v,3,3,121,2)*.03;
+  const gr=pfb(u+warp,v,70,3,123,2),gr2=pfb(u+warp,v,170,6,125,2),band=pfb(u+warp,v,10,2,127,3);
+  ST(q,[134,116,94]);BL(q,[96,80,64],band*.7);BL(q,[84,68,54],sm_(.45,.8,gr)*.55);
+  BL(q,[172,156,132],sm_(.5,.9,pfb(u,v,5,3,129,3))*.45);                            // sun bleach
+  BL(q,[166,160,150],sm_(.55,.9,gr2)*.18);
+  const ck=sm_(.985,.996,pridge(u+warp*3,v,16,2,131,2));BL(q,[52,42,36],ck*.7);
+  for(const [kx,ky,kr] of [[.3,.4,.035],[.74,.82,.028]]){const kd=Math.hypot(u-kx,(v-ky)*.6);if(kd<kr){BL(q,[54,40,32],(1-kd/kr)*.85)}else if(kd<kr*1.7)BL(q,[80,62,48],.35)}
+  q.h=.5+gr*.14-ck*.4+gr2*.05;q.ro=.94;q.me=0;
+};
+function canvasFn(pal,sd){
+  return (u,v,q,i,j)=>{
+    const wv=(((i>>1)+(j>>1))&1),wv2=(i&1)^(j&1);
+    const dirt=pfb(u,v,5,5,sd+1,4),stn=pfb(u,v,3,6,sd+3,3),thr=pfb(u,v,40,40,sd+5,1);
+    ST(q,pal.base);BL(q,pal.dirt,sm_(.35,.8,dirt)*.8);
+    BL(q,[88,74,56],sm_(.58,.72,stn)*.36);
+    BL(q,pal.mold,sm_(.66,.82,pfb(u,v,7,7,sd+7,3))*.26);
+    const wk=(wv?1:.87)*(.94+thr*.1);q.r*=wk;q.g*=wk;q.b*=wk;
+    const px=(u-.18+1)%1,py=(v-.22+1)%1,qx=(u-.62+1)%1,qy=(v-.58+1)%1;
+    for(const [a,b,w,h,c] of [[px,py,.3,.22,pal.patch],[qx,qy,.22,.26,pal.patch2]]){
+      if(a<w&&b<h){const ee=Math.min(a,w-a,b,h-b);BL(q,c,.7);if(ee<.01)BL(q,[40,32,24],.2);
+        if(Math.abs(ee-.02)<.003&&(((a*60+b*60)|0)&1))BL(q,[34,28,22],.65)}
+    }
+    q.h=.5+(wv?.12:0)+(wv2?.04:0)-sm_(.5,.8,dirt)*.04;q.ro=1;q.me=0;
+  };
+}
+const rubberFn=(u,v,q)=>{
+  const f=pfb(u,v,10,10,141,3),fn=pfb(u,v,70,70,143,1),ck=sm_(.975,.99,pridge(u,v,14,14,145,2));
+  ST(q,[44,40,38]);BL(q,[104,92,78],sm_(.45,.85,f)*.45);BL(q,[24,22,22],ck*.7);
+  const g=(fn-.5)*16;q.r+=g;q.g+=g;q.b+=g;
+  q.h=.5+f*.1+fn*.08-ck*.2;q.ro=.93;q.me=0;
+};
+const ropeFn=(u,v,q)=>{
+  const s=Math.sin((u*3+v*12)*TAU)*.5+.5,f=pfb(u,v,24,24,151,2),d=pfb(u,v,3,3,153,3);
+  ST(q,[112,94,66]);BL(q,[164,142,102],s*.8);BL(q,[40,32,24],(1-s)*(1-s)*.7);BL(q,[84,70,54],sm_(.4,.8,d)*.5);
+  const g=(f-.5)*30;q.r+=g;q.g+=g*.9;q.b+=g*.8;
+  q.h=.3+s*.7;q.ro=1;q.me=0;
+};
+const concFn=(u,v,q)=>{
+  const f=pfb(u,v,6,6,161,4),ag=pfb(u,v,40,40,163,3),pit=sm_(.72,.8,pfb(u,v,30,30,165,3)),st=pfb(u,v,10,2,167,3);
+  ST(q,[144,138,128]);BL(q,[100,94,86],f*.7);BL(q,[178,170,154],sm_(.56,.78,ag)*.35);BL(q,[56,52,48],pit*.65);
+  BL(q,[98,72,54],sm_(.6,.8,st)*.3);BL(q,[186,158,118],sm_(.6,.9,pfb(u,v,4,4,169,3))*.25);
+  q.h=.5+f*.15-pit*.3+ag*.12;q.ro=.96;q.me=0;
+};
+const soilFn=(u,v,q)=>{
+  const f=pfb(u,v,8,8,171,4),pb=sm_(.72,.8,pfb(u,v,28,28,173,3));
+  ST(q,[88,66,48]);BL(q,[134,104,76],f*.8);BL(q,[164,142,114],pb*.55);BL(q,[52,40,30],sm_(.55,.8,pfb(u,v,5,5,175,3))*.5);
+  q.h=.4+f*.3+pb*.2;q.ro=1;q.me=0;
+};
+const solarFn=(u,v,q)=>{                // tile = 4×4 cells
+  const cx=(u*4)%1,cy=(v*4)%1,gap=Math.min(cx,1-cx,cy,1-cy);
+  const g=pfb(u,v,4,4,181,3),dust=pfb(u,v,5,5,183,4),dd=sm_(.4,.85,dust);
+  ST(q,[24,34,66]);BL(q,[40,56,98],g*.7);
+  const bus=(Math.abs(cx-.33)<.012||Math.abs(cx-.66)<.012);if(bus)BL(q,[188,190,196],.8);
+  if(((cy*34)%1)<.2&&!bus)BL(q,[60,74,118],.35);
+  if(gap<.022){ST(q,[168,170,172]);BL(q,[120,120,118],.2)}
+  BL(q,[168,146,112],dd*.5);BL(q,[84,70,54],sm_(.6,.8,pfb(u,v,12,2,187,2))*.2);
+  q.h=.55-(gap<.022?.2:0);q.ro=lerp(.18,.85,dd);q.me=0;
+};
+const glassFn=(u,v,q)=>{
+  const d=pfb(u,v,5,5,191,4),st=pfb(u,v,14,2,193,2);
+  ST(q,[146,172,170]);BL(q,[190,176,148],sm_(.4,.85,d)*.7);BL(q,[96,82,60],sm_(.6,.8,st)*.3);
+  q.h=.5;q.ro=lerp(.12,.7,sm_(.4,.85,d));q.me=0;
+};
+const copperFn=(u,v,q)=>{
+  const f=pfb(u,v,8,8,201,4),vd=sm_(.4,.7,pfb(u,v,6,6,203,4));
+  ST(q,[150,88,54]);BL(q,[84,134,112],vd*.85);BL(q,[52,36,28],sm_(.6,.8,f)*.4);
+  q.h=.5+vd*.2+f*.1;q.ro=lerp(.42,.85,vd);q.me=lerp(.85,.05,vd);
+};
+/* rock: bedded desert sandstone — riser and flank faces */
+const rockSideFn=(u,v,q)=>{
+  const wob=pfb(u,v,3,3,211,3)*.07+pfb(u,v,9,2,213,2)*.02;
+  const st=(v+wob)*7,id=Math.floor(st),fr=st-id;
+  const hr=ihash(id%7,7,217),hr2=ihash(id%7,9,219);
+  const pal=[[178,146,112],[168,128,98],[192,164,128],[154,118,92],[146,128,110],[184,152,116],[164,124,92]];
+  const c=pal[(hr*7|0)%7];
+  ST(q,c);const f=pfb(u,v,12,12,221,4),fin=pfb(u,v,80,80,223,1);
+  q.r+=(f-.5)*26+(fin-.5)*16;q.g+=(f-.5)*24+(fin-.5)*14;q.b+=(f-.5)*22+(fin-.5)*12;
+  const soft=hr2<.45;
+  BL(q,[200,168,124],(soft?(1-sm_(0,.5,fr))*.3:0)+sm_(.7,.95,pfb(u,v,6,6,225,3))*.16);
+  const vs=sm_(.62,.82,pfb(u,v,15,2,227,3));BL(q,[74,58,48],vs*.45);
+  const tp=sm_(.76,.86,pfb(u,v,12,12,229,2));BL(q,[108,80,62],tp*.45);
+  let h=.5+(soft?-.1:.08)*(1-Math.abs(fr-.5)*1.4)+f*.28+fin*.05-tp*.2;
+  if(fr<.05){BL(q,[84,66,54],.4);h-=.08}
+  q.h=h;q.ro=.96;q.me=0;
+};
+/* rock: weathered flats — ledge and crest faces */
+const rockTopFn=(u,v,q)=>{
+  const f=pfb(u,v,7,7,241,4),fin=pfb(u,v,64,64,243,2),pit=sm_(.78,.88,pfb(u,v,22,22,245,2)),cr=sm_(.985,.997,pridge(u,v,6,6,247,3));
+  ST(q,[176,144,108]);BL(q,[146,114,86],f*.7);BL(q,[208,178,134],sm_(.4,.8,pfb(u,v,5,5,249,3))*.7);
+  BL(q,[96,74,58],sm_(.64,.84,pfb(u,v,3,3,251,3))*.28);BL(q,[70,54,44],pit*.5+cr*.6);
+  const g=(fin-.5)*24;q.r+=g;q.g+=g*.9;q.b+=g*.8;
+  q.h=.5+f*.22+fin*.06-pit*.22-cr*.3;q.ro=.97;q.me=0;
+};
+
+async function forgeAsm(say_){
+  const yieldUI=()=>new Promise(r=>setTimeout(r,0));
+  const step=async(msg)=>{if(say_)say_(msg);await yieldUI()};
+  const D=THREE.DoubleSide;
+  await step('mixing paint, chipping it');
+  asmMat('aPlate',512,1,plateFn(ASMPAL.olive,300),{bump:3.2,grain:'panel'});
+  asmMat('aOchre',512,1,plateFn(ASMPAL.ochre,400),{bump:3.2,grain:'panel'});
+  asmMat('aBlue',512,1,plateFn(ASMPAL.blue,500),{bump:3.2,grain:'panel'});
+  await step('rusting everything properly');
+  asmMat('aRust',512,1.5,rustFn,{bump:3.4});
+  asmMat('aGalv',256,1,galvFn,{bump:2.4,grain:'long'});
+  asmMat('aBare',256,.8,bareFn,{bump:2.2,grain:'long'});
+  await step('weathering timber and canvas');
+  asmMat('aWood',512,1.2,woodFn,{bump:3,grain:'long'});
+  asmMat('aCanvas',512,1.5,canvasFn({base:[170,152,118],dirt:[116,98,72],mold:[104,112,78],patch:[128,112,82],patch2:[150,136,106]},600),{bump:2.6,side:D});
+  asmMat('aOlive',256,1.2,canvasFn({base:[96,100,70],dirt:[64,64,46],mold:[70,86,60],patch:[120,106,74],patch2:[78,84,60]},700),{bump:2.6,side:D});
+  await step('cutting rubber, rope, concrete');
+  asmMat('aRubber',128,.5,rubberFn,{bump:2.4});
+  asmMat('aRope',128,.22,ropeFn,{bump:3.4,grain:'long'});
+  asmMat('aConc',256,1,concFn,{bump:3});
+  asmMat('aSoil',128,1,soilFn,{bump:3});
+  await step('dusting glass and copper');
+  asmMat('aSolar',256,.624,solarFn,{bump:1.6});
+  asmMat('aGlass',128,1,glassFn,{bump:1,opacity:.6,side:D});
+  asmMat('aCopper',128,.6,copperFn,{bump:2.6});
+  await step('layering sandstone');
+  asmMat('aRockS',512,2.2,rockSideFn,{bump:3.6});
+  asmMat('aRockT',256,1.6,rockTopFn,{bump:3.2});
+  MAT.aGlass.depthWrite=false;
+}
+
+/* ── tiled geometry: UVs in metres so a 3 m board and a 3 cm rail wear the same texture at the same scale ── */
+const _tg=new Map();
+function tiledGeo(base,m,sx,sy,sz,px,py,pz){
+  const tile=m.userData.tile,grain=m.userData.grain||'world';
+  const oi=(Math.abs(Math.sin(px*12.9898+py*78.233+pz*37.719)*43758.5453)%1*8)|0;
+  const kind=base===GEO.box?'b':'c',key=kind+tile+grain+'|'+Math.round(sx*200)+','+Math.round(sy*200)+','+Math.round(sz*200)+'|'+oi;
+  let g=_tg.get(key);if(g)return g;
+  g=base.clone();
+  const P=g.attributes.position,N=g.attributes.normal,U=g.attributes.uv,ou=(oi&3)*.25+.07,ov=(oi>>2)*.5+.13;
+  for(let i=0;i<P.count;i++){
+    const x=P.getX(i),y=P.getY(i),z=P.getZ(i),nx=Math.abs(N.getX(i)),ny=Math.abs(N.getY(i));
+    let u,v;
+    if(grain==='panel'&&kind==='b'){
+      let a,b;if(nx>.5){a=P.getZ(i);b=y}else if(ny>.5){a=x;b=z}else{a=x;b=y}
+      U.setXY(i,a+.5,b+.5);continue;
+    }
+    if(kind==='b'){
+      let a,b,ea,eb;
+      if(nx>.5){a=z;ea=sz;b=y;eb=sy}else if(ny>.5){a=x;ea=sx;b=z;eb=sz}else{a=x;ea=sx;b=y;eb=sy}
+      u=a*ea;v=b*eb;if(grain==='long'&&ea>eb){const t=u;u=v;v=t}
+    }else if(ny>.5){u=x*sx;v=z*sz}
+    else{u=U.getX(i)*Math.PI*(sx+sz)/2;v=(y+.5)*sy}
+    U.setXY(i,u/tile+ou,v/tile+ov);
+  }
+  _tg.set(key,g);return g;
+}
+
+/* ── profiles for extrusion (2-D, in the path's S/N frame) ── */
+const profCircle=(r,n)=>{const p=[];n=n||12;for(let i=0;i<n;i++){const a=i/n*TAU;p.push([Math.cos(a)*r,Math.sin(a)*r])}return{pts:p,closed:true,hard:false}};
+const profRect=(w,h)=>({pts:[[-w/2,-h/2],[w/2,-h/2],[w/2,h/2],[-w/2,h/2]],closed:true,hard:true});
+const profAngle=(a,b,t)=>({pts:[[0,0],[a,0],[a,t],[t,t],[t,b],[0,b]].map(p=>[p[0]-a/2,p[1]-b/2]),closed:true,hard:true});
+const profChannel=(w,h,t)=>({pts:[[0,0],[w,0],[w,t],[t,t],[t,h-t],[w,h-t],[w,h],[0,h]].map(p=>[p[0]-w/2,p[1]-h/2]),closed:true,hard:true});
+const profIBeam=(w,h,tw,tf)=>({pts:[[-w/2,-h/2],[w/2,-h/2],[w/2,-h/2+tf],[tw/2,-h/2+tf],[tw/2,h/2-tf],[w/2,h/2-tf],[w/2,h/2],[-w/2,h/2],[-w/2,h/2-tf],[-tw/2,h/2-tf],[-tw/2,-h/2+tf],[-w/2,-h/2+tf]],closed:true,hard:true});
+function profWave(width,pitch,amp,thick,per){
+  const N=Math.round(width/pitch*(per||6)),top=[],bot=[];
+  for(let i=0;i<=N;i++){const x=-width/2+i/N*width,y=amp*Math.sin(x/pitch*TAU);top.push([x,y]);bot.push([x,y-thick])}
+  return{pts:top.concat(bot.reverse()),closed:true,hard:false};
+}
+const profAirfoil=(chord,thick,camber,n)=>{        // leading edge at +x, trailing edge at -x
+  n=n||16;const up=[],lo=[];
+  for(let i=0;i<=n;i++){
+    const t=i/n,x=(1-Math.cos(t*Math.PI))/2,yt=5*thick*(.2969*Math.sqrt(x)-.126*x-.3516*x*x+.2843*x*x*x-.1036*x*x*x*x),yc=camber*4*x*(1-x);
+    up.push([(.5-x)*chord,(yc+yt)*chord]);lo.push([(.5-x)*chord,(yc-yt)*chord]);
+  }
+  return{pts:up.concat(lo.reverse().slice(1,-1)),closed:true,hard:false};
+};
+
+const V3=(x,y,z)=>new THREE.Vector3(x,y,z);
+const _V=(a)=>a.isVector3?a:new THREE.Vector3(a[0],a[1],a[2]);
+/* sweep a profile along a path.  o: tile, tu, tv, roll, cap, up, sc(t)→scale */
+function extrude(prof,path,o){
+  o=o||{};
+  let P=prof.pts.map(p=>[p[0],p[1]]);const closed=prof.closed!==false,hard=!!prof.hard;
+  if(closed){let ar=0;for(let i=0;i<P.length;i++){const a=P[i],b=P[(i+1)%P.length];ar+=a[0]*b[1]-b[0]*a[1]}if(ar<0)P.reverse()}
+  const nP=P.length,nE=closed?nP:nP-1,en=[],el=[];
+  for(let e=0;e<nE;e++){const a=P[e],b=P[(e+1)%nP],dx=b[0]-a[0],dy=b[1]-a[1],l=Math.hypot(dx,dy)||1e-9;en.push([dy/l,-dx/l]);el.push(l)}
+  const rv=[],pairs=[];let acc=0;
+  if(hard){for(let e=0;e<nE;e++){const a=P[e],b=P[(e+1)%nP];rv.push({x:a[0],y:a[1],nx:en[e][0],ny:en[e][1],u:acc});rv.push({x:b[0],y:b[1],nx:en[e][0],ny:en[e][1],u:acc+el[e]});pairs.push([rv.length-2,rv.length-1]);acc+=el[e]}}
+  else{
+    const cnt=closed?nP+1:nP;
+    for(let i=0;i<cnt;i++){
+      const ii=i%nP,e0=closed?(ii-1+nP)%nP:i-1,e1=closed?ii:i;let nx=0,ny=0;
+      if(e0>=0&&e0<nE){nx+=en[e0][0];ny+=en[e0][1]}if(e1>=0&&e1<nE){nx+=en[e1][0];ny+=en[e1][1]}
+      const l=Math.hypot(nx,ny)||1;rv.push({x:P[ii][0],y:P[ii][1],nx:nx/l,ny:ny/l,u:acc});
+      if(i<cnt-1){acc+=el[i%nE];pairs.push([i,i+1])}
+    }
+  }
+  const R=rv.length,pts=[],dd=[];
+  for(const p of path){const v=_V(p);if(!pts.length||v.distanceTo(pts[pts.length-1])>1e-5)pts.push(v.clone?v.clone():v)}
+  const m=pts.length;if(m<2)return new THREE.BufferGeometry();
+  const T=[],Nn=[],S=[],arc=[0];
+  for(let k=0;k<m;k++){
+    const t=(k===0?pts[1].clone().sub(pts[0]):k===m-1?pts[m-1].clone().sub(pts[m-2]):pts[k+1].clone().sub(pts[k-1])).normalize();T.push(t);
+    if(k)arc.push(arc[k-1]+pts[k].distanceTo(pts[k-1]));
+  }
+  let ref=o.up?_V(o.up).clone():new THREE.Vector3(0,1,0);
+  if(Math.abs(ref.dot(T[0]))>.98)ref=new THREE.Vector3(0,0,1);
+  for(let k=0;k<m;k++){
+    const prev=k?Nn[k-1]:ref;const n=prev.clone().addScaledVector(T[k],-prev.dot(T[k]));
+    if(n.lengthSq()<1e-8)n.copy(new THREE.Vector3(1,0,0).addScaledVector(T[k],-T[k].x));
+    n.normalize();Nn.push(n);S.push(n.clone().cross(T[k]).normalize());
+  }
+  const roll=o.roll||0,cr=Math.cos(roll),sr=Math.sin(roll),tu=o.tu||o.tile||1,tv=o.tv||o.tile||1;
+  const pos=[],nor=[],uv=[],idx=[];
+  const sc=o.sc?(typeof o.sc==='function'?o.sc:()=>o.sc):null;
+  for(let k=0;k<m;k++){
+    const k01=arc[m-1]>0?arc[k]/arc[m-1]:0,s=sc?sc(k01):1;
+    const Sx=S[k].clone().multiplyScalar(cr).addScaledVector(Nn[k],sr),Ny=Nn[k].clone().multiplyScalar(cr).addScaledVector(S[k],-sr);
+    for(const r of rv){
+      pos.push(pts[k].x+(Sx.x*r.x+Ny.x*r.y)*s,pts[k].y+(Sx.y*r.x+Ny.y*r.y)*s,pts[k].z+(Sx.z*r.x+Ny.z*r.y)*s);
+      const nx=Sx.x*r.nx+Ny.x*r.ny,ny=Sx.y*r.nx+Ny.y*r.ny,nz=Sx.z*r.nx+Ny.z*r.ny;nor.push(nx,ny,nz);
+      uv.push(r.u/tu+(o.uo||0),arc[k]/tv+(o.vo||0));
+    }
+  }
+  for(let k=0;k<m-1;k++)for(const [ia,ib] of pairs){
+    const a=k*R+ia,b=k*R+ib,c=(k+1)*R+ib,d=(k+1)*R+ia;idx.push(a,b,c,a,c,d);
+  }
+  if(o.cap!==false&&closed){
+    const tri=THREE.ShapeUtils.triangulateShape(P.map(p=>new THREE.Vector2(p[0],p[1])),[]);
+    for(const end of [0,1]){
+      const k=end?m-1:0,s=sc?sc(end):1,base=pos.length/3,sg=end?1:-1;
+      const Sx=S[k].clone().multiplyScalar(cr).addScaledVector(Nn[k],sr),Ny=Nn[k].clone().multiplyScalar(cr).addScaledVector(S[k],-sr);
+      for(const p of P){pos.push(pts[k].x+(Sx.x*p[0]+Ny.x*p[1])*s,pts[k].y+(Sx.y*p[0]+Ny.y*p[1])*s,pts[k].z+(Sx.z*p[0]+Ny.z*p[1])*s);nor.push(T[k].x*sg,T[k].y*sg,T[k].z*sg);uv.push(p[0]/tu+.3,p[1]/tv+.6)}
+      for(const t of tri){
+        const A=V3(pos[(base+t[0])*3],pos[(base+t[0])*3+1],pos[(base+t[0])*3+2]),B=V3(pos[(base+t[1])*3],pos[(base+t[1])*3+1],pos[(base+t[1])*3+2]),C=V3(pos[(base+t[2])*3],pos[(base+t[2])*3+1],pos[(base+t[2])*3+2]);
+        const fn=B.clone().sub(A).cross(C.clone().sub(A)),want=fn.dot(T[k])*sg>0;
+        want?idx.push(base+t[0],base+t[1],base+t[2]):idx.push(base+t[0],base+t[2],base+t[1]);
+      }
+    }
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  g.setAttribute('normal',new THREE.Float32BufferAttribute(nor,3));
+  g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+  g.setIndex(idx);return g;
+}
+/* round a polyline's corners into bends: this is what makes a pipe run look plumbed rather than stacked */
+function filletPath(pts,R,seg){
+  const P=pts.map(p=>_V(p).clone());seg=seg||6;const out=[P[0].clone()];
+  for(let i=1;i<P.length-1;i++){
+    const A=P[i-1],B=P[i],C=P[i+1],u1=A.clone().sub(B),u2=C.clone().sub(B),l1=u1.length(),l2=u2.length();
+    u1.divideScalar(l1);u2.divideScalar(l2);
+    const th=Math.acos(clamp(u1.dot(u2),-1,1));
+    if(th>Math.PI-.03||th<.03){out.push(B.clone());continue}
+    let d=R/Math.tan(th/2),r=R;const dm=Math.min(l1,l2)*.45;if(d>dm){d=dm;r=d*Math.tan(th/2)}
+    const T1=B.clone().addScaledVector(u1,d),bis=u1.clone().add(u2).normalize(),cen=B.clone().addScaledVector(bis,r/Math.sin(th/2));
+    const a1=T1.clone().sub(cen),a2=B.clone().addScaledVector(u2,d).sub(cen),ang=a1.angleTo(a2),axis=a1.clone().cross(a2).normalize();
+    for(let s=0;s<=seg;s++)out.push(cen.clone().add(a1.clone().applyAxisAngle(axis,ang*s/seg)));
+  }
+  out.push(P[P.length-1].clone());return out;
+}
+const sagPath=(a,b,sag,n)=>{a=_V(a);b=_V(b);n=n||10;const o=[];for(let i=0;i<=n;i++){const t=i/n;o.push(new THREE.Vector3().lerpVectors(a,b,t).add(new THREE.Vector3(0,-sag*4*t*(1-t),0)))}return o};
+const helixPath=(cx,cy,cz,rad,pitch,turns,n,axis)=>{const o=[],N=Math.round(turns*(n||14));for(let i=0;i<=N;i++){const t=i/(n||14),a=t*TAU;const p=axis==='x'?[cx+t*pitch,cy+Math.cos(a)*rad,cz+Math.sin(a)*rad]:[cx+Math.cos(a)*rad,cy+t*pitch,cz+Math.sin(a)*rad];o.push(new THREE.Vector3(p[0],p[1],p[2]))}return o};
+function pathAt(path,s){
+  let acc=0;for(let i=1;i<path.length;i++){const l=path[i].distanceTo(path[i-1]);if(acc+l>=s||i===path.length-1){const t=clamp((s-acc)/(l||1),0,1);return{p:path[i-1].clone().lerp(path[i],t),t:path[i].clone().sub(path[i-1]).normalize()}}acc+=l}
+}
+const pathLen=(path)=>{let l=0;for(let i=1;i<path.length;i++)l+=path[i].distanceTo(path[i-1]);return l};
+
+function ownMesh(geo,mat,cast){
+  const o=new THREE.Mesh(geo,mat);o.castShadow=cast!==false;o.receiveShadow=true;o.userData.own=true;return o;
+}
+/* surface patch from a function — tarps, flags, sagging cloth */
+function surfGeo(nu,nv,fn,tile){
+  const P=[],uv=[],idx=[];tile=tile||1;
+  const G=[];for(let j=0;j<=nv;j++){G.push([]);for(let i=0;i<=nu;i++)G[j].push(new THREE.Vector3(...fn(i/nu,j/nv)))}
+  const ac=[],ar=[];
+  for(let j=0;j<=nv;j++){ar.push([0]);for(let i=1;i<=nu;i++)ar[j].push(ar[j][i-1]+G[j][i].distanceTo(G[j][i-1]))}
+  for(let i=0;i<=nu;i++){ac.push([0]);for(let j=1;j<=nv;j++)ac[i].push(ac[i][j-1]+G[j][i].distanceTo(G[j-1][i]))}
+  for(let j=0;j<=nv;j++)for(let i=0;i<=nu;i++){const p=G[j][i];P.push(p.x,p.y,p.z);uv.push(ar[j][i]/tile,ac[i][j]/tile)}
+  for(let j=0;j<nv;j++)for(let i=0;i<nu;i++){const a=j*(nu+1)+i,b=a+1,c=a+nu+1,d=c+1;idx.push(a,c,b,b,c,d)}
+  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(P,3));g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));g.setIndex(idx);g.computeVertexNormals();return g;
+}
+function latheGeo(pr,seg,tile){
+  const g=new THREE.LatheGeometry(pr.map(p=>new THREE.Vector2(p[0],p[1])),seg||20),uv=g.attributes.uv,n=pr.length,acc=[0];
+  for(let j=1;j<n;j++)acc.push(acc[j-1]+Math.hypot(pr[j][0]-pr[j-1][0],pr[j][1]-pr[j-1][1]));
+  for(let i=0;i<=(seg||20);i++)for(let j=0;j<n;j++)uv.setXY(i*n+j,i/(seg||20)*TAU*Math.max(pr[j][0],.03)/tile,acc[j]/tile);
+  return g;
+}
+
+/* merge every static mesh in a built assembly into one mesh per material (draw calls ≈ number of materials).
+   `keep` lists objects that move or are referenced by the animator — they and their children stay as they are. */
+function bakeStatic(root,keep){
+  root.updateMatrixWorld(true);
+  const dyn=new Set();(keep||[]).forEach(o=>{if(o)o.traverse(c=>dyn.add(c))});
+  const list=[];root.traverse(o=>{if(o.isMesh&&!dyn.has(o))list.push(o)});
+  const inv=new THREE.Matrix4().copy(root.matrixWorld).invert(),buckets=new Map();
+  for(const o of list){
+    if(Array.isArray(o.material))continue;
+    const mtx=new THREE.Matrix4().multiplyMatrices(inv,o.matrixWorld),det=mtx.determinant();
+    const ng=o.geometry.index?o.geometry.toNonIndexed():o.geometry.clone();ng.applyMatrix4(mtx);
+    if(!ng.attributes.uv)ng.setAttribute('uv',new THREE.Float32BufferAttribute(new Float32Array(ng.attributes.position.count*2),2));
+    if(det<0)for(const k of ['position','normal','uv']){const a=ng.attributes[k],s=a.itemSize;for(let t=0;t<a.count;t+=3)for(let c=0;c<s;c++){const x=a.array[(t+1)*s+c];a.array[(t+1)*s+c]=a.array[(t+2)*s+c];a.array[(t+2)*s+c]=x}}
+    const key=o.material.uuid+(o.castShadow?'c':'n');let b=buckets.get(key);if(!b){b={mat:o.material,cast:o.castShadow,gs:[]};buckets.set(key,b)}
+    b.gs.push(ng);o.parent.remove(o);
+  }
+  for(const b of buckets.values()){
+    let nv=0;for(const g of b.gs)nv+=g.attributes.position.count;
+    const pos=new Float32Array(nv*3),nor=new Float32Array(nv*3),uv=new Float32Array(nv*2);let o3=0,o2=0;
+    for(const g of b.gs){pos.set(g.attributes.position.array,o3);nor.set(g.attributes.normal.array,o3);uv.set(g.attributes.uv.array,o2);o3+=g.attributes.position.count*3;o2+=g.attributes.position.count*2;g.dispose()}
+    const mg=new THREE.BufferGeometry();mg.setAttribute('position',new THREE.BufferAttribute(pos,3));mg.setAttribute('normal',new THREE.BufferAttribute(nor,3));mg.setAttribute('uv',new THREE.BufferAttribute(uv,2));
+    const mesh=ownMesh(mg,b.mat,b.cast&&!b.mat.transparent);mesh.frustumCulled=true;root.add(mesh);
+  }
+}
+
+/* ── builder kit used by every assembly ── */
+const ASMDBG={on:false,boxes:[]};
+function asmKit(){
+  const g=new THREE.Group(),keep=[];
+  const K={g,keep};
+  K.add=(o)=>{g.add(o);return o};
+  K.box=(m,x,y,z,w,h,d,rx,ry,rz,par)=>{
+    const mt=MAT[m],o=new THREE.Mesh(tiledGeo(GEO.box,mt,w,h,d,x,y,z),mt);
+    o.position.set(x,y,z);o.rotation.set(rx||0,ry||0,rz||0);o.scale.set(w,h,d);o.castShadow=true;o.receiveShadow=true;
+    (par||g).add(o);
+    if(ASMDBG.on&&!par&&!rx&&!ry&&!rz)ASMDBG.boxes.push({m,x,y,z,w,h,d});
+    return o;
+  };
+  K.mesh=(geo,m,x,y,z,rx,ry,rz,par,cast)=>{const o=ownMesh(geo,MAT[m],cast);o.position.set(x||0,y||0,z||0);o.rotation.set(rx||0,ry||0,rz||0);(par||g).add(o);return o};
+  K.tube=(m,prof,path,o,par)=>{const e=ownMesh(extrude(prof,path,o),MAT[m]);(par||g).add(e);return e};
+  K.pipe=(m,r,pts,bend,o,par)=>K.tube(m,profCircle(r,o&&o.n||10),filletPath(pts,bend||r*3,5),Object.assign({tile:.6},o||{}),par);
+  K.lathe=(m,pr,x,y,z,seg,par,tile)=>K.mesh(latheGeo(pr,seg||20,tile||1),m,x,y,z,0,0,0,par);
+  K.dyn=(o)=>{keep.push(o);return o};
+  K.sphere=(m,r,x,y,z,sx,sy,sz,par)=>{const o=ownMesh(new THREE.SphereGeometry(r,12,8),MAT[m]);o.position.set(x,y,z);o.scale.set(sx||1,sy||1,sz||1);(par||g).add(o);return o};
+  K.finish=()=>{bakeStatic(g,keep);return g};
+  return K;
+}
+function hexBolts(K,m,pts,r,par){for(const p of pts){K.mesh(latheGeo([[0,0],[r,0],[r,r*.9],[r*.6,r*1.2],[0,r*1.2]],6,.1),m,p[0],p[1],p[2],p[3]||0,p[4]||0,p[5]||0,par,false)}}
+
+function asmShelter(K,s){
+  const Hb=2.04,Hf=1.52,xs=1.46,zb=-1.25,zf=1.25,sl=(Hf-Hb)/(zf-zb);     // roof falls 0.2 m per metre towards the door
+  const yAt=(z)=>Hb+sl*(z-zb);
+  /* footings: concrete pads under every post, half buried */
+  for(const [x,z,w] of [[-xs,zb,.31],[xs,zb,.29],[-xs,zf,.27],[xs,zf,.285],[0,zb,.26]])K.box('aConc',x,.055,z,w,.17,w*.98+.004);
+  /* posts: angle iron, standing on the pads */
+  const post=(x,z,top,sz)=>K.tube('aGalv',profAngle(sz,sz,.009),[V3(x,.02,z),V3(x,top,z)],{tile:.8,roll:Math.PI/4});
+  post(-xs,zb,Hb,.083);post(xs,zb,Hb,.079);post(-xs,zf,Hf,.071);post(xs,zf,Hf,.074);post(0,zb,Hb,.066);
+  /* wall plates the rafters rest on */
+  K.tube('aBare',profIBeam(.07,.075,.01,.012),[V3(-xs-.18,Hb+.0375,zb),V3(xs+.18,Hb+.0375,zb)],{tile:.8});
+  K.tube('aBare',profIBeam(.065,.07,.009,.011),[V3(-xs-.18,Hf+.035,zf),V3(xs+.18,Hf+.035,zf)],{tile:.8});
+  /* rafters: channel iron following the slope, resting ON the plates */
+  const ry=(z,o)=>yAt(z)+.075+.045+o;
+  for(const [x,o] of [[-xs,0],[-.5,.004],[.5,-.003],[xs,.002]])
+    K.tube('aRust',profChannel(.05,.09,.006),[V3(x,ry(-1.62,o),-1.62),V3(x,ry(1.52,o),1.52)],{tile:.7});
+  /* roof: three corrugated sheets, staggered so the laps never share a plane */
+  const sheet=(x,dy,m)=>{
+    const z0=-1.64,z1=1.56,y0=ry(z0,0)+.045+.031+dy,y1=ry(z1,0)+.045+.031+dy;
+    K.tube(m,profWave(1.28,.076,.03,.0055,5),[V3(x,y0,z0),V3(x,y1,z1)],{tile:1,tu:1,tv:1,cap:true});
+  };
+  sheet(-1.14,.012,'aGalv');sheet(0,0,'aRust');sheet(1.14,.022,'aGalv');
+  /* patch plate screwed over a rusted-out hole */
+  { const z=-.3,y=ry(z,0)+.045+.031+.045; K.box('aOchre',.45,y,z,.62,.012,.54,Math.atan(-sl),0,0); }
+  /* rear wall: three corrugated sheets hung just proud of the posts */
+  for(const [x,m,dz] of [[-.98,'aRust',0],[.0,'aGalv',-.012],[.98,'aRust',.008]]){
+    K.tube(m,profWave(1.0,.076,.025,.0055,5),[V3(x,.16,zb-.1+dz),V3(x,Hb-.03,zb-.1+dz)],{tile:1,cap:true});
+  }
+  K.box('aWood',0,.88,zb+.055,2.9,.1,.045);                       // girt behind the sheets
+  K.box('aWood',0,1.58,zb+.052,2.9,.092,.04);
+  /* left wall: olive canvas pulled between the posts, laced with rope */
+  const lx=-xs-.03;
+  K.mesh(surfGeo(10,8,(a,b)=>[lx-Math.sin(a*Math.PI)*.045*Math.sin(b*Math.PI*.9)-.0,.14+b*(yAt(zb+a*2.5)-.2)+Math.sin(a*6+b*3)*.012,zb+a*(zf-zb)],.9),'aOlive',0,0,0);
+  for(let i=0;i<9;i++){const z=zb+.15+i*(2.5-.3)/8;K.tube('aRope',profCircle(.007,6),[V3(lx-.045,yAt(z)-.17,z),V3(lx+.03,yAt(z)-.17+.09,z+.1)],{tile:.2})}
+  /* right wall: bolted plate panels low down, open above so you can see out */
+  for(const [z,m,w] of [[-.72,'aPlate',.98],[.3,'aOchre',.98],[1.0,'aBlue',.4]])
+    K.box(m,xs+.06,.5,z+(m==='aBlue'?.02:0),.034+(z>0?.004:0),.82-(z>0?.05:0),w,0,0,(z>.9?.05:0));
+  K.box('aWood',xs+.06,.97,.14,.052,.06,2.4);
+  /* diagonal braces: angle iron from post to rafter, in the wall plane */
+  for(const sg of [-1,1]){
+    K.tube('aGalv',profAngle(.045,.045,.006),[V3(sg*xs,.55,zf),V3(sg*xs,Hf-.02,zf-.58)],{tile:.6});
+    K.tube('aGalv',profAngle(.045,.045,.006),[V3(sg*xs,.62,zb),V3(sg*xs,Hb-.02,zb+.52)],{tile:.6});
+  }
+  /* front curtain: canvas hung from the front plate, folded and tied back on one side */
+  K.mesh(surfGeo(14,8,(a,b)=>{const x=-xs+a*1.7,fold=Math.sin(a*TAU*3.5)*.035*(.3+b);return[x,Hf-.02-b*.95,zf+.04+fold+Math.sin(b*3)*.015]},.9),'aCanvas',0,0,0);
+  K.tube('aRope',profCircle(.009,6),[V3(-xs+.2,Hf-.02,zf+.08),V3(-xs+.5,Hf-.6,zf+.12),V3(-xs+.2,Hf-.98,zf+.07)],{tile:.2});
+  /* guy ropes: front corners out to pegs, rear right out to a rock-weighted ring — all outside the footprint */
+  const peg=(x,z,lean)=>{K.tube('aRust',profCircle(.014,8),[V3(x,-.08,z),V3(x+lean[0],.38,z+lean[1])],{tile:.4});K.pipe('aBare',.009,[V3(x+lean[0]*.9,.3,z+lean[1]*.9),V3(x+lean[0]*.55,.38,z+lean[1]*.55)],.02);
+    K.box('aConc',x+lean[0]*1.4,.04,z+lean[1]*1.4,.28,.1,.22,0,x,0)};
+  const guy=(a,b,sag)=>K.tube('aRope',profCircle(.0085,6),sagPath(a,b,sag,12),{tile:.2});
+  guy(V3(-xs-.18,Hf+.01,zf+.2),V3(-xs-1.5,.36,zf+1.4),.1);peg(-xs-1.5,zf+1.4,[.12,.1]);
+  guy(V3(xs+.18,Hf+.01,zf+.2),V3(xs+1.5,.36,zf+1.4),.1);peg(xs+1.5,zf+1.4,[-.12,.1]);
+  guy(V3(xs+.18,Hb+.01,zb-.1),V3(xs+1.55,.36,zb-1.5),.12);peg(xs+1.55,zb-1.5,[-.12,-.1]);
+  /* inside: bunk on a pallet, rolled blanket, crate, jerrycan, lantern hook */
+  K.box('aWood',-.3,.1,-.62,1.9,.07,.9);
+  for(const x of [-1.1,-.3,.5])K.box('aWood',x+.003*x,.045,-.62,.12,.09,.88+.01*x);
+  K.mesh(surfGeo(8,5,(a,b)=>[-1.22+a*1.75,.145+Math.sin(a*3.14)*.06*Math.sin(b*3.14)+.02,-1.06+b*.86],.8),'aOlive',0,0,0);
+  K.lathe('aCanvas',[[0,-.5],[.11,-.5],[.12,-.4],[.12,.4],[.11,.5],[0,.5]].map(p=>[p[0],p[1]*.7]),.38,.3,-.78,12);
+  const roll=K.g.children[K.g.children.length-1];roll.rotation.z=Math.PI/2;roll.rotation.y=.1;roll.position.set(.35,.28,-.88);
+  K.box('aWood',1.0,.2,-.7,.44,.34,.4,0,.2,0);K.box('aBare',1.0,.2,-.7,.46,.04,.42,0,.2,0);
+  K.lathe('aOlive',[[0,0],[.15,0],[.16,.02],[.16,.4],[.14,.43],[.05,.45],[.05,.5],[0,.5]],.9,0,-.2,14);
+  K.pipe('aBare',.007,[V3(0,Hb-.05,zb+.1),V3(0,Hb-.18,zb+.1),V3(.12,Hb-.24,zb+.1)],.04);
+  return K;
+}
+
+function asmWall(K,s){
+  /* corrugated sheet in an angle-iron frame, footing blocks and rear stays so it can really stand */
+  K.box('aConc',-1.12,.07,0,.52,.15,.36);K.box('aConc',1.1,.065,.01,.5,.14,.34);
+  K.tube('aGalv',profAngle(.07,.07,.008),[V3(-1.17,.05,0),V3(-1.17,1.6,0)],{tile:.8});
+  K.tube('aGalv',profAngle(.064,.064,.008),[V3(1.19,.05,0),V3(1.19,1.57,0)],{tile:.8});
+  K.tube('aRust',profChannel(.05,.09,.006),[V3(-1.28,1.63,0),V3(1.3,1.63,0)],{tile:.7});
+  K.tube('aRust',profChannel(.05,.08,.006),[V3(-1.26,.2,0),V3(1.28,.2,0)],{tile:.7});
+  for(const [x,m] of [[-.62,'aRust'],[.58,'aGalv']])
+    K.tube(m,profWave(1.2,.076,.026,.0055,5),[V3(x,.2,.002),V3(x,1.6,.002)],{tile:1,cap:true});
+  K.box('aOchre',.45,.72,.05,.7,.66,.012);                       // bolted patch on the front
+  K.box('aPlate',-.55,1.2,-.05,.62,.5,.014,0,0,.04);
+  for(const [x,sg] of [[-1.17,1],[1.19,-1]]){
+    K.tube('aGalv',profAngle(.05,.05,.007),[V3(x,.12,.34),V3(x,1.2,.04)],{tile:.7});
+    K.tube('aGalv',profAngle(.045,.045,.007),[V3(x,.12,-.34),V3(x,1.2,-.04)],{tile:.7});
+  }
+  return K;
+}
+function asmWorkbench(K,s){
+  /* angle-iron frame, timber plank top, vice, shelf, tools, work-lamp bar */
+  const L=[[-.78,-.42],[.8,-.4],[-.8,.4],[.77,.42]];
+  for(const [x,z] of L)K.tube('aGalv',profAngle(.06,.06,.007),[V3(x,0,z),V3(x,.84,z)],{tile:.7,roll:.8});
+  for(const z of [-.42,.41])K.tube('aBare',profChannel(.04,.07,.005),[V3(-.82,.8,z),V3(.84,.8,z)],{tile:.7});
+  for(const x of [-.8,.79])K.tube('aBare',profChannel(.04,.07,.005),[V3(x,.78,-.44),V3(x,.78,.44)],{tile:.7});
+  const pl=[[-.34,.052],[-.12,.046],[.1,.05],[.33,.044]];                     // planks: different widths + heights
+  let z=-.45;for(const [w,t] of [[.26,.05],[.22,.046],[.27,.052],[.21,.048]]){K.box('aWood',0,.87+t/2,z+w/2,1.86+Math.sin(z*9)*.02,t,w-.012);z+=w}
+  K.box('aBare',0,.28,0,1.66,.034,.86);                                        // lower shelf plate
+  K.box('aRust',-.78,.55,0,.02,.04,.84,0,0,0);
+  K.tube('aGalv',profAngle(.04,.04,.005),[V3(-.8,.2,-.4),V3(.8,.62,.4)],{tile:.6});
+  K.tube('aGalv',profAngle(.04,.04,.005),[V3(.8,.2,-.4),V3(-.8,.62,.4)],{tile:.6});
+  /* vice */
+  K.box('aBare',.62,1.0,-.28,.2,.12,.22);K.box('aBare',.62,.97,-.14,.12,.07,.12);
+  K.pipe('aBare',.011,[V3(.62,1.0,-.12),V3(.62,1.0,.12)],.01);K.pipe('aBare',.007,[V3(.5,1.0,.1),V3(.74,1.0,.1)],.01);
+  /* tools laid out */
+  K.box('aWood',-.3,.925,.12,.34,.025,.028,0,.4,0);K.box('aBare',-.17,.94,.05,.05,.05,.1,0,.4,0);          // hammer
+  K.pipe('aBare',.012,[V3(-.62,.93,-.3),V3(-.1,.93,-.28)],.01);                                               // pipe offcut
+  K.box('aRust',.1,.93,.2,.22,.03,.08,0,.2,0);
+  K.lathe('aBlue',[[0,0],[.07,0],[.08,.02],[.08,.2],[.06,.22],[.03,.22],[.03,.25],[0,.25]],-.65,.89,.25,12);   // oil can
+  /* back rail with pegboard + lamp bar */
+  for(const x of [-.82,.82])K.tube('aGalv',profAngle(.045,.045,.006),[V3(x,.84,-.46),V3(x,1.5,-.46)],{tile:.7});
+  K.box('aPlate',0,1.18,-.485,1.5,.54,.022);
+  K.box('aBare',0,1.5,-.45,1.74,.04,.06);
+  K.box('lampOn',0,1.44,-.33,.62,.034,.05);
+  K.pipe('aBare',.006,[V3(-.45,1.45,-.45),V3(-.45,1.5,-.4)],.02);
+  K.tube('aRubber',profCircle(.008,6),sagPath(V3(.8,1.46,-.46),V3(.9,.4,-.5),.12,10),{tile:.2});
+  return K;
+}
+function asmTank(K,s){
+  /* riveted drum on a braced angle-iron stand: ladder, sight tube, outlet with gate wheel */
+  const cy=1.12,R=.66;
+  const prof=[[0,-.7],[.38,-.7],[.58,-.67],[.65,-.6],[.664,-.52],[.664,.52],[.65,.6],[.58,.67],[.38,.7],[0,.7]];
+  K.lathe('aRust',prof,0,cy,0,28,null,1.1);
+  for(const y of [-.42,.02,.46])K.lathe('aBare',[[.656,y-.03],[.688,y-.024],[.694,y],[.688,y+.024],[.656,y+.03]],0,cy,0,28,null,.5);
+  K.box('aPlate',0,cy+.12,.672,.34,.28,.016);
+  K.box('aOchre',.3,cy-.3,.668,.003+.2,.18,.011);
+  const L=[[-.5,-.5],[.5,-.5],[-.5,.5],[.5,.5]];
+  L.forEach(([x,z],a)=>{K.tube('aGalv',profAngle(.06+a*.003,.06+a*.003,.008),[V3(x,.04,z),V3(x,.44,z)],{tile:.7,roll:a});K.box('aConc',x,.05,z,.24+a*.012,.1,.24-a*.01)});
+  K.tube('aBare',profChannel(.04,.06,.005),[V3(-.54,.3,-.5),V3(.54,.3,-.5)],{tile:.6});
+  K.tube('aBare',profChannel(.04,.058,.005),[V3(.5,.34,-.54),V3(.5,.34,.54)],{tile:.6});
+  K.tube('aBare',profChannel(.04,.062,.005),[V3(-.54,.38,.5),V3(.54,.38,.5)],{tile:.6});
+  K.tube('aBare',profChannel(.04,.056,.005),[V3(-.5,.32,-.54),V3(-.5,.32,.54)],{tile:.6});
+  K.tube('aGalv',profAngle(.04,.04,.005),[V3(-.5,.08,-.52),V3(.5,.4,-.52)],{tile:.6});
+  K.tube('aGalv',profAngle(.04,.04,.005),[V3(.52,.08,-.5),V3(.52,.4,.5)],{tile:.6});
+  /* top: hatch + vent + ladder */
+  K.lathe('aGalv',[[0,0],[.19,0],[.2,.03],[.2,.07],[.14,.1],[0,.12]],0,cy+.68,0,14,null,.5);
+  K.pipe('aGalv',.04,[V3(.36,cy+.62,.0),V3(.36,cy+.86,.0),V3(.42,cy+.94,.0),V3(.48,cy+.86,.0)],.06);
+  for(const z of [-.14,.14])K.tube('aGalv',profCircle(.014,6),[V3(.78,.12,z),V3(.7,cy+.62,z)],{tile:.5});
+  for(let i=0;i<8;i++)K.pipe('aBare',.009,[V3(.775-i*.009,.3+i*.2,-.14),V3(.775-i*.009,.3+i*.2,.14)],.01);
+  /* sight tube and outlet pipework */
+  K.tube('aGlass',profCircle(.022,8),[V3(-.78,.55,.18),V3(-.78,1.62,.18)],{tile:.5});
+  for(const y of [.55,1.62])K.pipe('aBare',.018,[V3(-.66,y,.18),V3(-.8,y,.18)],.01);
+  K.pipe('aRust',.034,[V3(.0,.46,.66),V3(.0,.34,.84),V3(.0,.22,1.0),V3(.3,.22,1.08),V3(.44,.2,.96)],.1,{tile:.5});
+  K.lathe('aCopper',[[0,-.06],[.07,-.06],[.075,-.02],[.05,.06],[.03,.14],[0,.14]],.0,.22,1.0,12);
+  K.mesh(extrude(profCircle(.01,6),filletPath([V3(0,.36,1.0),V3(0,.46,1.0)],.02,2),{tile:.4}),'aBare');
+  K.mesh(new THREE.TorusGeometry(.07,.01,5,14),'aBare',0,.48,1.0,0,0,0);
+  return K;
+}
+function asmTrough(K,s){
+  /* riveted steel planter on trestle legs, drip line along the rim */
+  K.box('aPlate',0,.28,.555,2.0,.38,.034);K.box('aOchre',0,.285,-.556,2.0,.37,.03);
+  K.box('aRust',1.013,.28,0,.036,.38,1.08);K.box('aBlue',-1.01,.28,0,.032,.38,1.08);
+  K.box('aBare',0,.095,0,1.96,.03,1.06);
+  K.box('aSoil',0,.4,0,1.93,.12,1.04);                         // top at .46 like the old trough
+  K.tube('aRust',profAngle(.05,.05,.006),[V3(-1.03,.5,.57),V3(1.03,.5,.57)],{tile:.6,roll:2.4});
+  K.tube('aRust',profAngle(.046,.046,.006),[V3(-1.03,.49,-.57),V3(1.03,.49,-.57)],{tile:.6,roll:.7});
+  for(const x of [-.82,.0,.82]){K.tube('aGalv',profAngle(.06,.06,.007),[V3(x,.0,.52),V3(x+.05,.2,.0),V3(x,.0,-.52)],{tile:.7});K.box('aConc',x,.03,.5,.2,.07,.12+x*.01)}
+  K.pipe('aCopper',.015,[V3(-1.2,.04,-.2),V3(-1.2,.58,-.2),V3(-1.0,.64,-.3),V3(.9,.64,-.3),V3(.98,.62,-.1)],.05,{tile:.4});
+  for(const x of [-.6,-.1,.4,.85])K.pipe('aRubber',.006,[V3(x,.64,-.3),V3(x+.02,.5,-.1)],.03);
+  K.mesh(new THREE.TorusGeometry(.055,.012,5,12),'aBare',-1.14,.4,-.2,0,Math.PI/2,0);
+  s.crop=new THREE.Group();K.g.add(s.crop);
+  s.crop.add(ownMesh(new THREE.ConeGeometry(.5,1,8),MAT.leaf));s.crop.children[0].position.set(0,.62,0);s.crop.children[0].scale.set(.3,.3,.3);s.crop.children[0].userData.own=true;
+  K.dyn(s.crop);
+  return K;
+}
+
+function asmHarvester(K,s){
+  /* dew harvester: a mast with a stack of galvanised condenser cones, a wind-driven fan up top, a drain pipe into a drum */
+  K.box('aConc',0,.075,0,1.5,.15,1.46);
+  K.lathe('aBlue',[[0,0],[.3,0],[.32,.04],[.32,.74],[.3,.78],[0,.8]],.0,.15,-.5,18,null,.9);              // drum
+  for(const y of [.2,.55])K.lathe('aBare',[[.312,y],[.332,y+.01],[.332,y+.03],[.312,y+.04]],0,.15,-.5,18,null,.5);
+  K.mesh(latheGeo([[0,0],[.08,0],[.08,.06],[0,.06]],10,.2),'aCopper',0,.95,-.5);
+  K.tube('aGalv',profCircle(.075,14),[V3(0,.15,.1),V3(0,2.0,.1)],{tile:.8});                              // mast
+  for(let i=0;i<3;i++){const a=i*TAU/3+.4;K.tube('aBare',profCircle(.012,6),[V3(Math.cos(a)*.3,.2,.1+Math.sin(a)*.3),V3(Math.cos(a)*.3,1.96,.1+Math.sin(a)*.3)],{tile:.3});K.lathe('aBare',[[0,0],[.03,0],[.03,.02],[0,.03]],Math.cos(a)*.3,1.96,.1+Math.sin(a)*.3,6)}
+    for(let i=0;i<5;i++){                                                                                      // condenser cones
+    const y=.6+i*.26,r=.62-i*.05;
+    K.lathe('aGalv',[[.07,0],[r,-.16],[r+.01,-.15],[.075,.012]],0,y,.1,24,null,.8);
+  }
+  K.lathe('aCopper',[[0,0],[.34,-.18],[.345,-.17],[0,.02]],0,.52,.1,24,null,.5);
+  K.pipe('aRust',.03,[V3(0,.33,.1),V3(0,.26,.3),V3(0,.26,-.3),V3(0,.46,-.5),V3(0,.94,-.5)],.1,{tile:.5});    // drain → drum
+  K.pipe('aCopper',.02,[V3(.1,.95,-.5),V3(.3,1.05,-.56),V3(.6,.5,-.6),V3(.62,.12,-.3)],.08,{tile:.4});
+  K.box('aBare',0,1.98,.1,.2,.04,.2);
+  /* fan: hub + 6 pitched blades, spins about Y (the animator drives s.fan.rotation.y) */
+  const fan=new THREE.Group();fan.position.set(0,2.1,.1);K.g.add(fan);
+  K.lathe('aBare',[[0,0],[.1,0],[.12,.03],[.06,.12],[0,.14]],0,-.05,0,12,fan);
+  for(let i=0;i<6;i++){
+    const a=i*TAU/6;
+    const bl=K.tube('aGalv',profAirfoil(.22,.05,.04,6),[V3(.1,0,0),V3(.62,.0,0)],{tile:.5,sc:t=>1-.35*t,roll:.5},fan);
+    bl.rotation.y=-a;
+  }
+  K.dyn(fan);s.fan=fan;
+  K.mesh(extrude(profCircle(.011,6),sagPath(V3(0,1.7,.15),V3(.5,.12,.62),.0,2),{tile:.3}),'aRubber');
+  return K;
+}
+function asmPurifier(K,s){
+  /* solar still: a shallow riveted tray under a tilted glass lid, with a collecting gutter and bottle */
+  K.box('aConc',0,.07,0,1.74,.14,1.74);
+  K.box('aBlue',0,.31,.72,1.62,.34,.03);K.box('aPlate',0,.3,-.7,1.62,.32,.028);
+  K.box('aRust',.8,.3,0,.03,.3,1.4);K.box('aOchre',-.8,.3,0,.034,.34,1.4);
+  K.box('aSoil',0,.2,0,1.5,.04,1.36);                                    // dark basin
+  const gl=(x,w)=>K.box('aGlass',x,.74,0,w,.014,1.5,0,0,0);
+  const lid=new THREE.Group();lid.position.set(0,.5,0);K.g.add(lid);
+  K.box('aGlass',0,.5,-.34,1.54,.016,.84,-.42,0,0,lid);K.box('aGlass',0,.5,.34,1.54,.014,.84,.42,0,0,lid);
+  for(const x of [-.78,.78]){K.tube('aGalv',profAngle(.04,.04,.005),[V3(x,.32,-.74),V3(x,.65,0),V3(x,.32,.74)],{tile:.5})}
+  K.tube('aBare',profChannel(.05,.05,.005),[V3(-.82,.64,0),V3(.82,.64,0)],{tile:.5});
+  for(const z of [.72,-.72])K.tube('aBare',profChannel(.04,.04,.005),[V3(-.8,.335,z),V3(.8,.335,z)],{tile:.5});
+  K.tube('aCopper',profChannel(.06,.05,.005),[V3(-.76,.34,.82),V3(.76,.31,.82)],{tile:.5});                  // gutter
+  K.pipe('aCopper',.02,[V3(.76,.3,.82),V3(.95,.28,.82),V3(.98,.1,.9)],.05,{tile:.4});
+  K.lathe('aGlass',[[0,0],[.1,0],[.11,.04],[.11,.26],[.05,.3],[.05,.4],[0,.4]],.98,.0,.95,12);
+  K.mesh(new THREE.TorusGeometry(.09,.012,5,10),'aBare',.0,.0,0);
+  K.g.children[K.g.children.length-1].position.set(.98,.38,.95);K.g.children[K.g.children.length-1].rotation.x=Math.PI/2;
+  return K;
+}
+function asmLamp(K,s){
+  /* tapered pipe pole on a bolted base plate and pad, bent arm, cowled lamp, cable running down */
+  K.box('aConc',0,.06,0,.56,.12,.5);
+  K.box('aBare',0,.138,0,.34,.026,.34);
+  hexBolts(K,'aBare',[[-.13,.15,-.13],[.13,.15,-.13],[-.13,.15,.13],[.13,.15,.13]],.018);
+  K.tube('aRust',profCircle(.075,14),[V3(0,.15,0),V3(0,1.6,0)],{tile:.7,sc:t=>1-.28*t});
+  K.tube('aRust',profCircle(.056,14),[V3(0,1.6,0),V3(0,2.95,0)],{tile:.7});
+  K.lathe('aBare',[[.056,0],[.075,0],[.08,.04],[.07,.07],[.056,.07]],0,1.55,0,14);
+  K.pipe('aGalv',.034,[V3(0,2.9,0),V3(0,3.02,0),V3(0,3.1,.12),V3(0,3.06,.45),V3(0,2.98,.56)],.12,{tile:.5});
+  K.lathe('aRust',[[.04,.0],[.22,-.12],[.25,-.16],[.2,-.2],[.04,-.04]].reverse(),0,3.0,.58,16);               // cowl
+  K.mesh(latheGeo([[.19,-.17],[.2,-.2],[.05,-.2]],16,.3),'aGlass',0,3.0,.58);
+  s.bulb=K.sphere('lampOn',.1,0,2.79,.58,.9,1.15,.9);
+  K.dyn(s.bulb);
+  K.tube('aRubber',profCircle(.009,6),[V3(.06,.14,.05),V3(.07,1.0,.06),V3(.06,2.95,.0),V3(.0,3.07,.1),V3(0,3.0,.45)],{tile:.3});
+  K.tube('aGalv',profAngle(.05,.05,.006),[V3(0,.5,.5),V3(0,.12,.3)],{tile:.5});
+  return K;
+}
+function asmBattery(K,s){
+  /* timber cradle holding six chemical cells, copper bus bars, a clip-on gauge */
+  K.box('aWood',0,.12,0,1.66,.12,1.04);
+  for(const x of [-.6,0,.6])K.box('aWood',x*1.0+x*.02,.04,0,.1,.08,1.1-x*.02);
+  for(const z of [-.5,.5])K.box('aWood',0,.3,z,1.58,.34+z*.02,.045+z*.01);
+  K.box('aWood',-.8,.3,0,.05,.34,.94);K.box('aWood',.8,.3,0,.046,.32,.93);
+  let i=0;for(const x of [-.5,0,.5])for(const z of [-.22,.22]){
+    const m=(i++%2)?'aBlue':'aOchre',h=.52+((i*7)%5)*.012;
+    K.lathe(m,[[0,0],[.2,0],[.215,.02],[.215,h-.04],[.2,h],[0,h]],x,.18,z,16,null,.9);
+    K.lathe('aBare',[[0,0],[.045,0],[.045,.05],[0,.05]],x,.18+h,z,8);
+  }
+  K.pipe('aCopper',.012,[V3(-.5,.76,-.22),V3(-.5,.82,0),V3(-.5,.76,.22)],.05);
+  K.pipe('aCopper',.012,[V3(0,.76,.22),V3(0,.84,.0),V3(.5,.84,0),V3(.5,.76,-.22)],.05);
+  K.pipe('aCopper',.012,[V3(-.5,.76,.22),V3(-.3,.9,.0),V3(0,.9,-.0),V3(0,.76,-.22)],.05);
+  K.tube('aRubber',profCircle(.018,6),[V3(.5,.76,.22),V3(.55,.9,.4),V3(.8,.5,.55),V3(.82,.14,.7),V3(.6,.05,.9)],{tile:.3});
+  K.box('aBare',.2,.88,.36,.18,.16,.05);K.box('lampOn',.2,.89,.388,.1,.03,.003+.002);
+  return K;
+}
+function asmSolar(K,s){
+  /* two cracked, dusty panels on a pitched rack: tall front legs, short rear legs, diagonal brace, cable run */
+  const tilt=.5,py=.72;
+  for(const [x,z,w] of [[-.82,.5,.3],[.84,.5,.28],[-.82,-.5,.32],[.84,-.5,.27]])K.box('aConc',x,.055,z,w,.11+x*.004,w*.96);
+  const rack=new THREE.Group();rack.position.set(0,py,0);rack.rotation.x=-tilt;K.g.add(rack);
+  for(const x of [-1.08,0,1.1])K.box('aBare',x,-.02,0,.05+x*.004,.045,1.62,0,0,0,rack);
+  for(const z of [-.76,.78])K.tube('aGalv',profChannel(.04,.05,.005),[V3(-1.1,-.025,z),V3(1.12,-.025,z)],{tile:.5},rack);
+  for(const [x,w] of [[-.54,1.02],[.57,1.04]]){
+    K.box('aBare',x,.012,0,w+.05,.026,1.5,0,0,0,rack);
+    K.box('aSolar',x,.034+(x>0?.002:0),0,w,.022,1.44,0,0,0,rack);
+  }
+  for(const x of [-.82,.84]){
+    K.tube('aGalv',profAngle(.05,.05,.006),[V3(x,.08,.5),V3(x,py+.546*.5-.07,.5)],{tile:.5});
+    K.tube('aGalv',profAngle(.05,.05,.006),[V3(x,.08,-.5),V3(x,py-.273-.07,-.5)],{tile:.5});
+    K.tube('aGalv',profAngle(.04,.04,.005),[V3(x,.12,.5),V3(x,py-.273-.09,-.5)],{tile:.5});
+  }
+  K.tube('aBare',profChannel(.04,.05,.005),[V3(-.9,py-.273-.2,-.51),V3(.92,py-.273-.2,-.51)],{tile:.5});
+  K.box('aBare',.2,.52,-.62,.2,.14,.1);
+  K.tube('aRubber',profCircle(.012,6),[V3(.2,.5,-.67),V3(.3,.1,-.9),V3(.9,.04,-.95),V3(1.3,.03,-.7)],{tile:.3});
+  return K;
+}
+
+function asmWindmill(K,s){
+  /* three-legged lattice tower of angle iron, braced in rings; nacelle, tail vane, three twisted blades */
+  const H=4.8,R0=.62,R1=.16;
+  K.box('aConc',0,.08,0,1.34,.16,1.28);
+  const leg=(a)=>[V3(Math.cos(a)*R0,.1,Math.sin(a)*R0),V3(Math.cos(a)*R1,H,Math.sin(a)*R1)];
+  const A=[.3,.3+TAU/3,.3+2*TAU/3];
+  A.forEach((a,i)=>K.tube('aGalv',profAngle(.07-i*.004,.07-i*.004,.008),leg(a),{tile:.8,up:V3(Math.cos(a),0,Math.sin(a)),roll:Math.PI/4}));
+  const P=(a,t)=>{const r=lerp(R0,R1,t);return V3(Math.cos(a)*r,lerp(.1,H,t),Math.sin(a)*r)};
+  for(let k=0;k<7;k++){const t0=k/7,t1=(k+1)/7;
+    for(let i=0;i<3;i++){const a=A[i],b=A[(i+1)%3];
+      K.tube('aBare',profAngle(.03,.03,.004),[P(a,t0),P(b,t1)],{tile:.4});
+      K.tube('aBare',profAngle(.028,.028,.004),[P(b,t0),P(a,t1)],{tile:.4});}
+    if(k%2===0)for(let i=0;i<3;i++)K.tube('aBare',profAngle(.03,.03,.004),[P(A[i],t0),P(A[(i+1)%3],t0)],{tile:.4});
+  }
+  K.lathe('aRust',[[0,0],[.19,0],[.2,.05],[.15,.1],[0,.1]],0,H,0,18);
+  K.lathe('aBare',[[0,0],[.17,0],[.19,.04],[.17,.2],[0,.22]],0,H+.08,0,18,null,.6);
+  /* nacelle + tail boom + vane */
+  K.mesh(latheGeo([[0,-.3],[.14,-.25],[.2,-.1],[.2,.25],[.15,.34],[0,.36]],18,.8),'aRust',0,H+.32,0,Math.PI/2,0,0);
+  K.tube('aGalv',profCircle(.032,8),[V3(0,H+.32,-.3),V3(0,H+.4,-1.6)],{tile:.5});
+  K.box('aOchre',0,H+.74,-1.5,.025,.62,.8,0,0,0);K.box('aPlate',.0,H+.38,-1.55,.7,.02,.5);
+  K.tube('aRubber',profCircle(.01,6),[V3(.1,H+.1,.0),V3(.1,2.4,.12),V3(.06,.3,.3),V3(.4,.05,.6)],{tile:.3});
+  /* rotor — the animator spins s.blades about z */
+  const hub=new THREE.Group();hub.position.set(0,H+.32,.5);K.g.add(hub);
+  K.lathe('aBare',[[0,0],[.11,0],[.15,.05],[.1,.16],[0,.2]],0,0,0,14,hub);
+  hub.children[hub.children.length-1].rotation.x=Math.PI/2;
+  for(let i=0;i<3;i++){
+    const a=i*TAU/3,b=K.tube('aWood',profAirfoil(.26,.07,.03,8),[V3(0,.14,0),V3(0,1.95,0)],{tile:.6,sc:t=>1-.55*t,roll:.5},hub);
+    b.rotation.z=a-Math.PI/2+Math.PI/2;b.rotation.x=0;
+    const bm=b;bm.rotation.set(0,0,a-Math.PI/2);
+  }
+  K.dyn(hub);s.blades=hub;
+  return K;
+}
+function asmStove(K,s){
+  /* oil-drum stove with a door, a pot on the plate, an elbowed flue with a rain hat, and a glowing element */
+  for(const [x,z,a] of [[-.34,-.3,0],[.34,-.3,1],[-.34,.3,2],[.34,.3,3]])K.tube('aGalv',profAngle(.05,.05,.006),[V3(x,0,z),V3(x,.22,z)],{tile:.5,roll:a});
+  K.lathe('aRust',[[0,0],[.37,0],[.4,.03],[.4,.62],[.37,.66],[0,.66]],0,.2,0,24,null,1);
+  for(const y of [.14,.46])K.lathe('aBare',[[.395,y],[.418,y+.012],[.418,y+.03],[.395,y+.042]],0,.2,0,24,null,.5);
+  K.box('aPlate',0,.52,.405,.34,.26,.02);
+  K.box('aBare',0,.58,.418,.03,.12,.016+.002);K.mesh(new THREE.TorusGeometry(.03,.007,5,10),'aBare',.0,.78,.416,0,0,0);
+  K.lathe('aBare',[[.2,0],[.43,0],[.44,.025],[.3,.03],[.2,.03]],0,.86,0,24,null,.5);                            // top plate
+  s.ember=K.sphere('lampOn',.2,0,.89,0,1,.1,1);K.dyn(s.ember);
+  K.lathe('aGalv',[[0,0],[.15,0],[.16,.02],[.16,.17],[.15,.19],[.13,.2],[0,.2]],.0,.9,.0,16,null,.5);
+  K.mesh(new THREE.TorusGeometry(.162,.009,5,18),'aBare',0,1.09,0,Math.PI/2,0,0);
+  K.pipe('aBare',.012,[V3(.15,1.05,0),V3(.27,1.08,0),V3(.3,.96,0)],.04);
+  K.box('aWood',.05,.0,.05,.001,.001,.001);
+  K.pipe('aRust',.055,[V3(-.18,.86,-.2),V3(-.18,1.5,-.2),V3(-.26,1.62,-.2),V3(-.5,1.72,-.2)],.12,{tile:.5});
+  K.lathe('aGalv',[[0,.03],[.15,-.07],[.14,-.06],[0,0]].reverse().reverse(),-.5,1.78,-.2,12,null,.5);
+  K.tube('aGalv',profCircle(.012,6),[V3(-.5,1.7,-.2),V3(-.5,1.76,-.2)],{tile:.3});
+  K.tube('aRubber',profCircle(.012,6),[V3(.3,.3,-.38),V3(.5,.1,-.7),V3(.9,.04,-.8),V3(1.2,.03,-.7)],{tile:.3});
+  return K;
+}
+function asmCrate(K,s){
+  /* heavy plank bin with strap iron and corner brackets, lid propped ajar */
+  const w=1.2,d=1.0,h=.78;
+  K.box('aWood',0,.06,0,w-.02,.05,d-.02);
+  for(const [x,z,sx,sz] of [[0,d/2-.02,w,.048],[0,-d/2+.022,w-.01,.044],[w/2-.02,0,.05,d-.07],[-w/2+.023,0,.044,d-.08]]){
+    for(let i=0;i<4;i++)K.box('aWood',x,.1+i*.178+(i%2)*.004,z,sx,.17,sz,0,0,0);
+  }
+  for(const y of [.2,.62])K.tube('aBare',profRect(.03,.012),[V3(-w/2-.01,y,d/2+.012),V3(w/2+.01,y,d/2+.012)],{tile:.4});
+  for(const [x,z] of [[-w/2,d/2],[w/2,d/2],[-w/2,-d/2],[w/2,-d/2]])K.tube('aBare',profAngle(.06,.06,.007),[V3(x,.02,z),V3(x,h,z)],{tile:.5,roll:(x>0?1:3)+(z>0?0:.5)});
+  K.box('aPlate',.0,.5,d/2+.02,.4,.3,.012);
+  const lid=new THREE.Group();lid.position.set(0,h+.02,-d/2);lid.rotation.x=-.5;K.g.add(lid);
+  for(let i=0;i<4;i++)K.box('aWood',0,0,.12+i*.228,w+.06,.04,.215,0,0,0,lid);
+  K.box('aBare',-.4,.03,.5,.05,.014,d-.06,0,0,0,lid);K.box('aBare',.4,.032,.5,.052,.014,d-.07,0,0,0,lid);
+  K.box('aBare',0,.04,0.03,w+.08,.04,.04,0,0,0,lid);
+  K.box('aWood',.0,.82,.24,.95,.05,.5,0,0,0);
+  K.box('aOlive',-.2,.88,.15,.5,.1,.35,0,.4,0);
+  return K;
+}
+function asmSign(K,s){
+  /* pipe post set in a stone-weighted footing, cross-arm, riveted board on chains, and a canvas pennant */
+  K.box('aConc',0,.07,0,.5,.14,.46);
+  for(const [x,z,r] of [[.2,.14,.12],[-.18,-.16,.1],[.14,-.2,.09]])K.mesh(new THREE.IcosahedronGeometry(r,1),'aRockS',x,r*.5,z,0,x*9,0);
+  K.tube('aRust',profCircle(.058,12),[V3(0,.12,0),V3(0,1.6,0)],{tile:.7,sc:t=>1-.18*t});
+  K.tube('aRust',profCircle(.047,12),[V3(0,1.6,0),V3(0,2.62,0)],{tile:.7});
+  K.pipe('aGalv',.03,[V3(0,2.3,0),V3(.0,2.38,0),V3(.1,2.44,.0),V3(1.2,2.44,0)],.08,{tile:.5});
+  K.tube('aGalv',profAngle(.04,.04,.005),[V3(0,1.9,0),V3(.5,2.4,0)],{tile:.4});
+  for(const x of [.5,1.0])K.tube('aBare',profCircle(.006,5),[V3(x,2.42,.02),V3(x+.01,2.08,.02)],{tile:.2});
+  K.box('aOchre',.75,1.85,.02,.84,.46,.03);K.box('aBlue',.75,1.85,.044,.7,.34,.012);
+  K.tube('aGalv',profCircle(.028,8),[V3(0,2.58,0),V3(.0,2.78,0)],{tile:.4});
+  K.lathe('aCopper',[[0,0],[.045,0],[.05,.02],[.03,.08],[0,.1]],0,2.62,0,8);
+  const fl=new THREE.Group();fl.position.set(.06,2.22,0);K.g.add(fl);
+  K.mesh(surfGeo(8,3,(a,b)=>[-a*.78,-b*.34-a*.05*b,Math.sin(a*TAU*1.4)*.035*a],.8),'aCanvas',0,0,0,0,0,0,fl);
+  K.tube('aGalv',profCircle(.012,6),[V3(.0,.04,0),V3(-.82,.07,0)],{tile:.3},fl);
+  K.dyn(fl);s.flag=fl;
+  return K;
+}
+function asmMast(K,s){
+  /* square lattice tower on a concrete plinth with a cabinet, three guys to anchor blocks, a dish on a slewing head */
+  const H=5.85;
+  K.box('aConc',0,.14,0,.82,.28,.8);K.box('aBare',0,.296,0,.5,.03,.5);
+  const c=[[-.16,-.16],[.16,-.16],[.16,.16],[-.16,.16]];
+  c.forEach(([x,z],i)=>K.tube('aGalv',profAngle(.055-i*.003,.055-i*.003,.007),[V3(x,.3,z),V3(x*.62,H,z*.62)],{tile:.8,roll:i*TAU/4+.8}));
+  for(let k=0;k<12;k++){const t0=k/12,t1=(k+1)/12,y0=.3+t0*(H-.3),y1=.3+t1*(H-.3),s0=1-.38*t0,s1=1-.38*t1;
+    for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];
+      K.tube('aBare',profAngle(.022,.022,.003),[V3(a[0]*s0,y0,a[1]*s0),V3(b[0]*s1,y1,b[1]*s1)],{tile:.3});}
+    if(k%3===0)for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];K.tube('aBare',profAngle(.024,.024,.003),[V3(a[0]*s0,y0,a[1]*s0),V3(b[0]*s0,y0,b[1]*s0)],{tile:.3})}
+  }
+  K.box('aPlate',.36,.45,.05,.34,.5,.3);K.box('aBare',.36,.72,.05,.38,.025,.34);
+  K.pipe('aRust',.014,[V3(.2,.55,.05),V3(.1,.6,.05),V3(.0,.9,.0)],.04);
+  /* guys: far out enough to clear the plinth, anchored in blocks */
+  [.5,.5+TAU/3,.5+2*TAU/3].forEach((a,i)=>{
+    const ax=Math.cos(a)*2.6,az=Math.sin(a)*2.6;
+    K.box('aConc',ax,.07,az,.34+i*.02,.15,.3+i*.015,0,a,0);
+    K.tube('aBare',profCircle(.009,5),sagPath(V3(Math.cos(a)*.1,4.3,Math.sin(a)*.1),V3(ax,.14,az),.07,14),{tile:.3});
+    K.pipe('aBare',.012,[V3(ax,.12,az),V3(ax,.26,az)],.02);
+  });
+  /* head + dish (animator turns s.dish about Y) */
+  K.lathe('aBare',[[0,0],[.1,0],[.1,.12],[.06,.16],[0,.16]],0,H,0,12);
+  const dish=new THREE.Group();dish.position.set(0,H+.16,0);K.g.add(dish);
+  K.mesh(latheGeo([[0,.0],[.2,.03],[.4,.12],[.62,.28],[.64,.28],[.4,.14],[.2,.05],[0,.02]],24,.8),'aGalv',0,0,0,-1.1,0,0,dish);
+  const arm=K.tube('aBare',profAngle(.02,.02,.003),[V3(0,.04,0),V3(0,.46,.54)],{tile:.3},dish);
+  K.lathe('aBare',[[0,0],[.025,0],[.025,.08],[0,.1]],0,.5,.58,8,dish);
+  K.tube('aBare',profCircle(.006,5),[V3(.24,.12,.0),V3(.3,.65,0)],{tile:.2},dish);
+  K.dyn(dish);s.dish=dish;
+  K.tube('aBare',profCircle(.007,5),[V3(.12,4.8,.12),V3(.1,H+.8,.1)],{tile:.2});
+  K.sphere('lampOn',.04,.1,H+.8,.1);
+  return K;
+}
+
+function asmBuggy(K,s){
+  /* tube-framed electric dune buggy: ladder chassis, panelled bonnet, roll cage, solar canopy, balloon tyres */
+  const rail=(x,m)=>K.tube(m,profChannel(.06,.1,.007),[V3(x,.5,-1.46),V3(x,.5,1.5)],{tile:.7});
+  rail(-.56,'aRust');rail(.57,'aBare');
+  for(const z of [-1.3,-.4,.5,1.3])K.tube('aGalv',profChannel(.05,.07,.006),[V3(-.6,.46+z*.004,z),V3(.62,.46+z*.004,z)],{tile:.6});
+  K.box('aPlate',0,.575,-.1,1.04,.022,2.2);
+  K.box('aOchre',0,.585,1.1,1.0,.02,.5);
+  /* bonnet */
+  K.box('aBlue',0,.78,1.08,1.18,.4,.88,.0,0,0);
+  K.box('aPlate',0,.99,1.28,1.1,.03,.55,-.2,0,0);
+  for(let i=0;i<5;i++)K.box('aBare',0,.62+i*.065,1.526,.78-i*.02,.018,.02+i*.002);
+  for(const x of [-.4,.4])K.sphere('lampOn',.1,x*1.14,.85,1.52,1,1,.7);
+  for(const x of [-.4,.4])K.tube('aBare',profCircle(.02,8),[V3(x*1.14,.76,1.5),V3(x*1.14,.94,1.5)],{tile:.3});
+  /* rear battery crate and cable */
+  K.box('aWood',0,.76,-.95,1.3,.34,.94);
+  K.box('aBare',0,.955,-.95,1.34,.04,.98);
+  K.box('aPlate',.0,.77,-1.43,.5,.22,.016);
+  K.tube('aRubber',profCircle(.02,6),[V3(.2,.95,-.7),V3(.12,.8,-.4),V3(.05,.64,.1),V3(0,.62,.6),V3(0,.8,.95)],{tile:.3});
+  K.lathe('aOlive',[[0,0],[.14,0],[.15,.02],[.15,.36],[.12,.4],[.05,.42],[.05,.46],[0,.46]],-.35,.97,-1.1,12);
+  /* seat + wheel */
+  K.box('aCanvas',0,.7,.12,.78,.14,.7);K.box('aCanvas',0,.98,-.28,.78,.56,.14,-.14,0,0);
+  K.tube('aGalv',profAngle(.04,.04,.005),[V3(-.34,.62,-.18),V3(-.36,1.1,-.34)],{tile:.4});
+  K.tube('aGalv',profAngle(.04,.04,.005),[V3(.34,.62,-.18),V3(.36,1.1,-.34)],{tile:.4});
+  K.tube('aGalv',profCircle(.022,8),[V3(0,.62,.6),V3(0,1.0,.52),V3(0,1.2,.32)],{tile:.4});
+  K.mesh(new THREE.TorusGeometry(.17,.016,6,18),'aRubber',0,1.2,.3,.6,0,0);
+  /* roll cage: bent pipe hoops with brace and top frame */
+  for(const [z,x0] of [[.5,.7],[-.78,.7]])for(const sg of [-1,1])
+    K.pipe('aGalv',.024,[V3(sg*x0,.58,z),V3(sg*x0,1.6,z),V3(sg*(x0-.06),1.96,z),V3(sg*(x0-.2),2.0,z)],.09,{tile:.5});
+  for(const sg of [-1,1])K.pipe('aGalv',.022,[V3(sg*.64,2.0,.5),V3(sg*.64,2.02,-.14),V3(sg*.64,2.0,-.78)],.08,{tile:.5});
+  K.tube('aGalv',profCircle(.022,8),[V3(-.5,1.99,.5),V3(.5,1.99,.5)],{tile:.5});
+  K.tube('aGalv',profCircle(.022,8),[V3(-.5,2.0,-.78),V3(.5,2.0,-.78)],{tile:.5});
+  for(const sg of [-1,1])K.tube('aGalv',profCircle(.017,8),[V3(sg*.7,.9,.5),V3(sg*.7,1.62,-.78)],{tile:.5});
+  K.tube('aGalv',profCircle(.017,8),[V3(-.7,1.0,-.78),V3(.7,1.65,-.78)],{tile:.5});
+  K.box('aBare',0,2.047,-.14,1.5,.026,1.62);K.box('aSolar',0,2.068,-.14,1.44,.02,1.54);
+  /* mudguards over the wheels, then the wheels */
+  s.wheels=[];
+  for(const x of [-.98,.98])for(const z of [-1,1]){
+    const arc=[];for(let i=0;i<=10;i++){const a=-.15+i/10*Math.PI*.95;arc.push(V3(x,.4+Math.sin(a)*.54,z+Math.cos(a)*.54*(z>0?1:-1)))}
+    K.tube(z>0?'aOchre':'aPlate',profRect(.012,.3),arc,{tile:.8,up:V3(1,0,0)});
+    const w=new THREE.Group();w.position.set(x,.4,z);K.g.add(w);
+    const tyre=K.lathe('aRubber',[[.2,-.18],[.3,-.19],[.39,-.15],[.42,-.06],[.42,.06],[.39,.15],[.3,.19],[.2,.18]],0,0,0,22,w,.7);tyre.rotation.z=Math.PI/2;
+    const hub=K.lathe('aBare',[[0,-.17],[.2,-.17],[.2,.17],[0,.17]],0,0,0,14,w,.4);hub.rotation.z=Math.PI/2;
+    const cap=K.lathe('aRust',[[0,0],[.06,0],[.07,.03],[0,.07]],0,0,0,10,w,.2);cap.rotation.z=-Math.PI/2;cap.position.x=x>0?.17:-.17;if(x<0)cap.rotation.z=Math.PI/2;
+    K.box('aGalv',x>0?.04:-.04,0,0,.01,.0,.0,0,0,0,w);
+    w.children[w.children.length-1].visible=false;
+    K.dyn(w);s.wheels.push(w);
+    K.tube('aBare',profCircle(.03,8),[V3(x*.55,.46,z),V3(x*.95,.4,z)],{tile:.4});     // axle
+  }
+  return K;
+}
+
+function asmPlane(K,s){
+  /* body frame: origin = centre of mass · +Z nose · +Y up · +X left · wheel bottoms at y = -1.15
+     (layout unchanged from the original microlite; the construction and surfaces are new) */
+  const _Y=V3(0,1,0);
+  const strut=(ax,ay,az,bx,by,bz,r,m,par)=>{
+    const o=K.tube(m,profCircle(r,9),[V3(ax,ay,az),V3(bx,by,bz)],{tile:.5},par);return o;
+  };
+  /* pod: tub, nose, seat, battery pack, screen, stick */
+  K.box('aPlate',0,-.66,.05,.92,.1,2.7);
+  for(const x of [-.43,.43])K.box(x<0?'aOchre':'aBlue',x,-.36,.1,.07+(x>0?.004:0),.5,2.5);
+  K.box('aPlate',0,-.4,1.45,.86,.5,.55,-.18,0,0);
+  K.box('aBare',0,-.42,1.76,.5,.34,.08);
+  for(const x of [-.43,.43])K.tube('aGalv',profAngle(.05,.05,.006),[V3(x*1.02,-.12,-1.1),V3(x*1.02,-.1,1.3)],{tile:.5});
+  K.box('aCanvas',0,-.52,-.12,.62,.12,.55);K.box('aCanvas',0,-.2,-.42,.62,.5,.1,.18,0,0);
+  K.box('aBlue',0,-.46,-.98,.72,.42,.62);K.box('glow',0,-.46,-.665,.5,.06,.02);
+  for(const x of [-.2,0,.2])K.box('aBare',x,-.2,-.98,.02,.02+x*.1,.5);
+  K.box('aBare',0,-.02,.95,.62,.26,.06,-.45,0,0);
+  K.sphere('lampOn',.026,.18,0,.9);
+  K.box('aGlass',0,.3,1.08,.84,.46,.03,-.55,0,0);
+  K.tube('aBare',profRect(.03,.03),[V3(-.43,.1,1.22),V3(-.43,.5,.94),V3(.43,.5,.94),V3(.43,.1,1.22)],{tile:.4});
+  for(const x of [-.43,.43])K.sphere('aBare',.022,x,.1,1.22);
+  K.tube('aGalv',profCircle(.018,7),[V3(0,-.28,.55),V3(0,.0,.55),V3(0,.12,.42)],{tile:.4});
+  K.sphere('lampOn',.075,0,-.34,1.82);
+  K.pipe('aRubber',.01,[V3(.3,-.5,-.7),V3(.3,-.38,0),V3(.1,-.18,.9),V3(0,-.08,.95)],.05);
+  /* pilot — only shown in the chase view; fabric so it keeps its texture */
+  const pilot=new THREE.Group();
+  K.box('aOlive',0,.02,-.12,.44,.52,.28,.15,0,0,pilot);K.box('aOlive',0,-.4,.25,.34,.14,.6,0,0,0,pilot);
+  for(const x of [-.24,.24])K.box('aOlive',x,0,.22,.1,.1,.5,.9,0,0,pilot);
+  const skin=new THREE.MeshStandardMaterial({color:0x8a6448,roughness:1});
+  const hd=ownMesh(new THREE.SphereGeometry(.13,10,8),skin);hd.position.set(0,.44,-.06);hd.scale.set(1,1.08,1);pilot.add(hd);
+  K.box('aRubber',0,.52,-.06,.3,.08,.3,0,0,0,pilot);
+  pilot.visible=false;K.g.add(pilot);s.pPilot=pilot;K.dyn(pilot);
+  /* wing: two canvas halves on dihedral pivots; real airfoil section with a rolled leading-edge tube */
+  const wing=(sg)=>{
+    const w=new THREE.Group();w.position.set(0,1.05,.15);w.rotation.z=.06*sg;
+    const ap=profAirfoil(1.7,.055,.02,14);
+    const prof={pts:ap.pts.map(p=>[sg>0?-p[0]:p[0],p[1]]),closed:true,hard:false};
+    K.tube('aCanvas',prof,[V3(0,0,0),V3(4.7*sg,0,0)],{tile:1.3,tu:1.3,tv:1.3},w);
+    K.tube('aGalv',profCircle(.032,9),[V3(0,.0,.84),V3(4.72*sg,.0,.84)],{tile:.6},w);
+    K.tube('aBare',profCircle(.012,6),[V3(0,.0,-.86),V3(4.72*sg,.0,-.86)],{tile:.3},w);
+    for(let i=0;i<6;i++){const x=(.55+i*.78)*sg;K.box('aWood',x,-.03,.05,.045+i*.002,.02,1.5-i*.02,0,0,0,w)}   // rib battens showing through below
+    K.box('aOchre',2.0*sg,.056,.25,.9,.012,.7,0,0,0,w);K.box('aBare',3.7*sg,.048,-.3,.6,.012,.5,0,0,0,w);
+    K.box('aWood',4.7*sg,0,0,.07,.12,1.72,0,0,0,w);
+    const ail=new THREE.Group();ail.position.set(3.4*sg,0,-.85);w.add(ail);
+    K.tube('aOlive',profAirfoil(.4,.045,0,8),[V3(-1.1*sg,0,-.2),V3(1.1*sg,0,-.2)],{tile:.9},ail);
+    K.tube('aBare',profCircle(.012,6),[V3(-1.12*sg,0,0),V3(1.12*sg,0,0)],{tile:.3},ail);
+    K.g.add(w);K.dyn(ail);return ail;
+  };
+  s.pAilL=wing(1);s.pAilR=wing(-1);
+  /* struts + A-frame */
+  for(const sg of [-1,1]){
+    strut(.4*sg,-.12,.28,2.4*sg,1.14,.18,.032,'aGalv');
+    strut(.4*sg,-.12,-.25,2.0*sg,1.12,-.28,.026,'aBare');
+    strut(.34*sg,0,.5,0,1.0,.22,.035,'aGalv');
+    strut(.34*sg,0,-.5,0,1.0,0,.032,'aBare');
+  }
+  /* motor pylon + pusher prop (spins about the body Z axis) */
+  strut(0,1.0,-.45,0,.95,-1.52,.045,'aRust');
+  K.lathe('aBare',[[0,0],[.17,0],[.18,.04],[.18,.56],[.16,.6],[0,.6]],0,.95,-1.92,18,null,.5);
+  K.g.children[K.g.children.length-1].rotation.x=Math.PI/2;
+  K.lathe('aRubber',[[0,0],[.15,0],[.15,.1],[0,.1]],0,.95,-1.28,12);K.g.children[K.g.children.length-1].rotation.x=Math.PI/2;
+  const prop=new THREE.Group();prop.position.set(0,.95,-1.98);K.g.add(prop);
+  K.lathe('aBare',[[0,0],[.075,0],[.08,.05],[.0,.1]],0,0,-.04,10,prop);prop.children[0].rotation.x=-Math.PI/2;
+  const bladeGeo=extrude(profAirfoil(.12,.06,.03,6),[V3(0,-.8,0),V3(0,.8,0)],{tile:.4,sc:t=>1-.45*Math.abs(2*t-1)*.6,roll:.35});
+  const blade=ownMesh(bladeGeo,MAT.aWood,false);prop.add(blade);
+  const discMat=new THREE.MeshStandardMaterial({color:0xd8d0c0,transparent:true,opacity:0,roughness:1,depthWrite:false,side:THREE.DoubleSide});
+  const disc=ownMesh(new THREE.CylinderGeometry(.81,.81,.004,28),discMat,false);disc.rotation.x=Math.PI/2;disc.receiveShadow=false;prop.add(disc);
+  K.dyn(prop);s.pProp=prop;s.pBlade=blade;s.pDisc=disc;s.pDiscMat=discMat;
+  /* tail boom, stabiliser + elevator, fin + rudder */
+  strut(0,-.1,-1.25,0,.02,-4.4,.06,'aGalv');
+  strut(0,-.52,-1.1,0,-.02,-3.9,.025,'aBare');
+  K.tube('aCanvas',profAirfoil(.7,.04,0,8),[V3(-1.1,.04,-4.12),V3(1.1,.04,-4.12)],{tile:.9});
+  const elev=new THREE.Group();elev.position.set(0,.04,-4.47);K.g.add(elev);
+  K.tube('aOlive',profAirfoil(.34,.04,0,8),[V3(-1.05,0,-.17),V3(1.05,0,-.17)],{tile:.8},elev);K.dyn(elev);s.pElev=elev;
+  K.box('aCanvas',0,.62,-4.12,.05,1.0,.8);
+  const rud=new THREE.Group();rud.position.set(0,.62,-4.52);K.g.add(rud);
+  K.box('aOlive',0,0,-.17,.04,.95,.34,0,0,0,rud);K.dyn(rud);s.pRud=rud;
+  K.box('aBare',0,-.12,-4.38,.05,.2,.22);
+  /* tricycle gear */
+  s.pWheels=[];
+  const wheel=(x,z)=>{
+    const w=new THREE.Group();w.position.set(x,-.93,z);K.g.add(w);
+    const ty=K.lathe('aRubber',[[.09,-.07],[.14,-.075],[.2,-.06],[.22,-.02],[.22,.02],[.2,.06],[.14,.075],[.09,.07]],0,0,0,18,w,.5);ty.rotation.z=Math.PI/2;
+    const hb=K.lathe('aBare',[[0,-.06],[.09,-.06],[.09,.06],[0,.06]],0,0,0,12,w,.3);hb.rotation.z=Math.PI/2;
+    K.dyn(w);s.pWheels.push(w);
+    const sx=x>0?.08:x<0?-.08:0;
+    if(sx)K.tube('aBare',profCircle(.014,6),[V3(x,-.93,z),V3(x+sx,-.93,z)],{tile:.2});
+  };
+  strut(0,-.5,1.22,0,-.93,1.45,.03,'aBare');wheel(0,1.45);
+  for(const sg of [-1,1]){
+    strut(.38*sg,-.62,-.3,.95*sg,-.93,-.35,.04,'aGalv');
+    strut(.15*sg,-.66,.1,.95*sg,-.93,-.35,.025,'aBare');
+    wheel(.95*sg,-.35);
+  }
+  return K;
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   ROCK OUTCROPS  —  bedded sandstone that belongs to the ground it sits on.
+   One heightfield, three surfaces: risers (aRockS), ledges and caps (aRockT), and the
+   wind-drift of dune sand that buries the foot (MAT.sand, tinted exactly like the terrain).
+   The body follows the local contour, so it reads as a scarp on a slope, a whaleback on
+   a flat and a stepped knoll on a crest — never as a single object stood on the sand.
+   ─────────────────────────────────────────────────────────────────────── */
+const _RKN=(x,z,sd)=>fbm(x,z,sd,3);
+function rockBlobGeo(r,sz,seed){
+  const g=new THREE.IcosahedronGeometry(1,2),P=g.attributes.position,rot=r()*TAU;
+  const sx=sz*(.8+r()*.5),sy=sz*(.45+r()*.3),sz2=sz*(.7+r()*.4);
+  for(let i=0;i<P.count;i++){
+    let x=P.getX(i),y=P.getY(i),z=P.getZ(i);
+    const n=fbm(x*1.6+seed,z*1.6+y*1.3,seed+9,3);
+    let k=.78+n*.5;
+    // quantise a little so the blocks are faceted rather than pebbles
+    const q=Math.round(y*2.4)/2.4;y=y*.55+q*.45;
+    x*=k*sx;y*=k*sy*(y<0?.4:1);z*=k*sz2;
+    const c=Math.cos(rot),s_=Math.sin(rot);P.setXYZ(i,x*c-z*s_,y,x*s_+z*c);
+  }
+  g.computeVertexNormals();
+  const U=g.attributes.uv,N=g.attributes.normal;
+  for(let i=0;i<P.count;i++){
+    const nx=Math.abs(N.getX(i)),ny=Math.abs(N.getY(i)),nz=Math.abs(N.getZ(i));
+    let u,v;if(ny>.7){u=P.getX(i);v=P.getZ(i)}else if(nx>nz){u=P.getZ(i);v=P.getY(i)}else{u=P.getX(i);v=P.getY(i)}
+    U.setXY(i,u/1.6+seed*.37,v/1.6);
+  }
+  return g;
+}
+function outcropMesh(f,r,tall,sc){
+  const grp=new THREE.Group(),cx=f.x,cz=f.z;
+  /* local frame: a runs along the contour, b runs downhill */
+  const e=2.2,gx=(heightAt(cx+e,cz)-heightAt(cx-e,cz))/(2*e),gz=(heightAt(cx,cz+e)-heightAt(cx,cz-e))/(2*e),sl=Math.hypot(gx,gz);
+  let dbx,dbz;if(sl>.06){dbx=-gx/sl;dbz=-gz/sl}else{dbx=Math.cos(f.rot+1.57);dbz=Math.sin(f.rot+1.57)}
+  const dax=-dbz,daz=dbx;
+  const La=(tall?3.4:3.9)*(.85+r()*.35),Lb=(tall?2.1:2.4)*(.85+r()*.35);
+  const Hmax=(tall?2.4:1.5)*(.85+r()*.35)*(sl>.25?1.1:1);
+  const stepH=tall?.5:.36,seed=(f.x*7.3+f.z*3.1)|0,sd=Math.abs(seed)%9000+17;
+  const yRef=heightAt(cx-dbx*Lb*.45,cz-dbz*Lb*.45)+.12;                         // anchored into the uphill side
+  const tilt=-.3*sl;                                                              // beds dip a little less than the ground
+  /* lobes: the body is a ridge of overlapping humps, not one dome */
+  const sg=r()<.5?-1:1;
+  const lobes=[[0,0,1,1,1],[sg*La*.6,Lb*.1,.58,.7,.72+r()*.15],[-sg*La*.55,-Lb*.2,.5,.62,.5+r()*.2],[sg*La*.2,Lb*.5,.4,.3,.3+r()*.15]];
+  const WIND=[Math.cos(.6),Math.sin(.6)],drift=(tall?.9:.7)+r()*.35;
+  const RA=1.55,RB=1.6,res=.31,nA=Math.ceil(2*La*RA/res),nB=Math.ceil(2*Lb*RB/res);
+  const NV=(nA+1)*(nB+1),Wm=new Float32Array(NV),Dm=new Float32Array(NV),WX=new Float32Array(NV),WZ=new Float32Array(NV),H=new Float32Array(NV),Dd=new Float32Array(NV);
+  const idx=(i,j)=>j*(nA+1)+i;
+  const smoothk=(a,b,x)=>{const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t)};
+  const ex=tall?.9:.75;
+  for(let j=0;j<=nB;j++)for(let i=0;i<=nA;i++){
+    const a=(i/nA*2-1)*La*RA,b=(j/nB*2-1)*Lb*RB;
+    const x=cx+dax*a+dbx*b,z=cz+daz*a+dbz*b,ter=heightAt(x,z);
+    const nz1=_RKN(x*.33,z*.33,sd),nz2=_RKN(x*1.1,z*1.1,sd+5),nz3=_RKN(x*.12,z*.12,sd+23);
+    /* the hump heights, smooth-maxed so lobes merge into saddles */
+    let hr=-9,dmin=9;
+    for(const [la,lb,wa,wb,hh] of lobes){
+      const dk=Math.hypot((a-la)/(La*wa),(b-lb)/(Lb*wb))*(1+(nz1-.5)*.5+(nz3-.5)*.3);
+      dmin=Math.min(dmin,dk);
+      const hk=dk<1?Hmax*hh*Math.pow(smoothk(0,tall?.62:.5,1-dk),tall?.75:.9):-(dk-1)*1.5;
+      hr=hr<-8?hk:Math.log(Math.exp(hr*4)+Math.exp(hk*4))/4;
+    }
+    hr+=(nz3-.5)*Hmax*.3*smoothk(0,.3,hr/Hmax);
+    /* strata: beds undulate; each has a short soft riser and a long flat ledge */
+    const base=tilt*b+hr;
+    const sv=base/stepH+(nz1-.5)*1.3,fl=Math.floor(sv),fr=sv-fl;
+    let tr=(fl+smoothk(.62,.84,fr))*stepH;
+    const jt=1-Math.abs(_RKN(x*.8+4,z*.8,sd+11)*2-1);
+    tr-=smoothk(.9,.985,jt)*.2*smoothk(0,.3,hr)+nz2*.04;                          // joints cut through the blocks
+    const rockY=yRef+(hr<0?base:tr);
+    /* dune sand: ramps up the windward side, long wind-shadow tail downwind */
+    const wa_=a*WIND[0]*dax+ (b*WIND[0]*dbx)*0, ws=((x-cx)*WIND[0]+(z-cz)*WIND[1]),wp=-((x-cx)*WIND[1])+((z-cz)*WIND[0]);
+    const ds1=Math.hypot((ws+La*.3)/(La*1.5),wp/(Lb*1.3)),tail=ws>0?Math.exp(-ws/(La*1.6)):1;
+    const sh=Math.pow(Math.max(0,1-ds1),1.5)*(ws>0?(.4+.6*tail):1);
+    const ds0=Math.hypot(a/(La*1.25),b/(Lb*1.4)),sh2=Math.pow(Math.max(0,1-ds0),1.4)*.65;   // general skirt that buries the foot
+    const sandY=ter+drift*Math.max(sh,sh2)*(.85+.3*nz2);
+    let top=Math.max(rockY,sandY);
+    const ed=Math.min(i,nA-i,j,nB-j)/5;if(ed<1)top=lerp(ter-.1,top,smoothk(0,1,ed));
+    const k=idx(i,j);H[k]=top;WX[k]=x;WZ[k]=z;Wm[k]=a;Dm[k]=b;Dd[k]=rockY-sandY-(ed<1?1:0);
+  }
+  const hgt=(i,j)=>H[idx(clamp(i,0,nA),clamp(j,0,nB))];
+  const Ns=[],Pp=[],C=[],nrm=new THREE.Vector3();
+  const sA=2*La*RA/nA,sB=2*Lb*RB/nB;
+  for(let j=0;j<=nB;j++)for(let i=0;i<=nA;i++){
+    const k=idx(i,j),dx=(hgt(i+1,j)-hgt(i-1,j))/(2*sA),dz=(hgt(i,j+1)-hgt(i,j-1))/(2*sB);
+    nrm.set(-dx,1,-dz).normalize();
+    Ns.push(nrm.x*dax+nrm.z*dbx,nrm.y,nrm.x*daz+nrm.z*dbz);
+    Pp.push(WX[k]-cx,H[k],WZ[k]-cz);
+    const t=[0,0,0];groundTint(WX[k],WZ[k],H[k],1-nrm.y,t);C.push(t[0],t[1],t[2]);
+  }
+  const gs={s:[],t:[],d:[]};
+  for(let j=0;j<nB;j++)for(let i=0;i<nA;i++){
+    const a=idx(i,j),b=idx(i+1,j),c=idx(i,j+1),d=idx(i+1,j+1);
+    for(const tri of [[a,b,c],[b,d,c]]){
+      const dm=(Dd[tri[0]]+Dd[tri[1]]+Dd[tri[2]])/3,dx=Math.max(Dd[tri[0]],Dd[tri[1]],Dd[tri[2]]);
+      const ny=(Ns[tri[0]*3+1]+Ns[tri[1]*3+1]+Ns[tri[2]*3+1])/3;
+      (dm<.015&&dx<.1?gs.d:(ny<.8?gs.s:gs.t)).push(tri);
+    }
+  }
+  const mk=(list,matName,uvFn,withCol)=>{
+    if(!list.length)return;
+    const pp=[],nn=[],uu=[],cc=[];
+    for(const t of list)for(const v of t){
+      pp.push(Pp[v*3],Pp[v*3+1],Pp[v*3+2]);nn.push(Ns[v*3],Ns[v*3+1],Ns[v*3+2]);
+      const uv=uvFn(v,t);uu.push(uv[0],uv[1]);if(withCol)cc.push(C[v*3],C[v*3+1],C[v*3+2]);
+    }
+    const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pp,3));
+    g.setAttribute('normal',new THREE.Float32BufferAttribute(nn,3));g.setAttribute('uv',new THREE.Float32BufferAttribute(uu,2));
+    if(withCol)g.setAttribute('color',new THREE.Float32BufferAttribute(cc,3));
+    const m=ownMesh(g,MAT[matName]);grp.add(m);
+  };
+  const tileS=MAT.aRockS.userData.tile,tileT=MAT.aRockT.userData.tile;
+  mk(gs.s,'aRockS',(v,t)=>{const k=v,a=Wm[k],b=Dm[k],hy=H[k];
+    const nx=Math.abs(Ns[t[0]*3]*dax+Ns[t[0]*3+2]*daz),nzz=Math.abs(Ns[t[0]*3]*dbx+Ns[t[0]*3+2]*dbz);
+    // beds are level: v is world height; u runs along whichever horizontal axis the face looks across
+    return[((nzz>nx?a:b)+sd*.13)/tileS,hy/tileS]});
+  mk(gs.t,'aRockT',(v)=>[(Wm[v]+sd*.07)/tileT,(Dm[v])/tileT]);
+  mk(gs.d,'sand',(v)=>[WX[v]/9,WZ[v]/9],true);
+  /* talus: broken blocks fallen from the face, mostly on the downhill side, half swallowed by sand */
+  const nt=tall?9:6;
+  for(let i=0;i<nt;i++){
+    const a=(r()*2-1)*La*.95,b=(.35+r()*.9)*Lb*(r()<.8?1:-.7),x=cx+dax*a+dbx*b,z=cz+daz*a+dbz*b,sz=.2+r()*r()*.5;
+    const bg=rockBlobGeo(r,sz,i*13+sd),m=ownMesh(bg,MAT[i%3?'aRockS':'aRockT']);
+    m.position.set(x-cx,heightAt(x,z)+sz*.12,z-cz);m.rotation.y=r()*TAU;grp.add(m);
+  }
+  grp.userData.world=true;
+  return grp;
+}
+
+
+const ASMFN={shelter:asmShelter,wall:asmWall,workbench:asmWorkbench,harvester:asmHarvester,purifier:asmPurifier,trough:asmTrough,tank:asmTank,lamp:asmLamp,battery:asmBattery,solar:asmSolar,windmill:asmWindmill,stove:asmStove,crate:asmCrate,sign:asmSign,buggy:asmBuggy,plane:asmPlane,mast:asmMast};
+function dropFeat(m){World.group.remove(m);m.traverse(o=>{if(o.isMesh&&o.userData.own&&o.geometry)o.geometry.dispose()})}
+
 function featureMesh(f){
   const g=new THREE.Group(),r=rngAt(f.x|0,f.z|0,SEED+5),o=f.rot,s=f.sc;
   switch(f.t){
     case 'outcrop': case 'spire': {
-      const tall=f.t==='spire';
-      if(tall){
-        const n=5+Math.floor(r()*3);
-        for(let i=0;i<n;i++){
-          const a=i*TAU/n+(r()-0.5)*0.3,rr=1.0+r()*0.8;
-          const sx=0.55+r()*0.5,sy=0.65+r()*0.6,sz=0.55+r()*0.5;
-          g.add(M(GEO.ico,MAT.rock,Math.cos(a)*rr,0.18+sy*0.35,Math.sin(a)*rr,
-            r()*0.5,r()*TAU,r()*0.5,sx,sy,sz));
-        }
-      }else{
-        const n=3+Math.floor(r()*4);
-        for(let i=0;i<n;i++){
-          const a=r()*TAU,rr=r()*1.9*s,w=(1.0+r()*1.3)*s;
-          g.add(M(GEO.ico1,MAT.rock,Math.cos(a)*rr,(w*0.42+r()*0.4)*s,Math.sin(a)*rr,r()*0.4,r()*TAU,r()*0.4,w,w*(0.7+r()*0.8),w));
-        }
-      }
-      if(tall) g.add(M(GEO.ico,MAT.rock,0,3.4*s,0,0,0.4,0,1.5*s,5.2*s,1.5*s));
+      /* terrain-conforming bedded sandstone; built in world-relative coordinates, so counter this group's scale */
+      const inner=outcropMesh(f,r,f.t==='spire',s);
+      inner.scale.setScalar(1/s);inner.position.y=-(f.y-0.08*s)/s;
+      g.add(inner);
       break;
     }
     case 'mast': {
@@ -1642,278 +2820,11 @@ function gridTick(dt){
    §08b  STRUCTURE MODELS
    ─────────────────────────────────────────────────────────────────────── */
 function structureMesh(s){
-  const g=new THREE.Group(),t=s.type;
-  switch(t){
-    case 'shelter':{
-      /* ── lean-to geometry ── */
-      const W=3.2, D=2.4;
-      const Hback=1.8, Hfront=1.5;              // back wall tall, front wall raised for headroom
-      const roofTh=0.06;
-      /* ── four corner posts (reach up to roof edge) ── */
-      g.add(M(GEO.cyl,MAT.rust,-W/2,Hback/2,-D/2, 0,0,0, 0.1,Hback,0.1));
-      g.add(M(GEO.cyl,MAT.rust, W/2,Hback/2,-D/2, 0,0,0, 0.1,Hback,0.1));
-      g.add(M(GEO.cyl,MAT.rust,-W/2,Hfront/2, D/2, 0,0,0, 0.1,Hfront,0.1));
-      g.add(M(GEO.cyl,MAT.rust, W/2,Hfront/2, D/2, 0,0,0, 0.1,Hfront,0.1));
-      /* ── side wall rails ── */
-      g.add(M(GEO.box,MAT.rust,0,0.4,-D/2,0,0,0,W,0.08,0.08));
-      g.add(M(GEO.box,MAT.rust,0,Hfront,-D/2,0,0,0,W,0.08,0.08));           // front top rail at roof height
-      g.add(M(GEO.box,MAT.rust,-W/2,(Hback+Hfront)/2,0,0,0,0,0.08,Hback-Hfront,D/2));  // sloped side rails
-      g.add(M(GEO.box,MAT.rust, W/2,(Hback+Hfront)/2,0,0,0,0,0.08,Hback-Hfront,D/2));
-      /* ── rear wall panel (full height) ── */
-      g.add(M(GEO.box,MAT.rustDark,0,Hback/2,-D/2,0,0,0,W,Hback,0.04));
-      /* ── front wall panel (up to roof) ── */
-      g.add(M(GEO.box,MAT.rustDark,0,Hfront/2,D/2,0,0,0,W,Hfront,0.04));
-      /* ── roof panel (single slope back→front, sits on top of walls) ── */
-      const roofMat=new THREE.MeshStandardMaterial({map:TEX.cloth,roughness:1,metalness:0,side:THREE.DoubleSide,color:0xb8a07a});
-      const roofLen=Math.hypot(D, Hback-Hfront);
-      const roofAng=Math.atan2(Hback-Hfront, D);
-      const roofCx=0, roofCy=(Hback+Hfront)/2 + 0.08, roofCz=0;  // lifted by beam height
-      const rp=new THREE.Mesh(new THREE.BoxGeometry(W+0.2,roofTh,roofLen+0.2),roofMat);
-      rp.position.set(roofCx, roofCy, roofCz);
-      rp.rotation.x=-roofAng;
-      rp.castShadow=true; g.add(rp);
-      /* ── roof edge binding ── */
-      g.add(M(GEO.box,MAT.rust,0,Hback,-D/2-0.05,0,0,0,W+0.2,0.06,0.06));
-      g.add(M(GEO.box,MAT.rust,0,Hfront, D/2+0.05,0,0,0,W+0.2,0.06,0.06));
-      /* ── guy-lines from rear eaves ── */
-      const guyMat=new THREE.MeshStandardMaterial({color:0x2a2622,roughness:0.9,metalness:0.3});
-      for(const gx of [-W/2-0.3, W/2+0.3]){
-        const lg=new THREE.Mesh(GEO.cyl,guyMat);
-        const vx=gx, vy=0, vz=-D/2-0.3, mx=vx/2, my=Hback/2, mz=vz/2, len=Math.hypot(vx,mx*2,vy-Hback,vz-mz*2);
-        lg.scale.set(0.012,len,0.012);
-        lg.position.set(mx,my,mz);
-        lg.lookAt(vx,vy,vz); lg.rotateX(Math.PI/2);
-        lg.castShadow=false; g.add(lg);
-      }
-      /* ── entrance flap (rolled up at front) ── */
-      const flap=new THREE.Mesh(new THREE.BoxGeometry(1.2,0.04,0.6),new THREE.MeshStandardMaterial({map:TEX.cloth,roughness:1,side:THREE.DoubleSide,color:0xb8a07a}));
-      flap.position.set(0,Hfront*0.9, D/2+0.02); flap.rotation.x=-0.1; flap.castShadow=true; g.add(flap);
-      /* ── sleeping platform against rear wall ── */
-      g.add(M(GEO.box,MAT.rustDark,0,0.18,-0.6,0,0,0,1.9,0.24,0.7));
-      g.add(M(GEO.box,MAT.fibre,0,0.32,-0.6,0,0,0,1.8,0.1,0.65));
-      /* ── pillow roll ── */
-      g.add(M(GEO.cyl,new THREE.MeshStandardMaterial({map:TEX.cloth,roughness:1,color:0x9a8a6a}),0.6,0.4,-0.6,Math.PI/2,0,0,0.12,0.4,0.12));
-      /* ── lantern hook on rear eave ── */
-      g.add(M(GEO.torus,new THREE.MeshStandardMaterial({color:0x8a6a3c,roughness:0.7,metalness:0.6}),0,Hback-0.03,-D/2,Math.PI/2,0,0,0.08,0.08,0.08));
-      break;
-    }
-    case 'wall':
-      g.add(M(GEO.box,MAT.rust,0,0.8,0,0,0,0,2.4,1.6,0.16));
-      g.add(M(GEO.box,MAT.rustDark,0,1.62,0,0,0,0,2.5,0.14,0.3));
-      g.add(M(GEO.box,MAT.rust,0,0.08,0,0,0,0,2.6,0.16,0.4));
-      break;
-    case 'workbench':
-      g.add(M(GEO.box,MAT.rust,0,0.86,0,0,0,0,1.8,0.1,1.0));
-      for(const [x,z] of [[-0.8,-0.4],[0.8,-0.4],[-0.8,0.4],[0.8,0.4]])
-        g.add(M(GEO.box,MAT.rustDark,x,0.43,z,0,0,0,0.12,0.86,0.12));
-      g.add(M(GEO.box,MAT.steel,0.4,0.99,0,0,0.3,0,0.5,0.16,0.4));
-      g.add(M(GEO.box,MAT.rust,0,0.62,0.3,0,0,0,1.6,0.5,0.1));
-      g.add(M(GEO.cyl,MAT.steel,-0.6,1.0,-0.2,0,0,0,0.14,0.3,0.14));
-      g.add(M(GEO.box,MAT.lampOn,0,1.3,0.3,0,0,0,0.5,0.06,0.06));
-      break;
-    case 'harvester':{
-      for(let i=0;i<4;i++)g.add(M(GEO.cyl,MAT.rust, -0.6+i*0.4,1.5,0, 0,0,0, 0.42,0.14,0.42));
-      g.add(M(GEO.cyl,MAT.steel,0,1.0,0,0,0,0,0.2,1.6,0.2));
-      g.add(M(GEO.box,MAT.rust,0,0.24,0,0,0,0,1.5,0.2,1.5));
-      g.add(M(GEO.cyl,MAT.glass,0.5,1.9,0,0,0,0,0.5,0.7,0.5));
-      g.add(M(GEO.box,MAT.rustDark,0,0.9,-0.7,0,0,0,1.0,0.8,0.3));
-      g.add(M(GEO.torus,MAT.cable,0,0.55,0,Math.PI/2,0,0,0.9,0.9,0.9));
-      s.fan=g.children[0];
-      break;
-    }
-    case 'purifier':{
-      g.add(M(GEO.box,MAT.rustDark,0,0.16,0,0,0,0,1.7,0.2,1.7));
-      const gl=new THREE.Mesh(GEO.cyl,MAT.glass);
-      gl.position.set(0,0.95,0);gl.scale.set(1.5,1.5,1.5);gl.castShadow=true;
-      g.add(gl);
-      g.add(M(GEO.cyl,MAT.glass,0,0.4,0,0,0,0,1.1,0.4,1.1));
-      g.add(M(GEO.cyl,MAT.rust,0,1.85,0,0,0,0,0.6,0.2,0.6));
-      g.add(M(GEO.cyl,MAT.rust,0.9,1.0,0,0,0,0,0.16,1.4,0.16));
-      break;
-    }
-    case 'trough':{
-      g.add(M(GEO.box,MAT.rust,0,0.24,0,0,0,0,2.0,0.48,1.1));
-      g.add(M(GEO.box,MAT.cloth,0,0.46,0,0,0,0,1.8,0.1,0.95));
-      s.crop=new THREE.Group();g.add(s.crop);
-      s.crop.add(M(GEO.cone,MAT.leaf,0,0.62,0,0,0,0,0.3,0.3,0.3));
-      break;
-    }
-    case 'tank':{
-      g.add(M(GEO.cyl,MAT.rust,0,0.9,0,0,0,0,1.3,1.8,1.3));
-      g.add(M(GEO.torus,MAT.rustDark,0,1.3,0,Math.PI/2,0,0,1.34,1.34,1.34));
-      g.add(M(GEO.cyl,MAT.pipeSteel,0,1.9,0,0,0,0,0.3,0.3,0.3));
-      g.add(M(GEO.box,MAT.rustDark,0,0.2,0,0,0,0,1.5,0.2,1.5));
-      break;
-    }
-    case 'lamp':{
-      g.add(M(GEO.cyl,MAT.rustDark,0,0.08,0,0,0,0,0.4,0.16,0.4));
-      g.add(M(GEO.cyl,MAT.rust,0,1.5,0,0,0,0,0.16,3.0,0.16));
-      g.add(M(GEO.box,MAT.rust,0,3.05,0.3,0.5,0,0,0.12,0.12,0.7));
-      g.add(M(GEO.cyl,MAT.glass,0,2.78,0.56,0,0,0,0.3,0.42,0.3));
-      s.bulb=M(GEO.sph,MAT.lampOn,0,2.78,0.56,0,0,0,0.34,0.44,0.34);
-      g.add(s.bulb);
-      break;
-    }
-    case 'battery':{
-      g.add(M(GEO.box,MAT.rustDark,0,0.12,0,0,0,0,1.6,0.24,1.0));
-      for(let i=0;i<3;i++)g.add(M(GEO.cyl,MAT.rust,-0.5+i*0.5,0.62,0,0,0,0,0.44,0.8,0.44));
-      g.add(M(GEO.box,MAT.cable,0,1.08,0,0,0,0,1.5,0.08,0.3));
-      break;
-    }
-    case 'solar':{
-      g.add(M(GEO.box,MAT.rustDark,0,0.3,0,0,0,0,2.0,0.1,0.5));
-      const p=new THREE.Mesh(GEO.box,MAT.glass);
-      p.position.set(0,0.75,0);p.rotation.x=-0.5;p.scale.set(2.2,0.08,1.6);p.castShadow=true;p.receiveShadow=true;
-      g.add(p);
-      for(const x of [-0.8,0.8])g.add(M(GEO.cyl,MAT.rust,x,0.3,0,0,0,0,0.1,0.6,0.1));
-      s.panel=p;
-      break;
-    }
-    case 'windmill':{
-      g.add(M(GEO.box,MAT.rustDark,0,0.1,0,0,0,0,1.0,0.2,1.0));
-      g.add(M(GEO.cyl,MAT.rust,0,2.5,0,0,0,0,0.18,5.0,0.18));
-      const hub=new THREE.Group();hub.position.set(0,4.9,0.28);g.add(hub);
-      for(let i=0;i<3;i++){
-        const a=i*TAU/3;
-        hub.add(M(GEO.box,MAT.steel,Math.cos(a)*1.1,Math.sin(a)*1.1,0,0,0,a-Math.PI/2,0.16,2.0,0.06));
-      }
-      hub.add(M(GEO.sph,MAT.steel,0,0,0.04,0,0,0,0.42,0.42,0.42));
-      s.blades=hub;
-      break;
-    }
-    case 'stove':{
-      g.add(M(GEO.cyl,MAT.rust,0,0.4,0,0,0,0,0.8,0.8,0.8));
-      g.add(M(GEO.cyl,MAT.rustDark,0,0.84,0,0,0,0,0.9,0.1,0.9));
-      g.add(M(GEO.cyl,MAT.rust,0.0,1.3,-0.3,0.4,0,0,0.14,0.9,0.14));
-      s.ember=M(GEO.sph,MAT.lampOn,0,0.86,0,0,0,0,0.6,0.2,0.6);
-      g.add(s.ember);
-      break;
-    }
-    case 'crate':
-      g.add(M(GEO.box,MAT.rust,0,0.4,0,0,0,0,1.2,0.8,1.0));
-      g.add(M(GEO.box,MAT.rustDark,0,0.4,0,0,0,0,1.24,0.12,1.04));
-      g.add(M(GEO.box,MAT.rust,0,0.84,0,0,0,0,1.1,0.1,0.9));
-      break;
-    case 'sign':
-      g.add(M(GEO.cyl,MAT.rustDark,0,1.3,0,0,0,0,0.12,2.6,0.12));
-      g.add(M(GEO.box,MAT.cloth,0.7,2.2,0,0,0,0.06,1.2,0.7,0.04));
-      s.flag=M(GEO.box,MAT.cloth,0.7,2.2,0.06,0,0,0.06,1.2,0.7,0.02);
-      g.add(s.flag);
-      break;
-    case 'buggy':{
-      g.add(M(GEO.box,MAT.rust,0,0.55,0,0,0,0,1.5,0.3,2.8));
-      g.add(M(GEO.box,MAT.rustDark,0,0.82,-0.95,0,0,0,1.3,0.4,0.9));
-      g.add(M(GEO.box,MAT.cloth,0,0.82,0.15,0,0,0,0.8,0.14,0.7));
-      g.add(M(GEO.box,MAT.cloth,0,1.2,-0.25,-0.15,0,0,0.8,0.7,0.14));
-      g.add(M(GEO.box,MAT.rustDark,0,0.78,1.05,0,0,0,1.2,0.2,0.8));
-      for(const x of [-0.7,0.7]){g.add(M(GEO.cyl,MAT.rustDark,x,1.3,0.45,0,0,0,0.09,1.5,0.09));g.add(M(GEO.cyl,MAT.rustDark,x,1.3,-0.75,0,0,0,0.09,1.5,0.09));g.add(M(GEO.box,MAT.rustDark,x,2.02,-0.15,0,0,0,0.09,0.09,1.4));g.add(M(GEO.sph,MAT.lampOn,x*0.65,0.85,1.5,0,0,0,0.2,0.2,0.2))}
-      g.add(M(GEO.box,MAT.glass,0,2.1,-0.15,0,0,0,1.5,0.05,1.5));
-      g.add(M(GEO.box,MAT.cable,0,1.0,0.62,0.5,0,0,0.5,0.05,0.05));
-      s.wheels=[];
-      for(const x of [-0.98,0.98])for(const z of [-1.0,1.0]){const w=M(GEO.cyl,MAT.cable,x,0.4,z,0,0,Math.PI/2,0.8,0.36,0.8);g.add(w);s.wheels.push(w);g.add(M(GEO.cyl,MAT.steel,x*1.08,0.4,z,0,0,Math.PI/2,0.34,0.38,0.34))}
-      break;
-    }
-    case 'plane':{
-      /* body frame: origin = centre of mass · +Z nose · +Y up · +X left · wheel bottoms at y = -1.15 */
-      const _Y=new THREE.Vector3(0,1,0),_dv=new THREE.Vector3();
-      const strut=(ax,ay,az,bx,by,bz,r,m)=>{
-        _dv.set(bx-ax,by-ay,bz-az);const len=_dv.length();
-        const o=M(GEO.cyl,m,(ax+bx)/2,(ay+by)/2,(az+bz)/2,0,0,0,r*2,len,r*2);
-        o.quaternion.setFromUnitVectors(_Y,_dv.normalize());return o;
-      };
-      const coat=new THREE.MeshStandardMaterial({color:0x6a4e34,roughness:1}),
-            skin=new THREE.MeshStandardMaterial({color:0x8a6448,roughness:1}),
-            cap =new THREE.MeshStandardMaterial({color:0x2a231d,roughness:1});
-      /* pod: tub, nose, seat, battery pack, screen, stick */
-      g.add(M(GEO.box,MAT.rustDark,0,-0.66,0.05,0,0,0,0.92,0.1,2.7));
-      for(const x of [-0.43,0.43])g.add(M(GEO.box,MAT.rust,x,-0.36,0.1,0,0,0,0.07,0.5,2.5));
-      g.add(M(GEO.box,MAT.rust,0,-0.4,1.45,-0.18,0,0,0.86,0.5,0.55));
-      g.add(M(GEO.box,MAT.steel,0,-0.42,1.76,0,0,0,0.5,0.34,0.08));
-      g.add(M(GEO.box,MAT.cloth,0,-0.52,-0.12,0,0,0,0.62,0.12,0.55));
-      g.add(M(GEO.box,MAT.cloth,0,-0.2,-0.42,0.18,0,0,0.62,0.5,0.1));
-      g.add(M(GEO.box,MAT.cable,0,-0.46,-0.98,0,0,0,0.72,0.42,0.62));
-      g.add(M(GEO.box,MAT.glow,0,-0.46,-0.665,0,0,0,0.5,0.06,0.02));
-      g.add(M(GEO.box,MAT.cable,0,-0.02,0.95,-0.45,0,0,0.62,0.26,0.06));
-      g.add(M(GEO.sph,MAT.lampOn,0.18,0.0,0.9,0,0,0,0.05,0.05,0.05));
-      g.add(M(GEO.box,MAT.glass,0,0.3,1.08,-0.55,0,0,0.84,0.46,0.03));
-      g.add(M(GEO.cyl,MAT.steel,0,-0.28,0.55,0,0,0,0.035,0.5,0.035));
-      g.add(M(GEO.sph,MAT.lampOn,0,-0.34,1.82,0,0,0,0.15,0.15,0.15));
-      /* pilot — only shown in the chase view */
-      const pilot=new THREE.Group();
-      pilot.add(M(GEO.box,coat,0,0.02,-0.12,0.15,0,0,0.44,0.52,0.28));
-      pilot.add(M(GEO.box,coat,0,-0.4,0.25,0,0,0,0.34,0.14,0.6));
-      for(const x of [-0.24,0.24])pilot.add(M(GEO.box,coat,x,0.0,0.22,0.9,0,0,0.1,0.1,0.5));
-      pilot.add(M(GEO.sph,skin,0,0.44,-0.06,0,0,0,0.26,0.28,0.26));
-      pilot.add(M(GEO.box,cap,0,0.52,-0.06,0,0,0,0.3,0.08,0.3));
-      pilot.visible=false;g.add(pilot);s.pPilot=pilot;
-      /* wing: two canvas halves on dihedral pivots; ailerons on their own hinge pivots */
-      const wing=(sg)=>{
-        const w=new THREE.Group();w.position.set(0,1.05,0.15);w.rotation.z=0.06*sg;
-        w.add(M(GEO.box,MAT.cloth,2.35*sg,0,0,0,0,0,4.7,0.07,1.7));
-        w.add(M(GEO.cyl,MAT.pipeSteel,2.35*sg,0.0,0.84,0,0,Math.PI/2,0.1,4.7,0.1));
-        w.add(M(GEO.box,MAT.cable,2.35*sg,-0.01,-0.84,0,0,0,4.7,0.03,0.03));
-        for(let i=0;i<6;i++)w.add(M(GEO.box,MAT.rustDark,(0.55+i*0.78)*sg,0.0,0,0,0,0,0.05,0.09,1.74));
-        w.add(M(GEO.box,MAT.rustDark,4.72*sg,0,0,0,0,0,0.1,0.12,1.76));
-        w.add(M(GEO.box,MAT.rustDark,(2.0+sg*0)*sg,0.045,0.25,0,0,0,0.9,0.02,0.7));
-        w.add(M(GEO.box,MAT.rust,3.7*sg,0.045,-0.3,0,0,0,0.6,0.02,0.5));
-        const ail=new THREE.Group();ail.position.set(3.4*sg,0,-0.85);
-        ail.add(M(GEO.box,MAT.rustDark,0,0,-0.2,0,0,0,2.2,0.05,0.4));
-        w.add(ail);
-        g.add(w);return ail;
-      };
-      s.pAilL=wing(1);s.pAilR=wing(-1);
-      /* struts + A-frame */
-      for(const sg of [-1,1]){
-        g.add(strut(0.40*sg,-0.12,0.28,2.4*sg,1.14,0.18,0.035,MAT.pipeSteel));
-        g.add(strut(0.40*sg,-0.12,-0.25,2.0*sg,1.12,-0.28,0.028,MAT.pipeSteel));
-        g.add(strut(0.34*sg,0.0,0.5,0.0,1.0,0.22,0.04,MAT.pipeSteel));
-        g.add(strut(0.34*sg,0.0,-0.5,0.0,1.0,0.0,0.035,MAT.pipeSteel));
-      }
-      /* motor pylon + pusher prop (spins about the body Z axis) */
-      g.add(strut(0,1.0,-0.45,0,0.95,-1.52,0.05,MAT.rustDark));
-      g.add(M(GEO.cyl,MAT.steel,0,0.95,-1.62,Math.PI/2,0,0,0.36,0.6,0.36));
-      g.add(M(GEO.cyl,MAT.cable,0,0.95,-1.28,Math.PI/2,0,0,0.3,0.1,0.3));
-      const prop=new THREE.Group();prop.position.set(0,0.95,-1.98);
-      g.add(M(GEO.cyl,MAT.steel,0,0.95,-1.95,Math.PI/2,0,0,0.16,0.12,0.16));
-      const blade=M(GEO.box,MAT.rustDark,0,0,0,0,0,0,0.13,1.62,0.025);blade.castShadow=false;
-      const discMat=new THREE.MeshStandardMaterial({color:0xd8d0c0,transparent:true,opacity:0,roughness:1,depthWrite:false,side:THREE.DoubleSide});
-      const disc=M(GEO.cyl,discMat,0,0,0,Math.PI/2,0,0,1.62,0.004,1.62);disc.castShadow=false;disc.receiveShadow=false;
-      prop.add(blade);prop.add(disc);g.add(prop);
-      s.pProp=prop;s.pBlade=blade;s.pDisc=disc;s.pDiscMat=discMat;
-      /* tail boom, stabiliser + elevator, fin + rudder */
-      g.add(strut(0,-0.1,-1.25,0,0.02,-4.4,0.06,MAT.pipeSteel));
-      g.add(strut(0,-0.52,-1.1,0,-0.02,-3.9,0.025,MAT.steel));
-      g.add(M(GEO.box,MAT.cloth,0,0.04,-4.12,0,0,0,2.2,0.05,0.7));
-      const elev=new THREE.Group();elev.position.set(0,0.04,-4.47);
-      elev.add(M(GEO.box,MAT.rustDark,0,0,-0.17,0,0,0,2.1,0.04,0.34));g.add(elev);s.pElev=elev;
-      g.add(M(GEO.box,MAT.cloth,0,0.62,-4.12,0,0,0,0.05,1.0,0.8));
-      const rud=new THREE.Group();rud.position.set(0,0.62,-4.52);
-      rud.add(M(GEO.box,MAT.rustDark,0,0,-0.17,0,0,0,0.04,0.95,0.34));g.add(rud);s.pRud=rud;
-      g.add(M(GEO.box,MAT.steel,0,-0.12,-4.38,0,0,0,0.05,0.2,0.22));
-      /* tricycle gear */
-      s.pWheels=[];
-      const wheel=(x,z)=>{
-        const w=M(GEO.cyl,MAT.cable,x,-0.93,z,0,0,Math.PI/2,0.44,0.14,0.44);g.add(w);s.pWheels.push(w);
-        g.add(M(GEO.cyl,MAT.steel,x*1.0+(x>0?0.08:x<0?-0.08:0),-0.93,z,0,0,Math.PI/2,0.16,0.18,0.16));
-      };
-      g.add(strut(0,-0.5,1.22,0,-0.93,1.45,0.03,MAT.steel));wheel(0,1.45);
-      for(const sg of [-1,1]){
-        g.add(strut(0.38*sg,-0.62,-0.3,0.95*sg,-0.93,-0.35,0.04,MAT.steel));
-        g.add(strut(0.15*sg,-0.66,0.1,0.95*sg,-0.93,-0.35,0.025,MAT.steel));
-        wheel(0.95*sg,-0.35);
-      }
-      break;
-    }
-    case 'mast':
-      g.add(M(GEO.box,MAT.rustDark,0,0.2,0,0,0,0,0.9,0.4,0.9));
-      g.add(M(GEO.cyl,MAT.rust,0,3.0,0,0,0,0,0.14,6.0,0.14));
-      for(let i=0;i<4;i++)g.add(M(GEO.box,MAT.rust,0,0.8+i*1.4,0,0,i*0.8,0,0.5,0.06,0.5));
-      const dish=M(GEO.sph,MAT.pipeSteel,0,6.2,0,0,0,0,1.4,0.5,1.4);
-      g.add(dish);s.dish=dish;
-      g.add(M(GEO.cyl,MAT.steel,0.3,6.6,0,0,0,0.6,0.08,1.0,0.08));
-      break;
-  }
+  const K=asmKit(),fn=ASMFN[s.type];
+  if(fn)fn(K,s);
+  const g=K.finish();
   g.traverse(o=>{if(o.isMesh)o.receiveShadow=true});
+  _tg.clear();
   scene.add(g);
   return g;
 }
@@ -2934,7 +3845,7 @@ function featureAction(f){
       SFX('hit');
       G.spents.add(f.id);
       const m=World.feats.get(f.id);
-      if(m){World.group.remove(m);World.feats.delete(f.id)}
+      if(m){dropFeat(m);World.feats.delete(f.id)}
     }
   };
 }
@@ -3097,7 +4008,7 @@ function startBuild(type){
   log('assembling '+WORKS[type].n+' — click to set, R to turn, B to stop');
 }
 function stopBuild(){
-  if(ghost){scene.remove(ghost);ghost.traverse(o=>{if(o.isMesh&&o.geometry&&o.geometry!==GEO.box&&o.geometry!==GEO.cyl&&o.geometry!==GEO.cyl6&&o.geometry!==GEO.cone&&o.geometry!==GEO.torus&&o.geometry!==GEO.sph&&o.geometry!==GEO.quad&&o.geometry!==GEO.ico&&o.geometry!==GEO.ico1&&o.geometry!==GEO.tri)o.geometry.dispose()});ghost=null}
+  if(ghost){scene.remove(ghost);ghost.traverse(o=>{if(o.isMesh&&o.geometry&&o.userData.own)o.geometry.dispose()});ghost=null}
   Build.on=false;Build.type=null;
 }
 function buildTick(){
@@ -3187,7 +4098,7 @@ function dropChunk(k){
   const e=World.chunks.get(k);
   if(!e)return;
   World.group.remove(e.mesh);e.g.dispose();
-  for(const id of e.feats){const m=World.feats.get(id);if(m){World.group.remove(m)}World.feats.delete(id)}
+  for(const id of e.feats){const m=World.feats.get(id);if(m){dropFeat(m)}World.feats.delete(id)}
   World.chunks.delete(k);
 }
 function fillFeats(e,cx,cz){
@@ -3201,7 +4112,7 @@ function fillFeats(e,cx,cz){
 function respawnScrap(){
   G.epochDay=Day.ctx.day;EPOCH++;G.spents.clear();_fc.clear();
   for(const [k,e] of World.chunks){
-    for(const id of e.feats){const m=World.feats.get(id);if(m)World.group.remove(m);World.feats.delete(id)}
+    for(const id of e.feats){const m=World.feats.get(id);if(m)dropFeat(m);World.feats.delete(id)}
     e.feats=[];const [cx,cz]=k.split(',').map(Number);fillFeats(e,cx,cz);
   }
   log('the night wind scours the flats — fresh scrap has surfaced','gold');
@@ -4362,7 +5273,7 @@ async function boot(){
   renderer.outputColorSpace=THREE.SRGBColorSpace;
   scene=new THREE.Scene();
   camera=new THREE.PerspectiveCamera(SET.fov,innerWidth/innerHeight,0.08,1600);
-  forgeTextures();buildGeo();buildMats();buildSky();
+  forgeTextures();buildGeo();buildMats();buildSky();say("weathering the kit — rust, canvas, sandstone","plain");await forgeAsm(t=>say(t,"plain"));
   say('welding sky dome, sun, shadow frustum','plain');
   worldInit();initPuffs();buildKite();buildViewModel();
   if(saved)applySave(saved);else bootCamp(false);
