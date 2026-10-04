@@ -2076,17 +2076,21 @@ function updateVehicleGroundPhysics(veh, dt, isPlane = false) {
    and pitch stays pitch no matter how the airframe is oriented in the world.
      pitch up   = rotate about −X     roll right = rotate about +Z
      yaw  left  = rotate about +Y
-   The ground is handled by position-based contact on 7 body-fixed points
-   (3 wheels, tail skid, 2 wingtips): a penetrating point pushes the centre of
-   mass up *and* turns the airframe about its own centre, so nose-over, tail
-   strikes and wing-low touchdowns come out of the geometry, not a lookup.
+   The ground is a rigid-body contact on 6 body-fixed points (3 wheels, tail
+   skid, 2 wingtips).  Each point is a unilateral velocity constraint along the
+   terrain normal, solved with impulses that act on BOTH the linear velocity
+   and an angular-velocity state (s.av), so weight on the wheels turns the
+   airframe until every wheel is down: the plane sits on the slope's own angle
+   because the three wheels are on it, with no ground mode and no clamp.  A
+   small position pass removes any residual depth.  Nose-over, tail strikes and
+   wing-low touchdowns still come out of the geometry.
    ─────────────────────────────────────────────────────────────────────── */
 const PL={
   max:240, cgh:1.15, g:9.8,
   KL:0.2, aStall:0.32, cl0:0.03, KD:0.0012, kInd:0.5,
   thrust:3.6, thrFade:55, drainFull:0.05, drainIdle:0.002,
   pitchRate:0.8, rollRate:1.05, kAlpha:2.2, aTrim:0.10, kBeta:2.5, kSide:0.12, kLevel:0.8, steer:0.9,
-  rollRes:0.45, brake:5.5, I:2.5,
+  rollRes:0.45, brake:5.5, I:2.5, avDamp:6,
   hardLand:3.6, crashImpact:7.5, crashTouch:5.0,
   pts:[
     {n:'nose', x: 0,    y:-1.15, z: 1.45, k:'wheel'},
@@ -2107,7 +2111,7 @@ function terrN(x,z,out){
 const planeWind=()=>{try{return Day.ctx.wind||0}catch(e){return 0}};
 
 function planeInit(s){
-  s.pos=new THREE.Vector3(s.x,0,s.z);s.q=new THREE.Quaternion();s.vel=new THREE.Vector3();
+  s.pos=new THREE.Vector3(s.x,0,s.z);s.q=new THREE.Quaternion();s.vel=new THREE.Vector3();s.av=new THREE.Vector3();
   s.thr=0;s.ctl={p:0,r:0,y:0};s.gnd=true;s.stall=0;s.aoa=0;s.va=0;s.vs=0;s.alt=0;s.bank=0;s.pitchA=0;
   s.propA=0;s.propW=0;s.crashT=0;s.camF=new THREE.Vector3(0,0,1);s.camU=new THREE.Vector3(0,1,0);
   s.look={y:0,p:0,t:0};s.view='chase';
@@ -2122,7 +2126,7 @@ function planeInit(s){
 function planePark(s,rot){
   s.rot=rot;
   s.q.setFromAxisAngle(_Yax,rot);
-  s.vel.set(0,0,0);
+  s.vel.set(0,0,0);s.av.set(0,0,0);
   const gh=heightAt(s.x,s.z);
   s.pos.set(s.x,gh+PL.cgh+0.6,s.z);
   for(let i=0;i<160;i++){s.pos.y-=0.03;groundSolve(s,4,null)}
@@ -2139,7 +2143,46 @@ function planeSync(s){
   _F.set(0,0,1).applyQuaternion(s.q);s.rot=Math.atan2(_F.x,_F.z);
   s.yaw = s.rot;
 }
-/* penetration solver — returns contact summary in s.contact */
+/* Unilateral velocity-level contact for the body-fixed points (sequential impulses).
+   Point velocity = v + (s.av + commanded body rates) × r.  Each point may close on the terrain no faster than
+   its gap allows (speculative contact), so nothing tunnels and nothing is snapped; the impulse that stops a
+   point is applied to the linear velocity and to s.av with the airframe's real lever arms, which is what
+   makes the plane rock down onto all its wheels.  Commanded rates are inputs, so a pilot's pitch/yaw into
+   the ground is answered by the reaction instead of being ratcheted away.  Returns the closing speed. */
+const _W=new THREE.Vector3(),_P=new THREE.Vector3(),_Q=new THREE.Vector3();
+const CT=PL.pts.map(()=>({r:new THREE.Vector3(),n:new THREE.Vector3(),rn:new THREE.Vector3(),gap:0,w:1,acc:0,on:false}));
+function contactSolve(s,h,wx,wy,wz){
+  const v=s.vel,av=s.av;
+  _W.set(wx,wy,wz).applyQuaternion(s.q);
+  let m=0;
+  for(let i=0;i<PL.pts.length;i++){
+    const c=PL.pts[i],k=CT[i];
+    k.r.set(c.x,c.y,c.z).applyQuaternion(s.q);
+    const px=s.pos.x+k.r.x,pz=s.pos.z+k.r.z,gh=heightAt(px,pz),gv=s.pos.y+k.r.y-gh;
+    k.on=gv<0.6;
+    if(!k.on)continue;
+    terrN(px,pz,k.n);                                  // same normal estimate the rest of the plane code uses
+    k.gap=gv*k.n.y;
+    k.rn.crossVectors(k.r,k.n);
+    k.w=1+k.rn.lengthSq()/PL.I;
+    k.acc=0;m++;
+  }
+  if(!m)return 0;
+  let impact=0;
+  for(let it=0;it<6;it++){
+    for(const k of CT){
+      if(!k.on)continue;
+      _P.crossVectors(_Q.copy(av).add(_W),k.r).add(v);
+      const vn=_P.dot(k.n);
+      if(it===0&&k.gap<0.08-vn*h&&-vn>impact)impact=-vn;      // the band in which a wheel counts as down (6 cm) plus a step of margin
+      let d=((k.gap>0?-k.gap/h:0)-vn)/k.w;
+      const na=Math.max(k.acc+d,0);d=na-k.acc;k.acc=na;
+      v.addScaledVector(k.n,d);av.addScaledVector(k.rn,d/PL.I);
+    }
+  }
+  return impact;
+}
+/* penetration solver — position-level cleanup of whatever depth is left; returns contact summary in s.contact */
 function groundSolve(s,iters,v){
   const out=s.contact||(s.contact={wheels:0,hard:null,impact:0,any:false});
   out.wheels=0;out.hard=null;out.impact=0;out.any=false;out.nose=false;
@@ -2215,21 +2258,27 @@ function flightStep(s,h,inp){
           + stall*0.35*Math.sin(tt*9+s.id);
   let wy= PL.kBeta*beta*smooth(3,10,vv);
   if(s.gnd){wz=0;wy+=-ctl.r*PL.steer*clamp(va/3,0,1)/(1+(va/9)*(va/9))}
+  const high=alt>14;
+  /* ── the ground answers first, at velocity level: it may brake the linear velocity AND turn the airframe (s.av) ── */
+  const closing0=high?0:contactSolve(s,h,wx,wy,wz);
   const k=h*0.5;
   _dq.set(wx*k,wy*k,wz*k,1).normalize();
-  q.multiply(_dq);q.normalize();                       // ← the local-axis rotation
-  /* ── translate, then let the ground answer ── */
+  q.multiply(_dq);                                     // ← the local-axis rotation (commanded)
+  const avm=s.av.length();
+  if(avm>1e-7){_yq.setFromAxisAngle(_P.copy(s.av).multiplyScalar(1/avm),avm*h);q.premultiply(_yq)}  // ← contact-induced rotation (world axes)
+  s.av.multiplyScalar(Math.exp(-PL.avDamp*h));
+  q.normalize();
+  /* ── translate, then clear any residual depth ── */
   s.pos.addScaledVector(v,h);
   const wasG=s.gnd;
-  const high=alt>14;
-  const c=high?(s.contact||(s.contact={wheels:0,hard:null,impact:0,any:false,nose:false})):groundSolve(s,6,v);
+  const c=high?(s.contact||(s.contact={wheels:0,hard:null,impact:0,any:false,nose:false})):groundSolve(s,6,null);
   if(high){c.wheels=0;c.any=false;c.hard=null;c.nose=false}
+  else{c.impact=closing0;if(c.hard)c.any=true}
   s.gnd=c.wheels>0;
   if(c.any||c.wheels>0){
     terrN(s.pos.x,s.pos.z,_N);
     _F.set(0,0,1).applyQuaternion(q);_L.set(1,0,0).applyQuaternion(q);
-    const vn=v.dot(_N),closing=Math.max(c.impact,-vn);        // measured BEFORE the ground eats it
-    if(vn<0)v.addScaledVector(_N,-vn*(closing>3?1.1:1));
+    const closing=c.impact;                                    // measured BEFORE the ground ate it
     const sp=Math.hypot(v.x,v.z);
     const tip=c.hard&&c.hard.n!=='tail';
     if(c.hard&&s.crashT<=0&&(closing>PL.crashTouch||(tip&&sp>8)))planeEvent(s,'crash',tip?'wing strike':'tail strike');
@@ -2272,7 +2321,7 @@ const FL={hud:null,adi:null,rows:null,acc:0,eng:null,buggyEng:null,warn:0,evT:0}
 const isPlane=()=>!!(G.drive&&G.drive.type==='plane');
 function enterPlane(s){
   closePanel();G.drive=s;
-  s.vel.set(0,0,0);s.thr=TOUCH.on?0.7:0;s.view='chase';s.look.y=s.look.p=0;s.flatMsg=false;
+  s.vel.set(0,0,0);s.av.set(0,0,0);s.thr=TOUCH.on?0.7:0;s.view='chase';s.look.y=s.look.p=0;s.flatMsg=false;
   s.camF.set(0,0,1).applyQuaternion(s.q);s.camU.set(0,1,0);
   _cv.set(0,0,1).applyQuaternion(s.q);
   P.yaw=Math.atan2(-_cv.x,-_cv.z);
