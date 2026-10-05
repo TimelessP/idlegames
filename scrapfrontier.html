@@ -1183,12 +1183,12 @@ const ST=(q,c)=>{q.r=c[0];q.g=c[1];q.b=c[2]};
 function asmSurf(n,fn,o){
   o=o||{};
   const col=new Uint8ClampedArray(n*n*4),orm=new Uint8ClampedArray(n*n*4),H=new Float32Array(n*n);
-  const q={r:0,g:0,b:0,h:0,ro:.85,me:0};
+  const q={r:0,g:0,b:0,a:255,h:0,ro:.85,me:0};
   for(let j=0;j<n;j++)for(let i=0;i<n;i++){
-    q.r=q.g=q.b=0;q.h=.5;q.ro=.85;q.me=0;
+    q.r=q.g=q.b=0;q.h=.5;q.ro=.85;q.me=0;q.a=255;
     fn(i/n,j/n,q,i,j);
     const k=(j*n+i)*4;
-    col[k]=q.r;col[k+1]=q.g;col[k+2]=q.b;col[k+3]=255;
+    col[k]=q.r;col[k+1]=q.g;col[k+2]=q.b;col[k+3]=q.a;
     orm[k]=255;orm[k+1]=clamp(q.ro,0,1)*255;orm[k+2]=clamp(q.me,0,1)*255;orm[k+3]=255;
     H[j*n+i]=q.h;
   }
@@ -1199,16 +1199,18 @@ function asmSurf(n,fn,o){
     nrm[k]=127.5*(-dx/l+1);nrm[k+1]=127.5*(dy/l+1);nrm[k+2]=127.5*(1/l+1);nrm[k+3]=255;
   }
   const mk=(arr)=>{const c=cvs(n),x=c.getContext('2d'),im=x.createImageData(n,n);im.data.set(arr);x.putImageData(im,0,0);return c};
-  return{map:mk(col),normal:mk(nrm),orm:mk(orm)};
+  return{map:mk(col),normal:mk(nrm),orm:mk(orm),raw:col,n:n};
 }
 const ASMCV={};   // kept so the harness (and curious people) can inspect the generated sheets
 function asmMat(name,n,tile,fn,o){
   o=o||{};
   const s=asmSurf(n,fn,o);ASMCV[name]=s;
   const T=(c,srgb)=>{const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.anisotropy=8;if(srgb)t.colorSpace=THREE.SRGBColorSpace;t.needsUpdate=true;return t};
-  const m=new THREE.MeshStandardMaterial({map:T(s.map,true),normalMap:T(s.normal,false),roughnessMap:T(s.orm,false),metalnessMap:T(s.orm,false),
+  let mapT=T(s.map,true);
+  if(o.alphaTest){const dt=new THREE.DataTexture(s.raw.slice(),s.n,s.n,THREE.RGBAFormat);dt.wrapS=dt.wrapT=THREE.RepeatWrapping;dt.colorSpace=THREE.SRGBColorSpace;dt.generateMipmaps=true;dt.minFilter=THREE.LinearMipmapLinearFilter;dt.magFilter=THREE.LinearFilter;dt.flipY=false;dt.needsUpdate=true;mapT=dt}
+  const m=new THREE.MeshStandardMaterial({map:mapT,normalMap:T(s.normal,false),roughnessMap:T(s.orm,false),metalnessMap:T(s.orm,false),
     roughness:1,metalness:1,normalScale:new THREE.Vector2(o.ns||1,o.ns||1),side:o.side||THREE.FrontSide,
-    transparent:!!o.opacity,opacity:o.opacity||1});
+    transparent:!!o.opacity,opacity:o.opacity||1,alphaTest:o.alphaTest||0});
   m.userData.tile=tile;m.userData.grain=o.grain||'world';
   MAT[name]=m;return m;
 }
@@ -1217,16 +1219,17 @@ function asmMat(name,n,tile,fn,o){
 const ASMPAL={
   olive:{paint:[88,95,76],fade:[122,126,106],prime:[118,64,48]},
   ochre:{paint:[168,136,60],fade:[204,178,108],prime:[124,70,46]},
-  blue :{paint:[54,88,104],fade:[102,132,138],prime:[110,60,46]}
+  blue :{paint:[54,88,104],fade:[102,132,138],prime:[110,60,46]},
+  red  :{paint:[132,48,38],fade:[170,92,70],prime:[96,52,40]}
 };
-function plateFn(pal,sd){
+function plateFn(pal,sd,plain){
   return (u,v,q)=>{
     const wear=pfb(u,v,3,3,sd+1,3),chipN=pfb(u,v,28,28,sd+3,3),blot=pfb(u,v,7,7,sd+5,3),fine=pfb(u,v,90,90,sd+7,1);
-    const du=Math.min(u,1-u),dv=Math.min(v,1-v),ed=Math.min(du,dv),edgeW=1-sm_(0,.14,ed);
+    const du=Math.min(u,1-u),dv=Math.min(v,1-v),ed=plain?1:Math.min(du,dv),edgeW=plain?0:1-sm_(0,.14,ed);
     ST(q,pal.paint);BL(q,pal.fade,sm_(.3,.8,blot)*.65);
     const g=(fine-.5)*14;q.r+=g;q.g+=g;q.b+=g;
     let h=.56+(chipN-.5)*.05,ro=.6+fine*.12,me=0;
-    const wa=sm_(.6,.9,wear)*.5+edgeW*.42+(chipN-.5)*.5;
+    const wa=sm_(.6,.9,wear)*.5+edgeW*.42+(chipN-.5)*.5+(plain?.13:0);
     const chip=sm_(.44,.54,wa);
     if(chip>0){
       const rs=pfb(u,v,12,12,sd+9,3),bare=sm_(.72,.82,pridge(u,v,16,16,sd+11,2))*chip;
@@ -1234,8 +1237,8 @@ function plateFn(pal,sd){
       h-=chip*.16;ro=lerp(ro,.9,chip);me=bare*.7;ro=lerp(ro,.42,bare);
     }
     // seam, weld bead, rivet rows (tile = 1 m, so a rivet is ~2 cm)
-    if(ed<.005){BL(q,[26,22,20],.85);h=.15}else if(ed<.02){h+=.12*(1-(ed-.005)/.015);BL(q,[92,58,40],.28)}
-    for(let a=0;a<2;a++){
+    if(!plain){if(ed<.005){BL(q,[26,22,20],.85);h=.15}else if(ed<.02){h+=.12*(1-(ed-.005)/.015);BL(q,[92,58,40],.28)}}
+    for(let a=0;a<(plain?0:2);a++){
       const e=a?dv:du,t=(a?u:v)*10,fr=(t-Math.floor(t)-.5)*.1,dr=Math.hypot(e-.04,fr);
       if(dr<.0125){const k=1-dr/.0125;h=.72+k*.28;BL(q,[168,156,136],.26*k);ro=.5;me=Math.max(me,.2)}
       else if(dr<.017){BL(q,[34,28,24],.5);h-=.1}
@@ -1369,6 +1372,50 @@ const rockTopFn=(u,v,q)=>{
   q.h=.5+f*.22+fin*.06-pit*.22-cr*.3;q.ro=.97;q.me=0;
 };
 
+
+const cactusFn=(u,v,q)=>{                      // u: round the stem (10 ribs per tile), v: along it (0.8 m)
+  const rib=Math.cos(u*TAU*10)*.5+.5,n=pfb(u,v,6,6,301,4),fin=pfb(u,v,90,90,303,1),bl=pfb(u,v,4,4,305,3),dust=pfb(u,v,5,5,309,3);
+  ST(q,[74,102,70]);BL(q,[112,134,92],n*.75);BL(q,[46,70,48],(1-rib)*.7);
+  BL(q,[170,160,100],sm_(.58,.85,bl)*.42);BL(q,[120,92,60],sm_(.74,.9,pfb(u,v,7,7,311,3))*.5);       // sun-yellowed and scarred patches
+  const ru=(u*10)%1,rv=(v*16)%1,dx=Math.min(ru,1-ru)*.1,dy=(rv-.5)*.05,dr=Math.hypot(dx,dy),ang=Math.atan2(dy,dx);
+  if(dr<.0085){BL(q,[188,176,142],.9)}                                                                    // areole
+  else if(dr<.034){const sp=Math.abs(Math.sin(ang*4.5+(Math.floor(v*16)%3)))>.93;if(sp)BL(q,[216,204,168],.85*(1-dr/.034))}
+  BL(q,[176,150,110],sm_(.55,.9,dust)*.28);BL(q,[34,50,36],sm_(.7,.9,pfb(u,v,14,2,313,2))*.15);
+  const g=(fin-.5)*14;q.r+=g;q.g+=g;q.b+=g*.7;
+  q.h=.4+rib*.3+(dr<.0085?.25:0)+n*.05;q.ro=.72;q.me=0;
+};
+const twigFn=(u,v,q)=>{
+  const fb=pfb(u,v,50,3,321,3),fb2=pfb(u,v,120,6,323,2),nd=pfb(u,v,3,10,325,2),bl=pfb(u,v,5,5,327,3);
+  ST(q,[104,86,66]);BL(q,[64,50,40],fb*.8);BL(q,[162,146,122],sm_(.55,.9,bl)*.5);BL(q,[40,32,26],sm_(.7,.9,nd)*.5);
+  BL(q,[188,176,152],sm_(.6,.9,fb2)*.18);
+  q.h=.4+fb*.4+fb2*.1;q.ro=.95;q.me=0;
+};
+const leafFn=(u,v,q)=>{                         // sparse dry scrub leaves cut out with alpha; 6×6 cells, one leaf each
+  const N=6,cx=Math.floor(u*N),cy=Math.floor(v*N);let best=9,bi=0,lx=0,ly=0;
+  for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+    const gx=cx+dx,gy=cy+dy,px=((gx%N)+N)%N,py=((gy%N)+N)%N,jx=gx+.25+ihash(px,py,431)*.5,jy=gy+.25+ihash(px,py,433)*.5;
+    const a=ihash(px,py,435)*Math.PI,ca=Math.cos(a),sa=Math.sin(a),rx=u*N-jx,ry=v*N-jy;
+    const ax=(rx*ca+ry*sa)/.46,ay=(-rx*sa+ry*ca)/.17,d=Math.hypot(ax,ay*(1+Math.abs(ax)*.6));
+    if(d<best){best=d;bi=ihash(px,py,437);lx=ax;ly=ay}
+  }
+  const tone=bi;ST(q,[112,126,82]);BL(q,[154,138,80],sm_(.55,.9,tone)*.8);BL(q,[96,78,52],sm_(.85,1,tone)*.7);
+  BL(q,[168,170,120],(1-sm_(0,.05,Math.abs(ly)))*.45*(best<1?1:0));BL(q,[60,66,44],sm_(.6,1,best)*.5);
+  BL(q,[112,126,82],1-clamp((1-best)*3,0,1)*.0);q.a=clamp((1-best)*9,0,1)*255;if(q.a<255){const k=1-q.a/255;BL(q,[104,118,76],k*.9)}q.h=.5;q.ro=.85;q.me=0;
+};
+const saltFn=(u,v,q)=>{                         // cracked evaporite plates: jittered periodic Voronoi, curled raised lips
+  const N=7,cx=Math.floor(u*N),cy=Math.floor(v*N);let b1=9,b2=9,id=0;
+  for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+    const gx=cx+dx,gy=cy+dy,px=((gx%N)+N)%N,py=((gy%N)+N)%N,jx=gx+.1+ihash(px,py,441)*.8,jy=gy+.1+ihash(px,py,443)*.8,d=Math.hypot(u*N-jx,v*N-jy);
+    if(d<b1){b2=b1;b1=d;id=ihash(px,py,445)}else if(d<b2)b2=d;
+  }
+  const ed=(b2-b1),sp=pfb(u,v,110,110,447,1),bl=pfb(u,v,4,4,449,4),dust=pfb(u,v,6,6,451,3);
+  ST(q,[228,222,208]);BL(q,[206,196,176],id*.7);BL(q,[214,190,176],sm_(.8,1,id)*.45);BL(q,[178,184,168],sm_(.6,.8,bl)*.3);
+  const lip=1-sm_(.02,.2,ed);BL(q,[248,245,238],lip*.8);
+  const crack=1-sm_(.012,.05,ed);BL(q,[84,72,58],crack*.95);BL(q,[142,122,98],crack*sm_(.5,.8,bl)*.5);
+  BL(q,[198,176,140],sm_(.55,.9,dust)*.3);
+  const g=(sp-.5)*26;q.r+=g;q.g+=g;q.b+=g;
+  q.h=.55+sm_(.02,.35,ed)*.12+lip*.2-crack*.4+sp*.03;q.ro=lerp(.62,.9,crack);q.me=0;
+};
 async function forgeAsm(say_){
   const yieldUI=()=>new Promise(r=>setTimeout(r,0));
   const step=async(msg)=>{if(say_)say_(msg);await yieldUI()};
@@ -1394,6 +1441,15 @@ async function forgeAsm(say_){
   asmMat('aSolar',256,.624,solarFn,{bump:1.6});
   asmMat('aGlass',128,1,glassFn,{bump:1,opacity:.6,side:D});
   asmMat('aCopper',128,.6,copperFn,{bump:2.6});
+  await step('mixing enamel, growing cactus skin');
+  asmMat('aRed',256,1,plateFn(ASMPAL.red,800,true),{bump:2.4});
+  asmMat('aBlueP',256,1,plateFn(ASMPAL.blue,810,true),{bump:2.4});
+  asmMat('aOliveP',256,1,plateFn(ASMPAL.olive,820,true),{bump:2.4});
+  asmMat('aOchreP',256,1,plateFn(ASMPAL.ochre,830,true),{bump:2.4});
+  asmMat('aCactus',512,1,cactusFn,{bump:3.4,grain:'long'});
+  asmMat('aTwig',256,.5,twigFn,{bump:2.6,grain:'long'});
+  asmMat('aLeaf',256,1,leafFn,{bump:1.2,side:D,alphaTest:.5});
+  asmMat('aSalt',512,1,saltFn,{bump:4.2});
   await step('layering sandstone');
   asmMat('aRockS',512,2.2,rockSideFn,{bump:3.6});
   asmMat('aRockT',256,1.6,rockTopFn,{bump:3.2});
@@ -1536,6 +1592,8 @@ const helixPath=(cx,cy,cz,rad,pitch,turns,n,axis)=>{const o=[],N=Math.round(turn
 function pathAt(path,s){
   let acc=0;for(let i=1;i<path.length;i++){const l=path[i].distanceTo(path[i-1]);if(acc+l>=s||i===path.length-1){const t=clamp((s-acc)/(l||1),0,1);return{p:path[i-1].clone().lerp(path[i],t),t:path[i].clone().sub(path[i-1]).normalize()}}acc+=l}
 }
+/* split long straight segments so a scale curve (sc) is sampled along the whole length, not just at the ends */
+function densify(path,seg){const o=[];for(let i=0;i<path.length;i++){const a=_V(path[i]).clone();if(i){const p=o[o.length-1],n=Math.max(1,Math.ceil(p.distanceTo(a)/seg));for(let k=1;k<n;k++)o.push(p.clone().lerp(a,k/n))}o.push(a)}return o}
 const pathLen=(path)=>{let l=0;for(let i=1;i<path.length;i++)l+=path[i].distanceTo(path[i-1]);return l};
 
 function ownMesh(geo,mat,cast){
@@ -1551,6 +1609,14 @@ function surfGeo(nu,nv,fn,tile){
   for(let j=0;j<=nv;j++)for(let i=0;i<=nu;i++){const p=G[j][i];P.push(p.x,p.y,p.z);uv.push(ar[j][i]/tile,ac[i][j]/tile)}
   for(let j=0;j<nv;j++)for(let i=0;i<nu;i++){const a=j*(nu+1)+i,b=a+1,c=a+nu+1,d=c+1;idx.push(a,c,b,b,c,d)}
   const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(P,3));g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));g.setIndex(idx);g.computeVertexNormals();return g;
+}
+/* a thin shell that is seen from both sides: duplicate with reversed winding and flipped normals */
+function twoSided(g){
+  const P=g.attributes.position,N=g.attributes.normal,U=g.attributes.uv,I=g.index.array,n=P.count;
+  const pos=new Float32Array(n*6),nor=new Float32Array(n*6),uv=new Float32Array(n*4);
+  pos.set(P.array);pos.set(P.array,n*3);nor.set(N.array);for(let i=0;i<n*3;i++)nor[n*3+i]=-N.array[i];uv.set(U.array);uv.set(U.array,n*2);
+  const idx=[];for(let i=0;i<I.length;i++)idx.push(I[i]);for(let i=0;i<I.length;i+=3)idx.push(I[i]+n,I[i+2]+n,I[i+1]+n);
+  const o=new THREE.BufferGeometry();o.setAttribute('position',new THREE.BufferAttribute(pos,3));o.setAttribute('normal',new THREE.BufferAttribute(nor,3));o.setAttribute('uv',new THREE.BufferAttribute(uv,2));o.setIndex(idx);return o;
 }
 function latheGeo(pr,seg,tile){
   const g=new THREE.LatheGeometry(pr.map(p=>new THREE.Vector2(p[0],p[1])),seg||20),uv=g.attributes.uv,n=pr.length,acc=[0];
@@ -1605,6 +1671,7 @@ function asmKit(){
 
   /* a wind-drifted mound of dune sand, tinted like the ground it sits on; its rim sinks below the terrain */
   K.drift=(x,z,rx,rz,h,seed,rot)=>{
+    if(K.cacheMode){K.driftReq.push([x,z,rx,rz,h,seed,rot]);return null}
     const nr=7,ns=28,pos=[],uv=[],col=[],idx=[],t=K.tint||[.8,.68,.48],cs=Math.cos(rot||0),sn=Math.sin(rot||0);
     for(let ri=0;ri<=nr;ri++)for(let si=0;si<ns;si++){
       const a=si/ns*TAU,rho=ri/nr,n=fbm(Math.cos(a)*1.4+seed,Math.sin(a)*1.4+rho*2.2,seed*3+11,2);
@@ -2132,7 +2199,7 @@ function asmPlane(K,s){
   K.lathe('aRubber',[[0,0],[.15,0],[.15,.1],[0,.1]],0,.95,-1.28,12);K.g.children[K.g.children.length-1].rotation.x=Math.PI/2;
   const prop=new THREE.Group();prop.position.set(0,.95,-1.98);K.g.add(prop);
   K.lathe('aBare',[[0,0],[.075,0],[.08,.05],[.0,.1]],0,0,-.04,10,prop);prop.children[0].rotation.x=-Math.PI/2;
-  const bladeGeo=extrude(profAirfoil(.12,.06,.03,6),[V3(0,-.8,0),V3(0,.8,0)],{tile:.4,sc:t=>1-.45*Math.abs(2*t-1)*.6,roll:.35});
+  const bladeGeo=extrude(profAirfoil(.12,.06,.03,6),densify([V3(0,-.8,0),V3(0,.8,0)],.1),{tile:.4,sc:t=>1-.45*Math.abs(2*t-1)*.6,roll:.35});
   const blade=ownMesh(bladeGeo,MAT.aWood,false);prop.add(blade);
   const discMat=new THREE.MeshStandardMaterial({color:0xd8d0c0,transparent:true,opacity:0,roughness:1,depthWrite:false,side:THREE.DoubleSide});
   const disc=ownMesh(new THREE.CylinderGeometry(.81,.81,.004,28),discMat,false);disc.rotation.x=Math.PI/2;disc.receiveShadow=false;prop.add(disc);
@@ -2483,9 +2550,189 @@ function featTank(K,r,f){
   return K;
 }
 
+/* ═══ WORLD FEATURES, group B — plants, salt, canisters ═══ */
+function profStar(rad,n,amp,seg){const p=[];seg=seg||n*4;for(let i=0;i<seg;i++){const a=i/seg*TAU,k=rad*(1+amp*Math.cos(a*n));p.push([Math.cos(a)*k,Math.sin(a)*k])}return{pts:p,closed:true,hard:false}}
+function profPerim(pr){let l=0;const p=pr.pts;for(let i=0;i<p.length;i++){const a=p[i],b=p[(i+1)%p.length];l+=Math.hypot(b[0]-a[0],b[1]-a[1])}return l}
+const rndTip=(k,from)=>{if(k<from)return 1;const q=(k-from)/(1-from);return Math.max(.03,Math.sqrt(Math.max(0,1-q*q)))};
+function featCactus(K,r,f){
+  const kind=r(),ribs=10;
+  if(kind<.55){
+    /* saguaro-type: fluted column with a rounded crown, swollen foot, elbowed arms */
+    const h=1.9+r()*1.3,rad=.17+r()*.05,pr=profStar(rad,ribs,.11,ribs*5),per=profPerim(pr);
+    const lean=(r()-.5)*.25,pts=[];
+    const N=20;for(let i=0;i<=N;i++){const t=i/N;pts.push(V3(lean*t*t*h*.4,t*h*.9,0))}
+    for(let j=1;j<=8;j++){const t=.9+.1*j/8;pts.push(V3(lean*t*t*h*.4,t*h,0))}
+    K.tube('aCactus',pr,pts,{tile:.8,tu:per,tv:.8,sc:k=>rndTip(k,.9)*(k<.07?1+.22*(1-k/.07):1)});
+    const arms=1+Math.floor(r()*3);
+    for(let i=0;i<arms;i++){
+      const a=r()*TAU,hy=h*(.3+r()*.35),ra=rad*(.55+r()*.15),len=.45+r()*.7,out=.35+r()*.25;
+      const dx=Math.cos(a),dz=Math.sin(a),x0=lean*(hy/h)*(hy/h)*h*.4;
+      const ap=densify(filletPath([V3(x0,hy,0),V3(x0+dx*out*.55,hy+.03,dz*out*.55),V3(x0+dx*out,hy+.18,dz*out),V3(x0+dx*out,hy+.2+len,dz*out)],.2,6),.07);
+      const arm=profStar(ra,ribs,.11,ribs*4);
+      K.tube('aCactus',arm,ap,{tile:.8,tu:profPerim(arm),tv:.8,sc:k=>rndTip(k,.92)});
+    }
+    for(let i=0;i<3;i++){const a=r()*TAU;K.sphere('aOchreP',.03,Math.cos(a)*rad*.5+lean*.4*h,h-.02,Math.sin(a)*rad*.5,1,.7,1)}   // dried flower buds on the crown
+  }else if(kind<.8){
+    /* barrel cactus: squat ribbed drum, crown tuft of dried flowers */
+    const h=.5+r()*.35,rad=.24+r()*.1,pr=profStar(rad,14,.1,14*4),per=profPerim(pr),pts=[];
+    for(let i=0;i<=16;i++)pts.push(V3(0,i/16*h,0));
+    K.tube('aCactus',pr,pts,{tile:.8,tu:per,tv:.8,sc:k=>{const q=(k-.5)*2;return Math.max(.1,Math.sqrt(Math.max(0,1-Math.pow(Math.abs(q),2.3)*.92)))*(k>.92?.8:1)}});
+    for(let i=0;i<7;i++){const a=i/7*TAU+r(),d=rad*.35*r();K.sphere('aOchreP',.035,Math.cos(a)*d,h*.97,Math.sin(a)*d,1,.8,1)}
+    K.tube('aTwig',profCircle(.03,6),[V3(0,h*.9,0),V3(0,h*1.02,0)],{tile:.3});
+  }else{
+    /* prickly pear: a cluster of flat pads, each a flattened pod with areoles, a few ripe red fruit */
+    const pad=(x,y,z,rx,ry,tilt,yaw,par)=>{
+      const g=new THREE.SphereGeometry(1,14,10),P=g.attributes.position,U=g.attributes.uv;
+      for(let i=0;i<P.count;i++){const px=P.getX(i),py=P.getY(i),pz=P.getZ(i);P.setXYZ(i,px*rx,py*ry,pz*.04+Math.sign(pz)*Math.abs(pz)*.02);U.setXY(i,px*rx/.8+.3,py*ry/.8+.2)}
+      g.computeVertexNormals();const m=ownMesh(g,MAT.aCactus);m.position.set(x,y,z);m.rotation.set(tilt,yaw,r()*.4-.2);K.g.add(m);return m};
+    const base=pad(0,.28,0,.2,.28,.1,r()*3,null);
+    const n=5+Math.floor(r()*4);
+    for(let i=0;i<n;i++){const a=r()*TAU,lvl=1+(i%3),px=Math.cos(a)*.12*lvl,py=.3+lvl*.17+r()*.1,pz=Math.sin(a)*.12*lvl;
+      pad(px,py,pz,.15+r()*.07,.2+r()*.08,(r()-.5)*.8,a,null);
+      if(r()<.5)K.sphere('aRed',.035,px+Math.cos(a)*.1,py+.2,pz+Math.sin(a)*.1,1,1.25,1)}
+  }
+  K.drift(0,0,.9,.8,.14,r()*20,r()*3);
+  return K;
+}
+function featShrub(K,r,f){
+  /* desert scrub: a crown of woody stems that fork three times, sparse dry leaves, and a small dune built up on its windward side */
+  const dead=r()<.25,H=.5+r()*.5;
+  K.drift(.15,0,1.2+r()*.5,.95+r()*.4,.28+r()*.16,r()*50,r()*3);
+  const card=new THREE.BufferGeometry();{
+    const w=.2,l=.26,P=[-w/2,0,0,w/2,0,0,-w/2*1.15,l*.55,.02,w/2*1.15,l*.55,.02,-w/2*.4,l,.04,w/2*.4,l,.04],U=[0,0,1,0,0,.5,1,.5,0,1,1,1];
+    card.setAttribute('position',new THREE.Float32BufferAttribute(P,3));card.setAttribute('uv',new THREE.Float32BufferAttribute(U,2));
+    card.setIndex([0,1,3,0,3,2,2,3,5,2,5,4]);card.computeVertexNormals();
+  }
+  const leaves=(p,d)=>{
+    if(dead&&r()<.8)return;
+    for(let i=0;i<2;i++){
+      const m=ownMesh(card.clone(),MAT.aLeaf,false);m.userData.own=true;
+      m.position.copy(p);m.quaternion.setFromUnitVectors(V3(0,1,0),d.clone().normalize());m.rotateOnAxis(V3(0,1,0),i*Math.PI/2+r()*.8);
+      m.scale.setScalar(.8+r()*.7);K.g.add(m);
+    }
+  };
+  const twig=(p,dir,len,rad,depth)=>{
+    const pts=[p.clone()],n=3;let d=dir.clone(),q=p.clone();
+    for(let i=0;i<n;i++){d.add(V3((r()-.5)*.4,(depth<2?.05:-.02)+(r()-.5)*.12,(r()-.5)*.4)).normalize();q=q.clone().addScaledVector(d,len/n);pts.push(q.clone())}
+    K.tube('aTwig',profCircle(rad,5),pts,{tile:.5,sc:t=>1-.7*t});
+    if(depth<3){
+      const kids=depth===0?2:(r()<.6?2:1);
+      for(let k=0;k<kids;k++){const at=pts[2+(k%2)],nd=d.clone().add(V3((r()-.5)*1.1,.1+r()*.2,(r()-.5)*1.1)).normalize();twig(at,nd,len*.7,rad*.62,depth+1)}
+    }else{leaves(pts[n],d);leaves(pts[2],d.clone().add(V3(.3,.2,0)))}
+  };
+  const stems=5+Math.floor(r()*3);
+  for(let i=0;i<stems;i++){
+    const a=i/stems*TAU+r()*.6,spread=.35+r()*.35;
+    twig(V3(Math.cos(a)*.04,.02,Math.sin(a)*.04),V3(Math.cos(a)*spread,1,Math.sin(a)*spread).normalize(),H*.6,.016+r()*.006,0);
+  }
+  K.mesh(latheGeo([[0,0],[.06,0],[.075,.06],[.05,.12],[0,.14]],8,.3),'aTwig',0,0,0);                    // woody crown
+  return K;
+}
+function featSaltcrust(K,r,f){
+  /* a patch of cracked evaporite plates: thin raised crust that tapers to the pan, curled loose plates, crystal clusters */
+  const npatch=2+Math.floor(r()*2);
+  for(let p=0;p<npatch;p++){
+    const cx=(r()-.5)*1.5,cz=(r()-.5)*1.5,R=.9+r()*.8,nr=7,ns=26,pos=[],uv=[],idx=[],ro=r()*50;
+    for(let ri=0;ri<=nr;ri++)for(let si=0;si<ns;si++){
+      const a=si/ns*TAU,rho=ri/nr,nz=fbm(Math.cos(a)*1.3+ro,Math.sin(a)*1.3+ro*.7,ro+7,3),rr=rho*R*(.7+.6*nz);
+      const edge=Math.pow(Math.max(0,1-rho),.7),y=-.03+.075*Math.min(1,edge*3.2)+fbm(cx+Math.cos(a)*rr*2,cz+Math.sin(a)*rr*2,ro+3,2)*.025;
+      const x=cx+Math.cos(a)*rr,z=cz+Math.sin(a)*rr;pos.push(x,ri===nr?-.07:y,z);uv.push(x+p*.37,z);
+    }
+    for(let ri=0;ri<nr;ri++)for(let si=0;si<ns;si++){const a=ri*ns+si,b=ri*ns+(si+1)%ns,c=(ri+1)*ns+si,d=(ri+1)*ns+(si+1)%ns;idx.push(a,b,c,b,d,c)}
+    const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));g.setIndex(idx);g.computeVertexNormals();
+    K.g.add(ownMesh(g,MAT.aSalt,false));
+    /* loose curled plates and shard clusters on this patch */
+    for(let i=0;i<4;i++){
+      const a=r()*TAU,d=r()*R*.55,px=cx+Math.cos(a)*d,pz=cz+Math.sin(a)*d,sz=.18+r()*.2,yaw=r()*TAU,cl=.04+r()*.05;
+      const m=ownMesh(twoSided(surfGeo(4,4,(u,v)=>{const x=(u-.5)*sz*2,z=(v-.5)*sz*1.6,e=Math.pow(Math.hypot(u-.5,v-.5)*2,2);return[x,.085+e*cl,z]},.8)),MAT.aSalt,false);
+      m.position.set(px,0,pz);m.rotation.set((r()-.5)*.2,yaw,(r()-.5)*.2);K.g.add(m);
+    }
+    for(let i=0;i<5;i++){const a=r()*TAU,d=r()*R*.6,s=.03+r()*.06;K.box('aSalt',cx+Math.cos(a)*d,.07+s*.3,cz+Math.sin(a)*d,s*1.3,s,s*(.8+r()*.5),r(),r()*TAU,r())}
+  }
+  return K;
+}
+function featCanheap(K,r,f){
+  /* a dump of salvaged canisters: gas bottles, jerrycans, oil cans, crushed ones, half in the sand */
+  K.drift(0,0,1.3,1.1,.2,r()*30,r()*3);
+  const bottle=(x,z,yaw,lie,m)=>{
+    const g=new THREE.Group();g.position.set(x,lie?.17:.0,z);g.rotation.set(0,yaw,0);K.g.add(g);
+    const inner=new THREE.Group();inner.rotation.z=lie?Math.PI/2:0;inner.position.y=lie?0:0;g.add(inner);
+    const lt=K.lathe(m,[[0,0],[.1,0],[.16,.02],[.17,.08],[.17,.52],[.15,.62],[.09,.7],[.04,.73],[0,.73]],0,lie?-.36:0,0,16,inner,.7);
+    K.mesh(new THREE.TorusGeometry(.14,.014,5,14),'aBare',0,lie?-.36+.02:.02,0,Math.PI/2,0,0,inner);
+    K.lathe('aCopper',[[0,0],[.035,0],[.04,.03],[.03,.08],[0,.09]],0,lie?.37:.73,0,8,inner);
+    for(let i=0;i<3;i++){const a=i*TAU/3;K.pipe('aGalv',.008,[V3(Math.cos(a)*.1,lie?.31:.67,Math.sin(a)*.1),V3(Math.cos(a)*.1,lie?.43:.79,Math.sin(a)*.1)],.02,{n:5},inner)}
+    K.mesh(new THREE.TorusGeometry(.1,.01,5,12),'aGalv',0,lie?.43:.79,0,Math.PI/2,0,0,inner);
+    return g;
+  };
+  const jerry=(x,z,yaw,m,tilt)=>{
+    const g=new THREE.Group();g.position.set(x,.25,z);g.rotation.set(tilt||0,yaw,0);K.g.add(g);
+    K.box(m,0,0,0,.34,.46,.15,0,0,0,g);
+    K.box(m,0,.0,.0,.3,.42,.158,0,0,0,g);
+    K.box('aBare',0,.08,.082,.2,.014,.006,0,0,.7,g);K.box('aBare',0,.08,.082,.2,.011,.009,0,0,-.7,g);
+    K.pipe('aBare',.012,[V3(-.1,.22,0),V3(-.1,.3,0),V3(.0,.33,0),V3(.08,.3,0),V3(.1,.2,0)],.04,{n:6},g);
+    K.lathe('aBare',[[0,0],[.035,0],[.04,.02],[.035,.07],[0,.07]],.1,.23,.0,8,g);
+    K.tube('aRubber',profCircle(.004,4),sagPath(V3(.1,.3,0),V3(.04,.26,.08),.03,5),{tile:.2},g);
+    return g;
+  };
+  const oil=(x,z,rad,h,m,yaw,lie,crush)=>{
+    const g=new THREE.Group();g.position.set(x,lie?rad:h/2,z);g.rotation.set(0,yaw,0);K.g.add(g);
+    const inner=new THREE.Group();inner.rotation.z=lie?Math.PI/2:0;g.add(inner);
+    K.disc(m,rad,h,0,0,0,'y',inner,.6,16);
+    for(const y of [-h*.5,h*.5])K.mesh(new THREE.TorusGeometry(rad,.012,5,16),'aBare',0,y,0,Math.PI/2,0,0,inner);
+    for(const y of [-h*.2,h*.2])K.mesh(new THREE.TorusGeometry(rad+.003,.008,4,16),'aBare',0,y,0,Math.PI/2,0,0,inner);
+    if(!crush)K.lathe('aBare',[[0,0],[.03,0],[.032,.02],[0,.025]],rad*.4,h/2,0,8,inner);
+    else{g.scale.set(1,.88,.7);g.rotation.z=.15}
+    return g;
+  };
+  const spots=[],place=(rad)=>{for(let t=0;t<30;t++){const a=r()*TAU,d=Math.sqrt(r())*.95,x=Math.cos(a)*d*1.05,z=Math.sin(a)*d*.9;if(spots.every(s=>Math.hypot(s[0]-x,s[1]-z)>s[2]+rad))return spots.push([x,z,rad]),[x,z]}return[(r()-.5)*2,(r()-.5)*2]};
+  const sink=(g,k)=>{g.position.y-=k*r();g.rotation.x+=(r()-.5)*.35;g.rotation.z+=(r()-.5)*.3;return g};
+  const mats=['aOliveP','aBlueP','aRed','aOchreP','aRust','aGalv'];
+  const nb=2+Math.floor(r()*2);for(let i=0;i<nb;i++){const p=place(.38);sink(bottle(p[0],p[1],r()*TAU,r()<.55,mats[Math.floor(r()*4)]),.05)}
+  const nj=2+Math.floor(r()*3);for(let i=0;i<nj;i++){const p=place(.28);sink(jerry(p[0],p[1],r()*TAU,mats[Math.floor(r()*6)],0),.07)}
+  const no=3+Math.floor(r()*3);for(let i=0;i<no;i++){const p=place(.2),rad=.11+r()*.05;sink(oil(p[0],p[1],rad,.2+r()*.12,mats[Math.floor(r()*6)],r()*TAU,r()<.5,r()<.35),.03)}
+  return K;
+}
+function featBarrel(K,r,f){
+  /* 200-litre steel drum: stamped rolling hoops, rolled chimes, two bungs; stands, lies, or lies split open */
+  const pose=r(),m=['aBlueP','aRed','aOliveP','aRust','aOchreP'][Math.floor(r()*5)];
+  const g=new THREE.Group();K.g.add(g);
+  const R=.29,Hh=.88;
+  const body=[[R,.0],[R,.1],[R-.012,.14],[R,.18],[R,.4],[R-.012,.44],[R,.48],[R,.7],[R-.012,.74],[R,.78],[R,Hh]].map(p=>[p[0],p[1]]);
+  g.add(K.lathe(m,body.map(p=>[p[0],p[1]-Hh/2]),0,0,0,22,g,.8));
+  for(const s of [-1,1]){
+    K.disc(m,R-.004,.03,0,s*(Hh/2-.012),0,'y',g,.7,22);
+    K.mesh(new THREE.TorusGeometry(R,.016,6,22),'aBare',0,s*(Hh/2),0,Math.PI/2,0,0,g);
+    K.mesh(new THREE.TorusGeometry(R-.04,.007,5,18),'aBare',0,s*(Hh/2-.002),0,Math.PI/2,0,0,g);
+  }
+  K.lathe('aBare',[[0,0],[.035,0],[.04,.02],[.035,.04],[0,.045]],.12,Hh/2+.005,.08,8,g);
+  K.lathe('aBare',[[0,0],[.025,0],[.03,.02],[.025,.035],[0,.04]],-.1,Hh/2+.004,-.12,8,g);
+  K.box('aOchre',.0,.1,R+.003,.2,.14,.012,0,0,0,g);                                   // faded stencil plate
+  if(pose<.4){g.position.y=Hh/2;g.rotation.y=r()*TAU}
+  else if(pose<.8){g.rotation.z=Math.PI/2;g.position.y=R;g.rotation.y=r()*TAU;K.drift(.0,0,.9,.7,.1,r()*30,r()*3)}
+  else{g.rotation.z=Math.PI/2+.1;g.position.y=R*.92;g.rotation.y=r()*TAU;K.drift(0,0,1.1,.8,.18,r()*30,r()*3)}
+  if(pose<.4&&r()<.5){const g2=new THREE.Group();g2.position.set(.7,R,.3);g2.rotation.z=Math.PI/2;K.g.add(g2);K.disc('aRust',R,Hh,0,0,0,'y',g2,.8,18);K.mesh(new THREE.TorusGeometry(R,.016,6,22),'aBare',0,Hh/2,0,Math.PI/2,0,0,g2)}
+  return K;
+}
+
 const ASMFN={shelter:asmShelter,wall:asmWall,workbench:asmWorkbench,harvester:asmHarvester,purifier:asmPurifier,trough:asmTrough,tank:asmTank,lamp:asmLamp,battery:asmBattery,solar:asmSolar,windmill:asmWindmill,stove:asmStove,crate:asmCrate,sign:asmSign,buggy:asmBuggy,plane:asmPlane,mast:asmMast};
-const ASMRAD={mast:1.2,wreck:2.3,pod:2.0,tank:2.6};
-const ASMFEAT={mast:featMast,wreck:featWreck,pod:featPod,tank:featTank};
+const ASMRAD={mast:1.2,wreck:2.3,pod:2.0,tank:2.6,canheap:0,barrel:0,cactus:0,shrub:0,saltcrust:0};
+const ASMFEAT={mast:featMast,wreck:featWreck,pod:featPod,tank:featTank,cactus:featCactus,shrub:featShrub,saltcrust:featSaltcrust,canheap:featCanheap,barrel:featBarrel};
+
+/* feature variants: each type builds a few variants once; instances share their geometry (never disposed),
+   and only the cheap sand drift is built per instance so it takes the local ground tint */
+const ASMVAR=new Map(),ASMNV={cactus:6,shrub:6,barrel:5,canheap:4,saltcrust:4};
+function asmFeatInstance(f,g,o){
+  const NV=ASMNV[f.t]||3,vi=Math.abs(Math.floor(f.x*7.13+f.z*3.77))%NV,key=f.t+':'+vi;
+  let v=ASMVAR.get(key);
+  if(!v){
+    const K=asmKit();K.cacheMode=true;K.driftReq=[];
+    ASMFEAT[f.t](K,rngAt(vi*977+1,vi*31+7,SEED+5+f.t.length*13),{x:0,z:0,y:0,rot:0,sc:1},1);
+    v={m:K.finish(),drifts:K.driftReq};ASMVAR.set(key,v);_tg.clear();
+  }
+  const inst=v.m.clone(true);inst.traverse(c=>{c.userData=Object.assign({},c.userData,{own:false})});inst.rotation.y=o;g.add(inst);
+  if(v.drifts.length){const K2=asmKit(),tn=[0,0,0];groundTint(f.x,f.z,f.y,0,tn);K2.tint=tn;for(const d of v.drifts)K2.drift(d[0],d[1],d[2],d[3],d[4],d[5],d[6]);const dm=K2.finish();dm.rotation.y=o;g.add(dm)}
+}
+
 function dropFeat(m){World.group.remove(m);m.traverse(o=>{if(o.isMesh&&o.userData.own&&o.geometry)o.geometry.dispose()})}
 function featureMesh(f){
   const g=new THREE.Group(),r=rngAt(f.x|0,f.z|0,SEED+5),o=f.rot,s=f.sc;
@@ -2493,8 +2740,7 @@ function featureMesh(f){
     /* terrain-conforming bedded sandstone; built in world-relative coordinates, so counter this group's scale */
     const inner=outcropMesh(f,r,f.t==='spire',s);inner.scale.setScalar(1/s);inner.position.y=-(f.y-0.08*s)/s;g.add(inner);
   }else if(ASMFEAT[f.t]){
-    const K=asmKit(),tn=[0,0,0];groundTint(f.x,f.z,f.y,0,tn);K.tint=tn;ASMFEAT[f.t](K,r,f,s);
-    const m=K.finish();m.rotation.y=o;g.add(m);_tg.clear();
+    asmFeatInstance(f,g,o);
     const R=(ASMRAD[f.t]||0)*s;if(R){let mn=f.y;for(let k=0;k<8;k++)mn=Math.min(mn,heightAt(f.x+Math.cos(k*.785+o)*R,f.z+Math.sin(k*.785+o)*R));g.userData.sink=(f.y-mn)*.8}
   }else switch(f.t){
     case 'ruin': {
@@ -2512,36 +2758,16 @@ function featureMesh(f){
     case 'gearpile': for(let i=0;i<4;i++)g.add(M(GEO.cyl,MAT.steel,(r()-0.5)*1.1,0.1+r()*0.5,(r()-0.5)*1.1,r()*0.5,r()*TAU,r()*0.5,0.7,0.16,0.7));
       g.add(M(GEO.torus,MAT.rust,0,0.9,0,0,0,0.2,1.1,1.1,1.1));
       break;
-    case 'canheap': for(let i=0;i<4;i++)g.add(M(GEO.cyl,MAT.rust,(r()-0.5)*1.1,0.3,(r()-0.5)*1.1,0,r()*TAU,0,0.44,0.6,0.44));
-      break;
     case 'wirecoil': for(let i=0;i<4;i++)g.add(M(GEO.torus,MAT.rust,(r()-0.5)*0.8,0.1+r()*0.3,(r()-0.5)*0.8,r()*1.2,r()*TAU,0,0.9,0.9,0.9));
       break;
     case 'crate': g.add(M(GEO.box,MAT.rust,0,0.42,0,o*0.2,0,0,0.95,0.84,0.95));
       g.add(M(GEO.box,MAT.rustDark,0,0.42,0,0,o*0.2,0,1.0,0.16,1.0));
       g.add(M(GEO.box,MAT.rust,0,0.87,0,0,o*0.2,0,0.9,0.1,0.9));
       break;
-    case 'barrel': g.add(M(GEO.cyl,MAT.rust,0,0.44,0,0,r()*TAU,0,0.6,0.88,0.6));
-      g.add(M(GEO.torus,MAT.rustDark,0,0.6,0,Math.PI/2,0,0,0.62,0.62,0.62));
-      break;
     case 'stone': g.add(M(GEO.ico1,MAT.rock,0,0.45,0,r()*0.5,r()*TAU,r()*0.4,1.5,1.2,1.4));
       g.add(M(GEO.ico,MAT.rock,0.7,0.2,0.3,r(),r(),r(),0.5,0.4,0.5));
       break;
     case 'stack': for(let i=0;i<3;i++)g.add(M(GEO.ico,MAT.rock,(r()-0.5)*0.3,0.22+i*0.34,(r()-0.5)*0.3,r()*0.4,r()*TAU,r()*0.3,0.6-i*0.08,0.34,0.55-i*0.06));
-      break;
-    case 'saltcrust': for(let i=0;i<3;i++)g.add(M(GEO.ico,MAT.salt,(r()-0.5)*1.4,0.03,(r()-0.5)*1.4,0,r()*TAU,0,0.9,0.09,0.8));
-      break;
-    case 'cactus': {
-      const h=1.6+r()*1.2;
-      g.add(M(GEO.cyl,MAT.cactus,0,h/2,0,0,0,0,0.34,h,0.34));
-      for(let i=0;i<2;i++){
-        const a=r()*TAU,hy=h*(0.35+r()*0.4);
-        g.add(M(GEO.cyl,MAT.cactus,Math.cos(a)*0.3,hy+0.35,Math.sin(a)*0.3,0,0,Math.cos(a)*0.6,0.2,0.8,0.2));
-      }
-      g.add(M(GEO.sph,MAT.cactus,0,h,0,0,0,0,0.3,0.4,0.3));
-      break;
-    }
-    case 'shrub': for(let i=0;i<5;i++){const a=r()*TAU;
-      g.add(M(GEO.tri,MAT.fibre,Math.cos(a)*0.3,0.22+r()*0.2,Math.sin(a)*0.3,0.2+a,a*1.3,a*0.3,0.5,0.55+r()*0.3,0.5));}
       break;
   }
   g.scale.setScalar(s);
