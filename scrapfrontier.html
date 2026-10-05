@@ -1571,15 +1571,16 @@ function bakeStatic(root,keep){
     const mtx=new THREE.Matrix4().multiplyMatrices(inv,o.matrixWorld),det=mtx.determinant();
     const ng=o.geometry.index?o.geometry.toNonIndexed():o.geometry.clone();ng.applyMatrix4(mtx);
     if(!ng.attributes.uv)ng.setAttribute('uv',new THREE.Float32BufferAttribute(new Float32Array(ng.attributes.position.count*2),2));
+    if(o.material.vertexColors&&!ng.attributes.color){const w=new Float32Array(ng.attributes.position.count*3).fill(1);ng.setAttribute('color',new THREE.BufferAttribute(w,3))}
     if(det<0)for(const k of ['position','normal','uv']){const a=ng.attributes[k],s=a.itemSize;for(let t=0;t<a.count;t+=3)for(let c=0;c<s;c++){const x=a.array[(t+1)*s+c];a.array[(t+1)*s+c]=a.array[(t+2)*s+c];a.array[(t+2)*s+c]=x}}
     const key=o.material.uuid+(o.castShadow?'c':'n');let b=buckets.get(key);if(!b){b={mat:o.material,cast:o.castShadow,gs:[]};buckets.set(key,b)}
     b.gs.push(ng);o.parent.remove(o);
   }
   for(const b of buckets.values()){
     let nv=0;for(const g of b.gs)nv+=g.attributes.position.count;
-    const pos=new Float32Array(nv*3),nor=new Float32Array(nv*3),uv=new Float32Array(nv*2);let o3=0,o2=0;
-    for(const g of b.gs){pos.set(g.attributes.position.array,o3);nor.set(g.attributes.normal.array,o3);uv.set(g.attributes.uv.array,o2);o3+=g.attributes.position.count*3;o2+=g.attributes.position.count*2;g.dispose()}
-    const mg=new THREE.BufferGeometry();mg.setAttribute('position',new THREE.BufferAttribute(pos,3));mg.setAttribute('normal',new THREE.BufferAttribute(nor,3));mg.setAttribute('uv',new THREE.BufferAttribute(uv,2));
+    const pos=new Float32Array(nv*3),nor=new Float32Array(nv*3),uv=new Float32Array(nv*2),vc=b.mat.vertexColors?new Float32Array(nv*3):null;let o3=0,o2=0;
+    for(const g of b.gs){pos.set(g.attributes.position.array,o3);nor.set(g.attributes.normal.array,o3);uv.set(g.attributes.uv.array,o2);if(vc)vc.set(g.attributes.color.array,o3);o3+=g.attributes.position.count*3;o2+=g.attributes.position.count*2;g.dispose()}
+    const mg=new THREE.BufferGeometry();mg.setAttribute('position',new THREE.BufferAttribute(pos,3));mg.setAttribute('normal',new THREE.BufferAttribute(nor,3));mg.setAttribute('uv',new THREE.BufferAttribute(uv,2));if(vc)mg.setAttribute('color',new THREE.BufferAttribute(vc,3));
     const mesh=ownMesh(mg,b.mat,b.cast&&!b.mat.transparent);mesh.frustumCulled=true;root.add(mesh);
   }
 }
@@ -1601,6 +1602,32 @@ function asmKit(){
   K.tube=(m,prof,path,o,par)=>{const e=ownMesh(extrude(prof,path,o),MAT[m]);(par||g).add(e);return e};
   K.pipe=(m,r,pts,bend,o,par)=>K.tube(m,profCircle(r,o&&o.n||10),filletPath(pts,bend||r*3,5),Object.assign({tile:.6},o||{}),par);
   K.lathe=(m,pr,x,y,z,seg,par,tile)=>K.mesh(latheGeo(pr,seg||20,tile||1),m,x,y,z,0,0,0,par);
+
+  /* a wind-drifted mound of dune sand, tinted like the ground it sits on; its rim sinks below the terrain */
+  K.drift=(x,z,rx,rz,h,seed,rot)=>{
+    const nr=7,ns=28,pos=[],uv=[],col=[],idx=[],t=K.tint||[.8,.68,.48],cs=Math.cos(rot||0),sn=Math.sin(rot||0);
+    for(let ri=0;ri<=nr;ri++)for(let si=0;si<ns;si++){
+      const a=si/ns*TAU,rho=ri/nr,n=fbm(Math.cos(a)*1.4+seed,Math.sin(a)*1.4+rho*2.2,seed*3+11,2);
+      const rr=rho*(.88+.3*n);let y=h*Math.pow(Math.max(0,1-rr*rr),1.5)*(.75+.5*n);if(ri===nr)y=-.14;
+      const lx=Math.cos(a)*rx*rho,lz=Math.sin(a)*rz*rho;
+      const px=x+lx*cs-lz*sn,pz=z+lx*sn+lz*cs;
+      pos.push(px,y,pz);uv.push(px/9+seed*.31,pz/9);col.push(t[0],t[1],t[2]);
+    }
+    for(let ri=0;ri<nr;ri++)for(let si=0;si<ns;si++){const a=ri*ns+si,b2=ri*ns+(si+1)%ns,c2=(ri+1)*ns+si,d=(ri+1)*ns+(si+1)%ns;idx.push(a,b2,c2,b2,d,c2)}
+    const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));g.setIndex(idx);g.computeVertexNormals();
+    const m=ownMesh(g,MAT.sand,false);m.receiveShadow=true;K.g.add(m);return m;
+  };
+
+  /* flat-faced disc (wheel, sprocket, roller): planar UVs on the faces so textures never swirl, rim wraps at true scale */
+  K.disc=(m,rad,w,x,y,z,axis,par,tile,seg)=>{
+    tile=tile||.8;seg=seg||18;const g=new THREE.CylinderGeometry(rad,rad,w,seg,1),U=g.attributes.uv,N=g.attributes.normal,P=g.attributes.position;
+    for(let i=0;i<U.count;i++){
+      if(Math.abs(N.getY(i))>.9)U.setXY(i,P.getX(i)/tile+.2,P.getZ(i)/tile+.6);
+      else U.setXY(i,U.getX(i)*TAU*rad/tile,P.getY(i)/tile);
+    }
+    if(axis==='x')g.rotateZ(Math.PI/2);else if(axis==='z')g.rotateX(Math.PI/2);
+    const o=ownMesh(g,MAT[m]);o.position.set(x,y,z);(par||K.g).add(o);return o;
+  };
   K.dyn=(o)=>{keep.push(o);return o};
   K.sphere=(m,r,x,y,z,sx,sy,sz,par)=>{const o=ownMesh(new THREE.SphereGeometry(r,12,8),MAT[m]);o.position.set(x,y,z);o.scale.set(sx||1,sy||1,sz||1);(par||g).add(o);return o};
   K.finish=()=>{bakeStatic(g,keep);return g};
@@ -2267,48 +2294,209 @@ function outcropMesh(f,r,tall,sc){
   return grp;
 }
 
+/* ═══ WORLD FEATURES, group A — the big hulks ═══ */
+function featMast(K,r,f){
+  /* a dead radio pylon: three-legged lattice, top third buckled over, missing braces, a collapsed service platform */
+  const H=8.4,R0=.78,R1=.24,Hb=5.9,A=[.4,.4+TAU/3,.4+2*TAU/3];
+  const P=(a,t)=>{const rr=lerp(R0,R1,t);return V3(Math.cos(a)*rr,t*H,Math.sin(a)*rr)};
+  K.box('aConc',0,.12,0,2.0,.24,1.9);K.box('aConc',.1,.05,-.1,2.24,.12,2.12,0,.3,0);
+  K.drift(.4,.2,2.8,2.2,.55,3,.4);
+  A.forEach((a,i)=>{
+    const t1=Hb/H,top=[P(a,0),P(a,t1*.5),P(a,t1)];                      // straight run, then the buckle
+    const lean=V3(1.0+i*.25,0,.35-i*.2);
+    const b1=P(a,t1).clone().add(lean.clone().multiplyScalar(.9));b1.y-=.25;
+    const b2=b1.clone().add(V3(.9+i*.15,-.35-i*.3,.25));
+    const pts=i===2?[top[0],top[1],top[2],b1]:[top[0],top[1],top[2],b1,b2];
+    K.tube('aRust',profAngle(.1-i*.006,.1-i*.006,.011),filletPath(pts,.9,7),{tile:.9,up:V3(Math.cos(a),0,Math.sin(a)),roll:Math.PI/4});
+    const sx=Math.cos(a)*R0*1.0,sz=Math.sin(a)*R0;                       // base shoe + anchor bolts
+    K.box('aBare',sx,.27,sz,.34+i*.012,.03,.34-i*.01,0,-a,0);
+    hexBolts(K,'aBare',[[sx+.1,.3,sz+.1],[sx-.1,.3,sz-.1],[sx+.1,.3,sz-.1],[sx-.1,.3,sz+.1]],.022);
+  });
+  const nb=7;
+  for(let k=0;k<nb;k++){
+    const t0=k/nb*(Hb/H),t1=(k+1)/nb*(Hb/H);
+    for(let i=0;i<3;i++){
+      const a=A[i],b=A[(i+1)%3];
+      if(r()>.22)K.tube('aBare',profAngle(.036,.036,.005),[P(a,t0),P(b,t1)],{tile:.4});
+      if(r()>.3)K.tube('aBare',profAngle(.034,.034,.005),[P(b,t0),P(a,t1)],{tile:.4});
+      if(k%2===0&&r()>.12)K.tube('aRust',profAngle(.038,.038,.005),[P(a,t0),P(b,t0)],{tile:.4});
+    }
+  }
+  /* one diagonal torn loose and hanging by a single bolt */
+  { const a=A[0],b=A[1],p=P(a,.42*Hb/H),q=P(b,.5*Hb/H);K.tube('aBare',profAngle(.036,.036,.005),[p,p.clone().lerp(q,.55).add(V3(0,-.5,.1)),p.clone().add(V3(.6,-1.3,.5))],{tile:.4}) }
+  /* service platform at ~3.6 m: grating tilted where one leg bracket let go, with a bent handrail */
+  const plat=new THREE.Group();plat.position.set(0,3.6,0);plat.rotation.set(.1,0,-.14);K.g.add(plat);
+  const rr=lerp(R0,R1,3.6/H)+.5;
+  for(let i=0;i<3;i++){const a=A[i]+TAU/6,b=A[(i+1)%3]+TAU/6;
+    K.tube('aGalv',profChannel(.05,.07,.006),[V3(Math.cos(a)*rr,0,Math.sin(a)*rr),V3(Math.cos(b)*rr,0,Math.sin(b)*rr)],{tile:.5},plat);}
+  for(let i=0;i<9;i++){const x=-.5+i*.125;K.box('aBare',x,.05,0,.026+(i%3)*.004,.014,1.2-Math.abs(x)*.5,0,0,0,plat)}
+  K.pipe('aGalv',.02,[V3(-.7,.05,-.45),V3(-.7,.95,-.45),V3(.1,.98,-.8),V3(.8,.95,-.4),V3(.9,.4,-.1)],.12,{tile:.4},plat);
+  /* ladder: two rails + rungs up one face to the platform, bottom three rungs missing */
+  const la=A[0]+TAU/6,lx=Math.cos(la)*.95,lz=Math.sin(la)*.95;
+  for(const d of [-.2,.2])K.tube('aGalv',profCircle(.014,6),[V3(lx+d*-Math.sin(la),.3,lz+d*Math.cos(la)),V3(lx*.82+d*-Math.sin(la),3.5,lz*.82+d*Math.cos(la))],{tile:.4});
+  for(let i=3;i<11;i++){const y=.3+i*.29,k=1-(y-.3)/3.2*.18;K.pipe('aBare',.01,[V3(lx*k+.2*-Math.sin(la),y,lz*k+.2*Math.cos(la)),V3(lx*k-.2*-Math.sin(la),y,lz*k-.2*Math.cos(la))],.01)}
+  /* the bent-over top: a cross-arm with cracked insulator stacks, guy wire dangling to the sand */
+  const tip=P(A[0],Hb/H).clone().add(V3(1.9,-.6,.5));
+  K.tube('aGalv',profChannel(.06,.08,.007),[tip.clone().add(V3(-.9,.2,-.7)),tip.clone().add(V3(.7,-.15,.55))],{tile:.5});
+  for(const u of [-.55,0,.55]){const c=tip.clone().add(V3(-.1+u*.6,.1,-.1+u*.75));K.lathe('aGlass',[[0,0],[.06,0],[.09,.05],[.06,.08],[.09,.13],[.06,.16],[.03,.2],[0,.2]],c.x,c.y,c.z,10,null,.3)}
+  K.tube('aRubber',profCircle(.012,6),sagPath(tip.clone().add(V3(0,-.1,0)),V3(3.0,.14,1.6),.6,14),{tile:.3});
+  K.tube('aBare',profCircle(.009,5),sagPath(P(A[1],.5).clone(),V3(-3.4,.1,2.2),.35,14),{tile:.3});
+  K.box('aConc',-3.45,.08,2.25,.5,.2,.4,0,.4,0);
+  return K;
+}
+function featWreck(K,r,f){
+  /* a stripped flatbed lorry, six-wheeled, nose to +Z. Door off, bonnet gone, bed rotted, two wheels missing */
+  const Y0=.0;
+  for(const x of [-.6,.6])K.tube('aBare',profChannel(.08,.15,.009),[V3(x+(x>0?.01:-.01),.55,-2.2),V3(x,.55,2.3)],{tile:.8});
+  for(const z of [-1.9,-.9,.1,1.1,2.0])K.tube('aRust',profChannel(.06,.1,.007),[V3(-.62,.5-z*.002,z),V3(.64,.5,z)],{tile:.6});
+  /* axles, leaf springs, diff */
+  for(const z of [-1.41,0,1.41]){
+    K.tube('aBare',profCircle(.06,9),[V3(-1.05,.4,z),V3(1.05,.4,z)],{tile:.5});
+    if(z===0)K.lathe('aRust',[[0,-.2],[.22,-.2],[.25,0],[.22,.2],[0,.2]],0,.42,z,12,null,.6);
+    for(const x of [-.55,.55])K.tube('aBare',profRect(.07,.03),sagPath(V3(x,.46,z-.55),V3(x,.46,z+.55),-.07,8),{tile:.4});
+  }
+  /* cab: floor, rear wall with window hole, roof peeled back, left door hanging, right door gone */
+  K.box('aPlate',0,.68,.55,1.7,.04,1.5);
+  K.box('aBlue',-.84,1.05,.55,.045,.7,1.5);                                 // left skin
+  K.box('aOchre',.8,.88,.5,.05,.36,1.2);                                    // right skin, torn off above the sill
+  K.box('aPlate',0,1.0,-.2,1.74,.64,.05);K.box('aPlate',-.68,1.52,-.2,.3,.42,.07);K.box('aPlate',.68,1.5,-.2,.3,.42,.064);K.box('aPlate',0,1.695,-.2,1.46,.1,.046);
+  K.box('aBlue',0,1.88,.52,1.8,.045,1.45,.07,0,.05);                        // roof, sagging
+  K.box('aBlue',0,1.7,1.28,1.76,.05,.06);
+  for(const x of [-.82,.82])K.tube('aGalv',profRect(.06,.06),[V3(x,.7,1.28),V3(x*.99,1.88,1.22)],{tile:.5});
+  K.tube('aGalv',profRect(.05,.05),[V3(-.84,1.4,-.2),V3(-.84,1.88,-.18)],{tile:.5});
+  const door=new THREE.Group();door.position.set(-.86,.9,1.2);door.rotation.y=1.05;K.g.add(door);
+  K.box('aBlue',0,.1,-.55,.05,.8,1.1,0,0,0,door);K.box('aBare',0,.55,-.55,.06,.06,1.1,0,0,0,door);
+  K.box('aGlass',0,.62,-.5,.025,.4,.8,0,0,0,door);
+  /* dash, seat, wheel, pedals, engine bay with the bonnet gone */
+  K.box('aRust',0,1.02,1.2,1.5,.2,.3);
+  K.box('aCanvas',-.32,.88,.4,.64,.14,.55);K.box('aCanvas',-.32,1.18,.1,.62,.5,.12,-.15,0,0);
+  K.tube('aBare',profCircle(.012,6),helixPath(.32,.8,.4,.06,.03,3,8,'y'),{tile:.2});
+  K.mesh(new THREE.TorusGeometry(.19,.018,6,18),'aRubber',-.32,1.18,.9,.9,0,0);
+  K.tube('aGalv',profCircle(.022,8),[V3(-.32,1.0,1.18),V3(-.32,1.12,.95)],{tile:.4});
+  K.box('aRust',0,.9,1.78,1.46,.12,.9);                                       // radiator shell + engine block
+  K.lathe('aBare',[[0,0],[.2,0],[.2,.55],[0,.55]],-.3,.7,1.75,10,null,.6);K.lathe('aBare',[[0,0],[.2,0],[.2,.55],[0,.55]],.1,.7,1.75,10,null,.6);
+  K.box('aBare',-.1,1.0,1.76,.62,.2,.52);K.box('aRust',-.1,1.15,1.76,.7,.04,.5,0,0,0);
+  K.pipe('aRust',.045,[V3(-.4,1.1,1.7),V3(-.6,1.05,1.0),V3(-.75,.62,.6),V3(-.75,.45,-1.4),V3(-.75,.28,-2.6)],.2,{tile:.5});
+  K.lathe('aRust',[[0,0],[.34,0],[.34,.7],[0,.7]],0,.6,2.18,14,null,.7);K.lathe('aGlass',[[0,0],[.15,0],[.15,.02],[0,.02]],.22,.82,2.5,10);
+  /* bed: stringers + a few surviving planks, sideboards leaning */
+  for(const x of [-.7,.0,.7])K.tube('aWood',profRect(.1,.08),[V3(x,.66,-2.25),V3(x,.66,-.3)],{tile:.7});
+  const pz=[-2.1,-1.88,-1.62,-1.3,-1.05,-.62,-.44];
+  pz.forEach((z,i)=>{if(i===3||i===6)return;K.box('aWood',0,.73+(i%3)*.004,z,1.84+(i%2)*.03,.045+(i%3)*.004,.2+(i%2)*.01,0,(i-3)*.012,0)});
+  K.box('aWood',-.92,.97,-1.4,.045,.4,1.8,0,0,.2);K.box('aWood',.92,.8,-1.6,.05,.4,1.1,0,0,-.1);
+  K.box('aWood',.0,.93,-2.3,1.84,.38,.05,.35,0,0);
+  K.mesh(surfGeo(10,6,(a,b)=>[-.9+a*1.05,.78+Math.sin(a*5+b*3)*.05+b*.0-b*b*.35,-1.9+b*1.6-Math.sin(a*3)*.08],.8),'aOlive',0,0,0);
+  /* wheels: 4 on, one flat, one gone (just the hub), one propped against the tail */
+  const tyre=(x,z,flat,missing)=>{
+    const sgn=x>0?1:-1;
+    K.lathe('aBare',[[0,-.1],[.14,-.1],[.15,0],[.14,.1],[0,.1]],x,.4,z,12,null,.4);
+    K.g.children[K.g.children.length-1].rotation.z=Math.PI/2;
+    if(missing)return;
+    const m=K.lathe('aRubber',[[.2,-.15],[.3,-.16],[.38,-.12],[.4,-.05],[.4,.05],[.38,.12],[.3,.16],[.2,.15]],x,.4,z,20,null,.7);
+    m.rotation.z=Math.PI/2;if(flat){m.scale.set(1,1,1);m.scale.y=.95;m.position.y=.34;m.scale.x=1.0;m.rotation.x=0}
+    if(flat)m.scale.set(.8,1,1);
+  };
+  tyre(-1.0,-1.41);tyre(1.0,-1.41,true);tyre(-1.0,0);tyre(1.0,0,false,true);tyre(-1.0,1.41,false,true);tyre(1.0,1.41);
+  K.lathe('aRubber',[[.2,-.15],[.3,-.16],[.38,-.12],[.4,-.05],[.4,.05],[.38,.12],[.3,.16],[.2,.15]],1.7,.16,.9,20,null,.7);
+  K.g.children[K.g.children.length-1].rotation.x=Math.PI/2;K.g.children[K.g.children.length-1].rotation.z=.2;
+  K.drift(-1.4,-.3,2.6,1.4,.55,5,.1);K.drift(.5,2.0,1.6,1.2,.35,7,.5);
+  return K;
+}
+function featPod(K,r,f){
+  /* a crashed escape capsule: scorched nose-down, hatch thrown open, shattered port, canopy and shroud lines strewn downwind */
+  const pod=new THREE.Group();pod.position.set(0,.65,0);pod.rotation.set(.2,0,.28);K.g.add(pod);
+  const prof=[[0,-1.62],[.3,-1.56],[.62,-1.36],[.88,-1.0],[1.04,-.5],[1.08,.05],[1.03,.6],[.88,1.08],[.62,1.46],[.3,1.7],[0,1.76]];
+  const hull=K.lathe('aPlate',prof,0,0,0,26,pod,1.1);hull.rotation.x=Math.PI/2;
+  const nose=K.lathe('aBare',prof.slice(0,5).concat([[1.04,-.5]]).map(p=>[p[0]*1.012,p[1]]),0,0,0,26,pod,.8);nose.rotation.x=Math.PI/2;
+  for(const z of [-.4,.5,1.2])K.lathe('aBare',[[1.03,z-.02],[1.1,z-.015],[1.11,z],[1.1,z+.015],[1.03,z+.02]].map((p,i)=>p),0,0,0,26,pod,.4),pod.children[pod.children.length-1].rotation.x=Math.PI/2;
+  /* hatch frame on the +x flank, door swung wide */
+  K.tube('aGalv',profRect(.07,.1),[V3(1.04,.05,.35),V3(1.07,.55,.35),V3(1.07,.55,1.0),V3(1.04,.05,1.0),V3(1.04,.05,.35)].map((v,i,a)=>v),{tile:.5},pod);
+  K.box('aBare',1.0,.3,.675,.06,.5,.65,0,0,0,pod);
+  const door=new THREE.Group();door.position.set(1.09,.3,1.0);door.rotation.y=-1.7;pod.add(door);
+  K.box('aOchre',0,0,-.34,.07,.55,.66,0,0,0,door);K.mesh(new THREE.TorusGeometry(.09,.016,6,14),'aBare',.045,0,-.34,0,Math.PI/2,0,door);
+  /* port: ring + cracked glass */
+  K.mesh(new THREE.TorusGeometry(.2,.035,6,18),'aGalv',-.05,.95,-.55,0,0,0,pod);
+  K.mesh(latheGeo([[0,.0],[.19,0],[.19,.01],[0,.01]],14,.3),'aGlass',-.05,.95,-.55,Math.PI/2,0,0,pod);
+  /* tail: three bent stabiliser fins */
+  for(let i=0;i<3;i++){
+    const a=i*TAU/3+.3,fin=K.tube('aPlate',{pts:[[0,0],[.55,.0],[.3,.9],[0,.9]].map(p=>[p[0]-.15,p[1]-.3]),closed:true,hard:true},[V3(0,0,0),V3(0,0,.05)],{tile:.7});
+    fin.position.set(Math.cos(a)*1.0,Math.sin(a)*1.0,1.55);fin.rotation.set(0,0,a-Math.PI/2+(i===1?.6:0));pod.add(fin);fin.rotation.x=i===0?-.2:0;
+  }
+  /* landing legs: one folded, one snapped */
+  K.pipe('aGalv',.04,[V3(-.7,-.9,-.3),V3(-1.3,-1.2,-.1),V3(-1.55,-1.6,.1)],.15,{tile:.5},pod);
+  K.pipe('aGalv',.04,[V3(.6,-.95,.2),V3(.9,-1.3,.5)],.15,{tile:.5},pod);
+  K.lathe('aBare',[[0,0],[.14,0],[.15,.03],[0,.05]],-1.58,-1.62,.1,10,pod);
+  /* canopy lying out across the sand with shroud lines back to a riser ring */
+  const ax=-3.6,az=-2.8;
+  K.mesh(surfGeo(16,10,(a,b)=>{const th=a*TAU,rad=b*2.1;return[ax+Math.cos(th)*rad+Math.sin(a*7)*.1*b,.06+Math.sin(b*3.14)*.18+Math.abs(Math.sin(th*3))*.07*b,az+Math.sin(th)*rad*.8]},1.1),'aCanvas',0,0,0);
+  for(let i=0;i<8;i++){const th=i/8*TAU,ex=ax+Math.cos(th)*2.0,ez=az+Math.sin(th)*1.6;
+    K.tube('aRope',profCircle(.008,6),sagPath(V3(-.6+i*.04,.6,.4),V3(ex,.12,ez),.25,12),{tile:.2})}
+  K.box('aOchre',-.9,.06,-.6,.3,.05,.2,0,.5,0);
+  K.drift(0,1.2,2.2,1.9,.8,9,.2);K.drift(-1.5,-1.0,1.3,.9,.3,4,0);
+  return K;
+}
+function featTank(K,r,f){
+  /* derelict tracked carrier: sloped hull from one extruded section, tracks on real wheel trains, one track thrown, turret with a drooping gun */
+  const hullPts=[[-2.45,.42],[-2.45,.95],[-1.9,1.1],[.8,1.14],[1.7,.92],[2.45,.62],[2.5,.42]].map(p=>[-p[0],p[1]]);
+  K.tube('aPlate',{pts:hullPts,closed:true,hard:true},[V3(-.85,0,0),V3(.85,0,0)],{tile:1.1,tu:1.1,tv:1.1});
+  K.box('aOlive',0,.4,0,1.3,.1,4.4);                                           // belly pan
+  K.box('aRust',0,1.145,-1.65,1.5,.04,1.5);K.box('aBare',0,1.16,-1.65,1.1,.02,1.1);   // engine deck + grille
+  for(let i=0;i<6;i++)K.box('aBare',0,1.19,-2.1+i*.18,1.08,.016,.05);
+  const RT=.44,YT=.46,ZS=-2.22,ZE=2.2;                                   // track path: radius, wheel-centre height, sprocket/idler z
+  const stadium=(x)=>{const p=[];
+    for(let i=0;i<=10;i++){const a=Math.PI/2+i/10*Math.PI;p.push(V3(x,YT+Math.sin(a)*RT,ZS+Math.cos(a)*RT))}
+    for(let i=0;i<=10;i++){const a=-Math.PI/2+i/10*Math.PI;p.push(V3(x,YT+Math.sin(a)*RT,ZE+Math.cos(a)*RT))}
+    p.push(p[0].clone());return p};
+  for(const sg of [-1,1]){
+    const x=sg*1.06;
+    for(let i=0;i<6;i++){const z=-1.7+i*.68;
+      K.disc('aBare',.29,.3,x,.36,z,'x');K.disc('aRust',.15,.38,x,.36,z,'x',null,.4,12);
+      const t=K.lathe('aRubber',[[.25,-.14],[.32,-.13],[.34,0],[.32,.13],[.25,.14]],x,.36,z,16,null,.5);t.rotation.z=Math.PI/2}
+    K.disc('aRust',.4,.3,x,YT,ZS,'x',null,.7,20);K.disc('aBare',.2,.36,x,YT,ZS,'x',null,.4,12);
+    K.disc('aRust',.38,.28,x,YT,ZE,'x',null,.7,20);K.disc('aBare',.16,.34,x,YT,ZE,'x',null,.4,12);
+    for(const z of [-1.3,-.1,1.1])K.disc('aBare',.1,.22,x,.79,z,'x',null,.4,10);
+    K.box(sg>0?'aOchre':'aPlate',x,1.04+(sg>0?.02:0),.2,.52,.035+(sg>0?.004:0),4.0,sg>0?.02:0,0,0);
+    K.box('aPlate',sg*1.31,.82,-.1,.04,.22,3.6,0,0,0);
+  }
+  /* right track: complete loop with raised cleats */
+  const loopR=stadium(1.06),LR=pathLen(loopR);
+  K.tube('aRust',profRect(.07,.46),loopR,{tile:.6,up:V3(1,0,0),tu:.6,tv:.6});
+  for(let i=0;i<34;i++){const sp=pathAt(loopR,i/34*LR);if(!sp)continue;
+    K.box('aBare',1.06,sp.p.y,sp.p.z,.5,.045,.05+.004*(i%3),-Math.atan2(sp.t.y,sp.t.z)*-1,0,0)}
+  /* left track: thrown — top run sags off the wheels and the rest lies out on the sand as a flat ribbon */
+  K.tube('aRust',profRect(.07,.46),filletPath([V3(-1.06,.9,-2.5),V3(-1.06,.88,-.4),V3(-1.06,.84,1.4),V3(-1.12,.5,2.5),V3(-1.5,.08,3.1),V3(-1.55,.045,4.9)],.34,6),{tile:.6,up:V3(1,0,0)});
+  for(let i=0;i<8;i++)K.box('aBare',-1.52-i*.004,.075,3.3+i*.22,.46,.04,.055+.004*(i%3),0,.05,0);
+  /* turret */
+  K.lathe('aPlate',[[0,0],[.98,0],[1.02,.1],[.98,.42],[.7,.62],[.3,.7],[0,.7]],0,1.12,.35,24,null,1.1);
+  K.lathe('aBare',[[.98,0],[1.05,.01],[1.05,.07],[.98,.1],[.98,0]],0,1.12,.35,24,null,.5);
+  K.box('aRust',-.55,1.25,-.5,.7,.44,.5);                                        // bustle stowage bin
+  K.box('aOchre',.52,1.4,.35,.5,.16,.5,0,0,0);
+  K.lathe('aGalv',[[.26,0],[.32,0],[.32,.12],[.26,.12],[.26,0]],-.25,1.78,.25,14,null,.5);
+  const hatch=K.box('aPlate',-.25,1.96,.25,.62,.04,.58,-.9,0,0);hatch.position.set(-.25,2.12,-.1);
+  /* gun: mantlet, barrel drooping, hollow muzzle brake */
+  K.box('aRust',0,1.38,1.2,.62,.46,.3);
+  K.tube('aBare',profCircle(.1,12),sagPath(V3(0,1.4,1.3),V3(0,1.2,4.0),.06,10),{tile:.7});
+  K.lathe('aBare',[[.075,0],[.17,0],[.17,.28],[.075,.28],[.075,0]],0,1.2,4.0,12,null,.4);K.g.children[K.g.children.length-1].rotation.x=Math.PI/2;
+  K.tube('aRubber',profCircle(.015,6),sagPath(V3(1.3,.85,-2.4),V3(1.4,.9,1.4),.12,12),{tile:.3});          // tow cable
+  K.box('aBare',1.0,1.13,1.3,.2,.1,.2);K.sphere('aGlass',.07,1.0,1.2,1.3);
+  K.tube('aGalv',profCircle(.012,6),[V3(-.9,1.14,-2.3),V3(-1.0,2.6,-2.0)],{tile:.3});
+  K.drift(-.8,.4,3.4,1.8,.5,13,.05);K.drift(1.7,-1.4,2.2,1.2,.4,14,.3);
+  return K;
+}
 
 const ASMFN={shelter:asmShelter,wall:asmWall,workbench:asmWorkbench,harvester:asmHarvester,purifier:asmPurifier,trough:asmTrough,tank:asmTank,lamp:asmLamp,battery:asmBattery,solar:asmSolar,windmill:asmWindmill,stove:asmStove,crate:asmCrate,sign:asmSign,buggy:asmBuggy,plane:asmPlane,mast:asmMast};
+const ASMRAD={mast:1.2,wreck:2.3,pod:2.0,tank:2.6};
+const ASMFEAT={mast:featMast,wreck:featWreck,pod:featPod,tank:featTank};
 function dropFeat(m){World.group.remove(m);m.traverse(o=>{if(o.isMesh&&o.userData.own&&o.geometry)o.geometry.dispose()})}
-
 function featureMesh(f){
   const g=new THREE.Group(),r=rngAt(f.x|0,f.z|0,SEED+5),o=f.rot,s=f.sc;
-  switch(f.t){
-    case 'outcrop': case 'spire': {
-      /* terrain-conforming bedded sandstone; built in world-relative coordinates, so counter this group's scale */
-      const inner=outcropMesh(f,r,f.t==='spire',s);
-      inner.scale.setScalar(1/s);inner.position.y=-(f.y-0.08*s)/s;
-      g.add(inner);
-      break;
-    }
-    case 'mast': {
-      g.add(M(GEO.box,MAT.rust,0,0.3,0,0,0,0,0.5,0.6,0.5));
-      g.add(M(GEO.cyl,MAT.rustDark,0,4.4,0,0,0,0,0.16,8.6,0.16));
-      for(let i=0;i<3;i++){
-        const y=1.6+i*2.2;
-        for(let k=0;k<3;k++)g.add(M(GEO.box,MAT.rust,Math.cos(k*2.09)*y*0.16,y,Math.sin(k*2.09)*y*0.16,0,-k*2.09,0,0.09,y*0.9,0.09));
-        g.add(M(GEO.box,MAT.rustDark,0,y,0,0,0,0,0.7,0.07,0.7));
-      }
-      g.add(M(GEO.box,MAT.rust,0.5,8.5,0,0,0,0.5,0.1,1.4,1.4));
-      break;
-    }
-    case 'wreck': case 'pod': case 'tank': {
-      const len=f.t==='pod'?3.2:f.t==='tank'?5.2:4.4;
-      g.add(M(GEO.box,MAT.rust,0,0.55,0,o*0,0,0,2.0,0.7,len));
-      if(f.t==='pod'){
-        g.add(M(GEO.sph,MAT.rust,0,1.0,-len*0.28,0,0,0,2.2,1.6,2.4));
-        g.add(M(GEO.sph,MAT.glass,0,1.1,-len*0.44,0,0,0,1.5,0.9,0.3));
-      }else{
-        g.add(M(GEO.box,MAT.rustDark,0.15,1.35,len*0.16,o*0,0.1,0,1.8,1.0,1.9));
-        g.add(M(GEO.box,MAT.glass,0.15,1.5,len*0.16+0.92,0,0,0,1.5,0.6,0.06));
-        g.add(M(GEO.box,MAT.rust,0.2,1.5,-len*0.34,0.15,0,0.1,1.7,0.8,1.4));
-      }
-      for(let i=0;i<3;i++)for(const sgn of[-1,1])
-        g.add(M(GEO.cyl,MAT.steel,sgn*1.0,0.36,-len*0.32+i*len*0.32,0,0,Math.PI/2,0.72,0.34,0.72));
-      g.add(M(GEO.cyl,MAT.rustDark,1.15,1.0,-len*0.44,0,0,0.6,0.14,2.6,0.14));
-      for(let i=0;i<4;i++)g.add(M(GEO.box,MAT.rust,r()*2-1,0.1,r()*len-2, r(),r()*3,r(),0.3+r(),0.16,0.3+r()));
-      break;
-    }
+  if(f.t==='outcrop'||f.t==='spire'){
+    /* terrain-conforming bedded sandstone; built in world-relative coordinates, so counter this group's scale */
+    const inner=outcropMesh(f,r,f.t==='spire',s);inner.scale.setScalar(1/s);inner.position.y=-(f.y-0.08*s)/s;g.add(inner);
+  }else if(ASMFEAT[f.t]){
+    const K=asmKit(),tn=[0,0,0];groundTint(f.x,f.z,f.y,0,tn);K.tint=tn;ASMFEAT[f.t](K,r,f,s);
+    const m=K.finish();m.rotation.y=o;g.add(m);_tg.clear();
+    const R=(ASMRAD[f.t]||0)*s;if(R){let mn=f.y;for(let k=0;k<8;k++)mn=Math.min(mn,heightAt(f.x+Math.cos(k*.785+o)*R,f.z+Math.sin(k*.785+o)*R));g.userData.sink=(f.y-mn)*.8}
+  }else switch(f.t){
     case 'ruin': {
       for(let i=0;i<5;i++){
         const a=r()*TAU,d=r()*2.4;
@@ -2357,7 +2545,7 @@ function featureMesh(f){
       break;
   }
   g.scale.setScalar(s);
-  g.position.set(f.x,f.y-0.08*s,f.z);
+  g.position.set(f.x,f.y-0.08*s-(g.userData.sink||0),f.z);
   return g;
 }
 
