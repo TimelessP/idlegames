@@ -3196,7 +3196,8 @@ function traderBuild(ci){
   }
   /* ── the stall: a counter in front (−Z), a tarp over both ── */
   const stall=new THREE.Group();stall.name='stall';stall.visible=false;g.add(stall);
-  stall.add(traderPart(K=>{
+  const inner=new THREE.Group();inner.position.z=-.12;stall.add(inner);
+  inner.add(traderPart(K=>{
     const zf=-1.2,zb=-.34;
     for(const x of [-.9,.9])for(const z of [zf+.03,zb])K.tube('aGalv',profAngle(.052,.052,.006),[V3(x,0,z),V3(x,.84,z)],{tile:.5,roll:x>0?1:2});
     for(const x of [-.9,.9]){K.tube('aBare',profChannel(.04,.06,.005),[V3(x,.78,zf),V3(x,.78,zb)],{tile:.4});K.tube('aGalv',profAngle(.035,.035,.005),[V3(x,.12,zf+.03),V3(x,.7,zb)],{tile:.4})}
@@ -3218,7 +3219,7 @@ function traderBuild(ci){
     K.lathe('aRust',[[0,0],[.04,0],[.05,.02],[.05,.07],[.038,.08],[0,.085]],.95,1.68,-1.34,8,null,.2);K.lathe('aGlass',[[.034,0],[.034,.09]],.95,1.74,-1.34,8,null,.2);K.sphere('glow',.011,.95,1.76,-1.34,1,2,1);
     K.pipe('aBare',.004,[V3(.95,1.9,-1.3),V3(.95,1.85,-1.34),V3(.95,1.82,-1.34)],.02,{n:4});
   }));
-  const can=new THREE.Group();can.name='canopy';can.position.set(.2,2.05,0);stall.add(can);
+  const can=new THREE.Group();can.name='canopy';can.position.set(.2,2.05,0);inner.add(can);
   can.add(traderPart(K=>{
     K.mesh(surfGeo(12,8,(a,b)=>{const x=-1.15+a*1.9+.0,zz=lerp(-1.35,.5,b),yy=lerp(-.14,.24,b)-Math.sin(a*Math.PI)*Math.sin(b*Math.PI)*.1+Math.sin(a*11+b*5)*.012;return[x,yy,zz]},.9),coat,0,0,0);
     for(const [a,b,c,d] of [[-1.15,-1.35,.75,-1.35],[-1.15,.5,.75,.5]])K.tube('aRope',profCircle(.009,5),[V3(a,lerp(-.14,.24,(b+1.35)/1.85)-.0,b),V3(c,lerp(-.14,.24,(d+1.35)/1.85),d)],{tile:.2});
@@ -3241,6 +3242,13 @@ function traderMesh(tr){
   tr.stall=g.getObjectByName('stall');tr.canopy=g.getObjectByName('canopy');tr.stall.visible=false;
   g.traverse(o=>{if(o.isMesh){o.receiveShadow=true;o.userData=Object.assign({},o.userData,{own:false})}});
   return g;
+}
+/* the stall is pinned in world space: it keeps the heading it was set up with while the trader turns to watch the player,
+   so you can walk right round the counter. Both share a pivot (the trader's feet), so a counter-rotation is exact. */
+function traderStallPin(tr){
+  if(!tr.stall||!tr.stall.visible)return;
+  if(tr.stallYaw===undefined)tr.stallYaw=Math.atan2(P.x-tr.x,P.z-tr.z)+Math.PI;
+  tr.stall.rotation.y=tr.stallYaw-tr.mesh.rotation.y;
 }
 /* standing at the stall: feet settle, one hand rests on the counter, the other talks */
 function traderPose(tr,dt){
@@ -3635,7 +3643,7 @@ const G={
   kite:false,kiteFly:false,attract:0,lure:0,findBoost:1,bench:false,findOn:false,findChg:1,
   waypoints:[null,null,null],
   facing:0,reach:3.4,craft:null,craftT:0,crafter:0,
-  traders:[],tid:1,nightCurfew:0,stats:{salv:0,built:0,craft:0,traded:0,d:0}
+  traders:[],tid:1,nightCurfew:0,quest:null,stats:{salv:0,built:0,craft:0,traded:0,d:0,quests:0}
 };
 let selectedPanel=null;
 const bagMass=()=>Object.entries(G.inv).reduce((s,[k,v])=>s+(ITEMS[k]?ITEMS[k].w*v:0),0);
@@ -5193,8 +5201,106 @@ const LAST=['Vant','Solano','Kerr','Dunmore','Ilves','Brack','Oyelaran','Ferrin'
 const TITLE=['salt-line trader','ash-route buyer','bone-dust merchant','well-walker','tin pedlar','dust assessor','dune broker','relic factor','cable runner','ferry hand'];
 const CATS=['part','mat','water','food','tool','kit'];
 const CATLIKE={part:'metal',mat:'stock',water:'water',food:'food',tool:'tools',kit:'built work'};
-function makeTrader(cause){
-  const seed=(Math.random()*0xffffff)|0,r=mulberry32(seed);
+/* ═══ ERRANDS ═══
+   Every trader who walks in may carry one errand. It asks only for things a drifter can come by without a trader — scavenged,
+   or crafted from scavenged parts — never canvas, which only traders supply (it is the reward instead).
+   The pool is derived from the live tables (FEATDEF loot, RECIPES), so it stays right as the game grows.
+   One errand at a time. While it is open, the giver's stay timer is frozen: he waits. "Send on" abandons it.
+   The errand lives in G.quest, which is written into the save; traders are not restored on load, so the giver is
+   re-created from his saved seed and walks back in as the same person. */
+const QP={pool:null};
+function questPool(){
+  if(QP.pool)return QP.pool;
+  const base=new Set(['water','dew','pear','root','bean']);                       // structure outputs: still-water, dew, crops
+  for(const k in FEATDEF){const d=FEATDEF[k];for(const e of (d.loot||[]))base.add(e[0]);for(const e of (d.lootSet||[]))base.add(e[0])}
+  base.delete('cloth');
+  const ok=new Set(base);let ch=true;
+  while(ch){ch=false;for(const r of RECIPES){const o=r.o[0];if(ok.has(o)||o==='cloth')continue;if(Object.keys(r.i).every(i=>i!=='cloth'&&ok.has(i))){ok.add(o);ch=true}}}
+  const never=new Set(['book','welder','finder','kite','cloth','k_buggy','k_plane']);
+  return QP.pool=[...ok].filter(id=>ITEMS[id]&&!never.has(id)&&!(ITEMS[id].c==='kit'&&ITEMS[id].v>190))
+    .map(id=>({id,v:ITEMS[id].v,w:ITEMS[id].w||0,kit:ITEMS[id].c==='kit',base:base.has(id)}));
+}
+const QT=[[40,90],[90,170],[170,320]];
+function genQuest(tr){
+  const r=mulberry32(((tr.seed^0x9e3779b1)>>>0)||1),pool=questPool();
+  const tier=r()<.5?0:r()<.72?1:2,target=QT[tier][0]+r()*(QT[tier][1]-QT[tier][0]);
+  const maxV=[22,70,200][tier],kinds=tier===0?1+(r()<.45?1:0):tier===1?2:2+(r()<.5?1:0);
+  const cand=pool.filter(p=>p.v<=maxV&&(tier>0||!p.kit));
+  const want=[];let total=0,mass=0;
+  for(let k=0;k<kinds;k++){
+    const left=cand.filter(c=>!want.some(w=>w.id===c.id));if(!left.length)break;
+    let sum=0;const ws=left.map(c=>{const w=(c.base?3:1.6)/Math.sqrt(c.v);sum+=w;return w});
+    let x=r()*sum,pick=left[left.length-1];for(let i=0;i<left.length;i++){x-=ws[i];if(x<=0){pick=left[i];break}}
+    let n=Math.max(1,Math.round(((target-total)/(kinds-k))/pick.v));
+    n=Math.min(n,pick.kit?1:Math.max(1,Math.floor(10/Math.max(.2,pick.w))),9);
+    if(pick.w>0&&mass+n*pick.w>26)n=Math.max(1,Math.floor((26-mass)/pick.w));
+    want.push({id:pick.id,n});total+=n*pick.v;mass+=n*pick.w;
+  }
+  const scrap=Math.max(10,Math.round(total*(1.5+r()*.45)/5)*5);
+  const cloth=tier===0?(r()<.4?1:0):tier===1?1+((r()*3)|0):3+((r()*4)|0);
+  const list=want.map(w=>w.n+' × '+itemName(w.id)).join(', '),cl=cloth?' I keep a bolt of canvas for people who deliver.':'';
+  const lines=[
+    `The road has been hard on my stock. Bring me ${list} and there is scrap in it for you.${cl}`,
+    `A ${tr.title} is only as good as the next load, and I am short. I need ${list}.${cl}`,
+    `${list}. That is all of it. Fetch them and I will not leave until we are square.${cl}`,
+    `Somebody down the line is asking for ${list}. You find it, I carry it, we both eat.${cl}`,
+    `I will wait on ${list}. This camp is as good a place as any to wait.${cl}`
+  ];
+  return{id:'q'+tr.seed,tier,giver:{seed:tr.seed,name:tr.name,title:tr.title,coat:tr.coat},want,pay:{scrap,cloth},text:lines[(r()*lines.length)|0],state:'open'};
+}
+const questHolds=tr=>!!(G.quest&&G.quest.state==='active'&&G.quest.giver&&G.quest.giver.seed===tr.seed);
+const questHave=q=>q.want.every(w=>(G.inv[w.id]||0)>=w.n);
+const questPay=p=>p.scrap+' scrap'+(p.cloth?' + '+p.cloth+' canvas strip'+(p.cloth>1?'s':''):'');
+const firstName=tr=>tr.name.split(' ')[0];
+function questAccept(tr){
+  if(G.quest||!tr.offer)return;
+  G.quest=Object.assign({},tr.offer,{state:'active',day:Day.ctx.day});tr.offer=null;
+  if((tr.stayLeft||0)<60)tr.stayLeft=60;
+  log(firstName(tr)+' needs '+G.quest.want.map(w=>w.n+' '+itemName(w.id)).join(', ')+'. They will wait.','gold');
+  saveGame();refreshPanel();
+}
+function questDeliver(tr){
+  const q=G.quest;if(!questHolds(tr))return;
+  if(!questHave(q)){log('you are still short of what '+firstName(tr)+' asked for','bad');return}
+  for(const w of q.want){invTake(w.id,w.n);tr.stock[w.id]=(tr.stock[w.id]||0)+w.n}
+  G.cash+=q.pay.scrap;if(q.pay.cloth)invAdd('cloth',q.pay.cloth);
+  G.stats.quests=(G.stats.quests||0)+1;G.quest=null;
+  tr.stayLeft=Math.min(tr.stayLeft||45,45);
+  SFX('coin');log(firstName(tr)+' pays '+questPay(q.pay)+'. "We are square."','gold');
+  saveGame();refreshPanel();
+}
+function questAbandon(tr){
+  if(!questHolds(tr))return;
+  log(firstName(tr)+"'s errand is dropped.");
+  G.quest=null;saveGame();
+}
+function questResume(){
+  const q=G.quest;if(!q||q.state!=='active'||!q.giver)return;
+  if(G.traders.some(t=>t.seed===q.giver.seed))return;
+  makeTrader('quest',{seed:q.giver.seed});
+}
+function questBlock(tr){
+  const q=G.quest;
+  if(questHolds(tr)){
+    const rows=q.want.map(w=>{const have=G.inv[w.id]||0;return `<span class="${have>=w.n?'ok':'no'}">${Math.min(have,w.n)}/${w.n} ${itemName(w.id)}</span>`}).join('');
+    return `<div class="rule"></div><div class="grp-h"><b>errand</b></div><p class="desc">${q.text}</p>
+      <div class="cost" style="margin-top:5px">${rows}</div>
+      <div class="kv" style="display:flex;justify-content:space-between;margin-top:6px"><span class="lbl">pays</span><span class="num">${questPay(q.pay)}</span></div>
+      <div style="margin-top:8px"><button class="btn sm ${questHave(q)?'pri':'gho'}" data-act="qdone" data-id="${tr.id}">hand it over</button></div>`;
+  }
+  if(tr.offer&&!G.quest){
+    const o=tr.offer,rows=o.want.map(w=>`<span class="${(G.inv[w.id]||0)>=w.n?'ok':''}">${w.n} × ${itemName(w.id)}</span>`).join('');
+    return `<div class="rule"></div><div class="grp-h"><b>an errand</b></div><p class="desc">${o.text}</p>
+      <div class="cost" style="margin-top:5px">${rows}</div>
+      <div class="kv" style="display:flex;justify-content:space-between;margin-top:6px"><span class="lbl">pays</span><span class="num">${questPay(o.pay)}</span></div>
+      <div style="margin-top:8px"><button class="btn sm pri" data-act="qaccept" data-id="${tr.id}">take the errand</button></div>`;
+  }
+  if(tr.offer&&G.quest)return `<p class="desc" style="margin-top:6px">${firstName(tr)} has an errand of their own, but you are already carrying one.</p>`;
+  return '';
+}
+
+function makeTrader(cause,forced){
+  const seed=(forced&&forced.seed)||((Math.random()*0xffffff)|0),r=mulberry32(seed);
   const tr={id:G.tid++,seed,
     name:FIRST[(r()*FIRST.length)|0]+' '+LAST[(r()*LAST.length)|0],
     title:TITLE[(r()*TITLE.length)|0],
@@ -5216,6 +5322,7 @@ function makeTrader(cause){
     const s=stock[(r()*stock.length)|0];
     tr.stock[s[0]]=(tr.stock[s[0]]||0)+(1+((r()*4)|0));
   }
+  tr.offer=forced?null:genQuest(tr);
   tr.mesh=traderMesh(tr);
   const a=r()*TAU;
   tr.sx=P.x+Math.cos(a)*105;tr.sz=P.z+Math.sin(a)*105;
@@ -5248,7 +5355,7 @@ function makeTrader(cause){
     ()=>machine('market',{ctx:{tr},initial:'trading',
       states:{
         trading:{enter(m){m.ctx.tr.stayLeft=m.ctx.tr.stay},update(m,dt){
-          m.ctx.tr.stayLeft-=dt;
+          if(!questHolds(m.ctx.tr))m.ctx.tr.stayLeft-=dt;
           if(m.ctx.tr.stayLeft<=0)m.set('leaving');
         }},
         leaving:{final:true}}
@@ -5266,6 +5373,7 @@ function makeTrader(cause){
           const i=G.traders.indexOf(m.ctx.tr);
           if(i>=0)G.traders.splice(i,1);
           m.ctx.tr.gone=true;
+          if(questHolds(m.ctx.tr))questAbandon(m.ctx.tr);
           log(m.ctx.tr.name+' moves on down the line.','gold');
         }}}
       ,trans:[{event:'leave',from:'walking',to:'gone'}]})
@@ -5310,6 +5418,7 @@ function traderTick(dt){
       while(d>Math.PI)d-=TAU;while(d<-Math.PI)d+=TAU;
       tr.mesh.rotation.y+=d*clamp(dt*3,0,1);
     }
+    traderStallPin(tr);
   }
 }
 /* ── price book ─────────────────────────────────────────────────────── */
@@ -5335,7 +5444,8 @@ function gameSaveData(){
     book:G.bookPages,st:G.struct.filter(s=>!s.fixed).map(s=>({t:s.type,x:+s.x.toFixed(2),z:+s.z.toFixed(2),r:+s.rot.toFixed(3),
       pow:+s.pow.toFixed(1),dew:+s.dew.toFixed(2),water:+s.water.toFixed(2),
       fluid:+s.fluid.toFixed(2),grow:+s.grow.toFixed(3),seeded:!!s.seeded,ripe:!!s.ripe})),
-    tr:G.traders.map(t=>({x:t.x,z:t.z,name:t.name,title:t.title,stay:t.stayLeft||0}))};
+    tr:G.traders.map(t=>({x:t.x,z:t.z,name:t.name,title:t.title,stay:t.stayLeft||0})),
+    q:G.quest||null};
 }
 function validateGameSave(d){
   const finite=v=>typeof v==='number'&&Number.isFinite(v);
@@ -5397,6 +5507,7 @@ function applySave(d){
   G.waypoints=Array.isArray(d.wp)?d.wp.slice(0,3).map(p=>p&&Number.isFinite(+p.x)&&Number.isFinite(+p.z)?{x:+p.x,y:Number.isFinite(+p.y)?+p.y:undefined,z:+p.z}:null):[null,null,null];
   while(G.waypoints.length<3)G.waypoints.push(null);
   G.spents=new Set(d.spents||[]);Object.assign(G.stats,d.stats||{});
+  G.quest=(d.q&&d.q.state==='active'&&Array.isArray(d.q.want)&&d.q.giver&&Number.isFinite(+d.q.giver.seed))?d.q:null;
   bootCamp(true);
   for(const s of (d.st||[])){
     const o=makeStructure(s.t,s.x,s.z,s.r,heightAt(s.x,s.z));
@@ -5404,6 +5515,7 @@ function applySave(d){
     o.grow=s.grow||0;o.seeded=!!s.seeded;o.ripe=!!s.ripe;
   }
   log('camp recovered from local storage','gold');
+  questResume();
 }
 function loadGame(){const d=readSave();if(!d)return false;applySave(d);return true}
 function wipeGame(){
@@ -5727,7 +5839,7 @@ FOOT.build=()=>`${G.struct.length} works standing · B toggles the drawer, click
 RENDER.trade=()=>{
   if(!G.traders.length){
     return `<div class="empty">no trader in range</div>
-    <p class="desc">Fly a signal kite and they will find you. A trade sign standing near a camp pulls them in from further out. When a trader walks in they stay exactly one day, then move down the line.</p>
+    <p class="desc">Fly a signal kite and they will find you. A trade sign standing near a camp pulls them in from further out. When a trader walks in they stay a day, or until the errand they give you is done, then move down the line.</p>
     <div class="rule"></div><p class="desc">kite: ${G.inv.kite||0} in satchel · lure: ${G.lure.toFixed(2)} · appeal banked: ${Math.floor(G.attract*100)}%</p>
     <div class="bar am"><i style="width:${clamp(G.attract,0,1)*100}%"></i></div>`;
   }
@@ -5738,10 +5850,11 @@ RENDER.trade=()=>{
     h+=`<div class="trader" style="${sel?'border-color:var(--rust)':''}">
       <h4>${tr.name} <em>${tr.title}</em></h4>
       <div class="kv" style="display:flex;justify-content:space-between;margin-top:5px">
-        <span class="lbl">stays</span><span class="num ${left<120?'am':''}">${Math.floor(left/60)}:${String(Math.floor(left%60)).padStart(2,'0')}</span></div>
+        <span class="lbl">stays</span><span class="num ${questHolds(tr)||left<120?'am':''}">${questHolds(tr)?'until the errand is done':Math.floor(left/60)+':'+String(Math.floor(left%60)).padStart(2,'0')}</span></div>
       <div class="bar am" style="margin-top:4px"><i style="width:${clamp(left/CFG.dayLen,0,1)*100}%"></i></div>
       <div class="fav">${CATS.map(c=>`<span class="${tr.w[c]>=1.2?'':'no'}">${CATLIKE[c]} ${tr.w[c]>=1.2?'▲':'▼'}</span>`).join('')}</div>
       <div class="cost" style="margin-top:5px">${tr.likes.map(l=>`<span class="ok">wants ${itemName(l)}</span>`).join('')}${tr.hates.map(l=>`<span class="no">no ${itemName(l)}</span>`).join('')}</div>
+      ${questBlock(tr)}
       <div style="display:flex;gap:6px;margin-top:8px">
         <button class="btn sm ${sel?'on':'pri'}" data-act="tsel" data-id="${tr.id}">${sel?'selected':'open ledger'}</button>
         ${sel?`<button class="btn sm gho" data-act="tdismiss" data-id="${tr.id}">send on</button>`:''}
@@ -6025,7 +6138,9 @@ $('#dbody').addEventListener('click',e=>{
       SFX('pick');refreshPanel();break;
     }
     case 'tsel':TRADER_SEL=+id;refreshPanel();break;
-    case 'tdismiss':{const t2=G.traders.find(x=>x.id== +id);if(t2){t2.visit.dispatch('timeout');log('you send them on','gold')}refreshPanel();break}
+    case 'tdismiss':{const t2=G.traders.find(x=>x.id== +id);if(t2){if(questHolds(t2))questAbandon(t2);t2.visit.dispatch('timeout');log('you send them on','gold')}refreshPanel();break}
+    case 'qaccept':{const t2=G.traders.find(x=>x.id== +id);if(t2)questAccept(t2);break}
+    case 'qdone':{const t2=G.traders.find(x=>x.id== +id);if(t2)questDeliver(t2);break}
     case 'buy':trade(+0,id,1,false);break;
     case 'buy5':trade(0,id,5,false);break;
     case 'sell':trade(0,id,1,true);break;
