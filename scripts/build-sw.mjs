@@ -190,6 +190,16 @@ async function ensureFonts() {
   });
 
   await writeFontFaceSheet({
+    packageName: 'archivo',
+    family: 'Archivo',
+    weights: [700, 900],
+    filePattern: (weight) => `archivo-latin-${weight}-normal.woff2`,
+    cssFileName: 'archivo.css',
+    outputDirName: 'archivo',
+    licenseTarget: 'archivo-OFL.txt',
+  });
+
+  await writeFontFaceSheet({
     packageName: 'intel-one-mono',
     family: 'Intel One Mono',
     weights: [400, 500, 700],
