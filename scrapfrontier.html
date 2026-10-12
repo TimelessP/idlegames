@@ -5733,7 +5733,7 @@ function crawlerHud(){
    margin, ignores scrap while recharging, and stops dead if it ever runs flat: carry it back (X) and set it
    down again for a 5 % charge — enough to reach the nearest pad.
    ─────────────────────────────────────────────────────────────────────── */
-const SC={B:100,perM:100/400,speed:1.7,turn:2.6,chg:2.0,padDraw:6,padIdle:.25,range:100,place:5,R:.6,margin:8,
+const SC={B:100,perM:100/400,speed:1.7,turn:2.6,chg:2.0,padDraw:6,padIdle:.25,range:100,want:90,place:5,R:.6,margin:8,
   dockTol:.22,scan:1.6};
 const SC_SCRAP=new Set(['wreck','pod','tank','ruin','plateheap','pipeheap','gearpile','canheap','wirecoil','crate','barrel','stone','stack','saltcrust','cactus','shrub']);
 const SC_TXT={seek:'looking for a charge pad',dock:'on the pad',toScrap:'heading for scrap',work:'salvaging',toPad:'heading home',wait:'waiting for the charge pad',align:'docking',dead:'out of power',idle:'idle'};
@@ -5764,14 +5764,14 @@ function scrNearestPad(s){                     /* cheapest pad: distance, plus a
   let b=null,bc=1e9,bd=0;
   for(const p of scrPads()){
     const d=scrDist(s.pos.x,s.pos.z,p.x,p.z),occ=scrOcc(p),q=scrQueue(p).filter(r=>r!==s).length;
-    const c=d+(occ&&occ!==s?20:0)+q*20;
+    const c=d+(occ&&occ!==s?40:0)+q*40;
     if(c<bc){bc=c;b=p;bd=d}
   }
   return b?{pad:b,d:bd}:null;
 }
 function scrEnterWait(s){
   if(s.pad&&s.pad.robot===s){s.pad.robot=null;s.pad.charging=false}
-  s.st='wait';s.slot=-1;s.waitT=0;s.needChg=s.pow<SC.B-.02;
+  s.st='wait';s.slot=-1;s.waitT=0;s.needChg=s.pow<SC.want;
   if(s.needChg){const q=scrQueue(s.pad);if(!q.includes(s))q.push(s)}
 }
 function scrSlot(s){                           /* this droid's waiting spot on the ring round the pad */
@@ -5807,6 +5807,7 @@ function scrObstacles(s,x,z,rad,skipId){
   }
   for(const o of G.struct){
     if(o===s||o===s.pad)continue;
+    if(o.type==='scrappy'&&(s.st==='toPad'||s.st==='align'))continue;   /* a droid docking never gets blocked by one in the way: the other one clears off */
     if(Math.abs(o.x-x)>rad||Math.abs(o.z-z)>rad)continue;
     const d=WORKS[o.type];out.push({x:o.x,z:o.z,R:Math.max(d.size[0],d.size[2])*.5});
   }
@@ -5932,18 +5933,31 @@ function scrapStep(s,dt){
           if(f){s.tgt=f;f.claim=s.id;s.tgtT=0;s.st='toScrap';s.pad.charging=false;s.pad.robot=null}
         }
         /* charged, nothing to do: hand the pad to whoever is queueing for a charge */
-        if(s.st==='dock'&&scrQueue(s.pad).length){s.pad.charging=false;scrEnterWait(s)}
+        if(s.st==='dock'&&s.pow>=SC.B-.02&&scrQueue(s.pad).length){s.pad.charging=false;scrEnterWait(s)}
       }
       break;
     }
     case 'wait':{
       if(!s.pad){s.st='seek';break}
-      s.needChg=s.pow<SC.B-.02;
+      s.needChg=s.pow<SC.want;
       const q=scrQueue(s.pad);
       if(s.needChg&&!q.includes(s))q.push(s);
       if(s.needChg&&!scrOcc(s.pad)&&q[0]===s){q.shift();s.pad.robot=s;s.st='toPad';s.waitT=0;break}
+      s.retT=(s.retT||0)-dt;
+      if(s.needChg&&s.retT<=0){                     /* a vacant pad (e.g. a new one) beats waiting in line */
+        s.retT=1.2;
+        if(scrOcc(s.pad)){
+          let b=null,bd=1e9;
+          for(const o of scrPads()){
+            if(o===s.pad||scrOcc(o)||scrQueue(o).some(r=>r!==s)||!padPowered(o))continue;
+            const d=scrDist(s.pos.x,s.pos.z,o.x,o.z);
+            if(d<bd&&scrRange(s)>d*1.1+2){bd=d;b=o}
+          }
+          if(b){scrRelease(s);s.pad=b;b.robot=s;s.st='toPad';s.waitT=0;s.slot=-1;break}
+        }
+      }
       const [gx,gz]=scrSlot(s);
-      if(s.waitT<25&&scrDist(s.pos.x,s.pos.z,gx,gz)>.35){moving=true;s.waitT+=dt;scrDrive(s,dt,gx,gz,.35,null,1)}
+      if((s.waitT<25||scrDist(s.pos.x,s.pos.z,s.pad.x,s.pad.z)<3.4)&&scrDist(s.pos.x,s.pos.z,gx,gz)>.35){   /* never give up while still on the docking lane */moving=true;s.waitT+=dt;scrDrive(s,dt,gx,gz,.35,null,1)}
       else s.speed+=clamp(-s.speed,-5*dt,5*dt);
       if(!s.needChg){                               /* topped up while waiting its turn: go back to work if there is any */
         s.scanT-=dt;
