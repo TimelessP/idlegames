@@ -5294,6 +5294,150 @@ function flightStep(s,h,inp){
   s.pitchA=Math.asin(clamp(_F.set(0,0,1).applyQuaternion(q).y,-1,1));
 }
 
+/* ───────────────────────────────────────────────────────────────────────
+   THE BUGGY — the microlite's rigid-body ground model, with tyres.
+   Position is the centre of mass; orientation is a quaternion; linear and angular velocity are real state.  Four wheels
+   and five body points (bumpers, roof, flanks) are unilateral contacts on the terrain normal, solved with sequential
+   impulses that act on BOTH the velocity and the spin, so weight on the wheels rocks the chassis onto the slope and a
+   wall stops the vehicle instead of being climbed.  Each wheel then has a friction cone: its grip is limited to
+   μ × the normal force it is carrying, so
+     · a wheel on a steep face has little normal force and the buggy slides back down it,
+     · sideways on a slope the lateral grip runs out at ~45° and it slips downhill,
+     · drive, braking and cornering all draw on the same grip budget (a locked brake means no steering),
+     · ramps launch it, and it lands, bounces, rolls and can end up on its roof.
+   Steering turns the front wheels; the yaw comes from their lateral grip, as on a real car.
+   ─────────────────────────────────────────────────────────────────────── */
+const BG={
+  cgh:0.62,g:9.8,I:3.2,avDamp:2.0,
+  mu:1.05,muL:0.95,muB:0.55,                   // lateral / longitudinal tyre grip, body-scrape friction
+  aDrive:12,aRev:7,vMax:17,vRev:6,roll:1.3,engBrake:3.0,steerMax:0.46,
+  pts:[
+    {n:'FL',x: 1.0, y:-0.62,z: 1.4, k:'w',f:1},{n:'FR',x:-1.0,y:-0.62,z: 1.4,k:'w',f:1},
+    {n:'RL',x: 1.0, y:-0.62,z:-1.4, k:'w',f:0},{n:'RR',x:-1.0,y:-0.62,z:-1.4,k:'w',f:0},
+    {n:'bumpF',x:0,  y:-0.15,z: 2.1,k:'b'},{n:'bumpR',x:0,y:-0.15,z:-2.0,k:'b'},
+    {n:'roof', x:0,  y: 0.80,z: 0.0,k:'b'},
+    {n:'sideL',x: 1.1,y: 0.10,z:0.0,k:'b'},{n:'sideR',x:-1.1,y:0.10,z:0.0,k:'b'}
+  ]
+};
+const BCT=BG.pts.map(()=>({r:new THREE.Vector3(),n:new THREE.Vector3(),rn:new THREE.Vector3(),t1:new THREE.Vector3(),t2:new THREE.Vector3(),
+  r1:new THREE.Vector3(),r2:new THREE.Vector3(),gap:0,w:1,w1:1,w2:1,acc:0,a1:0,a2:0,on:false}));
+const _bf=new THREE.Vector3(),_bl=new THREE.Vector3(),_bu=new THREE.Vector3(),_bp=new THREE.Vector3(),_bq=new THREE.Vector3();
+/* penetration cleanup: position-level, rotates the chassis about the contact as well as lifting it */
+function buggyGround(s,iters){
+  let wheels=0;
+  for(let it=0;it<iters;it++){
+    let moved=false;
+    for(const c of BG.pts){
+      _R.set(c.x,c.y,c.z).applyQuaternion(s.q);
+      const pen=heightAt(s.pos.x+_R.x,s.pos.z+_R.z)-(s.pos.y+_R.y);
+      if(pen>0){
+        const rx=-_R.z,rz=_R.x,w=1+(rx*rx+rz*rz)/BG.I,lam=Math.min(pen,0.6)/w;
+        s.pos.y+=lam;
+        _dq.set(rx*lam/BG.I*0.5,0,rz*lam/BG.I*0.5,1).normalize();
+        s.q.premultiply(_dq);moved=true;
+      }
+    }
+    if(!moved)break;
+  }
+  s.q.normalize();
+  for(const c of BG.pts){
+    if(c.k!=='w')continue;
+    _R.set(c.x,c.y,c.z).applyQuaternion(s.q);
+    if(heightAt(s.pos.x+_R.x,s.pos.z+_R.z)-(s.pos.y+_R.y)>-0.07)wheels++;
+  }
+  return wheels;
+}
+/* one physics substep.  inp = {thr:-1..1, stg:-1..1 (+ = right), brake:bool} */
+function buggyStep(s,h,inp){
+  const q=s.q,v=s.vel,av=s.av;
+  _bf.set(0,0,1).applyQuaternion(q);_bl.set(1,0,0).applyQuaternion(q);_bu.set(0,1,0).applyQuaternion(q);
+  v.y-=BG.g*h;
+  const vf0=v.dot(_bf),thr=inp.thr||0,brake=!!inp.brake;
+  const del=-(inp.stg||0)*BG.steerMax/(1+(Math.abs(vf0)/13)*(Math.abs(vf0)/13)),cd=Math.cos(del),sd=Math.sin(del);
+  let m=0;
+  for(let i=0;i<BG.pts.length;i++){
+    const c=BG.pts[i],k=BCT[i];
+    k.r.set(c.x,c.y,c.z).applyQuaternion(q);
+    const px=s.pos.x+k.r.x,pz=s.pos.z+k.r.z,gv=s.pos.y+k.r.y-heightAt(px,pz);
+    k.on=gv<0.5;if(!k.on)continue;
+    terrN(px,pz,k.n);
+    k.gap=gv*k.n.y;k.rn.crossVectors(k.r,k.n);k.w=1+k.rn.lengthSq()/BG.I;k.acc=0;k.a1=0;k.a2=0;
+    // wheel frame: forward (front wheels steered) and side, both in the contact plane
+    if(c.f)_bp.copy(_bf).multiplyScalar(cd).addScaledVector(_bl,sd);else _bp.copy(_bf);
+    k.t1.copy(_bp).addScaledVector(k.n,-_bp.dot(k.n));
+    if(k.t1.lengthSq()<1e-6)k.t1.copy(_bf);
+    k.t1.normalize();k.t2.crossVectors(k.n,k.t1).normalize();
+    k.r1.crossVectors(k.r,k.t1);k.r2.crossVectors(k.r,k.t2);
+    k.w1=1+k.r1.lengthSq()/BG.I;k.w2=1+k.r2.lengthSq()/BG.I;
+    m++;
+  }
+  /* engine, rolling resistance and brakes are applied per grounded wheel, capped by the grip that wheel has */
+  const idle=Math.abs(thr)<0.05;
+  for(let i=0;i<4;i++){
+    const k=BCT[i];if(!k.on||k.gap>0.1)continue;
+    _bp.crossVectors(av,k.r).add(v);
+    const vf=_bp.dot(k.t1),cap=BG.muL*BG.g*h*Math.max(k.n.y,0)*0.25;
+    let j=0;
+    if(thr>0.05)j=thr*BG.aDrive*h*0.25*(1-clamp(vf/BG.vMax,0,1));
+    else if(thr<-0.05)j=thr*BG.aRev*h*0.25*(1-clamp(-vf/BG.vRev,0,1));
+    j=clamp(j,-cap,cap);
+    const rr=(BG.roll+(idle?BG.engBrake:0))*h*0.25;
+    j-=Math.sign(vf)*Math.min(Math.abs(vf)/k.w1,rr);
+    v.addScaledVector(k.t1,j);av.addScaledVector(k.r1,j/BG.I);
+  }
+  if(m){
+    for(let it=0;it<6;it++){
+      for(let i=0;i<BG.pts.length;i++){
+        const k=BCT[i];if(!k.on)continue;
+        const wheel=BG.pts[i].k==='w';
+        _bp.crossVectors(av,k.r).add(v);
+        const vn=_bp.dot(k.n);
+        let d=((k.gap>0?-k.gap/h:0)-vn)/k.w;
+        const na=Math.max(k.acc+d,0);d=na-k.acc;k.acc=na;
+        v.addScaledVector(k.n,d);av.addScaledVector(k.rn,d/BG.I);
+        if(k.acc<=0||k.gap>0.1)continue;
+        const mu=wheel?BG.mu:BG.muB,muL=wheel?BG.muL:BG.muB;
+        _bp.crossVectors(av,k.r).add(v);
+        let j=-_bp.dot(k.t2)/k.w2,lim=mu*k.acc,a=clamp(k.a2+j,-lim,lim);j=a-k.a2;k.a2=a;
+        v.addScaledVector(k.t2,j);av.addScaledVector(k.r2,j/BG.I);
+        if(!wheel||brake||(idle&&Math.abs(vf0)<1.5)){            // brakes, or holding on a slope when stopped
+          _bp.crossVectors(av,k.r).add(v);
+          j=-_bp.dot(k.t1)/k.w1;lim=muL*k.acc;a=clamp(k.a1+j,-lim,lim);j=a-k.a1;k.a1=a;
+          v.addScaledVector(k.t1,j);av.addScaledVector(k.r1,j/BG.I);
+        }
+      }
+    }
+  }
+  v.multiplyScalar(Math.exp(-0.012*h));
+  if(v.lengthSq()>2500)v.setLength(50);
+  const avm=av.length();
+  if(avm>1e-7){_yq.setFromAxisAngle(_bp.copy(av).multiplyScalar(1/avm),avm*h);q.premultiply(_yq)}
+  av.multiplyScalar(Math.exp(-BG.avDamp*h));
+  q.normalize();
+  s.pos.addScaledVector(v,h);
+  s.wheelsDown=buggyGround(s,6);
+  s.isGrounded=s.wheelsDown>0;
+}
+/* mesh and the legacy fields (x, z, rot, speed…) follow the physics state */
+function buggySync(s){
+  _bf.set(0,0,1).applyQuaternion(s.q);_bu.set(0,1,0).applyQuaternion(s.q);
+  s.mesh.position.copy(s.pos).addScaledVector(_bu,-BG.cgh);
+  s.mesh.quaternion.copy(s.q);
+  s.x=s.pos.x;s.z=s.pos.z;s.y=s.mesh.position.y;
+  s.rot=Math.atan2(_bf.x,_bf.z);s.yaw=s.rot;
+  s.speed=s.vel.dot(_bf);s.groundSlope=-_bf.y;
+}
+/* set the buggy down on its wheels where it stands (used on entering and leaving) */
+function buggyPark(s){
+  if(!s.q){s.q=new THREE.Quaternion();s.vel=new THREE.Vector3();s.av=new THREE.Vector3();s.pos=new THREE.Vector3()}
+  else{_bf.set(0,0,1).applyQuaternion(s.q);s.rot=Math.atan2(_bf.x,_bf.z)}
+  s.vel.set(0,0,0);s.av.set(0,0,0);
+  s.q.setFromAxisAngle(_Yax,s.rot||0);
+  s.pos.set(s.x,heightAt(s.x,s.z)+BG.cgh+0.5,s.z);
+  for(let i=0;i<110;i++)buggyStep(s,0.012,{thr:0,stg:0,brake:true});
+  s.vel.set(0,0,0);s.av.set(0,0,0);s.flipT=0;s.steer=0;
+  buggySync(s);
+}
 /* ── the cockpit: keys → control state → physics, plus camera, HUD and motor note ── */
 const _cv=new THREE.Vector3(),_cu=new THREE.Vector3(),_ce=new THREE.Vector3(),_ct=new THREE.Vector3(),_cb=new THREE.Vector3(),
       _cm=new THREE.Matrix4(),_cq=new THREE.Quaternion(),_cq2=new THREE.Quaternion(),_ceu=new THREE.Euler(),_Wup=new THREE.Vector3(0,1,0);
@@ -6792,8 +6936,7 @@ function enterBuggy(s){
   s.isGrounded = true;
   s.yaw = s.rot;
   s.look = {yaw:0,pitch:0};
-  s.groundSlope = updateVehicleGroundPhysics(s,1,false);
-  s.mesh.position.copy(s.pos);
+  buggyPark(s);
   P.yaw = s.yaw + Math.PI;
   P.pitch = 0;
   log('buggy: W/S throttle · A/D steer · Space brake · V view · E step out','gold');
@@ -6809,6 +6952,7 @@ function exitBuggy(){
   P.yaw=Math.atan2(-cd.x,-cd.z);
   P.pitch=Math.asin(clamp(cd.y,-1,1));
   G.drive=null;
+  buggyPark(s);                                        // settle it on its wheels where it is
   P.x=s.x-Math.cos(s.rot)*2.3;
   P.z=s.z+Math.sin(s.rot)*2.3;
   P.y=heightAt(P.x,P.z);
@@ -6839,28 +6983,24 @@ function driveTick(dt){
   const stg=bl?0:((Keys['KeyD']||Keys['ArrowRight']?1:0)-(Keys['KeyA']||Keys['ArrowLeft']?1:0)+TOUCH.x);
   const live=s.pow>0.3;
   
-  s.speed = s.speed || 0;
   s.throttle = clamp(thr, -1, 1);
-  s.isGrounded = true;
-  
-  const turn = -clamp(stg, -1, 1) * 1.7 * dt * clamp(Math.abs(s.speed) / 5, 0, 1) * (s.speed < 0 ? -1 : 1);
-  s.rot += turn;
-  s.yaw = s.rot;
+  const stgIn=clamp(stg,-1,1);
+  s.steer=(s.steer||0)+clamp(stgIn-(s.steer||0),-7*dt,7*dt);            // the wheel takes a moment to swing
+  const braking=!bl&&!!Keys['Space'];
+  if(dt>0){
+    const n=Math.min(8,Math.max(1,Math.ceil(dt/0.009))),h=dt/n,inp={thr:live?s.throttle:0,stg:s.steer,brake:braking};
+    for(let i=0;i<n;i++)buggyStep(s,h,inp);
+  }
+  buggySync(s);
+  /* flipped and stopped: after a couple of seconds the chassis is hauled upright again */
+  _bu.set(0,1,0).applyQuaternion(s.q);
+  if(_bu.y<0.4&&s.vel.length()<2.5){
+    s.flipT=(s.flipT||0)+dt;
+    if(s.flipT>2.2){s.flipT=0;s.q.setFromAxisAngle(_Yax,s.rot);s.pos.y+=1.4;s.vel.set(0,0,0);s.av.set(0,0,0);buggySync(s);log('the buggy is hauled back onto its wheels','gold')}
+  }else s.flipT=0;
   P.yaw = s.yaw + Math.PI + (s.look ? s.look.yaw : 0);
   P.pitch = s.look ? s.look.pitch : 0;
-
-  if(live) s.speed += s.throttle * (s.throttle > 0 ? 10 : 7) * dt;
-  s.speed += clamp((s.groundSlope || 0) * 22, -16, 16) * dt;
-  const drag = s.throttle <= 0.1 ? 0.92 : 0.995;
-  s.speed *= Math.pow(drag, dt * 60.0);
-  
-  // Apply brake
-  if(!bl && Keys['Space']) s.speed -= s.speed * Math.min(1, 3 * dt);
-  
-  s.speed = clamp(s.speed, -6, 17);
-  s.pos.x += Math.sin(s.yaw) * s.speed * dt;
-  s.pos.z += Math.cos(s.yaw) * s.speed * dt;
-  s.groundSlope = updateVehicleGroundPhysics(s, dt, false);
+  s.isGrounded=s.wheelsDown>0;
   
   // Battery drain
   if(live) s.flat = false;
@@ -6868,7 +7008,6 @@ function driveTick(dt){
   s.pow = Math.max(0, s.pow - (Math.abs(s.speed) * V.drain + 0.05) * dt);
   
   // Update mesh position and the terrain-aligned visual orientation.
-  s.mesh.position.copy(s.pos);
   s.mesh.updateMatrixWorld(true);
   s.camPos = s.mesh.localToWorld(new THREE.Vector3(0, 1.6, 0.45));
   if(SET.buggyView==='chase'){
