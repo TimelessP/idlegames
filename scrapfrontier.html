@@ -582,6 +582,15 @@ GEOMETRY
     s.dish / s.crop / s.wheels / s.pWheels / s.pProp … Keep those names.
   • Keep each assembly roughly inside its WORKS footprint; target ≲ 6k triangles.
 
+TERRAIN (§05b)
+  • heightAt(x,z) is still the single source of truth for every vehicle, the player and the spawner. It is now a
+    pure function of (SEED, x, z): the original rolling hills, plus 1200 m macro cells (valley / massif / mesa /
+    gullied mesa), dry riverbeds, wind-built dunes, clay pans and salt flats. Formations stay 60 m inside their own
+    cell, so open ground between them is always one connected network; each has a gentle spiral ramp road to its top.
+  • Surface texture is chosen per fragment from 8 seamless layers (§02b / makeTerrainMaterial) by zone weights
+    baked into vertex attributes aSA/aSB, per-pixel steepness and each layer's own relief.
+  • Scrap bridges add decks to DECKS; terrainSample() treats a deck as solid ground.
+
 ROCK & TERRAIN FEATURES
   • Outcrops and spires are never stood on the sand. They are one heightfield built
     from heightAt(): aligned to the local contour, strata dip with the ground, a
@@ -696,6 +705,207 @@ function normalTex(canvas,strength=2.2){
     return[Math.round(127.5*(-dx/l+1)),Math.round(127.5*(dy/l+1)),Math.round(127.5*(1/l+1))];
   });
   return toTex(c,1,false);
+}
+/* periodic (seamless) noise for the terrain layers */
+function pn(x,y,Px,Py,s){
+  const xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi,u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf);
+  const x0=((xi%Px)+Px)%Px,x1=(x0+1)%Px,y0=((yi%Py)+Py)%Py,y1=(y0+1)%Py;
+  return lerp(lerp(ihash(x0,y0,s),ihash(x1,y0,s),u),lerp(ihash(x0,y1,s),ihash(x1,y1,s),u),v);
+}
+function pf(u,v,Px,Py,s,oct){let f=1,a=.5,sum=0,nm=0;for(let i=0;i<oct;i++){sum+=a*pn(u*Px*f,v*Py*f,Px*f,Py*f,s+i*131);nm+=a;f*=2;a*=.5}return sum/nm}
+function vor(u,v,G,s,o){            // seamless cellular noise: o = [F1, F2, cell id]
+  const x=u*G,y=v*G,xi=Math.floor(x),yi=Math.floor(y);let f1=9,f2=9,id=0;
+  for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){
+    const cx=xi+di,cy=yi+dj,wx=((cx%G)+G)%G,wy=((cy%G)+G)%G;
+    const d=Math.hypot(cx+.15+.7*ihash(wx,wy,s)-x,cy+.15+.7*ihash(wx,wy,s+77)-y);
+    if(d<f1){f2=f1;f1=d;id=ihash(wx,wy,s+5)}else if(d<f2)f2=d;
+  }
+  o[0]=f1;o[1]=f2;o[2]=id;return o;
+}
+/* Photographic-style ground layers.  Each one is built the way the real surface forms: a height field first (plates, beds,
+   ripples, fragments), then colour from that height and from low-contrast mineral variation, then baked ambient occlusion
+   from the height so every crack, pit and ledge has real depth.  Directional light is left to the shader's bump. */
+function blurP(A,N,r){
+  const T=new Float32Array(N*N),O=new Float32Array(N*N),k=2*r+1;
+  for(let j=0;j<N;j++){let s=0;for(let i=-r;i<=r;i++)s+=A[j*N+((i+N)%N)];for(let i=0;i<N;i++){T[j*N+i]=s/k;s+=A[j*N+((i+r+1)%N)]-A[j*N+((i-r+N)%N)]}}
+  for(let i=0;i<N;i++){let s=0;for(let j=-r;j<=r;j++)s+=T[((j+N)%N)*N+i];for(let j=0;j<N;j++){O[j*N+i]=s/k;s+=T[((j+r+1)%N)*N+i]-T[((j-r+N)%N)*N+i]}}
+  return O;
+}
+function bake(N,hf,cf,aoK,r){
+  const H=new Float32Array(N*N);
+  for(let j=0;j<N;j++)for(let i=0;i<N;i++)H[j*N+i]=hf(i/N,j/N);
+  const B=blurP(H,N,r),B2=blurP(H,N,r*3);
+  return paint(N,(i,j)=>{
+    const k=j*N+i,ao=clamp(1+aoK*(H[k]-B[k])+aoK*.5*(H[k]-B2[k]),.42,1.3),c=cf(i/N,j/N,H[k]);
+    return[clamp(c[0]*ao,0,255),clamp(c[1]*ao,0,255),clamp(c[2]*ao,0,255)];
+  });
+}
+function forgeTerrainTextures(){
+  const o=[0,0,0],o2=[0,0,0];
+  /* multi-scale mineral/dust variation: real surfaces are never flat colour at any zoom */
+  const det=(u,v,s)=>(pf(u,v,9,9,s,2)-.5)*.16+(pf(u,v,27,27,s+5,2)-.5)*.14+(pf(u,v,81,81,s+9,2)-.5)*.12+(pf(u,v,200,200,s+13,1)-.5)*.14;
+  const lit=(c,k)=>[c[0]*k,c[1]*k,c[2]*k];
+  const warp=(u,v,s,a,b)=>[u+(pf(u,v,6,6,s,3)-.5)*a+(pf(u,v,22,22,s+3,2)-.5)*b,v+(pf(u,v,6,6,s+9,3)-.5)*a+(pf(u,v,22,22,s+7,2)-.5)*b];
+
+  // 0 · soft sand
+  TEX.tSand=toTex(bake(256,(u,v)=>pf(u,v,40,14,11,3)*.5+pf(u,v,8,8,13,3)*.5,(u,v,h)=>{
+    let c=mixc([200,160,108],[226,192,142],pf(u,v,3,3,23,4));
+    c=mixc(c,[184,142,96],smooth(.6,.85,pf(u,v,2,2,41,3))*.4);
+    return lit(c,1+det(u,v,7)*1.1+(h-.5)*.1)},.9,3));
+
+  // 1 · wind-rippled dune sand
+  TEX.tDune=toTex(bake(256,(u,v)=>{
+    const ph=v*26+pf(u,v,4,4,17,3)*3.8+pf(u,v,14,14,19,2)*1.1,t=ph-Math.floor(ph);
+    return(t<.64?smooth(0,1,t/.64):1-smooth(0,1,(t-.64)/.36))*.7+pf(u,v,70,70,21,2)*.2+pf(u,v,6,6,23,2)*.1},(u,v,h)=>{
+    let c=mixc([194,154,104],[228,198,150],clamp(h,0,1)*.8+.1);
+    c=mixc(c,[204,164,116],smooth(.55,.85,pf(u,v,3,3,43,3))*.3);
+    return lit(c,1+det(u,v,9)*1.1)},1.05,2));
+
+  // 2 · cracked baked clay: warped plates of uneven size, cracks that vary in width and fade in and out
+  const clayEdge=(u,v)=>{const [a,b]=warp(u,v,201,.09,.014);vor(a,b,12,31,o);return[o[1]-o[0],o[2]]};
+  const crackW=(u,v,e)=>{const w=.008+.05*pf(u,v,9,9,203,3),fade=smooth(.18,.42,pf(u,v,5,5,204,3));return(1-smooth(w,w+.045,e))*fade};
+  TEX.tClay=toTex(bake(512,(u,v)=>{
+    const [e,id]=clayEdge(u,v),c1=crackW(u,v,e);
+    const [a,b]=warp(u,v,215,.08,.02);vor(a,b,31,47,o2);const c2=(1-smooth(.01,.045,o2[1]-o2[0]))*smooth(.4,.64,pf(u,v,4,4,205,3))*.55;
+    return(.78-.28*smooth(.02,.5,e)+(id-.5)*.2+(pf(u,v,60,60,207,3)-.5)*.14)*(1-c1)*(1-c2*.6)},(u,v,h)=>{
+    const [e,id]=clayEdge(u,v),c1=crackW(u,v,e);
+    let c=mixc([164,114,80],[198,150,108],id*.5+pf(u,v,7,7,209,3)*.5);
+    c=mixc(c,[214,184,150],smooth(.56,.82,pf(u,v,5,5,211,3))*.42);
+    c=mixc(c,[206,170,134],(1-smooth(.02,.2,e))*.25);
+    c=mixc(c,[82,58,44],c1*.8);
+    c=mixc(c,[168,134,102],c1*smooth(.5,.78,pf(u,v,90,90,213,2))*.6);
+    return lit(c,1+det(u,v,15)*1.3)},1.6,4));
+
+  // 3 · dry riverbed: pale sorted sand, fine ripples, sparse irregular pebbles
+  const pebE=(u,v)=>{const [a,b]=warp(u,v,55,.0,.025);vor(a,b,38,57,o);return[o[0],o[2]]};
+  TEX.tWash=toTex(bake(256,(u,v)=>{
+    const [f,id]=pebE(u,v);let h=pf(u,v,20,7,63,3)*.3;
+    if(id>.74){const r=.2+.22*id;if(f<r)h+=.7*smooth(r,r*.3,f)}return h},(u,v,h)=>{
+    let c=mixc([210,184,144],[230,208,168],pf(u,v,3,12,65,3));
+    c=mixc(c,[172,144,110],smooth(.55,.85,pf(u,v,6,6,67,3))*.4);
+    const [f,id]=pebE(u,v);
+    if(id>.74){const r=.2+.22*id;if(f<r)c=mixc(c,mixc([118,100,86],[188,160,126],ihash(Math.floor(id*999),7,1)),smooth(r,r*.8,f)*.85)}
+    return lit(c,1+det(u,v,17)*1.2)},1.1,3));
+
+  // 4 · sandstone: soft rounded beds of different hardness, wavy and cross-bedded, eroded hollows, fluting, joints
+  const bedS=(u,v)=>v+(pf(u,v,2,2,221,2)-.5)*.07+(pf(u,v,7,3,223,2)-.5)*.03+(pf(u,v,18,6,225,2)-.5)*.008;
+  const hardAt=(s)=>{const b=pn(.3,s*11,1,11,225)*.4+pn(.3,s*27,1,27,227)*.35+pn(.3,s*59,1,59,229)*.25;return smooth(.34,.7,b)};
+  const hollowAt=(u,v)=>smooth(.6,.8,pf(u,v,9,5,235,3));
+  TEX.tStrata=toTex(bake(512,(u,v)=>{
+    const s=bedS(u,v),hd=hardAt(s),soft=1-hd,hol=hollowAt(u,v)*soft;
+    const flute=(pf(u,v,36,2,237,2)-.5)*.14*soft;
+    const jn=Math.abs(pf(u,v,3,1,239,1)-.5),joint=1-smooth(.002,.01,jn);
+    return .36+.36*hd+pn(.3,s*90,1,90,241)*.08+flute-hol*.3-joint*.28+(pf(u,v,64,64,243,3)-.5)*.1},(u,v,h)=>{
+    const s=bedS(u,v),hd=hardAt(s),hol=hollowAt(u,v)*(1-hd);
+    let c=mixc([176,124,88],[212,170,126],hd*.65+pf(u,v,4,2,245,3)*.35);
+    c=mixc(c,[228,194,152],smooth(.62,.86,pf(u,v,3,3,247,3))*.28);
+    c=mixc(c,[132,92,68],smooth(.6,.84,pf(u,v,16,2,249,3))*.3);
+    c=mixc(c,[120,82,60],hol*.5);
+    const jn=Math.abs(pf(u,v,3,1,239,1)-.5);c=mixc(c,[76,54,42],(1-smooth(.002,.01,jn))*.6);
+    return lit(c,1+det(u,v,19)*1.4+(h-.5)*.12)},1.7,5));
+
+  // 5 · caprock: pale weathered slabs, narrow jagged joints, mottled
+  const capE=(u,v)=>{const [a,b]=warp(u,v,251,.1,.02);vor(a,b,5,91,o);return[o[1]-o[0],o[2]]};
+  TEX.tCap=toTex(bake(256,(u,v)=>{
+    const [e,id]=capE(u,v),w=.008+.025*pf(u,v,10,10,93,2),c=1-smooth(w,w+.035,e);
+    return(.62+(id-.5)*.14+(pf(u,v,40,40,97,3)-.5)*.2)*(1-c)},(u,v,h)=>{
+    const [e,id]=capE(u,v),w=.008+.025*pf(u,v,10,10,93,2);
+    let c=mixc([186,150,112],[216,184,146],id*.5+pf(u,v,5,5,99,3)*.5);
+    c=mixc(c,[150,138,114],smooth(.64,.82,pf(u,v,12,12,101,3))*.25);
+    c=mixc(c,[92,68,52],(1-smooth(w,w+.035,e))*.8);
+    return lit(c,1+det(u,v,21)*1.4)},1.5,3));
+
+  // 6 · salt crust
+  TEX.tSalt=toTex(bake(256,(u,v)=>{
+    const [a,b]=warp(u,v,261,.09,.02);vor(a,b,8,71,o);const e=o[1]-o[0];
+    return .5+.2*(1-smooth(0,.18,e))-.2*(1-smooth(.006,.03,e))+(pf(u,v,60,60,73,3)-.5)*.16},(u,v,h)=>{
+    let c=mixc([218,210,194],[238,232,220],clamp(h,0,1));
+    c=mixc(c,[200,178,148],smooth(.5,.8,pf(u,v,4,4,75,3))*.45);
+    c=mixc(c,[186,174,158],smooth(.6,.85,pf(u,v,12,12,77,3))*.3);
+    return lit(c,1+det(u,v,23)*1.2)},1.2,3));
+
+  // 7 · scree: angular sandstone fragments in a sand matrix
+  const scrE=(u,v)=>{const [a,b]=warp(u,v,271,.07,.016);vor(a,b,15,81,o);return[o[0],o[1]-o[0],o[2]]};
+  TEX.tScree=toTex(bake(256,(u,v)=>{
+    const [f,e,id]=scrE(u,v);
+    return(.3+.5*(1-smooth(0,.6,f))+(id-.5)*.3+(pf(u,v,50,50,83,3)-.5)*.14)*smooth(.01,.09,e)},(u,v,h)=>{
+    const [f,e,id]=scrE(u,v);
+    let c=mixc([158,116,86],[200,162,122],id*.45+pf(u,v,9,9,85,3)*.55);
+    c=mixc(c,[176,140,100],(1-smooth(.01,.12,e))*.85);
+    return lit(c,1+det(u,v,25)*1.5)},1.6,3));
+
+  // noise map: R,G warp · B macro variation (seamless, linear data)
+  TEX.tNoise=toTex(paint(256,(i,j)=>{const u=i/256,v=j/256;
+    return[pf(u,v,4,4,301,3)*255,pf(u,v,4,4,302,3)*255,pf(u,v,3,3,303,4)*255]}),1,false);
+}
+/* ground material: eight layers blended per fragment by vertex weights, per-pixel steepness and each layer's own
+   relief (so edges follow pebbles and cracks, never straight lines); domain-warped and de-tiled; cliffs triplanar */
+function makeTerrainMaterial(){
+  tsSync();
+  const m=new THREE.MeshStandardMaterial({vertexColors:true,roughness:1,metalness:0,dithering:true});
+  const U={uWind:{value:new THREE.Vector2(_wc,_ws)},tNoise:{value:TEX.tNoise}};
+  const names=['tSand','tDune','tClay','tWash','tStrata','tCap','tSalt','tScree'];
+  names.forEach((n,i)=>{U['tL'+i]={value:TEX[n]}});
+  m.userData.U=U;
+  m.onBeforeCompile=(sh)=>{
+    Object.assign(sh.uniforms,U);
+    sh.vertexShader=sh.vertexShader
+      .replace('#include <common>','#include <common>\nattribute vec4 aSA;\nattribute vec4 aSB;\nvarying vec4 vSA;\nvarying vec4 vSB;\nvarying vec3 vWP;\nvarying vec3 vWN;')
+      .replace('#include <begin_vertex>','#include <begin_vertex>\nvSA=aSA;vSB=aSB;vWP=(modelMatrix*vec4(transformed,1.0)).xyz;vWN=normalize(mat3(modelMatrix)*objectNormal);');
+    const hdr=`#include <common>
+uniform sampler2D tL0;uniform sampler2D tL1;uniform sampler2D tL2;uniform sampler2D tL3;
+uniform sampler2D tL4;uniform sampler2D tL5;uniform sampler2D tL6;uniform sampler2D tL7;
+uniform sampler2D tNoise;uniform vec2 uWind;
+varying vec4 vSA;varying vec4 vSB;varying vec3 vWP;varying vec3 vWN;
+float gBump;
+float lmn(vec3 c){return dot(c,vec3(.299,.587,.114));}`;
+    const body=`{
+  vec3 wn=normalize(vWN);
+  vec2 P=vWP.xz;
+  vec4 n1=texture2D(tNoise,P*0.0061);
+  vec4 n2=texture2D(tNoise,P*0.0173+vec2(.31,.57));
+  vec4 n3=texture2D(tNoise,P*0.049+vec2(.71,.13));
+  vec2 uv=P/9.0+(n1.rg-.5)*.6;
+  vec2 uvr=vec2(dot(uv,vec2(-uWind.y,uWind.x)),dot(uv,uWind));
+  vec3 cc[8];float ww[8];float hh[8];float bsc[8];
+  cc[0]=mix(texture2D(tL0,uv).rgb,texture2D(tL0,uv*.37+vec2(.19,.43)).rgb,smoothstep(.3,.7,n2.b));
+  cc[1]=mix(texture2D(tL1,uvr).rgb,texture2D(tL1,uvr*.43+vec2(.27,.11)).rgb,smoothstep(.3,.7,n2.g));
+  cc[2]=mix(texture2D(tL2,uv*1.3).rgb,texture2D(tL2,uv*.47+vec2(.5,.2)).rgb,smoothstep(.35,.65,n3.r)*.55);
+  cc[3]=texture2D(tL3,uv*.9).rgb;
+  vec3 bw=pow(abs(wn),vec3(5.0));bw/=bw.x+bw.y+bw.z+1e-4;
+  float yy=vWP.y/7.0+(n1.b-.5)*.5;
+  vec3 cTop=texture2D(tL5,uv*.7).rgb;
+  float sm4=smoothstep(.3,.7,n3.g);
+  cc[4]=mix(texture2D(tL4,vec2(vWP.z/7.0+n2.r,yy)).rgb,texture2D(tL4,vec2(vWP.z/2.9+n2.g,yy*.41+.3)).rgb,sm4)*bw.x+mix(texture2D(tL4,vec2(vWP.x/7.0+n2.r,yy)).rgb,texture2D(tL4,vec2(vWP.x/2.9+n2.g,yy*.41+.3)).rgb,sm4)*bw.z+cTop*bw.y;
+  cc[5]=cTop;
+  cc[6]=texture2D(tL6,uv*.9).rgb;
+  cc[7]=texture2D(tL7,uv*1.1).rgb;
+  float steep=smoothstep(.18,.46,1.0-wn.y);
+  float cliff=max(vSB.x,steep);float k=1.0-cliff;
+  ww[0]=vSA.x*k;ww[1]=vSA.y*k;ww[2]=vSA.z*k;ww[3]=vSA.w*k;ww[4]=cliff;ww[5]=vSB.y*k;ww[6]=vSB.z*k;ww[7]=vSB.w*k+steep*.35*k;
+  bsc[0]=.015;bsc[1]=.04;bsc[2]=.06;bsc[3]=.04;bsc[4]=.30;bsc[5]=.07;bsc[6]=.03;bsc[7]=.12;
+  float ma=0.0;
+  for(int i=0;i<8;i++){hh[i]=lmn(cc[i]);if(ww[i]>.002)ma=max(ma,ww[i]+hh[i]*.35);}
+  float sw=0.0;vec3 col=vec3(0.0);float bmp=0.0;
+  for(int i=0;i<8;i++){float b=ww[i]>.002?max(ww[i]+hh[i]*.35-ma+.22,0.0):0.0;sw+=b;col+=cc[i]*b;bmp+=hh[i]*bsc[i]*b;}
+  col/=max(sw,1e-4);bmp/=max(sw,1e-4);
+  col*=.93+.14*n2.b;
+  gBump=bmp;
+  diffuseColor.rgb*=col;
+}`;
+    const bump=`#include <normal_fragment_maps>
+{
+  vec3 dpx=dFdx(-vViewPosition),dpy=dFdy(-vViewPosition);
+  float dhx=dFdx(gBump),dhy=dFdy(gBump);
+  vec3 r1=cross(dpy,normal),r2=cross(normal,dpx);
+  float det=dot(dpx,r1);
+  vec3 grad=sign(det)*(dhx*r1+dhy*r2);
+  normal=normalize(abs(det)*normal-grad);
+}`;
+    sh.fragmentShader=sh.fragmentShader.replace('#include <common>',hdr).replace('#include <map_fragment>',body).replace('#include <normal_fragment_maps>',bump);
+  };
+  m.customProgramCacheKey=()=>'terrain-splat-1';
+  return m;
 }
 function forgeTextures(){
   // ── dune sand: warm quartz with wind ripples and grit
@@ -920,6 +1130,7 @@ const ITEMS={
   k_plane:{n:'microlite kit',c:'kit',v:640,w:0,g:'◭',t:'#e8d9a8',s:'plane'},
   k_scrappy:{n:'scrappy droid kit',c:'kit',v:540,w:0,g:'◙',t:'#e0b030',s:'scrappy'},
   k_dockpad:{n:'charge pad kit',c:'kit',v:210,w:0,g:'▣',t:'#7ccf6a',s:'dockpad'},
+  k_bridge:{n:'scrap bridge kit',c:'kit',v:380,w:0,g:'═',t:'#c9a86a',s:'bridge'},
   k_crawler:{n:'desert crawler kit',c:'kit',v:1900,w:0,g:'▦',t:'#d0763a',s:'crawler'}
 };
 const itemName=id=>ITEMS[id]?ITEMS[id].n:id;
@@ -973,6 +1184,7 @@ const RECIPES=[
   {o:['k_plane',1],i:{hull:6,rod:8,cloth:10,pipe:6,gear:3,cell:6,wire:6,bolt:10,bracket:4,plate:3},t:12,g:'build',bench:true,d:'Electric microlite: canvas wing, pusher prop, 240-unit pack. Needs a workbench or toolkit, and a long flat strip.'},
   {o:['k_scrappy',1],i:{hull:3,plate:5,gear:6,cell:6,wire:8,rod:6,bolt:12,lens:2,pipe:2,canister:1},t:14,g:'build',bench:true,d:'Scrappy: a box-shelled junkyard droid on tank tracks. It shares charge pads with other droids and salvages anything with loot within 100 m of one. 400 m of travel per full charge. Needs a bench or toolkit.'},
   {o:['k_dockpad',1],i:{plate:6,rod:4,wire:8,bolt:8,bracket:4,cell:2,pipe:2},t:9,g:'build',bench:true,d:'A charge pad for a scrappy droid. It draws current from your grid only while it is charging. Needs a bench or toolkit.'},
+  {o:['k_bridge',1],i:{plate:10,rod:12,bolt:16,bracket:8,pipe:6,wire:2},t:10,g:'build',bench:true,d:'A 12 m deck of plate on iron trestles, wide enough for the crawler. Needs a workbench or toolkit.'},
   {o:['k_crawler',1],i:{hull:14,rod:16,plate:12,gear:10,cell:16,wire:14,bolt:24,bracket:10,canister:8,pipe:12,lens:10,cloth:10},t:24,g:'build',bench:true,d:'Desert crawler: four tracked pods under a walkable solar deck with batteries, dew harvester, still, crops, kite winch, lockers and a bunk. Slow, patient, self-sufficient. Needs a workbench or toolkit, and a lot of scrap.'}
 ];
 /* helper: 'cloth' and 'cactus' are gathered, defined with the matter table */
@@ -1007,6 +1219,7 @@ const WORKS={
   plane:{n:'electric microlite',kit:'k_plane',d:'High-wing, pusher prop, scrap and canvas. Charges from a grid within 15 m. Needs ~60 m of flat ground.',size:[9.4,2.6,6.6],r:8,warm:1,veh:{max:240,drain:0},cgh:1.15,dist:6.5,refund:['k_plane',1]},
   scrappy:{n:'scrappy droid',kit:'k_scrappy',d:'A junkyard droid on tank tracks. Charges on a shared pad, then salvages scrap, boulders, crates, cacti and salt pans within 100 m of it. 400 m per full charge.',size:[1.1,1.6,1.2],r:3,mobile:1,dist:3.4,refund:['k_scrappy',1]},
   dockpad:{n:'charge pad',kit:'k_dockpad',d:'Charges one scrappy droid at a time; others queue beside it. Draws 6 units/s while charging, a trickle otherwise.',size:[2.5,1.6,2.5],r:5,draw:6,dyn:1,dist:4.6,refund:['k_dockpad',1]},
+  bridge:{n:'scrap bridge',kit:'k_bridge',d:'A 12 m plate deck on trestles, 7 m wide: crawler, buggy and microlite can all cross. Both ends must rest on firm ground at about the same height. The span is solid ground to vehicles, so you cannot drive underneath it.',size:[7.4,3,12],r:4,dist:9,bridge:1,refund:['k_bridge',1]},
   crawler:{n:'desert crawler',kit:'k_crawler',d:'Four-tracked, solar-driven, slow and tireless. Walk its deck: panels, batteries, dew harvester, still, troughs, kite winch, lockers, bunk. Steer, throttle or waypoint — then forget it.',size:[5.4,3.4,8.6],r:8,warm:1,cap:{mass:120},crawler:1,dist:9,slopeR:3.2,refund:['k_crawler',1]}
 };
 /* ───────────────────────────────────────────────────────────────────────
@@ -1035,17 +1248,135 @@ const MAT={},GEO={};
    ─────────────────────────────────────────────────────────────────────── */
 function plateauAt(x,z){ return smooth(0.56,0.71,fbm(x*0.0016+11,z*0.0016-4,SEED+31,3)) }
 function saltAt(x,z,h){ return smooth(0.63,0.79,fbm(x*0.0019-31,z*0.0019+17,SEED+53,3))*(1-smooth(2,15,h)) }
-function heightAt(x,z){
-  let h=(fbm(x*0.0026,z*0.0026,SEED,4)-0.5)*48;
-  h+=(ridged(x*0.0075,z*0.0075,SEED+7,4)-0.44)*10;
-  h+=(fbm(x*0.031,z*0.031,SEED+13,3)-0.5)*1.7;
-  h+=plateauAt(x,z)*24;
-  const sm=saltAt(x,z,h);
-  h=lerp(h,-1.4,sm*0.88);
-  const d=Math.hypot(x,z);                       // the old camp sat on flat ground
-  h=lerp(h,0,smooth(46,15,d));
-  return h;
+
+/* MACRO CELLS.  The world is tiled by 1200 m cells, each seeded from (SEED, cellX, cellZ) and cached.
+   A cell is a valley floor, a mountain massif, a mesa, or a gullied mesa.  Whatever it holds stays at
+   least 60 m inside its own edge (outline wobble included), so two neighbouring formations are never
+   closer than ~70 m: the open ground between them is one connected network, and no ring of rock can
+   ever close around a basin.  Inside a formation a ramp (a road-wide wedge that spirals up from the
+   rim, smooth and gentle, with no terracing or crags) always reaches the summit basin / mesa top.
+   Only the crags above the ramp are climbing-only.  The camp's cell is always open valley.            */
+const MC=1200,MCG=60;
+let _tsSeed=null,_wc=1,_ws=0,_camp=0;
+const _mcc=new Map(),DECKS=[];
+function tsSync(){
+  if(_tsSeed===SEED)return;
+  _tsSeed=SEED;_mcc.clear();_camp=baseH(0,0,1);
+  const a=((SEED>>>5)&1023)/1023*Math.PI;_wc=Math.cos(a);_ws=Math.sin(a);       // prevailing wind, from the seed
+  if(typeof MAT!=='undefined'&&MAT.terrain)MAT.terrain.userData.U.uWind.value.set(_wc,_ws);
 }
+function macroCell(mx,mz){
+  tsSync();
+  const k=(mx+4096)*8192+(mz+4096);let c=_mcc.get(k);
+  if(!c){c=macroCellRaw(mx,mz);_mcc.set(k,c);if(_mcc.size>300)_mcc.delete(_mcc.keys().next().value)}
+  return c;
+}
+function macroCellRaw(mx,mz){
+  const r=rngAt(mx,mz,SEED^0x7e11a9),roll=r();
+  const kind=(mx===0&&mz===0)?0:roll<.30?0:roll<.58?1:roll<.80?2:3;   // 0 valley · 1 massif · 2 mesa · 3 gullied mesa
+  const c={kind,mx,mz};
+  if(!kind)return c;
+  const R=kind===1?250+r()*170:170+r()*190,maxOff=MC/2-MCG-R;
+  c.R=R;c.cx=mx*MC+(r()*2-1)*maxOff;c.cz=mz*MC+(r()*2-1)*maxOff;
+  c.s=Math.floor(r()*1e9)|0;
+  c.H=kind===1?58+r()*24:30+r()*26;
+  c.relief=kind===1?45+r()*40:0;
+  c.step=kind===1?5+r()*3.5:7+r()*5;
+  c.gul=kind===1?10:kind===3?13:0;
+  c.th0=r()*TAU;c.spiral=(r()<.5?-1:1)*(.25+r()*.45);c.wob=r()*TAU;
+  c.p1=r()*TAU;c.p2=r()*TAU;c.p3=r()*TAU;
+  c.halfW=26+r()*14;
+  /* the datum plane the formation stands on, fitted to the ground around its rim: the local hills fade into it,
+     so the formation never inherits the hillside's own steepness */
+  let pa=0,pb=0,pc=0;const NS=12;
+  for(let k=0;k<NS;k++){const an=k/NS*TAU,ex=Math.cos(an)*R*.95,ez=Math.sin(an)*R*.95,hh=baseH(c.cx+ex,c.cz+ez,1);pa+=hh/NS;pb+=hh*ex;pc+=hh*ez}
+  c.pa=pa;c.pb=clamp(pb/(NS*R*R*.95*.95*.5),-.1,.1);c.pc=clamp(pc/(NS*R*R*.95*.95*.5),-.1,.1);
+  return c;
+}
+/* stepped strata: flat benches joined by short, steep risers */
+function terr(h,step,w){const t=h/step,k=Math.floor(t),f=t-k;return(k+smooth(.5-w*.5,.5+w*.5,f))*step}
+/* one formation's height at (x,z).  o.mh height · o.mm presence 0..1 · o.mr 1 on the ramp road */
+function massifAt(c,x,z,lod,o){
+  o.mh=0;o.mm=0;o.mr=0;
+  let dx=x-c.cx,dz=z-c.cz;
+  if(dx*dx+dz*dz>(c.R+40)*(c.R+40))return;
+  dx+=(vnoise(x*.011,z*.011,c.s)-.5)*36;dz+=(vnoise(x*.011+7.3,z*.011-3.1,c.s+9)-.5)*36;
+  const d=Math.hypot(dx,dz),th=Math.atan2(dz,dx);
+  const rr=c.R*(1-.30*(.5+.5*(Math.sin(2*th+c.p1)*.5+Math.sin(3*th+c.p2)*.3+Math.sin(5*th+c.p3)*.2)));
+  const dn=d/rr;if(dn>=1)return;
+  const mesa=c.kind!==1;
+  const e=mesa?1-smooth(.42,1,dn):1-smooth(.10,1,dn);
+  const Hr=mesa?Math.min(c.H,c.R*.07):Math.min(c.H,c.R*.095);
+  const Hb=Hr*e+(fbm(x*.03,z*.03,c.s+21,2)-.5)*1.5*Math.min(1,e*3);
+  /* the ramp road: a spiral wedge, measured perpendicular to its own path */
+  const thg=c.th0+c.spiral*dn+Math.sin(dn*5+c.wob)*.16;
+  const dthg=c.spiral+.8*Math.cos(dn*5+c.wob);
+  let da=Math.abs(th-thg)%TAU;if(da>Math.PI)da=TAU-da;
+  const dp=d*da/Math.sqrt(1+dn*dn*dthg*dthg);
+  const T=smooth(c.halfW,c.halfW+34,dp);
+  let hm=Hb;
+  if(T>.001){
+    const n=Math.max(1,Math.round(Hr/c.step)),step=Hr/n,w=lerp(.7,.22,smooth(.08,.5,e)),pe=Math.pow(e,1.15),sh=c.step*.8*Math.min(1,e*4);
+    /* one stepped surface, evaluated at 5 taps ~2.5 m apart and averaged: a crest that only just clears a riser level can no
+       longer leave a lone pinnacle, and every cliff face gets a ~2.5 m run instead of a razor edge */
+    const rawAt=(px,pz)=>{let r=Hb;if(!mesa)r+=c.relief*smooth(.16,.60,ridged(px*.0105,pz*.0105,c.s+3,lod?2:3))*pe;return terr(r+(fbm(px*.021,pz*.021,c.s+5,2)-.5)*sh,step,w)};
+    let tt=rawAt(x,z);
+    if(!lod){const q=2.5;tt=tt*.4+(rawAt(x+q,z)+rawAt(x-q,z)+rawAt(x,z+q)+rawAt(x,z-q))*.15}
+    hm=lerp(Hb,tt,T);
+    if(c.gul>0&&e>.12&&!lod){                                    // slot gullies bite only the rim band, so the summit / mesa top can never be cut into islands
+      const g=Math.abs(fbm(x*.0135,z*.0135,c.s+31,3)-.5),gate=smooth(.40,.56,fbm(x*.017+3,z*.017-9,c.s+37,2));
+      hm-=Math.min((1-smooth(.014,.06,g))*gate*c.gul*smooth(.45,.62,dn)*smooth(.12,.4,e)*T,hm*.8);
+    }
+  }
+  o.mh=hm;o.mm=Math.min(1,e*2);o.mr=1-T;
+}
+function baseH(x,z,lod){
+  let h=(fbm(x*0.0026,z*0.0026,SEED,4)-0.5)*48;
+  h+=(ridged(x*0.0075,z*0.0075,SEED+7,lod?3:4)-0.44)*10;
+  if(!lod)h+=(fbm(x*0.031,z*0.031,SEED+13,3)-0.5)*1.7;
+  return h+plateauAt(x,z)*24;
+}
+const _ms={mh:0,mm:0,mr:0},_hs={h:0,mass:0,ramp:0,clay:0,dune:0,wash:0,salt:0,plat:0};
+/* the whole field: height plus the zone masks that choose the surface texture.  lod 1 = far view (no dunes, no fine noise) */
+function terrainSample(x,z,lod,o){
+  const c=macroCell(Math.floor((x+MC/2)/MC),Math.floor((z+MC/2)/MC));
+  const pl=plateauAt(x,z);
+  let h=baseH(x,z,lod);
+  const sm=saltAt(x,z,h);h=lerp(h,-1.4,sm*0.88);
+  const flat=smooth(84,22,Math.hypot(x,z));                        // the camp sits on level ground; the hills ease into it over ~60 m
+  const cl=smooth(.60,.74,fbm(x*.0017+100,z*.0017-67,SEED+141,3))*(1-sm)*(1-pl*.9)*(1-flat*.6);   // baked clay pans: broad and flat
+  if(cl>0)h=lerp(h,h*.4,cl*.85);
+  _ms.mh=0;_ms.mm=0;_ms.mr=0;
+  if(c.kind){massifAt(c,x,z,lod,_ms);if(_ms.mm>0)h=lerp(h,c.pa+c.pb*(x-c.cx)+c.pc*(z-c.cz),.85*_ms.mm)+_ms.mh}
+  /* dry riverbed: the zero-contour of a warped noise, a wide shallow wadi with soft banks (never steeper than ~0.35) */
+  let wash=0;
+  const w1=fbm(x*.0009,z*.0009,SEED+211,2),w2=fbm(x*.0009+5.2,z*.0009+1.3,SEED+212,2);
+  const dv=Math.abs(fbm(x*.0013+(w1-.5)*.9,z*.0013+(w2-.5)*.9,SEED+201,3)-.5);
+  if(dv<.06){
+    const fade=(1-smooth(0,.35,_ms.mm))*(1-sm)*(1-flat);
+    if(fade>0){h-=(1.6+2.6*fbm(x*.004,z*.004,SEED+222,2))*(1-smooth(.004,.055,dv))*fade;wash=(1-smooth(.007,.03,dv))*fade}
+  }
+  /* wind-built dunes: long transverse crests with a gentle windward face and a steeper lee, plus mini-dunes */
+  const dz=smooth(.50,.66,fbm(x*.0014+55,z*.0014+13,SEED+151,3))*(1-sm)*(1-cl)*(1-pl)*(1-Math.min(1,_ms.mm*3))*(1-wash)*(1-flat);
+  if(dz>.02&&!lod){
+    const aa=x*_wc+z*_ws,cc=-x*_ws+z*_wc;
+    const ph=(aa+(fbm(x*.006,z*.006,SEED+163,2)-.5)*80)/44,t=ph-Math.floor(ph);
+    const prof=t<.72?smooth(0,1,t/.72):1-smooth(0,1,(t-.72)/.28);
+    const A=.35+1.9*smooth(.3,.75,fbm(x*.003+9,z*.003,SEED+167,2));
+    const ph2=(aa*.96-cc*.28+(fbm(x*.02,z*.02,SEED+169,2)-.5)*26)/13;
+    h+=dz*(A*prof+.25*Math.sin(ph2*TAU)*smooth(.2,.7,dz));
+  }
+  h=lerp(h,_camp,flat);
+  if(DECKS.length)for(let i=0;i<DECKS.length;i++){          // scrap bridges: the deck is solid ground
+    const k=DECKS[i],ex=x-k.x,ez=z-k.z;if(ex*ex+ez*ez>k.rr)continue;
+    const u=ex*k.sn+ez*k.cs,v=ex*k.cs-ez*k.sn,au=Math.abs(u);
+    if(au>k.L*.5||Math.abs(v)>k.W*.5)continue;
+    const e=au-(k.L*.5-1.6),y=k.y-(e>0?e*.28:0);if(y>h)h=y;
+  }
+  o.h=h;o.mass=_ms.mm;o.ramp=_ms.mr;o.clay=cl;o.dune=dz;o.wash=wash;o.salt=sm;o.plat=pl;
+  return o;
+}
+function heightAt(x,z){terrainSample(x,z,0,_hs);return _hs.h}
 function normalAt(x,z){
   const e=1.1;
   const hL=heightAt(x-e,z),hR=heightAt(x+e,z),hD=heightAt(x,z-e),hU=heightAt(x,z+e);
@@ -1053,18 +1384,33 @@ function normalAt(x,z){
   return n.normalize();
 }
 const SAND=[196,163,116],ROCK=[126,110,96],SALT=[226,219,203];
-/* the sand texture supplies the colour; the vertex colour only tints it */
-function groundTint(x,z,h,slope,out){
-  const pm=plateauAt(x,z),sm=saltAt(x,z,h);
-  const rocky=Math.max(smooth(0.30,0.72,slope),pm*0.85);
+/* mild colour variation only: the splat textures carry the real colour */
+function tintBase(x,z,out){
   let k=1+(fbm(x*0.02,z*0.02,SEED+91,3)-0.5)*0.20;
   k*=1-smooth(0.45,0.85,fbm(x*0.006,z*0.006,SEED+61,3))*0.12;
-  k=lerp(k,k*0.62,rocky);
-  k=lerp(k,k*1.16,sm*0.92);
   const g=1+(fbm(x*0.11,z*0.11,SEED+3,2)-0.5)*0.12;
-  out[0]=clamp(k*g*1.03,0,2);
-  out[1]=clamp(k*g*0.99,0,2);
-  out[2]=clamp(k*g*0.93,0,2);
+  out[0]=clamp(k*g*1.03,0,2);out[1]=clamp(k*g*0.99,0,2);out[2]=clamp(k*g*0.93,0,2);
+}
+const _gz={h:0,mass:0,ramp:0,clay:0,dune:0,wash:0,salt:0,plat:0};
+/* tint for things made of "the ground here" (wind-drifts etc.): soft-sand colour pushed toward the local surface */
+function groundTint(x,z,h,slope,out){
+  tintBase(x,z,out);
+  terrainSample(x,z,1,_gz);
+  const rk=Math.max(_gz.plat*.8,Math.min(1,_gz.mass*1.5),smooth(.3,.8,slope||0)*.8);
+  const cl=_gz.clay,wa=_gz.wash*.6,sa=_gz.salt*.92,bs=1-Math.min(1,cl+wa+sa+rk);
+  out[0]*=bs+cl*.98+wa*.85+sa*1.15+rk*.76;out[1]*=bs+cl*.86+wa*.82+sa*1.2+rk*.74;out[2]*=bs+cl*.84+wa*.8+sa*1.22+rk*.72;
+}
+/* surface-layer weights for one vertex.  A=[soft sand, dune sand, baked clay, dry riverbed]  B=[cliff strata, caprock, salt, scree]
+   g is the ground gradient; the fragment shader adds its own per-pixel steepness on top */
+function splatWeights(clay,dune,wash,salt,mass,ramp,plat,g,A,B){
+  const cliff=smooth(.55,1.2,g),flat=1-smooth(.12,.34,g),calm=1-smooth(.35,.6,g);
+  const cap=Math.min(1,smooth(.06,.3,mass)*(1-ramp*.9)+plat*.7)*flat;
+  const scree=smooth(.28,.55,g)*(1-smooth(.8,1.3,g))*(.2+.8*smooth(0,.25,mass));
+  let a1=dune*(1-smooth(.45,.8,g)),a2=clay*calm,a3=wash*calm,b1=cap,b2=salt*.92,b3=scree;
+  const tot=a1+a2+a3+b1+b2+b3,n=tot>1?1/tot:1;
+  a1*=n;a2*=n;a3*=n;b1*=n;b2*=n;b3*=n;
+  A[0]=Math.max(0,1-(a1+a2+a3+b1+b2+b3));A[1]=a1;A[2]=a2;A[3]=a3;
+  B[0]=cliff;B[1]=b1;B[2]=b2;B[3]=b3;
 }
 
 /* ───────────────────────────────────────────────────────────────────────
@@ -1072,13 +1418,19 @@ function groundTint(x,z,h,slope,out){
    ─────────────────────────────────────────────────────────────────────── */
 const STEP=CFG.CH/CFG.N, VER=CFG.N+1;
 function buildChunk(cx,cz){
-  const M=CFG.N+3,H=new Float32Array(M*M);
-  const x0=cx*CFG.CH,z0=cz*CFG.CH;
-  for(let j=0;j<M;j++)for(let i=0;i<M;i++)
-    H[j*M+i]=heightAt(x0+(i-1)*STEP,z0+(j-1)*STEP);
-  const pos=new Float32Array(VER*VER*3),uv=new Float32Array(VER*VER*2),
-        col=new Float32Array(VER*VER*3),nor=new Float32Array(VER*VER*3),idx=[];
-  const t=[0,0,0],e=STEP;
+  const M=CFG.N+3,H=new Float32Array(M*M),V2=VER*VER;
+  const x0=cx*CFG.CH,z0=cz*CFG.CH,zc=new Float32Array(V2*7);
+  for(let j=0;j<M;j++)for(let i=0;i<M;i++){
+    terrainSample(x0+(i-1)*STEP,z0+(j-1)*STEP,0,_hs);
+    H[j*M+i]=_hs.h;
+    if(i>=1&&i<=VER&&j>=1&&j<=VER){
+      const o=((j-1)*VER+(i-1))*7;
+      zc[o]=_hs.clay;zc[o+1]=_hs.dune;zc[o+2]=_hs.wash;zc[o+3]=_hs.salt;zc[o+4]=_hs.mass;zc[o+5]=_hs.ramp;zc[o+6]=_hs.plat;
+    }
+  }
+  const pos=new Float32Array(V2*3),uv=new Float32Array(V2*2),col=new Float32Array(V2*3),nor=new Float32Array(V2*3),
+        sA=new Float32Array(V2*4),sB=new Float32Array(V2*4),idx=[];
+  const t=[0,0,0],A=[0,0,0,0],B=[0,0,0,0],e=STEP;
   for(let j=0;j<VER;j++)for(let i=0;i<VER;i++){
     const o=j*VER+i,x=x0+i*STEP,z=z0+j*STEP;
     const h=H[(j+1)*M+(i+1)];
@@ -1088,8 +1440,11 @@ function buildChunk(cx,cz){
     const nl=Math.hypot(gx,gz,1);
     nor[o*3]=-gx/nl;nor[o*3+1]=1/nl;nor[o*3+2]=-gz/nl;
     uv[o*2]=x/9;uv[o*2+1]=z/9;
-    groundTint(x,z,h,1-1/nl,t);
+    tintBase(x,z,t);
     col[o*3]=t[0];col[o*3+1]=t[1];col[o*3+2]=t[2];
+    const q=o*7;
+    splatWeights(zc[q],zc[q+1],zc[q+2],zc[q+3],zc[q+4],zc[q+5],zc[q+6],Math.hypot(gx,gz),A,B);
+    sA.set(A,o*4);sB.set(B,o*4);
   }
   for(let j=0;j<CFG.N;j++)for(let i=0;i<CFG.N;i++){
     const a=j*VER+i,b=a+1,c=a+VER,d=c+1;
@@ -1100,6 +1455,8 @@ function buildChunk(cx,cz){
   g.setAttribute('normal',new THREE.BufferAttribute(nor,3));
   g.setAttribute('uv',new THREE.BufferAttribute(uv,2));
   g.setAttribute('color',new THREE.BufferAttribute(col,3));
+  g.setAttribute('aSA',new THREE.BufferAttribute(sA,4));
+  g.setAttribute('aSB',new THREE.BufferAttribute(sB,4));
   g.setIndex(idx);
   return g;
 }
@@ -1132,26 +1489,43 @@ const FEATDEF={
 const MARKS=['outcrop','spire','mast','wreck','pod','tank','ruin','plateheap','pipeheap','gearpile','canheap','wirecoil','crate','barrel','stone','stack','saltcrust','cactus','shrub'];
 const _fc=new Map();
 function cellFeatures(cx,cz){const k=cx+','+cz;let v=_fc.get(k);if(!v){v=cellFeaturesRaw(cx,cz);_fc.set(k,v);if(_fc.size>600)_fc.delete(_fc.keys().next().value)}return v}
+const SITE_R={outcrop:6,spire:5,mast:1.6,wreck:3.2,pod:2.6,tank:3.6,ruin:4.6,plateheap:2.2,pipeheap:2.2,gearpile:2.2,canheap:2.2,wirecoil:1.8,crate:1.6,barrel:1.2,stone:1.8,stack:1.5,saltcrust:2.5,cactus:.9,shrub:.7};
+const SITE_G={outcrop:.30,spire:.30,mast:.2,cactus:.45,shrub:.5,stone:.45,stack:.4,saltcrust:.15};
+/* nothing is ever placed where it would stick out of a hillside or hang over a cliff: the ground under its whole
+   footprint must be gentle (landmark outcrops and spires want flatter ground still) */
+function siteOK(x,z,t,lm){
+  const R=SITE_R[t]||2,mg=(lm&&(t==='outcrop'||t==='spire'))?.22:(SITE_G[t]||.28),h0=heightAt(x,z);let md=0;
+  for(let a=0;a<8;a++){const d=Math.abs(heightAt(x+Math.cos(a*.7854+.3)*R,z+Math.sin(a*.7854+.3)*R)-h0);if(d>md)md=d}
+  return md/R<=mg;
+}
+const _fz={h:0,mass:0,ramp:0,clay:0,dune:0,wash:0,salt:0,plat:0};
 function cellFeaturesRaw(cx,cz){
   const r=rngAt(cx,cz,SEED^0x5f3a91);
   const out=[],bx=cx*FCELL,bz=cz*FCELL;
-  const h=heightAt(bx+FCELL/2,bz+FCELL/2);
-  const plat=plateauAt(bx+FCELL/2,bz+FCELL/2),salt=saltAt(bx+FCELL/2,bz+FCELL/2,h);
   const n=3+Math.floor(r()*2);
   for(let k=0;k<n;k++){
     const ep=k===0?0:EPOCH*977,re=rngAt(cx*31+k,cz*17-k,SEED+313+ep);
-    const px=bx+re()*FCELL,pz=bz+re()*FCELL;
     const rr=rngAt(cx*31+k,cz*17-k,SEED+771+ep);
-    const fh=heightAt(px,pz);
-    let pool;
-    if(salt>0.5)            pool=['saltcrust','stone','barrel','cactus','wreck'];
-    else if(plat>0.55)      pool=['outcrop','spire','stone','stack','mast','ruin','tank','wreck','plateheap'];
-    else if(fh<-0.6)       pool=['saltcrust','stone','shrub','barrel','wreck'];
-    else                    pool=['cactus','shrub','wreck','pipeheap','plateheap','gearpile','canheap','wirecoil','crate','ruin','pod','barrel','stone','stack','tank','outcrop','mast'];
-    let t=pool[Math.floor(rr()*pool.length)];
-    if(k===0){const LM=salt>0.5?['saltcrust','stone']:plat>0.55?['outcrop','spire','mast','ruin']:['mast','ruin','tank','outcrop','wreck'];t=LM[Math.floor(rr()*LM.length)];if(rr()<0.45)continue}
-    if(t==='wreck'&&rr()<0.5) t='pipeheap';
-    if(t==='outcrop'&&rr()<0.6) t='spire';
+    const skipLM=k===0&&rr()<0.45;
+    let t=null,px=0,pz=0,fh=0;
+    for(let at=0;at<6&&!t;at++){
+      const qx=bx+re()*FCELL,qz=bz+re()*FCELL,S=terrainSample(qx,qz,0,_fz);
+      const q=fh=S.h,plat=S.plat,salt=S.salt,rock=S.mass>.08;
+      let pool;
+      if(salt>0.5)            pool=['saltcrust','stone','barrel','cactus','wreck'];
+      else if(rock)           pool=['stone','stack','outcrop','spire','stone','ruin','wreck','shrub'];
+      else if(plat>0.55)      pool=['outcrop','spire','stone','stack','mast','ruin','tank','wreck','plateheap'];
+      else if(q<-0.6)         pool=['saltcrust','stone','shrub','barrel','wreck'];
+      else if(S.wash>0.5)     pool=['wreck','pipeheap','barrel','stone','plateheap','canheap'];
+      else if(S.clay>0.5)     pool=['wreck','ruin','barrel','crate','stone','tank','cactus'];
+      else                    pool=['cactus','shrub','wreck','pipeheap','plateheap','gearpile','canheap','wirecoil','crate','ruin','pod','barrel','stone','stack','tank','outcrop','mast'];
+      let tt=pool[Math.floor(rr()*pool.length)];
+      if(k===0){const LM=salt>0.5?['saltcrust','stone']:rock?['outcrop','spire','stone']:plat>0.55?['outcrop','spire','mast','ruin']:['mast','ruin','tank','outcrop','wreck'];tt=LM[Math.floor(rr()*LM.length)]}
+      if(tt==='wreck'&&rr()<0.5) tt='pipeheap';
+      if(tt==='outcrop'&&rr()<0.6) tt='spire';
+      if(siteOK(qx,qz,tt,k===0)){t=tt;px=qx;pz=qz}
+    }
+    if(!t||skipLM)continue;
     const def=FEATDEF[t];
     const sc=0.75+rr()*0.7;
     const loot=def.loot?def.loot.map(l=>[l[0],l[1]+Math.floor(rr()*2)]):(def.lootSet?[[def.lootSet[Math.floor(rr()*def.lootSet.length)][0],1]]:null);
@@ -1199,6 +1573,7 @@ function buildGeo(){
 function buildMats(){
   const std=(o)=>new THREE.MeshStandardMaterial(Object.assign({roughness:0.95,metalness:0.05},o));
   MAT.sand=std({map:TEX.sand,normalMap:TEX.sandN,normalScale:new THREE.Vector2(1.1,1.1),vertexColors:true,roughness:1,metalness:0,dithering:true});
+  MAT.terrain=makeTerrainMaterial();
   MAT.rock=std({map:TEX.rock,normalMap:TEX.rockN,roughness:1,metalness:0,flatShading:false});
   MAT.rust=std({map:TEX.rust,normalMap:TEX.rustN,roughness:0.82,metalness:0.55});
   MAT.rustDark=std({map:TEX.rust,color:0x8a6a55,roughness:0.9,metalness:0.45});
@@ -3937,7 +4312,31 @@ function asmDockpad(K,s){
   return K;
 }
 
-const ASMFN={shelter:asmShelter,wall:asmWall,workbench:asmWorkbench,pulp_mill:asmPulpMill,harvester:asmHarvester,purifier:asmPurifier,trough:asmTrough,tank:asmTank,lamp:asmLamp,battery:asmBattery,solar:asmSolar,windmill:asmWindmill,stove:asmStove,crate:asmCrate,freight:asmFreight,sign:asmSign,buggy:asmBuggy,plane:asmPlane,mast:asmMast,crawler:asmCrawler,scrappy:asmScrappy,dockpad:asmDockpad};
+const BR={L:12,W:7.4};
+function asmBridge(K,s){
+  const L=BR.L,W=BR.W,legs=s.bridgeLegs;
+  for(const [x,t,m,w] of [[-2.45,.115,'aPlate',2.38],[0,.121,'aRust',2.42],[2.45,.109,'aPlate',2.37]])K.box(m,x,-t/2,0,w,t,L-.6+(x?0:.03));
+  for(const sg of [-1,1]){
+    K.box('aRust',sg*3.45,-.3,0,.2+(sg>0?.012:0),.34,L-.02*sg);
+    K.box('aConc',0,-.5,sg*(L/2-.3),W-.4,.5,.6+(sg>0?.02:0));
+    K.box('aHazard',0,.004,sg*(L/2-.12),W-.6,.01,.2);
+    K.box('aRust',sg*3.55,.8,0,.06,.07,L-.2);
+    K.box('aGalv',sg*3.55,.45,0,.05,.05,L-.2);
+    for(let i=0;i<5;i++)K.box('aGalv',sg*3.55,.42,-L/2+.6+i*(L-1.2)/4,.08+(i%2)*.004,.84,.08);
+  }
+  for(let i=0;i<8;i++)K.box('aGalv',0,-.22,-L/2+.9+i*1.45,W-.5,.09+.002*(i%3),.13);
+  const us=[-5,-2.5,0,2.5,5];
+  us.forEach((u,i)=>{
+    for(const sg of [-1,1]){
+      const len=legs?legs[i][sg<0?0:1]:1.0;
+      K.box('aGalv',sg*3.0,-.35-len/2,u,.16+(i%2)*.006,len,.16);
+      K.box('aConc',sg*3.0,-.35-len+.04,u,.5,.14,.5);
+    }
+    K.box('aRust',0,-.62,u,6,.08,.1+(i%2)*.004);
+  });
+  return K;
+}
+const ASMFN={bridge:asmBridge,shelter:asmShelter,wall:asmWall,workbench:asmWorkbench,pulp_mill:asmPulpMill,harvester:asmHarvester,purifier:asmPurifier,trough:asmTrough,tank:asmTank,lamp:asmLamp,battery:asmBattery,solar:asmSolar,windmill:asmWindmill,stove:asmStove,crate:asmCrate,freight:asmFreight,sign:asmSign,buggy:asmBuggy,plane:asmPlane,mast:asmMast,crawler:asmCrawler,scrappy:asmScrappy,dockpad:asmDockpad};
 const ASMRAD={mast:1.2,wreck:2.3,pod:2.0,tank:2.6,canheap:0,barrel:0,cactus:0,shrub:0,saltcrust:0,ruin:2.8,plateheap:1.6,pipeheap:2.0,gearpile:1.3,wirecoil:1.1,crate:0.8,stone:1.0,stack:0.6};
 const ASMFEAT={mast:featMast,wreck:featWreck,pod:featPod,tank:featTank,cactus:featCactus,shrub:featShrub,saltcrust:featSaltcrust,canheap:featCanheap,barrel:featBarrel,ruin:featRuin,plateheap:featPlateheap,pipeheap:featPipeheap,gearpile:featGearpile,wirecoil:featWirecoil,crate:featCrate,stone:featStone,stack:featStack};
 
@@ -4080,19 +4479,22 @@ function buildSky(){
 }
 /* full terrain underlay: detailed beneath streamed chunks, coarser toward the far plane */
 function buildHorizon(){
-  const RR=1500,INNER_R=CFG.CH*(CFG.draw+1)*1.5,INNER_RINGS=64,FAR_RINGS=12,
-        RINGS=INNER_RINGS+FAR_RINGS-1,SEG=128,ox=World.hx||0,oz=World.hz||0;
-  const pos=[],uv=[],col=[],idx=[];
-  const t=[0,0,0];
+  const RR=1500,INNER_R=CFG.CH*(CFG.draw+1)*1.5,INNER_RINGS=56,FAR_RINGS=16,
+        RINGS=INNER_RINGS+FAR_RINGS-1,SEG=160,ox=World.hx||0,oz=World.hz||0;
+  const NV=RINGS*(SEG+1),pos=new Float32Array(NV*3),uv=new Float32Array(NV*2),col=new Float32Array(NV*3),zc=new Float32Array(NV*7),idx=[];
+  const t=[0,0,0];let n=0;
   for(let r=0;r<RINGS;r++){
     const f=r<INNER_RINGS?r/(INNER_RINGS-1):(r-(INNER_RINGS-1))/(FAR_RINGS-1);
     const rad=r<INNER_RINGS?INNER_R*f:INNER_R*Math.pow(RR/INNER_R,f);
-    for(let a=0;a<=SEG;a++){
-      const an=a/SEG*TAU,x=Math.cos(an)*rad,z=Math.sin(an)*rad,y=heightAt(ox+x,oz+z);
-      pos.push(x,y-2.6,z);uv.push((ox+x)/9,(oz+z)/9);
-      groundTint(ox+x,oz+z,y,0,t);
+    const lod=rad>INNER_R*1.15?1:0;                  // level of detail by distance: dunes and fine noise drop out past ~400 m
+    for(let a=0;a<=SEG;a++,n++){
+      const an=a/SEG*TAU,x=Math.cos(an)*rad,z=Math.sin(an)*rad;
+      terrainSample(ox+x,oz+z,lod,_hs);
+      pos[n*3]=x;pos[n*3+1]=_hs.h-3.2;pos[n*3+2]=z;uv[n*2]=(ox+x)/9;uv[n*2+1]=(oz+z)/9;
+      tintBase(ox+x,oz+z,t);
       const k=1-(rad/RR)*0.30;
-      col.push(t[0]*k,t[1]*k,t[2]*k);
+      col[n*3]=t[0]*k;col[n*3+1]=t[1]*k;col[n*3+2]=t[2]*k;
+      const q=n*7;zc[q]=_hs.clay;zc[q+1]=_hs.dune;zc[q+2]=_hs.wash;zc[q+3]=_hs.salt;zc[q+4]=_hs.mass;zc[q+5]=_hs.ramp;zc[q+6]=_hs.plat;
     }
   }
   for(let r=0;r<RINGS-1;r++)for(let a=0;a<SEG;a++){
@@ -4100,11 +4502,19 @@ function buildHorizon(){
     idx.push(i0,i1,i2,i1,i3,i2);
   }
   const g=new THREE.BufferGeometry();
-  g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
-  g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
-  g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
+  g.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  g.setAttribute('uv',new THREE.BufferAttribute(uv,2));
+  g.setAttribute('color',new THREE.BufferAttribute(col,3));
   g.setIndex(idx);g.computeVertexNormals();
-  return new THREE.Mesh(g,MAT.sand);
+  const nor=g.attributes.normal.array,sA=new Float32Array(NV*4),sB=new Float32Array(NV*4),A=[0,0,0,0],B=[0,0,0,0];
+  for(let i=0;i<NV;i++){
+    const ny=Math.max(nor[i*3+1],.05),gg=Math.sqrt(Math.max(0,1-ny*ny))/ny,q=i*7;
+    splatWeights(zc[q],zc[q+1],zc[q+2],zc[q+3],zc[q+4],zc[q+5],zc[q+6],gg,A,B);
+    sA.set(A,i*4);sB.set(B,i*4);
+  }
+  g.setAttribute('aSA',new THREE.BufferAttribute(sA,4));
+  g.setAttribute('aSB',new THREE.BufferAttribute(sB,4));
+  return new THREE.Mesh(g,MAT.terrain);
 }
 
 /* ───────────────────────────────────────────────────────────────────────
@@ -4271,10 +4681,28 @@ function structureFSM(s){
     ]
   });
 }
+function bridgeSite(x,z,rot){
+  const sn=Math.sin(rot),cs=Math.cos(rot),at=(u,v)=>heightAt(x+u*sn+v*cs,z+u*cs-v*sn);
+  const e=BR.L/2-1,vs=[-BR.W*.4,0,BR.W*.4];
+  const A=vs.map(v=>at(-e,v)),B=vs.map(v=>at(e,v)),hA=(A[0]+A[1]+A[2])/3,hB=(B[0]+B[1]+B[2])/3,y=(hA+hB)/2;
+  let reason='';
+  if(Math.abs(hA-hB)>1.0)reason='the two ends are at different heights';
+  else if([...A,...B].some(h=>h<y-.9||h>y+.5))reason='both ends need firm ground at deck height';
+  else if([-3,0,3].some(u=>vs.some(v=>at(u,v)>y+.6)))reason='ground is in the way of the span';
+  return{ok:!reason,reason,y};
+}
+function bridgeInit(s){
+  const site=bridgeSite(s.x,s.z,s.rot),sn=Math.sin(s.rot),cs=Math.cos(s.rot);
+  s.y=site.y;
+  s.bridgeLegs=[-5,-2.5,0,2.5,5].map(u=>[-3,3].map(v=>Math.max(.3,site.y-heightAt(s.x+u*sn+v*cs,s.z+u*cs-v*sn)+.25)));
+  s.deck={x:s.x,z:s.z,sn,cs,L:BR.L,W:BR.W,y:site.y,rr:52};
+  DECKS.push(s.deck);
+}
 function makeStructure(type,x,z,rot,y){
   const d=WORKS[type];
   const s={id:uid++,type,x,z,y:(y===undefined?heightAt(x,z):y),rot:rot||0,
     pow:0,dew:0,water:0,fluid:0,gen:0,pw:0,fed:false,grow:0,seeded:false,ripe:false,lit:false,work:0,age:0};
+  if(type==='bridge')bridgeInit(s);
   s.fsm=structureFSM(s);
   s.mesh=structureMesh(s);
   s.mesh.position.set(s.x,s.y,s.z);s.mesh.rotation.y=s.rot;
@@ -4286,6 +4714,7 @@ function makeStructure(type,x,z,rot,y){
   return s;
 }
 function removeStructure(s,refund){
+  if(s.deck){const di=DECKS.indexOf(s.deck);if(di>=0)DECKS.splice(di,1)}
   if(s.type==='scrappy')scrRelease(s);
   if(s.type==='dockpad'){for(const r0 of G.struct)if(r0.type==='scrappy'&&r0.pad===s){r0.pad=null;if(['dock','toPad','align','wait'].includes(r0.st))r0.st='seek'}s.robot=null;s.queue=[]}
   if(s.type==='crawler'&&(P.aboard===s||G.drive===s))leaveCrawler(s,true);
@@ -5228,7 +5657,16 @@ function playerTick(dt){
   P.vx=lerp(P.vx,tx,clamp(acc*dt,0,1));
   P.vz=lerp(P.vz,tz,clamp(acc*dt,0,1));
   if(!P.aboard){
-  P.x+=P.vx*dt;P.z+=P.vz*dt;
+  { /* on foot you cannot walk up a cliff face: climbing a rise steeper than ~50° needs a jump (or, later, a rope) */
+    let nx=P.x+P.vx*dt,nz=P.z+P.vz*dt;
+    if(P.ground){
+      const mv=Math.hypot(P.vx,P.vz)*dt,ok=(ax,az,m)=>heightAt(ax,az)-P.y<=0.04+m*1.25;
+      if(mv>1e-5&&!ok(nx,nz,mv)){
+        if(ok(nx,P.z,Math.abs(P.vx)*dt))nz=P.z;else if(ok(P.x,nz,Math.abs(P.vz)*dt))nx=P.x;else{nx=P.x;nz=P.z;P.vx*=.4;P.vz*=.4}
+      }
+    }
+    P.x=nx;P.z=nz;
+  }
   P.vy-=23*dt;
   P.y+=P.vy*dt;
   const gy=heightAt(P.x,P.z);
@@ -5340,7 +5778,7 @@ function crawlerObstacles(s,x,z,rad,hard){
   for(const o of G.struct){
     if(o===s)continue;
     if(Math.abs(o.x-x)>rad||Math.abs(o.z-z)>rad)continue;
-    const d=WORKS[o.type];out.push({x:o.x,z:o.z,R:Math.max(d.size[0],d.size[2])*.5,n:d.n});
+    if(o.type==='bridge')continue;const d=WORKS[o.type];out.push({x:o.x,z:o.z,R:Math.max(d.size[0],d.size[2])*.5,n:d.n});
   }
   return out;
 }
@@ -5389,7 +5827,14 @@ function crawlerAuto(s,dt){
   if(d<CR.arrive){s.auto=null;s.thr=0;s.str=0;s.autoIdx=-1;log('the crawler has reached '+a.name,'good');SFX('coin');return}
   if(s.backT>0){s.backT-=dt;s.str+=clamp(0-s.str,-1.4*dt,1.4*dt);s.thr+=clamp(-.3-s.thr,-1.2*dt,1.2*dt);s.apOff=undefined;return}
   if(s.thr<0)s.thr=Math.min(0,s.thr+dt*1.5);
-  const desired=Math.atan2(dx,dz);
+  if(a.route===undefined){a.route=planRoute(s.pos.x,s.pos.z,a.x,a.z);a.ri=0}
+  let tdx=dx,tdz=dz;
+  if(a.route&&a.route.length){
+    while(a.ri<a.route.length-1&&Math.hypot(a.route[a.ri][0]-s.pos.x,a.route[a.ri][1]-s.pos.z)<20)a.ri++;
+    const q=a.route[a.ri];tdx=q[0]-s.pos.x;tdz=q[1]-s.pos.z;
+    if(a.ri>=a.route.length-1&&a.route.partial&&Math.hypot(tdx,tdz)<24&&(a.rp=(a.rp||0)+1)<10)a.route=undefined;   // reached the end of a partial plan: plan on from here
+  }
+  const desired=Math.atan2(tdx,tdz);
   s.apT=(s.apT||0)-dt;
   if(s.apT<=0||s.apOff===undefined){s.apT=.2;s.apOff=crawlerPlan(s,desired);if(s.apOff===0&&s.hits&&now()-s.hitT>12)s.hits=0}
   const err=crwWrap(desired+s.apOff-s.yaw);
@@ -5607,10 +6052,72 @@ function crawlerTargets(){
   G.waypoints.forEach((w,i)=>{if(w)out.push({x:w.x,z:w.z,name:'WP'+(i+1)})});
   return out;
 }
+/* ───────────────────────────────────────────────────────────────────────
+   ROUTE PLANNER — the crawler's autopilot plans over the real terrain (A* on a 16 m grid; a node is drivable when
+   the ground within a hull radius is gentle) instead of just steering at the waypoint, so it drives round
+   mountains, mesas and basins to wherever it was sent.
+   ─────────────────────────────────────────────────────────────────────── */
+const NAV={cs:16,m:new Map()};
+function navNode(ix,iz){
+  const k=(ix+32768)*65536+(iz+32768);let v=NAV.m.get(k);
+  if(v===undefined){
+    const x=ix*NAV.cs,z=iz*NAV.cs,h0=heightAt(x,z);let ok=1;
+    for(let a=0;a<8;a++){if(Math.abs(heightAt(x+Math.cos(a*.7854)*5.2,z+Math.sin(a*.7854)*5.2)-h0)>2.3){ok=0;break}}
+    v={ok,h:h0};NAV.m.set(k,v);
+  }
+  return v;
+}
+function navLOS(ax,az,bx,bz){
+  const cs=NAV.cs,L=Math.hypot(bx-ax,bz-az),n=Math.max(1,Math.ceil(L/(cs*.5))),sl=L/n;let ph=heightAt(ax,az);
+  for(let i=1;i<=n;i++){
+    const x=ax+(bx-ax)*i/n,z=az+(bz-az)*i/n;
+    if(!navNode(Math.round(x/cs),Math.round(z/cs)).ok)return false;
+    const h=heightAt(x,z);if(Math.abs(h-ph)>.45*sl)return false;ph=h;
+  }
+  return true;
+}
+function planRoute(x0,z0,x1,z1){
+  const cs=NAV.cs;if(NAV.m.size>50000)NAV.m.clear();
+  const snap=(x,z)=>{
+    const ix=Math.round(x/cs),iz=Math.round(z/cs);if(navNode(ix,iz).ok)return[ix,iz];
+    for(let r=1;r<=8;r++)for(let dz=-r;dz<=r;dz++)for(let dx=-r;dx<=r;dx++){
+      if(Math.max(Math.abs(dx),Math.abs(dz))!==r)continue;if(navNode(ix+dx,iz+dz).ok)return[ix+dx,iz+dz];
+    }
+    return null;
+  };
+  const s=snap(x0,z0),g=snap(x1,z1);if(!s||!g)return null;
+  const key=(a,b)=>(a+32768)*65536+(b+32768),heap=[],gs=new Map(),from=new Map(),closed=new Set();
+  const push=(f,a,b)=>{heap.push([f,a,b]);let i=heap.length-1;while(i>0){const p=(i-1)>>1;if(heap[p][0]<=heap[i][0])break;[heap[p],heap[i]]=[heap[i],heap[p]];i=p}};
+  const pop=()=>{const top=heap[0],last=heap.pop();if(heap.length){heap[0]=last;let i=0;for(;;){let l=i*2+1,r=l+1,m=i;if(l<heap.length&&heap[l][0]<heap[m][0])m=l;if(r<heap.length&&heap[r][0]<heap[m][0])m=r;if(m===i)break;[heap[m],heap[i]]=[heap[i],heap[m]];i=m}}return top};
+  const hf=(a,b)=>Math.hypot(a-g[0],b-g[1])*cs*1.3;
+  gs.set(key(s[0],s[1]),0);push(hf(s[0],s[1]),s[0],s[1]);
+  let best=[s[0],s[1]],bh=hf(s[0],s[1]),exp=0,done=false;
+  while(heap.length&&exp<14000){
+    const [,a,b]=pop(),kk=key(a,b);if(closed.has(kk))continue;closed.add(kk);exp++;
+    if(a===g[0]&&b===g[1]){done=true;break}
+    const h=hf(a,b);if(h<bh){bh=h;best=[a,b]}
+    const na=navNode(a,b),gc=gs.get(kk);
+    for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){
+      if(!dx&&!dz)continue;const c=a+dx,d=b+dz,nk=key(c,d);if(closed.has(nk))continue;
+      const nn=navNode(c,d);if(!nn.ok)continue;
+      const len=cs*Math.hypot(dx,dz),dh=Math.abs(nn.h-na.h);if(dh>.5*len)continue;
+      if(Math.abs(heightAt((a+c)*.5*cs,(b+d)*.5*cs)-(nn.h+na.h)*.5)>1.4)continue;
+      const ng=gc+len+dh*4,old=gs.get(nk);
+      if(old===undefined||ng<old){gs.set(nk,ng);from.set(nk,kk);push(ng+hf(c,d),c,d)}
+    }
+  }
+  const end=done?g:best,pts=[];let k=key(end[0],end[1]);
+  while(k!==undefined){const a=Math.floor(k/65536)-32768,b=(k%65536)-32768;pts.push([a*cs,b*cs]);k=from.get(k)}
+  pts.reverse();
+  const out=[[pts[0][0],pts[0][1]]];let i=0;                    // string-pull: keep only the corners
+  while(i<pts.length-1){let j=pts.length-1;while(j>i+1&&!navLOS(pts[i][0],pts[i][1],pts[j][0],pts[j][1]))j--;out.push(pts[j]);i=j}
+  if(done)out.push([x1,z1]);else out.partial=true;
+  return out;
+}
 function crawlerSetAuto(s,t){
   if(t&&s.dead){log('the battery is flat - wait for it to recharge a little first','bad');SFX('bad');return}
   if(!t){s.auto=null;s.autoIdx=-1;s.thr=0;s.str=0;log('autopilot off — the crawler slows to a stop');return}
-  s.halt=false;s.auto={x:t.x,z:t.z,name:t.name,cruise:s.thr>.15?s.thr:.8};
+  s.halt=false;s.auto={x:t.x,z:t.z,name:t.name,cruise:s.thr>.15?s.thr:.8,route:planRoute(s.pos.x,s.pos.z,t.x,t.z),ri:0,rp:0};
   log('autopilot → '+t.name+' · '+Math.hypot(t.x-s.pos.x,t.z-s.pos.z).toFixed(0)+' m. you can walk away.','gold');SFX('chirp');
 }
 function crawlerCycleAuto(){
@@ -5858,7 +6365,7 @@ function scrObstacles(s,x,z,rad,skipId){
     if(o===s||o===s.pad)continue;
     if(o.type==='scrappy'&&(s.st==='toPad'||s.st==='align'))continue;   /* a droid docking never gets blocked by one in the way: the other one clears off */
     if(Math.abs(o.x-x)>rad||Math.abs(o.z-z)>rad)continue;
-    const d=WORKS[o.type];out.push({x:o.x,z:o.z,R:Math.max(d.size[0],d.size[2])*.5});
+    if(o.type==='bridge')continue;const d=WORKS[o.type];out.push({x:o.x,z:o.z,R:Math.max(d.size[0],d.size[2])*.5});
   }
   return out;
 }
@@ -6683,14 +7190,16 @@ function buildTick(){
   const d=WORKS[Build.type];
   const gx=Math.round(P.x+fwd.x*(d.dist||3.2)),gz=Math.round(P.z+fwd.z*(d.dist||3.2));
   Build.x=gx;Build.z=gz;Build.y=heightAt(gx,gz);
+  let bsite=null;if(d.bridge){bsite=bridgeSite(gx,gz,Build.rot);Build.y=bsite.y}
   ghost.position.set(gx,Build.y+(d.cgh||0),gz);
   ghost.rotation.y=Build.rot;
   const sr=d.slopeR||1.2;
   const slope=Math.max(
     Math.abs(heightAt(gx+sr,gz)-Build.y),Math.abs(heightAt(gx,gz+sr)-Build.y),
     Math.abs(heightAt(gx-sr,gz)-Build.y),Math.abs(heightAt(gx,gz-sr)-Build.y));
-  let ok=slope<0.95&&(G.inv[WORKS[Build.type].kit]||0)>0;
+  let ok=(d.bridge||slope<0.95)&&(G.inv[WORKS[Build.type].kit]||0)>0;
   let reason=ok?'':'ground too steep';
+  if(bsite&&!bsite.ok){ok=false;reason=bsite.reason}
   if(ok&&d.cgh){const cr=Math.cos(Build.rot),sr=Math.sin(Build.rot);
     const tipH=Math.max(heightAt(gx+cr*4.7,gz-sr*4.7),heightAt(gx-cr*4.7,gz+sr*4.7))-Build.y,tailH=heightAt(gx-sr*4.3,gz-cr*4.3)-Build.y;
     if(tipH>1.5){ok=false;reason='a wingtip would strike the slope'}else if(tailH>0.9){ok=false;reason='the tail would strike the slope'}}
@@ -6741,7 +7250,7 @@ function addChunk(cx,cz){
   const k=chunkKey(cx,cz);
   if(World.chunks.has(k))return;
   const g=buildChunk(cx,cz);
-  const mesh=new THREE.Mesh(g,MAT.sand);
+  const mesh=new THREE.Mesh(g,MAT.terrain);
   mesh.position.set(cx*CFG.CH,0,cz*CFG.CH);
   mesh.receiveShadow=true;mesh.castShadow=true;
   mesh.matrixAutoUpdate=false;mesh.updateMatrix();
@@ -6871,7 +7380,7 @@ function questPool(){
   base.delete('cloth');
   const ok=new Set(base);let ch=true;
   while(ch){ch=false;for(const r of RECIPES){const o=r.o[0];if(ok.has(o)||o==='cloth')continue;if(Object.keys(r.i).every(i=>i!=='cloth'&&ok.has(i))){ok.add(o);ch=true}}}
-  const never=new Set(['book','welder','finder','kite','cloth','k_buggy','k_plane','k_crawler','k_scrappy','k_dockpad']);
+  const never=new Set(['book','welder','finder','kite','cloth','k_buggy','k_plane','k_crawler','k_scrappy','k_dockpad','k_bridge']);
   return QP.pool=[...ok].filter(id=>ITEMS[id]&&!never.has(id)&&!(ITEMS[id].c==='kit'&&ITEMS[id].v>190))
     .map(id=>({id,v:ITEMS[id].v,w:ITEMS[id].w||0,kit:ITEMS[id].c==='kit',base:base.has(id)}));
 }
@@ -8327,7 +8836,7 @@ async function boot(){
   renderer.outputColorSpace=THREE.SRGBColorSpace;
   scene=new THREE.Scene();
   camera=new THREE.PerspectiveCamera(SET.fov,innerWidth/innerHeight,0.08,1600);
-  forgeTextures();buildGeo();buildMats();buildSky();say("weathering the kit — rust, canvas, sandstone","plain");await forgeAsm(t=>say(t,"plain"));
+  forgeTextures();forgeTerrainTextures();buildGeo();buildMats();buildSky();say("weathering the kit — rust, canvas, sandstone","plain");await forgeAsm(t=>say(t,"plain"));
   say('welding sky dome, sun, shadow frustum','plain');
   worldInit();initPuffs();buildKite();buildViewModel();
   if(saved)applySave(saved);else bootCamp(false);
