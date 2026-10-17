@@ -7678,8 +7678,8 @@ function bpGenStairs(near){
     add(n.x,n.z,n.y,n.rot,'on',n.x,n.z,n.y,n.y);
     for(const [i,j] of [[1,0],[-1,0],[0,1],[0,-1]]){
       const dx=a[0]*i+b[0]*j,dz=a[1]*i+b[1]*j,cx=n.x+dx*S,cz=n.z+dz*S,am=n.x+dx*S/2,az=n.z+dz*S/2;
-      if(heightAt(cx,cz)<n.y-1.0)add(cx,cz,n.y-BPC.LP,bpAng(-dx,-dz),'down',am,az,n.y,n.y);   // far below: descend from the edge
-      else add(cx,cz,n.y,bpAng(dx,dz),'up',am,az,n.y,n.y);                                    // otherwise climb away from it
+      add(cx,cz,n.y-BPC.LP,bpAng(-dx,-dz),'down',am,az,n.y,n.y);   // top lands on this edge: a ramp UP to the floor from outside (foot buried if the ground is high)
+      add(cx,cz,n.y,bpAng(dx,dz),'up',am,az,n.y,n.y);              // foot on this edge: climbs away from it to the next storey
     }
   }
   return out;
@@ -7774,7 +7774,7 @@ function bpLegs(x,z,y,rot){                                    // leg depths bel
 function bpFreeSpot(O,D,type,near,yaw){                        // the first piece of a building: onto open ground, away from other buildings
   const h=bpTerrainHit(O,D,BPC.REACH+1);if(!h)return null;
   for(const p of near)if(bpIsNode(p)&&Math.hypot(p.x-h.x,p.z-h.z)<BPC.S*2)return null;
-  if(type==='bp_stair'){const a=bpAx(yaw);return{mode:'free',via:'free',x:h.x,z:h.z,y:heightAt(h.x-a[0]*1.5,h.z-a[1]*1.5),rot:yaw,t:h.t}}   // foot on the ground
+  if(type==='bp_stair'){const a=bpAx(yaw);return{mode:'free',via:'free',x:h.x,z:h.z,y:heightAt(h.x-a[0]*1.8,h.z-a[1]*1.8),rot:yaw,t:h.t}}   // foot on the ground
   const [,mx]=bpFootprint(h.x,h.z,yaw);
   return{mode:'free',via:'free',x:h.x,z:h.z,y:(type==='bp_floor'?mx+.08:mx+.55),rot:yaw,t:h.t};
 }
@@ -7856,6 +7856,14 @@ function bpCollide(pos,crouch){                                // push the drift
   const r=.34,y0=pos.y+.12,y1=pos.y+1.78-.62*(crouch||0)-.03;let hit=false;
   for(let pass=0;pass<2;pass++)for(const s of bpNear(pos.x,pos.z,3.4)){
     const k=WORKS[s.type].bp;if(k!=='edge'&&k!=='cell'&&k!=='stair')continue;
+    if(k==='stair'){                                           // never a barrier at the foot or the landing; solid at the sides and underneath
+      const a=bpAx(s.rot),c=bpAz(s.rot),dx=pos.x-s.x,dz=pos.z-s.z,u=dx*a[0]+dz*a[1],w=dx*c[0]+dz*c[1];
+      if(u<-1.8||u>1.5||Math.abs(w)>=1.5+r)continue;
+      const surf=s.y+Math.min(BPC.LP,Math.max(u,-1.8)+1.94);
+      if(pos.y>=surf-BPC.STEP-.2||pos.y+1.0<s.y)continue;       // standing on it, stepping onto it, or in the buried part
+      const nw=(w>=0?1:-1)*(1.5+r),dw=nw-w;
+      pos.x+=c[0]*dw;pos.z+=c[1]*dw;hit=true;continue;
+    }
     for(const b of bpBoxes(s,[])){
       if(b.slab&&b.y1-pos.y<=BPC.STEP)continue;                // a deck you can step onto is ground, not a wall
       if(y1<=b.y0||y0>=b.y1)continue;
@@ -7880,7 +7888,7 @@ function bpFloorY(x,z,yRef){                                   // highest deck u
   let best=null;
   for(const s of bpNear(x,z,2.2)){
     const kk=WORKS[s.type].bp;
-    if(kk==='stair'){const h=bpStairH(s,x,z);if(h!==null&&h<=yRef+BPC.STEP&&(best===null||h>best))best=h;continue}
+    if(kk==='stair'){const h=bpStairH(s,x,z);if(h!==null&&h<=yRef+BPC.STEP+.2&&(best===null||h>best))best=h;continue}      // a stair foot is forgiven an extra 0.2 m: no jump needed
     if(kk!=='cell'||s.y>yRef+BPC.STEP)continue;
     const a=bpAx(s.rot),c=bpAz(s.rot),dx=x-s.x,dz=z-s.z;
     if(Math.abs(dx*a[0]+dz*a[1])<=1.5&&Math.abs(dx*c[0]+dz*c[1])<=1.5&&(best===null||s.y>best))best=s.y;
@@ -7992,12 +8000,20 @@ function bpBuildTick(){
   const cp=Math.cos(P.pitch),O=camera.position,D={x:-Math.sin(P.yaw)*cp,y:Math.sin(P.pitch),z:-Math.cos(P.yaw)*cp};
   let sel=null;
   if(d.bp==='edge')sel=bpSelectEdge(BPB.slots,type,O,D);
-  else{sel=bpSelectCell(BPB.cands,O,D,BPB.prev);if(!sel)sel=bpFreeSpot(O,D,type,BPB.near,Build.free)}
+  else{
+    let pool=BPB.cands;
+    if(type==='bp_stair'){        // beside an edge a stair either CLIMBS AWAY from it or RAMPS UP TO it: standing on the floor you want the former, standing below it the latter; R flips
+      const fl=!!(Build.q&1);
+      pool=pool.filter(c=>c.via==='on'||(c.via==='down')===((P.y<c.py-.5)!==fl));
+    }
+    BPB.pool=pool;
+    sel=bpSelectCell(pool,O,D,BPB.prev);if(!sel)sel=bpFreeSpot(O,D,type,BPB.near,Build.free)
+  }
   BPB.prev=(sel&&sel.mode==='snap'&&sel.key)?{key:sel.key}:null;BPB.sel=sel;
   let reason='';
   if(!sel)reason=d.bp==='edge'?'aim at the edge of a floor or truss':'aim at an open edge or corner of your building';
   else{
-    sel.rotF=d.bp==='edge'?sel.rot+(Build.q&1)*Math.PI:(sel.mode==='free'?Build.free:sel.rot+(Build.q&3)*Math.PI/2);
+    sel.rotF=d.bp==='edge'?sel.rot+(Build.q&1)*Math.PI:(sel.mode==='free'?Build.free:(type==='bp_stair'&&sel.via!=='on')?sel.rot:sel.rot+(Build.q&3)*Math.PI/2);
     reason=bpValidate(type,sel);
   }
   Build.ok=!reason;Build.reason=reason;
@@ -8009,9 +8025,9 @@ function bpBuildTick(){
   /* socket dots: every open socket near you, the one you are aiming at in white */
   const dots=[];
   if(d.bp==='edge')for(const sl of BPB.slots){if(type==='bp_half'?sl.occ!==3:!sl.occ)dots.push([sl.x,sl.base+.12,sl.z])}
-  else for(const c of BPB.cands)dots.push([c.ax,c.ay+.08,c.az]);
+  else for(const c of (type==='bp_stair'&&BPB.pool?BPB.pool:BPB.cands))dots.push([c.ax,c.ay+.08,c.az]);
   bpMarkers(dots.filter(p=>(p[0]-P.x)**2+(p[2]-P.z)**2<144),sel&&sel.mode==='snap'?(d.bp==='edge'?[sel.x,sel.base+.12,sel.z]:[sel.ax,sel.ay+.08,sel.az]):null);
-  const turn=(sel&&sel.mode==='free')?'R turns 15°':d.bp==='edge'?'R flips':'R turns';
+  const turn=(sel&&sel.mode==='free')?'R turns 15°':d.bp==='edge'?'R flips':(type==='bp_stair'&&sel&&sel.via!=='on')?'R flips up / down':'R turns';
   setPrompt(d.n+(sel?' · '+((type==='bp_stair'&&sel.via==='on')?'on the deck':BPVIA[sel.via]||'snapped')+(sel.m&&type==='bp_half'?(sel.m===1?' · lower half':' · upper half'):''):''),
     reason?reason:'click to set · '+turn+' · B to stop',0);
 }
