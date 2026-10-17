@@ -6074,8 +6074,8 @@ function playerTick(dt){
   /* stamina, thirst, hunger, cold */
   if(sprint)P.sta=Math.max(0,P.sta-0.21*dt);else P.sta=Math.min(1,P.sta+0.085*dt);
   const shel=nearWarm(P.x,P.z),cold=isNight()&&!shel;
-  P.hyd=Math.max(0,P.hyd-0.0009*dt*(cold?1.4:shel?0.8:1));       /* shelter (lean-to, a vehicle, any kit piece) cuts the drain by day too */
-  P.nut=Math.max(0,P.nut-0.0007*dt*(cold?1.3:shel?0.85:1));
+  P.hyd=Math.max(0,P.hyd-0.00045*dt*(cold?1.4:shel?0.8:1));       /* shelter (lean-to, a vehicle, any kit piece) cuts the drain by day too */
+  P.nut=Math.max(0,P.nut-0.00035*dt*(cold?1.3:shel?0.85:1));
   P.warm=lerp(P.warm,cold?0:1,dt*0.6);
   if(P.hyd<=0||P.nut<=0)P.hp-=0.005*dt;
   if(cold)P.hp-=0.0015*dt;
@@ -6627,7 +6627,7 @@ function crawlerLoad(s,d){
 function savedPlayerPos(){
   const s=P.aboard;
   if(s){crwLocalToWorld(s,0,-CR.drop,_cw);return{x:_cw.x,z:_cw.z,yaw:P.yaw}}
-  return{x:P.x,z:P.z,yaw:P.yaw};
+  return{x:P.x,z:P.z,yaw:P.yaw,y:+P.y.toFixed(2)};          // y too: upstairs in a building you come back upstairs
 }
 /* ── HUD ── */
 function crawlerHud(){
@@ -7735,7 +7735,7 @@ function bpGenEdges(near){
     out.push({x,z,base,rot,dx,dz,occ});
   };
   for(const n of near){                                                         // the four edges of every floor and truss
-    if(!bpIsNode(n))continue;
+    if(!bpIsNode(n)&&WORKS[n.type].bp!=='stair')continue;                       // floors, trusses and the four sides of a stair cell
     const a=bpAx(n.rot),b=bpAz(n.rot);
     const E=[[a,b],[[-a[0],-a[1]],b],[b,a],[[-b[0],-b[1]],a]];                  // [outward normal, edge direction]
     for(const [o,dir] of E)push(n.x+o[0]*S/2,n.z+o[1]*S/2,n.y,bpAng(dir[0],dir[1]),dir[0],dir[1]);
@@ -7743,6 +7743,14 @@ function bpGenEdges(near){
   for(const e of edges){                                                        // …and the top of every wall piece: walls and half walls stack
     const a=bpAx(e.rot);
     push(e.x,e.z,e.y+(e.type==='bp_half'?BPC.HH:BPC.H),e.rot,a[0],a[1]);
+  }
+  for(const e of edges){                                                        // the vertical edges at the ENDS of a wall, door or half wall:
+    const a=bpAx(e.rot),n=bpAz(e.rot),base=bpEdgeBase(e);                       // carry straight on, or turn a corner either way
+    for(const sg of [-1,1]){
+      const ex=e.x+a[0]*sg*S/2,ez=e.z+a[1]*sg*S/2;
+      push(e.x+a[0]*sg*S,e.z+a[1]*sg*S,base,e.rot,a[0],a[1]);
+      for(const pn of [-1,1])push(ex+n[0]*pn*S/2,ez+n[1]*pn*S/2,base,bpAng(n[0],n[1]),n[0],n[1]);
+    }
   }
   return out;
 }
@@ -7899,13 +7907,16 @@ function bpCollide(pos,crouch){                                // push the drift
   const r=.34,y0=pos.y+.12,y1=pos.y+1.78-.62*(crouch||0)-.03;let hit=false;
   for(let pass=0;pass<2;pass++)for(const s of bpNear(pos.x,pos.z,3.4)){
     const k=WORKS[s.type].bp;if(k!=='edge'&&k!=='cell'&&k!=='stair')continue;
-    if(k==='stair'){                                           // never a barrier at the foot or the landing; solid at the sides and underneath
+    if(k==='stair'){                                           // the flight is a ramp, not a block: you can walk under it where there is headroom
       const a=bpAx(s.rot),c=bpAz(s.rot),dx=pos.x-s.x,dz=pos.z-s.z,u=dx*a[0]+dz*a[1],w=dx*c[0]+dz*c[1];
       if(u<-1.8||u>1.5||Math.abs(w)>=1.5+r)continue;
-      const surf=s.y+Math.min(BPC.LP,Math.max(u,-1.8)+1.94);
-      if(pos.y>=surf-BPC.STEP-.2||pos.y+1.0<s.y)continue;       // standing on it, stepping onto it, or in the buried part
-      const nw=(w>=0?1:-1)*(1.5+r),dw=nw-w;
-      pos.x+=c[0]*dw;pos.z+=c[1]*dw;hit=true;continue;
+      const uStep=pos.y+BPC.STEP+.2-s.y-1.94,uHead=y1+.28-s.y-1.94;   // u <= uStep: low enough to step onto it · u >= uHead: tall enough to stand under it
+      if(u<=uStep||u>=uHead)continue;
+      const dl=(1.5+r)-Math.abs(w),dp=uHead-u,dm=u-uStep;             // in between, the slanted underside is at head height: out by the shortest way
+      if(dl<=dp&&dl<=dm){const nw=(w>=0?1:-1)*(1.5+r)-w;pos.x+=c[0]*nw;pos.z+=c[1]*nw}
+      else if(dp<=dm){pos.x+=a[0]*dp;pos.z+=a[1]*dp}
+      else{pos.x-=a[0]*dm;pos.z-=a[1]*dm}
+      hit=true;continue;
     }
     for(const b of bpBoxes(s,[])){
       if(b.slab&&b.y1-pos.y<=BPC.STEP)continue;                // a deck you can step onto is ground, not a wall
@@ -7941,10 +7952,11 @@ function bpFloorY(x,z,yRef){                                   // highest deck u
 function bpCeilY(x,z,prevHead,head){                           // underside of the lowest deck the head has just risen into
   let best=null;
   for(const s of bpNear(x,z,2.2)){
-    if(WORKS[s.type].bp!=='cell')continue;
-    const under=s.y-BPC.T;if(under<prevHead-.02||under>=head)continue;
-    const a=bpAx(s.rot),c=bpAz(s.rot),dx=x-s.x,dz=z-s.z;
-    if(Math.abs(dx*a[0]+dz*a[1])<=1.5&&Math.abs(dx*c[0]+dz*c[1])<=1.5&&(best===null||under<best))best=under;
+    const kk=WORKS[s.type].bp;if(kk!=='cell'&&kk!=='stair')continue;
+    const a=bpAx(s.rot),c=bpAz(s.rot),dx=x-s.x,dz=z-s.z,u=dx*a[0]+dz*a[1],w=dx*c[0]+dz*c[1];
+    const under=kk==='stair'?s.y+Math.min(BPC.LP,u+1.94)-.28:s.y-BPC.T;       // a stair's underside slopes: the head can hit it on the way up
+    if(under<prevHead-.02||under>=head)continue;
+    if(kk==='stair'?(Math.abs(w)<=1.5&&u>=-1.8&&u<=1.5):(Math.abs(u)<=1.5&&Math.abs(w)<=1.5)){if(best===null||under<best)best=under}
   }
   return best;
 }
@@ -8145,22 +8157,20 @@ window.BP={C:BPC,give(n){n=n||6;for(const k of ['k_bpfloor','k_bptruss','k_bpwal
 function bridgeSpan(ax,az,rot){
   const sn=Math.sin(rot),cs=Math.cos(rot),x0=ax-sn,z0=az-cs;               // the deck starts 1 m behind the aim point, bedding the near end
   const at=(u,v)=>heightAt(x0+u*sn+v*cs,z0+u*cs-v*sn),vs=[-BR.W*.4,0,BR.W*.4];
-  const A=vs.map(v=>at(1.5,v)),y=(A[0]+A[1]+A[2])/3;
+  const A=vs.map(v=>at(1.5,v)),y=(A[0]+A[1]+A[2])/3;                       // deck level: the ground under the near end, however sloped
   const mk=(ok,reason,L)=>{L=Math.max(BR.MIN,Math.min(BR.MAX,L||BR.MIN));return{ok,reason,L,y,cx:x0+sn*L/2,cz:z0+cs*L/2,sn,cs}};
-  if(A.some(h=>h<y-.9||h>y+.5))return mk(false,'the near end needs firm, level ground');
   let gap=false,cand=0;
   for(let u=2;u<=BR.MAX-1;u++){
-    const hs=vs.map(v=>at(u,v));
-    if(hs.every(h=>h>=y-.9&&h<=y+.5)){                                     // firm ground at deck height
-      if(gap){if(u>=BR.MIN-1)return mk(true,'',u+1);continue}              // the far mount, after a gap
-      if(u>=BR.MIN-1){if(!cand)cand=u+1;if(u>=cand+BR.LOOK-1)return mk(true,'',cand)}   // level ground: keep looking a few metres on in case a gap starts just ahead
+    const touch=Math.max(at(u,vs[0]),at(u,vs[1]),at(u,vs[2]))>=y-.6;       // does the ground reach the deck here?
+    if(touch){
+      if(gap){if(u>=BR.MIN-1)return mk(true,'',u+1);continue}              // beyond a gap: the far mount
+      if(u>=BR.MIN-1){if(!cand)cand=u+1;if(u>=cand+BR.LOOK-1)return mk(true,'',cand)}   // no gap yet: keep looking a few metres on in case one starts just ahead
       continue;
     }
-    if(hs[1]>y+.6||hs.some(h=>h>y+1.4)){if(cand&&!gap)return mk(true,'',cand);return mk(false,'ground is in the way of the span',u+1)}
-    gap=true;                                                              // ground falls away: a gap to cross
+    gap=true;                                                              // the ground has fallen away below the deck
   }
   if(cand&&!gap)return mk(true,'',cand);
-  return mk(false,'no firm ground to land on within 100 m',BR.MAX);
+  return mk(false,'no ground to land on within 100 m',BR.MAX);
 }
 function bridgeObstacle(sp){
   const L=sp.L,sn=sp.sn,cs=sp.cs;
@@ -8663,6 +8673,7 @@ function applySave(d){
   Day.ctx.t=d.t;Day.ctx.day=d.day||1;
   Day.set(d.t>=0.75?'night':'day');
   P.x=d.p.x;P.z=d.p.z;P.yaw=d.p.yaw;P.y=heightAt(P.x,P.z);
+  if(Number.isFinite(d.p.y)&&d.p.y>P.y&&d.p.y-P.y<150){P.y=d.p.y;P.vy=0}     // resume the saved height (a floor that is gone just means a short fall)
   if(d.vit&&typeof d.vit==='object'){                           // hydration, nutrition, stamina and integrity as they were at the last save
     const v=(k,lo)=>Number.isFinite(+d.vit[k])?clamp(+d.vit[k],lo,1):null;
     const hy=v('hyd',0),nu=v('nut',0),sa=v('sta',0),hp=v('hp',.1);   // integrity never loads below 10%: a save written at the moment of death must not loop
@@ -8723,7 +8734,7 @@ function detailHtml(kind){
   const mt=(l,v,c)=>`<div class="meter"><div class="row"><span class="lbl">${l}</span><span class="num">${Math.round(v*100)}%</span></div><div class="bar ${c}"><i style="width:${(v*100).toFixed(1)}%"></i></div></div>`;
   const tool=G.drive?(isPlane()?'microlite '+Math.round(G.drive.pow/PL.max*100)+'%':(G.drive.type==='crawler'?'crawler '+Math.round(G.drive.pow/CR.B*100)+'%':'buggy '+Math.round(G.drive.pow/WORKS.buggy.veh.max*100)+'%')):(G.tool==='hands'?'bare hands':itemName(G.tool));
   const kv=(l,v)=>`<div class="kv"><span class="lbl">${l}</span><span class="num">${v}</span></div>`;
-  return mt('hydration',P.hyd,'sk')+mt('nutrition',P.nut,'am')+mt('stamina',P.sta,'sg')+mt('integrity',P.hp,'bd')+'<div class="rule"></div>'+
+  return mt('hydration',satShown(P.hyd),'sk')+mt('nutrition',satShown(P.nut),'am')+mt('stamina',P.sta,'sg')+mt('integrity',P.hp,'bd')+'<div class="rule"></div>'+
     kv('scrap',G.cash||0)+kv('grid load',Grid.supply.toFixed(0)+' / '+Grid.demand.toFixed(0)+' w')+kv('structures',G.struct.length)+
     kv('satchel',bagMass().toFixed(1)+' / '+G.cap+' kg · '+Object.keys(G.inv).length+' kinds')+kv('tool',tool)+kv('fabricator',Fab.state==='running'?('making '+itemName(Fab.ctx.r.o[0])+(G.fabQ.length?' · '+G.fabQ.length+' queued':'')):(G.fabQ.length?G.fabQ.length+' queued · waiting':'idle'))+'<div class="rule"></div>'+
     kv('east',P.x.toFixed(0)+' m')+kv('south',P.z.toFixed(0)+' m')+kv('cell',Math.floor(P.x/CFG.CH)+', '+Math.floor(P.z/CFG.CH));
@@ -9152,11 +9163,11 @@ RENDER.map=()=>{
     const d=Math.hypot(f.x-P.x,f.z-P.z);
     const bear=((Math.atan2(f.x-P.x,-(f.z-P.z))*180/Math.PI)+360)%360;
     const rel=((bear-heading()+540)%360-180);
-    h+=`<div class="rowi"><div class="sw">${f.d.mark?'◆':'◇'}</div>
-      <div class="nm"><b>${f.d.n}</b><i>${d.toFixed(0)} m · ${rel>0?'starboard':'port'} ${Math.abs(rel).toFixed(0)}°</i></div>
+    h+=`<div class="rowi"><div class="sw">${f.droid?'◈':f.d.mark?'◆':'◇'}</div>
+      <div class="nm"><b>${f.d.n}</b><i>${d.toFixed(0)} m · ${rel>0?'starboard':'port'} ${Math.abs(rel).toFixed(0)}°${f.droid?' · as of the last ping':''}</i></div>
       <div class="qt">${f.loot?f.loot.length+' kinds':''}</div>
       <button class="btn sm" data-act="mark" data-x="${f.x.toFixed(1)}" data-z="${f.z.toFixed(1)}">${d<60?'walk':'ping'}</button></div>`;
-    if(h.length>4000)break;
+    if(h.length>16000)break;
   }
   return h;
 };
@@ -9178,8 +9189,8 @@ RENDER.help=()=>`<div class="help">
   <div class="grp-h"><b>building with kits</b></div>
   <div class="keygrid">
     <span class="kbd">floor · truss</span><span>the first one goes on open ground; every other piece snaps to a socket on one already standing: edge middles and corners. Look at the ground beyond an edge and the next cell lights up. On a slope, set a foundation truss first, then lay the floor on it.</span>
-    <span class="kbd">wall · half · door</span><span>snap to the middle of a floor or truss edge, or stack on top of another wall or half wall. A half wall takes the lower or upper half, depending on where you look; the gap left open is a window.</span>
-    <span class="kbd">stairs</span><span>a 45° flight that climbs one storey. Set it on a floor (R turns it), beside a floor edge climbing away from it, or beside an edge where the ground is far below: then it descends, and whatever is under the terrain is buried, which makes a way in from a slope. Floors snap to its landing and its foot.</span>
+    <span class="kbd">wall · half · door</span><span>snap to the middle of a floor, truss or stair-cell edge, stack on top of another wall or half wall, or continue from the end of one (straight on or round a corner). A half wall takes the lower or upper half, depending on where you look; the gap left open is a window.</span>
+    <span class="kbd">stairs</span><span>a 45° flight that climbs one storey. Set it on a floor (R turns it), beside a floor edge climbing away from it, or beside an edge where the ground is far below: then it descends, and whatever is under the terrain is buried, which makes a way in from a slope. Floors snap to its landing and its foot. You can walk under the high part of a flight; only the 45° line carries you up or down.</span>
     <span class="kbd">R</span><span>turn the piece (15° when free on the ground, 90° or 180° when snapped); wheel and right-click too</span>
     <span class="kbd">E</span><span>on a door: open or close it. It always swings away from you.</span>
     <span class="kbd">X</span><span>hold on any piece to recover its kit. Kits weigh something in your satchel; placed, they do not. Any kit piece within about 4 m counts as shelter.</span>
@@ -9578,14 +9589,13 @@ function scannerList(){
     if(d2>r2)continue;
     out.push({x:f.x,z:f.z,d:f.d,dist:Math.sqrt(d2),d2,mark:f.d.mark});
   }
-  out.sort((a,b)=>a.d2-b.d2);
-  const res=out.slice(0,26);
   scanPing();
   for(const r of SCANSNAP.list){                               // scrappy droids: where each one was at the last ping, not where it is now
     const d2=(r.x-P.x)**2+(r.z-P.z)**2;if(d2>r2)continue;
-    res.push({x:r.x,z:r.z,d:{n:'scrappy droid'},dist:Math.sqrt(d2),d2,mark:false,droid:true});
+    out.push({x:r.x,z:r.z,d:{n:'scrappy droid',droid:1},dist:Math.sqrt(d2),d2,mark:false,droid:true});
   }
-  return res;
+  out.sort((a,b)=>a.d2-b.d2);
+  return out.slice(0,26);
 }
 const SCANSNAP={t:0,list:[]};
 function scanPing(){
@@ -9647,10 +9657,12 @@ function drawMarkers(){
   box.innerHTML=h;
 }
 function fpsBadgeTick(){const b=$('#fpsbadge');if(!b)return;b.style.display=SET.showFps?'block':'none';if(SET.showFps)b.textContent=Math.round(fps)+' fps'}
+/* thirst and hunger read 100% until they fall below 80% of the real value, so the bars are not always asking for attention */
+const satShown=v=>Math.min(1,v/0.8);
 function hudTick(dt){
   const m=bagMass()/G.cap;
   const hb=(id,v)=>{const b=$('#hb-'+id);b.firstElementChild.style.width=(v*100)+'%';b.classList.toggle('low',v<0.25)};
-  hb('hyd',P.hyd);hb('nut',P.nut);hb('sta',P.sta);hb('int',P.hp);
+  hb('hyd',satShown(P.hyd));hb('nut',satShown(P.nut));hb('sta',P.sta);hb('int',P.hp);
   $('#hb').classList.toggle('warn',m>0.95);
   $('#ck-t').textContent=clockStr();
   $('#ck-d').textContent='day '+String(Day.ctx.day).padStart(3,'0');
