@@ -1292,7 +1292,7 @@ const WORKS={
   scrappy:{n:'scrappy droid',kit:'k_scrappy',d:'A junkyard droid on tank tracks. Charges on a shared pad, then salvages scrap, boulders, crates, cacti and salt pans within 100 m of it. 400 m per full charge.',size:[1.1,1.6,1.2],r:3,mobile:1,dist:3.4,refund:['k_scrappy',1]},
   dockpad:{n:'charge pad',kit:'k_dockpad',d:'Charges one scrappy droid at a time; others queue beside it. Draws 6 units/s while charging, a trickle otherwise.',size:[2.5,1.6,2.5],r:5,draw:6,dyn:1,dist:4.6,refund:['k_dockpad',1]},
   ramp:{n:'scrap ramp',kit:'k_ramp',d:'A plate deck 7 m wide, like the bridge but sloped: it starts at your feet and ends on the ground where you look (up to 100 m, up to 15° up or down). It may cut through terrain and objects. Crawler, buggy and microlite can all use it. Legs stand wherever the ground is within 10 m below the deck.',size:[7.4,3,12],r:12,dist:9,ramp:1,refund:['k_ramp',1]},
-  bridge:{n:'scrap bridge',kit:'k_bridge',d:'A plate deck on trestles, 7 m wide: crawler, buggy and microlite can all cross. Aim at the ground where the near end rests and turn it with R (5° steps). The span runs on from there, up to 100 m, and ends at the first firm ground at deck height; with no far side it will not place. Legs stand only where the ground is within 10 m of the deck.',size:[7.4,3,12],r:4,dist:9,bridge:1,refund:['k_bridge',1]},
+  bridge:{n:'scrap bridge',kit:'k_bridge',d:'A plate deck on trestles, 7 m wide: crawler, buggy and microlite can all cross. It starts at your feet and runs the way you face, up to 100 m, and ends at the first firm ground at deck height; with no far side it will not place. Legs stand only where the ground is within 10 m of the deck.',size:[7.4,3,12],r:4,dist:9,bridge:1,refund:['k_bridge',1]},
   crawler:{n:'desert crawler',kit:'k_crawler',d:'Four-tracked, solar-driven, slow and tireless. Walk its deck: panels, batteries, dew harvester, still, troughs, kite winch, lockers, bunk. Steer, throttle or waypoint — then forget it.',size:[5.4,3.4,8.6],r:8,warm:1,cap:{mass:120},crawler:1,dist:9,slopeR:3.2,refund:['k_crawler',1]},
   bp_floor:{n:'sheet floor',kit:'k_bpfloor',d:'A 3 m deck of riveted sheet. Snap it to a floor edge or corner, a truss, or the top of a wall.',size:[3,.3,3],r:9,bp:'cell',refund:['k_bpfloor',1]},
   bp_truss:{n:'foundation truss',kit:'k_bptruss',d:'Four legs and a rim frame, sunk below the sand. Set it first on a slope, then lay the floor on top.',size:[3,2,3],r:9,bp:'found',refund:['k_bptruss',1]},
@@ -1337,7 +1337,7 @@ function saltAt(x,z,h){ return smooth(0.63,0.79,fbm(x*0.0019-31,z*0.0019+17,SEED
    Only the crags above the ramp are climbing-only.  The camp's cell is always open valley.            */
 const MC=1200,MCG=60;
 let _tsSeed=null,_wc=1,_ws=0,_camp=0;
-const _mcc=new Map(),DECKS=[];
+const _mcc=new Map(),DECKS=[],FDECK=new Map();      /* FDECK: the 3 m sheet floors, in an 8 m spatial hash so hundreds of them cost one lookup per sample */
 let _noDeck=false,_deckY=1e9;      /* _noDeck: sample the bare ground (meshes, trestle legs). _deckY: a deck is solid only to whoever is within 1.2 m of its height, so you can walk (and drive) underneath a high span */
 function tsSync(){
   if(_tsSeed===SEED)return;
@@ -1418,6 +1418,17 @@ function baseH(x,z,lod){
 }
 const _ms={mh:0,mm:0,mr:0},_hs={h:0,mass:0,ramp:0,clay:0,dune:0,wash:0,salt:0,plat:0};
 /* the whole field: height plus the zone masks that choose the surface texture.  lod 1 = far view (no dunes, no fine noise) */
+const fdKey=(x,z)=>((Math.floor(x/8)+32768)&65535)*65536+((Math.floor(z/8)+32768)&65535);
+/* height of deck k at (x,z), or -1e9 if it is not there / not solid to whoever is asking (_deckY = their height) */
+function deckY(k,x,z){
+  const ex=x-k.x,ez=z-k.z;if(ex*ex+ez*ez>k.rr)return -1e9;
+  const u=ex*k.sn+ez*k.cs,v=ex*k.cs-ez*k.sn,au=Math.abs(u);
+  if(au>k.L*.5||Math.abs(v)>k.W*.5)return -1e9;
+  const yd=k.y+(k.sl||0)*u;                                         // a ramp's deck rises along its length
+  if(_deckY<yd-1.2)return -1e9;                                     // you can walk or drive UNDER a deck that is well above you
+  if(k.flat)return yd;                                              // a floor tile: flat to its edges
+  const e=au-(k.L*.5-1.6);return yd-(e>0?e*.28:0);                   // bridge and ramp ends dip to meet the ground
+}
 function terrainSample(x,z,lod,o){
   const c=macroCell(Math.floor((x+MC/2)/MC),Math.floor((z+MC/2)/MC));
   const pl=plateauAt(x,z);
@@ -1447,14 +1458,9 @@ function terrainSample(x,z,lod,o){
     h+=dz*(A*prof+.25*Math.sin(ph2*TAU)*smooth(.2,.7,dz));
   }
   h=lerp(h,_camp,flat);
-  if(DECKS.length&&!_noDeck)for(let i=0;i<DECKS.length;i++){          // scrap bridges: the deck is solid ground
-    const k=DECKS[i];
-    const ex=x-k.x,ez=z-k.z;if(ex*ex+ez*ez>k.rr)continue;
-    const u=ex*k.sn+ez*k.cs,v=ex*k.cs-ez*k.sn,au=Math.abs(u);
-    if(au>k.L*.5||Math.abs(v)>k.W*.5)continue;
-    const yd=k.y+(k.sl||0)*u;                                   // a ramp's deck rises along its length
-    if(_deckY<yd-1.2)continue;
-    const e=au-(k.L*.5-1.6),y=yd-(e>0?e*.28:0);if(y>h)h=y;
+  if(!_noDeck){                                                          // scrap bridges, ramps and sheet floors: a deck is solid ground
+    for(let i=0;i<DECKS.length;i++){const y=deckY(DECKS[i],x,z);if(y>h)h=y}
+    if(FDECK.size){const l=FDECK.get(fdKey(x,z));if(l)for(let i=0;i<l.length;i++){const y=deckY(l[i],x,z);if(y>h)h=y}}
   }
   o.h=h;o.mass=_ms.mm;o.ramp=_ms.mr;o.clay=cl;o.dune=dz;o.wash=wash;o.salt=sm;o.plat=pl;
   return o;
@@ -6181,6 +6187,7 @@ function playerTick(dt){
   /* stamina, thirst, hunger, cold */
   if(sprint)P.sta=Math.max(0,P.sta-0.21*dt);else P.sta=Math.min(1,P.sta+0.085*dt);
   const shel=nearWarm(P.x,P.z),cold=isNight()&&!shel;
+  SHELTERED=shel;
   P.hyd=Math.max(0,P.hyd-0.00045*dt*(cold?1.4:shel?0.8:1));       /* shelter (lean-to, a vehicle, any kit piece) cuts the drain by day too */
   P.nut=Math.max(0,P.nut-0.00035*dt*(cold?1.3:shel?0.85:1));
   P.warm=lerp(P.warm,cold?0:1,dt*0.6);
@@ -7163,7 +7170,8 @@ function padDraw(s,d){return s.charging?d.draw:SC.padIdle}
    oscillators, steered every frame:  wind (follows Day.ctx.wind, gusts, dust storms), the crawler (motor,
    track rumble, scrub, clanks) and the scrappy droid (servo whine, clanks).
    ─────────────────────────────────────────────────────────────────────── */
-const Aud={built:false,out:null,noise:null,wind:null,cr:null,sc:null,gt:0,acc:0,accS:0};
+let SHELTERED=false;                                              /* set each frame by the survival tick; the wind reads it */
+const Aud={built:false,out:null,noise:null,wind:null,cr:null,sc:null,gt:0,acc:0,accS:0,sh:0};
 function audUnlock(){
   if(!SET.audio)return;
   try{
@@ -7219,10 +7227,14 @@ function audTick(dt){
   Aud.gt+=dt;
   const gust=.62+.2*Math.sin(Aud.gt*.31)+.12*Math.sin(Aud.gt*.83+1.7)+.08*Math.sin(Aud.gt*2.1+.4),
         base=Math.pow(lvl,1.25)*gust*(storm?1.45:1),W=Aud.wind;
-  W.low.g.gain.setTargetAtTime(.55*base,t,.3);
-  W.mid.g.gain.setTargetAtTime(.34*base,t,.35);
-  W.mid.fl.frequency.setTargetAtTime(380+lvl*850*gust*(storm?1.3:1),t,.35);
-  W.hi.g.gain.setTargetAtTime((storm?.2:.07)*base*base,t,.35);
+  /* under a roof or in a cab the wind is a low, muffled push: the highs go first, the mids fall and darken, only a rumble of the lows is left */
+  Aud.sh+=(((SHELTERED&&!Drone.on)?1:0)-Aud.sh)*(1-Math.exp(-dt*2.2));
+  const sh=Aud.sh;
+  W.low.g.gain.setTargetAtTime(.55*base*(1-.4*sh),t,.3);
+  W.low.fl.frequency.setTargetAtTime(240-95*sh,t,.4);
+  W.mid.g.gain.setTargetAtTime(.34*base*(1-.8*sh),t,.35);
+  W.mid.fl.frequency.setTargetAtTime((380+lvl*850*gust*(storm?1.3:1))*(1-.5*sh),t,.35);
+  W.hi.g.gain.setTargetAtTime((storm?.2:.07)*base*base*(1-.96*sh),t,.35);
   /* ── crawler: nearest one within earshot ── */
   let near=null,nd=1e9;
   for(const s of G.struct){if(s.type!=='crawler')continue;const d=Math.hypot(s.x-P.x,s.z-P.z);if(d<nd){nd=d;near=s}}
@@ -7896,8 +7908,10 @@ const bpIsNode=s=>{const b=WORKS[s.type].bp;return b==='cell'||b==='found'};
 function bpIndex(s){
   const k=Math.floor(s.x/8)+','+Math.floor(s.z/8);s._bk=k;
   let a=BPG.get(k);if(!a){a=[];BPG.set(k,a)}a.push(s);BPALL.push(s);BPV++;
+  if(s.type==='bp_floor'&&typeof bpDeckAdd==='function')bpDeckAdd(s);
 }
 function bpUnindex(s){
+  if(s.fdeck&&typeof bpDeckRemove==='function')bpDeckRemove(s);
   const a=BPG.get(s._bk);if(a){const i=a.indexOf(s);if(i>=0)a.splice(i,1)}
   const j=BPALL.indexOf(s);if(j>=0)BPALL.splice(j,1);BPV++;
 }
@@ -8037,11 +8051,12 @@ function bpSelectEdge(slots,type,O,D){
   return{mode:'snap',via:'edge',x:sl.x,z:sl.z,base:sl.base,y:sl.base+(m===2?BPC.HH:0),rot:sl.rot,m,dx:sl.dx,dz:sl.dz,t:h.t,u:h.u,v:h.v};
 }
 function bpTerrainHit(O,D,maxT){
-  const hy=t=>O.y+D.y*t-heightAt(O.x+D.x*t,O.z+D.z*t);
+  const hAt=(x,z,y,off)=>{const sv=_deckY;_deckY=y-.7+off;const h=heightAt(x,z);_deckY=sv;return h};   // a deck is solid to the ray from 0.5 m below its top upward, so a 0.4 m step cannot tunnel through it
+  const hy=t=>{const y=O.y+D.y*t;return y-hAt(O.x+D.x*t,O.z+D.z*t,y,0)};
   for(let t=.6;t<=maxT;t+=.4){
     if(hy(t)<=0){
       let lo=t-.4,hi=t;for(let i=0;i<8;i++){const m=(lo+hi)/2;if(hy(m)>0)lo=m;else hi=m}
-      const x=O.x+D.x*hi,z=O.z+D.z*hi;return{x,z,y:heightAt(x,z),t:hi};
+      const x=O.x+D.x*hi,z=O.z+D.z*hi;return{x,z,y:hAt(x,z,O.y+D.y*hi,.1),t:hi};
     }
   }
   return null;
@@ -8239,6 +8254,20 @@ function bpAfter(s,o){                                         // after it exist
 }
 const bpSaveExtra=s=>{const d=WORKS[s.type];if(!d.bp)return null;const o={y:+s.y.toFixed(3),m:s.bpm};if(d.door)o.ds=s.fsm.state;return o};
 /*BP-PURE-END*/
+/* sheet floors join the deck system, so every vehicle can drive and park on them and bridges and ramps can meet them */
+function bpDeckCells(k,fn){
+  const r=BPC.S*.7072+.3;
+  for(let cx=Math.floor((k.x-r)/8);cx<=Math.floor((k.x+r)/8);cx++)for(let cz=Math.floor((k.z-r)/8);cz<=Math.floor((k.z+r)/8);cz++)fn(((cx+32768)&65535)*65536+((cz+32768)&65535));
+}
+function bpDeckAdd(s){
+  const k=s.fdeck={x:s.x,z:s.z,sn:Math.sin(s.rot),cs:Math.cos(s.rot),L:BPC.S,W:BPC.S,y:s.y,sl:0,flat:true,rr:(BPC.S*.7072+.3)**2};
+  bpDeckCells(k,key=>{let l=FDECK.get(key);if(!l){l=[];FDECK.set(key,l)}l.push(k)});
+}
+function bpDeckRemove(s){
+  const k=s.fdeck;if(!k)return;
+  bpDeckCells(k,key=>{const l=FDECK.get(key);if(!l)return;const i=l.indexOf(k);if(i>=0)l.splice(i,1);if(!l.length)FDECK.delete(key)});
+  s.fdeck=null;
+}
 /* ── placement: the ghost, the socket dots, the prompt ────────────────── */
 const BPB={near:[],cands:[],slots:[],v:-1,px:1e9,pz:1e9,type:'',prev:null,sel:null,gl:null};
 const BPVIA={sup:'stairs continued upward',sdn:'stairs continued downward',up:'stair rising from the edge',down:'stair descending from the edge',stair:'at the stairs',edge:'edge-middle snap',corner:'corner snap',on:'floor on truss',under:'truss under floor',wall:'on top of the wall',free:'free on the ground'};
@@ -8276,7 +8305,7 @@ function buildTurn(dir){                                       // R, right-click
   if(!Build.on)return;
   const d=WORKS[Build.type];
   if(d.ramp)return;                                                // a ramp is aimed, not turned
-  if(d.bridge){Build.rot+=dir*TAU/72;return}                       // 5° per press, 2.5° per wheel notch
+  if(d.bridge)return;                                              // a bridge is aimed by where you stand and face
   if(!d.bp){Build.rot+=dir*TAU/8;return}
   const t=performance.now();if(Math.abs(dir)<1&&t-(Build.tt||0)<150)return;Build.tt=t;
   if(BPB.sel&&BPB.sel.mode==='free'&&d.bp!=='edge')Build.free+=(dir<0?-1:1)*TAU/24;
@@ -8389,10 +8418,10 @@ window.BP={C:BPC,give(n){n=n||6;for(const k of ['k_bpfloor','k_bptruss','k_bpwal
    ground beneath (no leg where the drop exceeds 10 m), so a long span stands on its
    ends and on any high ground between.
    ─────────────────────────────────────────────────────────────────────── */
-function bridgeSpan(ax,az,rot){
+function bridgeSpan(ax,az,rot,y0){
   const sn=Math.sin(rot),cs=Math.cos(rot),x0=ax-sn,z0=az-cs;               // the deck starts 1 m behind the aim point, bedding the near end
   const at=(u,v)=>heightAt(x0+u*sn+v*cs,z0+u*cs-v*sn),vs=[-BR.W*.4,0,BR.W*.4];
-  const A=vs.map(v=>at(1.5,v)),y=(A[0]+A[1]+A[2])/3;                       // deck level: the ground under the near end, however sloped
+  const A=vs.map(v=>at(1.5,v)),y=y0!==undefined?y0:(A[0]+A[1]+A[2])/3;       // deck level: your feet (a floor, a bridge, the ground), however sloped
   const mk=(ok,reason,L)=>{L=Math.max(BR.MIN,Math.min(BR.MAX,L||BR.MIN));return{ok,reason,L,y,cx:x0+sn*L/2,cz:z0+cs*L/2,sn,cs}};
   let gap=false,cand=0;
   for(let u=2;u<=BR.MAX-1;u++){
@@ -8415,7 +8444,7 @@ function bridgeObstacle(sp){
     if(Math.abs(ex*k.sn+ez*k.cs)<k.L/2-1.2&&Math.abs(ex*k.cs-ez*k.sn)<k.W/2+.5&&Math.abs(k.y-sp.y)<2.5)return 'overlaps another bridge';
   }
   for(const s of G.struct){
-    if(s.type==='bridge'||s.type==='ramp'||s.y<sp.y-1.5)continue;
+    if(s.type==='bridge'||s.type==='ramp'||WORKS[s.type].bp||s.y<sp.y-1.5)continue;    // kit pieces (floors you stand on, walls) never block a span
     const d=WORKS[s.type];if(rect(s.x,s.z,Math.max(d.size[0],d.size[2])*.5))return 'something is in the way of the span';
   }
   for(const f of featuresNear(sp.cx,sp.cz,L/2+8)){
@@ -8432,30 +8461,31 @@ function bridgeRebuildGhost(L,legs){
   ghost=g;
 }
 function bridgeBuildTick(){
-  const d=WORKS.bridge,cp=Math.cos(P.pitch),O=camera.position,D={x:-Math.sin(P.yaw)*cp,y:Math.sin(P.pitch),z:-Math.cos(P.yaw)*cp};
-  const hit=bpTerrainHit(O,D,14),now=performance.now();
-  let reason='aim at the ground where the near end should rest',sp=BRB.span;
-  if(hit){
-    const ax=Math.round(hit.x*2)/2,az=Math.round(hit.z*2)/2,key=ax+'|'+az+'|'+Build.rot.toFixed(4)+'|'+DECKS.length+'|'+G.struct.length;
-    if(key!==BRB.key&&now-BRB.t>110){                                       // the search is ~300 height samples: not every frame
-      BRB.key=key;BRB.t=now;
-      sp=BRB.span=bridgeSpan(ax,az,Build.rot);
-      sp.legs=bridgeLegsFor(sp.cx,sp.cz,sp.sn,sp.cs,sp.L,sp.y);
-      sp.obstacle=sp.ok?bridgeObstacle(sp):'';
-    }
-    sp=BRB.span;
-  }else sp=null;
+  const d=WORKS.bridge,now=performance.now();
+  const rot=Math.round((P.yaw+Math.PI)/(TAU/360))*(TAU/360);               // the way you face, to the degree
+  Build.rot=rot;
+  const key=(P.x*2|0)+'|'+(P.z*2|0)+'|'+(P.y*4|0)+'|'+rot.toFixed(4)+'|'+DECKS.length+'|'+FDECK.size+'|'+G.struct.length;
+  let sp=BRB.span;
+  if(key!==BRB.key&&now-BRB.t>110){                                         // the search is ~300 height samples: not every frame
+    BRB.key=key;BRB.t=now;
+    const sv=_deckY;_deckY=1e9;                                            // planning: every deck counts as ground, so a span can start or end on a floor
+    sp=BRB.span=bridgeSpan(P.x,P.z,rot,P.y);
+    sp.legs=bridgeLegsFor(sp.cx,sp.cz,sp.sn,sp.cs,sp.L,sp.y);
+    sp.obstacle=sp.ok?bridgeObstacle(sp):'';
+    _deckY=sv;
+  }
+  let reason='';
   if(sp){
     reason=sp.ok?(sp.obstacle||''):sp.reason;
     if(!reason&&!(G.inv[d.kit]>0))reason='no kit left';
     const sig=sp.L.toFixed(1)+'|'+sp.legs.map(p=>p.map(v=>v==null?'n':v.toFixed(1)).join(',')).join(';');
     if(sig!==BRB.sig){BRB.sig=sig;bridgeRebuildGhost(sp.L,sp.legs)}
-    ghost.visible=true;ghost.position.set(sp.cx,sp.y,sp.cz);ghost.rotation.y=Build.rot;
+    ghost.visible=true;ghost.position.set(sp.cx,sp.y,sp.cz);ghost.rotation.y=rot;
     Build.x=sp.cx;Build.z=sp.cz;Build.y=sp.y;
   }else ghost.visible=false;
   Build.ok=!!sp&&!reason;Build.reason=reason;
   GHOSTMAT.color.set(Build.ok?0x9aae6f:0xc4442c);
-  setPrompt(d.n+(sp?' · '+Math.round(sp.L)+' m span':''),reason?reason:'click to set · R turns 5° · wheel 2.5° · B to stop',0);
+  setPrompt(d.n+(sp?' · '+Math.round(sp.L)+' m span':''),reason?reason:'click to set · it runs from your feet the way you face · B to stop',0);
 }
 function bridgePlace(){
   const d=WORKS.bridge,sp=BRB.span;
@@ -9489,6 +9519,7 @@ RENDER.help=()=>`<div class="help">
   <div class="keygrid">
     <span class="kbd">floor · truss</span><span>the first one goes on open ground; every other piece snaps to a socket on one already standing: edge middles and corners. Look at the ground beyond an edge and the next cell lights up. On a slope, set a foundation truss first, then lay the floor on it.</span>
     <span class="kbd">wall · half · door</span><span>snap to the middle of a floor, truss or stair-cell edge, stack on top of another wall or half wall, or continue from the end of one (straight on or round a corner). A half wall takes the lower or upper half, depending on where you look; the gap left open is a window.</span>
+    <span class="kbd">decks</span><span>sheet floors are solid ground to every vehicle, and bridges and ramps can start or end on them: build a turning area out of floor tiles. Bridges now run from your feet the way you face, like ramps.</span>
     <span class="kbd">stairs</span><span>a 45° flight that climbs one storey. Set it on a floor (R turns it), beside a floor edge climbing away from it, or beside an edge where the ground is far below: then it descends, and whatever is under the terrain is buried, which makes a way in from a slope. Floors snap to its landing and its foot. You can walk under the high part of a flight; only the 45° line carries you up or down.</span>
     <span class="kbd">R</span><span>turn the piece (15° when free on the ground, 90° or 180° when snapped); wheel and right-click too</span>
     <span class="kbd">E</span><span>on a door: open or close it. It always swings away from you.</span>
