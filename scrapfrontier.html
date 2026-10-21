@@ -7596,15 +7596,18 @@ function anProgress(){
   for(const k of P_.items){a+=Math.min(G.inv[k]||0,P_.D[k]);b+=P_.D[k]}
   return b?Math.floor(a/b*100):100;
 }
-function anBench(s){
-  let b=null,bd=1e9,bl=null,bld=1e9;
+const AN_MAXB=3;
+function anLoad(b,s){return G.struct.filter(o=>o.type==='android'&&o!==s&&o.wb===b&&o.st!=='dead').length}
+/* benches in order of preference: powered first, then least crowded (an even split), then nearest; full ones (3 androids) are left out */
+function anBenches(s){
+  const out=[];
   for(const o of G.struct){
     if(WORKS[o.type].flag!=='bench')continue;
-    const d=scrDist(s.pos.x,s.pos.z,o.x,o.z);
-    if(o.fsm.ctx.live&&d<bld){bld=d;bl=o}
-    if(d<bd){bd=d;b=o}
+    const ld=anLoad(o,s);if(ld>=AN_MAXB)continue;
+    out.push({b:o,live:o.fsm.ctx.live?0:1,ld,d:scrDist(s.pos.x,s.pos.z,o.x,o.z)});
   }
-  return bl||b;
+  out.sort((p,q)=>p.live-q.live||p.ld-q.ld||p.d-q.d);
+  return out;
 }
 function anSpot(b,s){                        /* in front of the bench; androids sharing a bench stand side by side */
   const taken=G.struct.filter(o=>o.type==='android'&&o!==s&&o.wb===b&&['toBench','fab','pause'].includes(o.st)).map(o=>o.spotI);
@@ -7618,13 +7621,31 @@ function androidInit(s){
   s.mades={};s.logT=-1e9;s.blinkT=2+Math.random()*3;s.blink=0;s.aHp=AN.stand;s.aLean=0;s.aHead=[0,0];s.fabT=0;
 }
 /* leave the pad / ring for the workbench if there is one in reach */
-function anGo(s){
-  const b=anBench(s);
-  if(!b){s.why='no workbench';return false}
+function anReach(s,b){
   const sp=anSpot(b,s),there=scrDist(s.pos.x,s.pos.z,sp.x,sp.z),back=s.pad?scrDist(sp.x,sp.z,s.pad.x,s.pad.z):0;
-  if(scrRange(s)<there*1.1+back*1.15+SC.margin+AN.reserve){s.why='the workbench is too far from the pad';return false}
-  s.wb=b;s.st='toBench';s.cur=null;s.why='';s.stg=0;
-  return true;
+  return scrRange(s)>=there*1.1+back*1.15+SC.margin+AN.reserve;
+}
+/* between jobs: move to another bench if that evens the split (or the current one has lost power and another has it) */
+function anRebalance(s){
+  const cur=s.wb,curLive=cur.fsm.ctx.live?0:1,L=anLoad(cur,s);
+  for(const x of anBenches(s)){
+    if(x.b===cur)continue;
+    if(((curLive&&!x.live)||(x.ld<L&&x.live<=curLive))&&anReach(s,x.b)){s.wb=x.b;s.st='toBench';s.stg=0;s.cur=null;s.why='';s.spotI=undefined;return true}
+    break;                                   /* candidates are sorted best-first: only the best is worth trying */
+  }
+  return false;
+}
+function anGo(s){
+  const c=anBenches(s);
+  if(!c.length){s.why=G.struct.some(o=>WORKS[o.type].flag==='bench')?'every workbench already has three androids':'no workbench';return false}
+  const keep=s.wb?c.findIndex(x=>x.b===s.wb):-1;           /* go back to the bench it was using, if there is still room */
+  if(keep>0)c.unshift(c.splice(keep,1)[0]);
+  for(const x of c){
+    const b=x.b;
+    if(!anReach(s,b))continue;
+    s.wb=b;s.st='toBench';s.cur=null;s.why='';s.stg=0;return true;
+  }
+  s.why='the workbenches are too far from the pad';return false;
 }
 function anStart(s){
   const b=s.wb;
@@ -7652,7 +7673,7 @@ function androidStep(s,dt){
   if(s.pad&&!G.struct.includes(s.pad)){s.pad=null;if(['dock','toPad','align','wait'].includes(s.st))s.st='seek'}
   if(s.wb&&!G.struct.includes(s.wb)){s.wb=null;s.skipB=null;s.cur=null;if(['toBench','fab','pause'].includes(s.st))s.st=s.pad?'toPad':'seek'}
   if(s.pow<=.01&&s.st!=='dead'&&s.st!=='dock'){
-    scrRelease(s);s.st='dead';s.speed=0;s.cur=null;
+    scrRelease(s);s.st='dead';s.speed=0;s.cur=null;s.wb=null;s.skipB=null;
     if(!s.deadMsg){s.deadMsg=true;log('android has run out of power. carry it back (hold X to recover) and set it down for a 5% charge','bad');SFX('powerdown')}
   }
   let moving=false;
@@ -7724,8 +7745,12 @@ function androidStep(s,dt){
         if(scrDrive(s,dt,stx,stz,.6,null,AN.speed/SC.speed))s.stg=2;
       }else{
         s.skipB=b;
-        if(scrDrive(s,dt,sp.x,sp.z,.22,null,AN.speed/SC.speed*(here<1.5?.7:1))){
-          if(scrTurnTo(s,dt,sp.yaw)){s.st='pause';s.cur=null;s.planT=0;s.why='';s.stg=0}
+        if(here>.8){s.apOff=0;s.apT=1;scrDrive(s,dt,sp.x,sp.z,.3,null,AN.speed/SC.speed*(here<1.8?.7:1))}   /* no re-planning on the way in */
+        else{                                    /* last stretch: glide onto the mark while turning to face the bench */
+          const st=Math.min(here,.5*dt);
+          if(here>.001){s.pos.x+=(sp.x-s.pos.x)/here*st;s.pos.z+=(sp.z-s.pos.z)/here*st}
+          s.speed=here>.03?.45:0;
+          if(scrTurnTo(s,dt,sp.yaw)&&here<.04){s.st='pause';s.cur=null;s.planT=0;s.why='';s.stg=0}
         }
       }
       break;
@@ -7741,7 +7766,8 @@ function androidStep(s,dt){
         s.tapT-=dt;if(s.tapT<=0){s.tapT=.55;s.clack=true}
         if(s.curT>=s.curD)anFinish(s);
       }else{
-        s.planT-=dt;
+        s.planT-=dt;s.rebT=(s.rebT||0)-dt;
+        if(s.rebT<=0){s.rebT=2;if(anRebalance(s))break}
         if(s.planT<=0){s.planT=s.st==='fab'?.05:AN.scan;anStart(s)}
       }
       break;
