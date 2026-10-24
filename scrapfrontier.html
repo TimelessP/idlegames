@@ -6122,7 +6122,7 @@ function flightStep(s,h,inp){
   const nz1=Math.sin(tt*1.7+s.id)+Math.sin(tt*2.9+1.3*s.id),nz2=Math.sin(tt*1.3+2.1)+Math.sin(tt*3.7+s.id*0.7);
   const noseOn=!!(s.contact&&s.contact.nose&&s.gnd);
   const rest=(s.gnd&&!noseOn)?clamp(1-L/PL.g,0,1)*0.9:0;            // weight the wings aren't carrying tips the nose onto its wheel
-  let wx=-ctl.p*PL.pitchRate*auth*(ctl.p>0?1-0.65*smooth(0.24,0.33,aoa):1) + PL.kAlpha*(aoa-PL.aTrim)*smooth(2,8,spd)*(noseOn?0.15:1) + rest + stall*1.1 + gust*0.06*nz1*smooth(6,14,vv);
+  let wx=-ctl.p*PL.pitchRate*auth*(ctl.p>0?1-0.65*smooth(0.24,0.33,aoa):1) + PL.kAlpha*(aoa-(s.aTrim==null?PL.aTrim:s.aTrim))*smooth(2,8,spd)*(noseOn?0.15:1) + rest + stall*1.1 + gust*0.06*nz1*smooth(6,14,vv);
   let wz= ctl.r*PL.rollRate*authR - PL.kLevel*_L.y*(1-Math.abs(ctl.r)) + gust*0.10*nz2*smooth(6,14,vv)
           + stall*0.35*Math.sin(tt*9+s.id);
   let wy= PL.kBeta*beta*smooth(3,10,vv);
@@ -6169,10 +6169,16 @@ function flightStep(s,h,inp){
       const vnGround=v.dot(_N);
       _R.copy(v).addScaledVector(_N,-vnGround);
       let vf=_R.dot(_A),vs=_R.dot(_B);
-      vs*=Math.exp(-9*h);
-      const dec=(PL.rollRes+(inp.brake?PL.brake:0))*h;
+      /* Coulomb tyres: grip = μ × the weight the wheels still carry (lift unloads them).  Slow: a wheel rolls freely along its own
+         axis (a little rolling drag, plus a stiction that parks it on a gentle slope while the throttle is closed) but will not
+         slide sideways.  Fast: the grip fades so the aircraft can accelerate and lift off. */
+      const gs=Math.hypot(vf,vs),load=Math.max(0,PL.g*_N.y-L*Math.max(0,_U.dot(_N)));
+      const muSide=1.25*(1-0.8*smooth(8,30,gs)),idle=1-smooth(0.05,0.3,s.thr);
+      const muLong=0.04+0.30*idle*(1-smooth(1,6,Math.abs(vf)));
+      const dS=muSide*load*h;vs=vs>0?Math.max(0,vs-dS):Math.min(0,vs+dS);
+      vs*=Math.exp(-3*h*(1-0.8*smooth(8,30,gs)));
+      const dec=(muLong*load+(inp.brake?PL.brake*clamp(load/PL.g,0.25,1)*(1-0.5*smooth(15,40,Math.abs(vf))):0))*h;
       vf=vf>0?Math.max(0,vf-dec):Math.min(0,vf+dec);
-      if(s.thr<0.03&&Math.abs(vf)<1.2)vf*=Math.exp(-4*h);
       v.copy(_N).multiplyScalar(vnGround).addScaledVector(_A,vf).addScaledVector(_B,vs);
     }
   }
@@ -6343,7 +6349,7 @@ function enterPlane(s){
   if(viewModel)viewModel.visible=false;
   planeHudShow(true);
   $('#log').classList.add('plane-help');
-  log('microlite: shift/Q throttle · W/S pitch · A/D roll (steer on the ground) · space brake · V camera · N invert · E step out','gold');
+  log('microlite: shift/Q throttle · W/S pitch · A/D roll (steer on the ground) · space brake / trim · V camera · N invert · E step out','gold');
   SFX('place');
 }
 function exitPlane(force){
@@ -6411,7 +6417,13 @@ function planeTick(s,dt){
   
   if(dt>0){
     const live0=s.pow>0.3;
-    const n=Math.min(8,Math.max(1,Math.ceil(dt/0.009))),h=dt/n,inp={brake:!bl&&(!!K.Space||!!s.tbrake)};
+    /* space: on the ground it is the brake and clears the trim; in the air it trims the elevator to the current speed (the aircraft
+       then settles at this airspeed with the stick centred; hold it while the speed settles) */
+    const sp=!bl&&(!!K.Space||!!s.tbrake);
+    if(sp&&s.gnd){if(s.aTrim!=null){s.aTrim=null;log('trim reset')}}
+    else if(sp){const cur=s.aTrim==null?PL.aTrim:s.aTrim;if(!s.spPrev)log('trimmed for current speed');s.aTrim=cur+(clamp(s.aoa,-0.04,0.26)-cur)*Math.min(1,dt*2.5)}
+    s.spPrev=sp;
+    const n=Math.min(8,Math.max(1,Math.ceil(dt/0.009))),h=dt/n,inp={brake:sp&&s.gnd};
     for(let i=0;i<n;i++){flightStep(s,h,inp);if(G.drive!==s)return}
     
     // Common: battery drain, stall warning, animation
@@ -10775,7 +10787,7 @@ RENDER.help=()=>`<div class="help">
     <span class="kbd">shift</span><span>more throttle · <span class="kbd">Q</span> less · <span class="kbd">X</span> idle</span>
     <span class="kbd">W S</span><span>nose down / up · <span class="kbd">N</span> inverts</span>
     <span class="kbd">A D</span><span>roll left / right — steer on the ground</span>
-    <span class="kbd">space</span><span>wheel brakes</span>
+    <span class="kbd">space</span><span>on the ground: wheel brakes, and clears the trim. In the air: trims the aircraft to hold the current speed with the stick centred</span>
     <span class="kbd">V</span><span>chase / cockpit view · mouse looks around</span>
   </div>
   <div class="grp-h"><b>flying the helicopter</b></div>
@@ -11338,7 +11350,7 @@ let touchSync=()=>{};
   const thrBrk=thrTrk.querySelector('.brk');
   const thrPaint=()=>{const pl=isPlane(),v=pl?clamp(G.drive.thr,0,1):0,b=pl&&!!G.drive.tbrake;thrFill.style.height='calc((100% - 22%) * '+v.toFixed(3)+')';thrBrk.classList.toggle('on',b);thrNum.textContent=b?'brk':Math.round(v*100);thrl.setAttribute('aria-valuenow',String(b?0:Math.round(v*100)));thrl.setAttribute('aria-valuetext',b?'Brake applied':'Throttle '+Math.round(v*100)+' percent')};
   const thrSet=y=>{if(!isPlane())return;const r=thrTrk.getBoundingClientRect();const f=1-(y-r.top)/r.height;     /* bottom 22% of the track (and anywhere below it) is the brake: throttle to idle and the brakes on */
-    if(f<=.22){G.drive.thr=0;G.drive.tbrake=true}
+    if(f<=.22){if(G.drive.gnd!==false)G.drive.thr=0;G.drive.tbrake=true}
     else{let v=clamp((f-.22)/.78,0,1);if(v<.03)v=0;if(v>.97)v=1;G.drive.thr=v;G.drive.tbrake=false}
     thrPaint()};
   thrl.addEventListener('pointerdown',e=>{e.preventDefault();thrDrag=true;thrl.classList.add('act');try{thrl.setPointerCapture(e.pointerId)}catch(_){}thrSet(e.clientY)});
