@@ -6604,7 +6604,7 @@ const HL={
   Tmax:19, spool:0.3,
   pitchRate:1.1, rollRate:1.2, yawRate:1.35, lag:0.17, kAtt:3.0, maxP:0.5, maxR:0.55,
   kBeta:1.4,
-  dIdle:0.012, dLoad:0.21,
+  dIdle:0.012, dLoad:0.21, mu:0.95,
   hardLand:3.2, crashImpact:6.3, I:2.2, avDamp:6,
   pts:[
     {n:'skFL',x: 0.85,y:-1.42,z: 1.15,k:'wheel'},{n:'skFR',x:-0.85,y:-1.42,z: 1.15,k:'wheel'},
@@ -6728,11 +6728,11 @@ function heliStep(s,h,inp){
   const lim=(x,m)=>clamp(x,-m,m);
   let cx=fly*lim(HL.kAtt*(pitchA-tP),HL.pitchRate*auth);
   let cz=fly*lim(HL.kAtt*(tR-bank0),HL.rollRate*auth);
-  const tq=live?-1.1*(c-0.5)*rr*(1-0.85*(1-Math.abs(ctl.y))):0;     // rotor torque, what the gyro does not catch
+  const tq=(live&&!s.gnd)?-1.1*(c-0.5)*rr*(1-0.85*(1-Math.abs(ctl.y))):0;     // rotor torque, what the gyro does not catch
   let cy=-ctl.y*HL.yawRate*clamp(s.rpm,0.2,1)+tq+HL.kBeta*beta*smooth(3,10,vh);
   const a=1-Math.exp(-h/HL.lag);
   R.x+=(cx-R.x)*a;R.y+=(cy-R.y)*a;R.z+=(cz-R.z)*a;
-  if(s.gnd)R.y*=Math.exp(-2.2*clamp(1-Tm/HL.g,0,1)*h);            // skids resist a turn until the rotor takes the weight
+  if(s.gnd){const w=clamp(1-Tm/HL.g,0,1);R.y*=Math.exp(-(Math.abs(ctl.y)>0.05?2.2:14)*w*h);s.av.y*=Math.exp(-10*w*h)}            // skids resist a turn until the rotor takes the weight
   /* ── the ground answers first ── */
   const high=alt>14,closing0=high?0:heliContact(s,h,R.x,R.y,R.z),k=h*0.5;
   _dq.set(R.x*k,R.y*k,R.z*k,1).normalize();q.multiply(_dq);
@@ -6755,10 +6755,11 @@ function heliStep(s,h,inp){
       else if(closing>HL.hardLand)heliEvent(s,'hard',closing);
       else heliEvent(s,'touch',closing);
     }
-    if(cn.wheels>0){                                              // skids drag on the ground in proportion to the weight they carry
-      const w=clamp(1-Tm/HL.g,0,1),vn=v.dot(_N);
-      _R.copy(v).addScaledVector(_N,-vn).multiplyScalar(Math.exp(-(2.6+(inp.hold?3:0))*w*h));
-      if(w>0.6&&_R.lengthSq()<0.12)_R.set(0,0,0);
+    if(cn.wheels>0){                                              // skids: Coulomb friction on the load they carry, so steep enough slopes still slide
+      const vn=v.dot(_N),load=Math.max(0,HL.g*_N.y-Tm*_U.dot(_N)),mu=HL.mu+(inp.hold?0.3:0);
+      _R.copy(v).addScaledVector(_N,-vn);
+      const vt=_R.length(),dv=(mu*load+0.15*load)*h;
+      if(vt>1e-6)_R.multiplyScalar(Math.max(0,vt-Math.min(vt,dv))/vt);
       v.copy(_N).multiplyScalar(vn).add(_R);
     }
   }
@@ -6767,6 +6768,22 @@ function heliStep(s,h,inp){
   s.va=vF;s.vs=v.y;s.alt=alt;
   s.bank=Math.atan2(_L.set(1,0,0).applyQuaternion(q).y,_U.y);
   s.pitchA=Math.asin(clamp(_F.y,-1,1));
+}
+/* space: hold position and altitude.  Feed-forward collective for the weight at the current rotor state plus a vertical-speed
+   damper and a slow altitude trim, so it settles wherever it was released; shift/Q while held move the held height. */
+function heliAltHold(s,dt,on){
+  if(!on||s.gnd||s.alt<0.5||s.pow<=0.3||s.rpm<0.85){s.holdOn=false;return}
+  if(!s.holdOn){s.holdOn=true;s.holdAlt=s.alt+s.vs*1.2;s.holdI=0}
+  const K=Keys;if(K.ShiftLeft||K.ShiftRight)s.holdAlt+=3*dt;if(K.KeyQ)s.holdAlt-=3*dt;
+  s.holdAlt=Math.max(s.holdAlt,1);
+  _U.set(0,1,0).applyQuaternion(s.q);
+  const rr=s.rpm*s.rpm,dens=1-0.4*smooth(180,650,s.alt),ge=0.2*(1-smooth(0.3,4,s.alt));
+  const vh=Math.hypot(s.vel.x,s.vel.z),tl=0.14*smooth(3,9,vh)*(1-0.6*smooth(16,32,vh));
+  const ff=HL.g/Math.max(0.5,_U.y)/(HL.Tmax*rr*dens*(1+ge+tl));
+  const err=s.holdAlt-s.alt,tvs=clamp(err*0.5,-3,3);
+  s.holdI=clamp(s.holdI+0.02*err*dt,-0.15,0.15);
+  const tgt=clamp(ff+0.07*(tvs-s.vs)+s.holdI,0,1);
+  s.thr+=clamp(tgt-s.thr,-0.8*dt,0.8*dt);
 }
 function heliEvent(s,kind,d){
   if(G.drive!==s)return;
@@ -6826,6 +6843,7 @@ function heliTick(s,dt){
   const slew=(cur,tgt)=>{const r=(tgt===0||tgt*cur<0)?9:6;return cur+clamp(tgt-cur,-r*dt,r*dt)};
   s.ctl.p=slew(s.ctl.p,pin);s.ctl.r=slew(s.ctl.r,rin);s.ctl.y=slew(s.ctl.y,yin);
   if(dt>0){
+    heliAltHold(s,dt,!bl&&(!!K.Space||!!s.tbrake));
     const live0=s.pow>0.3,n=Math.min(8,Math.max(1,Math.ceil(dt/0.009))),h=dt/n,inp={hold:!bl&&(!!K.Space||!!s.tbrake)};
     for(let i=0;i<n;i++){heliStep(s,h,inp);if(G.drive!==s)return}
     const rr=s.rpm*s.rpm;
