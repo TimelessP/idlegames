@@ -1768,6 +1768,7 @@ const _fz={h:0,mass:0,ramp:0,clay:0,dune:0,wash:0,salt:0,plat:0};
 /* is anything the player has built within r metres of (x,z)? Scrap that regenerates at dawn keeps clear of it. */
 function nearKit(x,z,r){
   try{
+    if(rwNearTrack(x,z,Math.max(6,r*.7)))return true;       // scrap that regenerates keeps clear of railway lines too
     for(const s of bpNear(x,z,r+4))if((s.x-x)**2+(s.z-z)**2<(r+1.6)**2)return true;       // kit pieces: up to 3 m across
     for(const s of G.struct){
       if(WORKS[s.type].bp)continue;
@@ -8654,12 +8655,13 @@ function* rwProfileGen(nodes){
    A route is its list of nodes. It is known by where it starts and ends, not by the waypoints it was planned from. */
 let _rwId=1;
 const rwNewRoute=(nodes,ph,built)=>({id:_rwId++,nodes,ph,built:built|0,pr:null,laid:null,claim:null,meta:null,secs:new Map(),spots:new Map()});
-RW.routes=[];RW.queue=[];RW.jobR=null;RW.quiet=false;RW.crew={android:0,bot:0};RW.crewT=0;
+RW.routes=[];RW.queue=[];RW.jobR=null;RW.quiet=false;RW.crews=[];RW.crewT=0;
 function rwSetProfile(R,pr){
   rwDropSections(R);
   R.pr=pr;R.laid=new Uint8Array(pr.nSeg);R.claim=new Int32Array(pr.nSeg);R.spots=new Map();
-  const done=R.ph==='done'||R.built>=pr.nSeg;
+  const be=R.builtEnd|0,done=R.ph==='done'||(R.built|0)+be>=pr.nSeg;
   for(let i=0;i<(done?pr.nSeg:Math.min(R.built|0,pr.nSeg));i++)R.laid[i]=1;
+  if(!done)for(let i=0;i<Math.min(be,pr.nSeg);i++)R.laid[pr.nSeg-1-i]=1;
   R.ph=done?'done':'building';
   R.meta=[];
   const nSec=Math.ceil(pr.nSeg/RWC.SEC);
@@ -8673,12 +8675,12 @@ function rwSetProfile(R,pr){
 function rwFreeAndroids(){for(const s of G.struct)if(s.type==='android'&&s.rw){s.rw=false;s.cur=null;s.seg=-1;s.route=null;if(String(s.st).startsWith('rw'))s.st='seek'}}
 function rwResetAll(){
   for(const R of RW.routes)rwDropSections(R);
-  RW.routes=[];RW.queue=[];RW.job=null;RW.jobKind='';RW.jobR=null;RW.pair=null;RW.why='';RW.crew={android:0,bot:0};rwFreeAndroids();
+  RW.routes=[];RW.queue=[];RW.job=null;RW.jobKind='';RW.jobR=null;RW.pair=null;RW.why='';RW.crews=[];rwFreeAndroids();_fc.clear();
 }
 function rwDeleteRoute(R){
   rwDropSections(R);
   const i=RW.routes.indexOf(R);if(i>=0)RW.routes.splice(i,1);
-  RW.queue=RW.queue.filter(q=>q!==R);
+  RW.queue=RW.queue.filter(q=>q!==R);_fc.clear();
   if(RW.jobR===R){RW.job=null;RW.jobKind='';RW.jobR=null}
   for(const s of G.struct)if(s.type==='android'&&s.rw&&s.route===R){s.route=null;s.seg=-1;s.cur=null;s.st='rwHome'}
   RW.why='';
@@ -8710,12 +8712,12 @@ function rwJobTick(){
   if(kind==='plan'){
     if(!v){log(RW.msg||'planning failed','bad');SFX('bad');RW.pair=null;return}
     if(v.note)log('planners: '+v.note,'gold');
-    const R=rwNewRoute(v.nodes,'building',0);RW.routes.push(R);
+    const R=rwNewRoute(v.nodes,'building',0);RW.routes.push(R);_fc.clear();      /* scrap that regenerates keeps clear of the new line */
     RW.job=rwProfileGen(v.nodes);RW.jobKind='prof';RW.jobR=R;RW.msg='drawing up the levels';RW.prog=Math.max(RW.prog,.88);
   }else if(kind==='prof'){
     const R=RW.jobR,wasQuiet=RW.quiet;RW.pair=null;RW.jobR=null;RW.quiet=false;RW.jobKind='';
     if(!v){const i=RW.routes.indexOf(R);if(i>=0)RW.routes.splice(i,1);log('the survey of that route came out unusable','bad');return}
-    rwSetProfile(R,v);
+    rwSetProfile(R,v);_fc.clear();
     if(!wasQuiet){log('railway planned: '+v.len.toFixed(0)+' m in '+v.nSeg+' sections ('+rwPos(rwEnds(R).a)+' → '+rwPos(rwEnds(R).b)+'). build an android and a battery robot and the crew will start','good');SFX('craft');saveGame()}
   }
 }
@@ -8734,23 +8736,55 @@ const rwActive=()=>RW.routes.find(r=>r.pr&&r.ph==='building')||null;
 const rwBuilding=()=>!!(rwActive()&&rwOffice());
 const rwLaidCount=R=>{let n=0;if(R&&R.laid)for(let i=0;i<R.laid.length;i++)n+=R.laid[i];return n};
 function rwBuiltRun(R){let n=0;while(R&&R.laid&&n<R.laid.length&&R.laid[n])n++;return n}
-const rwCrewBot=()=>G.struct.find(o=>o.id===RW.crew.bot&&o.type==='battbot'&&o.pow>6)||null;
-const rwCrewAndroid=()=>G.struct.find(o=>o.id===RW.crew.android&&o.type==='android')||null;
+const rwCrewOf=id=>RW.crews.find(c=>c.android===id)||null;
+const rwBotFor=s=>{const c=rwCrewOf(s.id);return c?(G.struct.find(o=>o.id===c.bot&&o.type==='battbot'&&o.pow>6)||null):null};
+const rwCrewAndroid=c=>G.struct.find(o=>o.id===c.android&&o.type==='android')||null;
+function rwBuiltEnd(R){let n=0;while(R&&R.laid&&n<R.laid.length&&R.laid[R.laid.length-1-n])n++;return n}
+const rwAllLaid=R=>rwBuiltRun(R)>=R.pr.nSeg;
+/* the next section either end of the line would be worked from, and where an android would stand to do it */
+function rwHeadPos(R,e){
+  const nS=R.pr.nSeg,k=e===0?rwBuiltRun(R):nS-1-rwBuiltEnd(R);
+  if(k<0||k>=nS)return null;
+  const sp=rwSpot(R,k);return{x:sp.x,z:sp.z,k};
+}
+/* crews: one android and one battery robot each. the pair nearest the line is chosen, and it works from whichever end it is nearer to.
+   a second pair joins at the other end only if that android is already on the other end's side of the line: a split. */
 function rwCrewTick(dt){
   RW.crewT-=dt;if(RW.crewT>0)return;RW.crewT=.8;
-  const act=rwActive(),A=rwCrewAndroid(),B=G.struct.find(o=>o.id===RW.crew.bot&&o.type==='battbot');
-  if(!act||!rwOffice()){
-    if(!(A&&A.rw))RW.crew={android:0,bot:0};          /* the crew stands down once the android is back home */
+  const act=rwActive(),off=rwOffice();
+  RW.crews=RW.crews.filter(c=>{
+    const A=rwCrewAndroid(c),B=G.struct.find(o=>o.id===c.bot&&o.type==='battbot');
+    if(!act||!off)return !!(A&&A.rw);                      /* a crew stands down once its android is back home */
+    return !!(A&&A.st!=='dead'&&B&&B.st!=='flat');
+  });
+  if(!act||!off)return;
+  const used=new Set();for(const c of RW.crews){used.add(c.android);used.add(c.bot)}
+  const ands=G.struct.filter(o=>o.type==='android'&&o.st!=='dead'&&!used.has(o.id));
+  const bots=G.struct.filter(o=>o.type==='battbot'&&o.st!=='flat'&&o.pow>6&&!used.has(o.id));
+  if(!ands.length||!bots.length){
+    if(!RW.crews.length)rwWhy('waiting for you to build '+(!ands.length&&!bots.length?'an android and a battery robot':!ands.length?'an android':'a battery robot')+' — track construction needs one of each');
     return;
   }
-  const aOK=A&&A.st!=='dead',bOK=B&&B.st!=='flat';
-  if(aOK&&bOK)return;
-  let a=aOK?A:null,b=bOK?B:null;
-  if(!a)for(const o of G.struct)if(o.type==='android'&&o.st!=='dead'&&(!a||o.pow>a.pow))a=o;
-  if(!b)for(const o of G.struct)if(o.type==='battbot'&&o.st!=='flat'&&(!b||o.pow>b.pow))b=o;
-  if(a&&b){RW.crew={android:a.id,bot:b.id};RW.why='';return}
-  RW.crew={android:a?a.id:0,bot:b?b.id:0};
-  rwWhy('waiting for you to build '+(!a&&!b?'an android and a battery robot':!a?'an android':'a battery robot')+' — track construction needs one of each');
+  const heads=[rwHeadPos(act,0),rwHeadPos(act,1)],dist=(o,h)=>Math.hypot(o.x-h.x,o.z-h.z);
+  const form=(a,e)=>{
+    let b=null,bd=1e9;for(const o of bots){if(used.has(o.id))continue;const d=Math.hypot(o.x-a.x,o.z-a.z);if(d<bd){bd=d;b=o}}
+    if(!b)return;
+    used.add(a.id);used.add(b.id);RW.crews.push({android:a.id,bot:b.id,end:e});RW.why='';
+    log('railway: a crew forms to build from the '+(e===0?'start':'far end')+' of the line','gold');
+  };
+  if(!RW.crews.length){
+    let best=null;
+    for(const a of ands)for(let e=0;e<2;e++){if(!heads[e])continue;const d=dist(a,heads[e]);if(!best||d<best.d)best={a,e,d}}
+    if(best)form(best.a,best.e);
+  }
+  if(RW.crews.length===1){
+    const e1=RW.crews[0].end,h1=heads[e1],h2=heads[1-e1];
+    if(h1&&h2&&h1.k!==h2.k){
+      let best=null;
+      for(const a of ands){if(used.has(a.id))continue;const d2=dist(a,h2);if(d2<dist(a,h1)&&(!best||d2<best.d))best={a,d:d2}}
+      if(best)form(best.a,1-e1);
+    }
+  }
 }
 const RW_LAYREC={o:['rail',0],i:{},t:1};
 function rwNeed(R,k){
@@ -8759,29 +8793,67 @@ function rwNeed(R,k){
   if(k===0||k===R.pr.nSeg-1){n.rod=2;n.plate=(n.plate||0)+1}       /* the buffer stops */
   return n;
 }
-/* where the android stands to work on section k: beside the track, on the more level side, facing it */
+function rwSolidAt(x,z,m){
+  for(const f of featuresNear(x,z,9)){const R=CR_SOLID[f.t];if(R&&!G.spents.has(f.id)&&Math.hypot(f.x-x,f.z-z)<R*f.sc+m)return true}
+  for(const s of G.struct){if(WORKS[s.type].mobile||vehDriveable(s))continue;if(Math.hypot(s.x-x,s.z-z)<Math.max(WORKS[s.type].size[0],WORKS[s.type].size[2])*.5+m)return true}
+  return false;
+}
+/* where the android stands to work on section k: beside the track, on the more level side, facing it. a spot inside a landmark is never chosen */
 function rwSpot(R,k){
   let o=R.spots.get(k);if(o)return o;
   const pr=R.pr,i=Math.min(pr.N-1,k*RWC.SPS+2),rx=-pr.TZ[i],rz=pr.TX[i];
   const gr=groundAt(pr.X[i]+rx*2.9,pr.Z[i]+rz*2.9),gl=groundAt(pr.X[i]-rx*2.9,pr.Z[i]-rz*2.9),sg=Math.abs(gr-pr.Y[i])<=Math.abs(gl-pr.Y[i])?1:-1;
-  o={x:pr.X[i]+rx*sg*2.9,z:pr.Z[i]+rz*sg*2.9,yaw:Math.atan2(-rx*sg,-rz*sg)};R.spots.set(k,o);return o;
+  let pick=null;
+  for(const [s2,d] of [[sg,2.9],[-sg,2.9],[sg,4.4],[-sg,4.4]]){
+    const x=pr.X[i]+rx*s2*d,z=pr.Z[i]+rz*s2*d;
+    if(!rwSolidAt(x,z,1.4)){pick={x,z,s2};break}
+  }
+  if(!pick)pick={x:pr.X[i]+rx*sg*2.9,z:pr.Z[i]+rz*sg*2.9,s2:sg};
+  o={x:pick.x,z:pick.z,mx:pr.X[i],mz:pr.Z[i],yaw:Math.atan2(-rx*pick.s2,-rz*pick.s2)};R.spots.set(k,o);return o;
+}
+/* scrap in the way of a laid section is cleared; and scrap that grows back keeps off the line altogether */
+function rwClearScrap(R,k){
+  const pr=R.pr,i0=k*RWC.SPS,i1=Math.min(pr.N-1,i0+RWC.SPS);
+  for(const f of featuresNear((pr.X[i0]+pr.X[i1])/2,(pr.Z[i0]+pr.Z[i1])/2,11)){
+    if(G.spents.has(f.id)||CR_SOLID[f.t]||String(f.id).endsWith('_L'))continue;
+    let d=1e9;for(let i=i0;i<=i1;i++)d=Math.min(d,Math.hypot(f.x-pr.X[i],f.z-pr.Z[i]));
+    if(d<6){G.spents.add(f.id);const m=World.feats.get(f.id);if(m){dropFeat(m);World.feats.delete(f.id)}}
+  }
+}
+function rwNearTrack(x,z,r){
+  for(const R of RW.routes){
+    const P=R.nodes;
+    if(!R.bb){let a=1e9,b=1e9,c=-1e9,d=-1e9;for(const p of P){a=Math.min(a,p[0]);b=Math.min(b,p[1]);c=Math.max(c,p[0]);d=Math.max(d,p[1])}R.bb=[a,b,c,d]}
+    if(x<R.bb[0]-r-12||x>R.bb[2]+r+12||z<R.bb[1]-r-12||z>R.bb[3]+r+12)continue;
+    for(let i=0;i<P.length-1;i++){
+      const ax=P[i][0],az=P[i][1],bx=P[i+1][0]-ax,bz=P[i+1][1]-az,l2=bx*bx+bz*bz||1;
+      const t=clamp(((x-ax)*bx+(z-az)*bz)/l2,0,1),dx=x-(ax+bx*t),dz=z-(az+bz*t);
+      if(dx*dx+dz*dz<r*r)return true;
+    }
+  }
+  return false;
+}
+function rwClaimOk(id,s){
+  if(id===s.id)return true;
+  const o=G.struct.find(q=>q.id===id);return !!(o&&o.rw&&String(o.st).startsWith('rw')&&o.st!=='rwHome');
 }
 function rwRelease(s){if(s.seg>=0&&s.route&&s.route.claim&&s.route.claim[s.seg]===s.id)s.route.claim[s.seg]=0;s.seg=-1}
 function rwLeave(s,st){rwRelease(s);s.rw=false;s.route=null;s.cur=null;s.st=st}
 function rwWhy(msg){RW.why=msg;if(now()-RW.whyT>40){RW.whyT=now();log('railway: '+msg,'gold')}}
-/* only the crew android, and only with its crew robot about */
+/* only a crew android, and only with its crew robot about */
 function rwJoin(s){
-  if(s.rw||RW.crew.android!==s.id||!rwBuilding()||!rwCrewBot())return false;
+  const c=s.rw?null:rwCrewOf(s.id);
+  if(!c||!rwBuilding()||!rwBotFor(s))return false;
   const R=rwActive(),st=s.st,ready=(st==='dock'&&s.pow>=SC.B-6)||((st==='pause'||st==='idle'||st==='seek')&&s.pow>=70)||(st==='wait'&&!s.needChg&&s.pow>=70)||((st==='toBench'||st==='fab')&&!s.cur&&s.pow>=70);
-  if(!ready||rwBuiltRun(R)>=R.pr.nSeg)return false;
+  if(!ready||rwAllLaid(R))return false;
   s.rwOrigin={pad:s.pad||null,x:s.pos.x,z:s.pos.z};
-  scrRelease(s);s.wb=null;s.skipB=null;s.cur=null;s.rw=true;s.route=R;s.seg=-1;s.st='rwPrep';s.apT=0;s.tgtT=0;s.planT=0;
+  scrRelease(s);s.wb=null;s.skipB=null;s.cur=null;s.rw=true;s.route=R;s.rwEnd=c.end;s.seg=-1;s.st='rwPrep';s.apT=0;s.tgtT=0;s.planT=0;
   return true;
 }
 function rwLay(R,k,s){
   R.laid[k]=1;R.claim[k]=0;
   const sec=R.secs.get(Math.floor(k/RWC.SEC));if(sec)sec.dirty=true;
-  const sp=rwSpot(R,k);puff(sp.x,R.pr.Y[Math.min(R.pr.N-1,k*RWC.SPS+2)]+.3,sp.z,6,0xb0a080,1.6);SFX('place');
+  const sp=rwSpot(R,k);puff(sp.x,R.pr.Y[Math.min(R.pr.N-1,k*RWC.SPS+2)]+.3,sp.z,6,0xb0a080,1.6);SFX('place');rwClearScrap(R,k);
   const n=rwLaidCount(R);
   if(n>=R.pr.nSeg){R.ph='done';RW.why='';log('the railway is complete — '+R.pr.len.toFixed(0)+' m of track with buffer stops at both ends. the crew heads home','good');SFX('craft');saveGame()}
   else if(n%10===0){log('railway: '+n+' / '+R.pr.nSeg+' sections laid','good');saveGame()}
@@ -8790,8 +8862,9 @@ function rwAndroidStep(s,dt){
   let moving=false;
   const off=rwOffice();
   const R=rwActive();
+  if(!R&&s.st!=='rwHome'&&(RW.queue.length||(RW.job&&RW.jobKind==='prof'))){s.speed=0;return false}      /* routes still being restored after a load */
   if((!R||!off)&&s.st!=='rwHome'){rwRelease(s);s.cur=null;s.route=null;s.st='rwHome'}
-  else if(R&&s.st!=='rwHome'&&!rwCrewBot()){rwWhy('the battery robot is gone — the android stands down until one joins it');rwLeave(s,'seek');return false}
+  else if(R&&s.st!=='rwHome'&&!rwBotFor(s)){rwWhy('the battery robot is gone — the android stands down until one joins it');rwLeave(s,'seek');return false}
   else if(R&&s.route!==R&&s.st!=='rwHome'){rwRelease(s);s.route=R;s.seg=-1;s.cur=null;s.st='rwPrep'}
   const brake=()=>{s.speed+=clamp(-s.speed,-5*dt,5*dt)};
   switch(s.st){
@@ -8801,9 +8874,14 @@ function rwAndroidStep(s,dt){
     }
     case 'rwPrep':{
       brake();
-      if(s.pow<12&&!rwCrewBot()){rwLeave(s,'seek');break}
+      if(s.pow<12&&!rwBotFor(s)){rwLeave(s,'seek');break}
       let k=s.seg;
-      if(k<0||R.laid[k]){k=-1;const b=rwBuiltRun(R);if(b<R.pr.nSeg)k=b}
+      if(k<0||R.laid[k]){
+        /* each crew works inward from its own end of the line */
+        k=-1;const nS=R.pr.nSeg,bs=rwBuiltRun(R),be=rwBuiltEnd(R);
+        if(s.rwEnd===1){for(let i=nS-1-be;i>=Math.max(0,nS-7-be);i--)if(!R.laid[i]&&(!R.claim[i]||rwClaimOk(R.claim[i],s))){k=i;break}}
+        else{for(let i=bs;i<Math.min(nS,bs+6);i++)if(!R.laid[i]&&(!R.claim[i]||rwClaimOk(R.claim[i],s))){k=i;break}}
+      }
       if(k<0){s.st='rwWait';s.planT=1.5;break}
       s.seg=k;R.claim[k]=s.id;
       const need=rwNeed(R,k);
@@ -8829,15 +8907,19 @@ function rwAndroidStep(s,dt){
     case 'rwWalk':{
       const k=s.seg;if(k<0||R.laid[k]){s.st='rwPrep';break}
       const sp=rwSpot(R,k);
-      s.tgtT+=dt;if(s.tgtT>180){rwRelease(s);s.st='rwWait';s.planT=4;break}
+      s.tgtT+=dt;
+      /* close enough is enough: within reach of the section, not on an exact spot that a landmark may be in the way of */
+      const dm=scrDist(s.pos.x,s.pos.z,sp.mx,sp.mz);
+      if(dm<=4.8||(s.tgtT>25&&dm<9)){s.st='rwLay';s.curT=0;s.curD=9;s.cur=RW_LAYREC;s.speed=0;break}
+      if(s.tgtT>180){rwRelease(s);s.st='rwWait';s.planT=4;break}
       moving=true;
-      if(scrDrive(s,dt,sp.x,sp.z,.45,null,AN.speed/SC.speed)){s.st='rwLay';s.curT=0;s.curD=9;s.cur=RW_LAYREC}
+      if(scrDrive(s,dt,sp.x,sp.z,1.6,null,AN.speed/SC.speed)){s.st='rwLay';s.curT=0;s.curD=9;s.cur=RW_LAYREC}
       break;
     }
     case 'rwLay':{
       const k=s.seg;if(k<0||R.laid[k]){s.cur=null;s.st='rwPrep';break}
       brake();const sp=rwSpot(R,k);
-      scrTurnTo(s,dt,sp.yaw);
+      scrTurnTo(s,dt,Math.atan2(sp.mx-s.pos.x,sp.mz-s.pos.z));
       s.curT+=dt;s.pow=Math.max(0,s.pow-AN.drain*dt);
       s.tapT-=dt;if(s.tapT<=0){s.tapT=.55;s.clack=true}
       if(s.curT>=s.curD){
@@ -8888,7 +8970,7 @@ function battStep(s,dt){
     let goal=null,tol=4.5,mode='home';
     const low=s.pow<BB.B*.12;
     /* the crew robot stays with its android for as long as the android is on the job: out, and all the way home again */
-    const crewA=(RW.crew.bot===s.id)?G.struct.find(o=>o.id===RW.crew.android&&o.rw):null;
+    const crew=RW.crews.find(c=>c.bot===s.id),crewA=crew?G.struct.find(o=>o.id===crew.android&&o.rw):null;
     if(low)mode='rest';
     else if(crewA){mode='escort';goal=[crewA.pos.x,crewA.pos.z];tol=4.2}
     else{
@@ -9281,25 +9363,52 @@ function rwRenderTick(){
 /* ── saves: only the routes (nodes) and how much of each is laid. the assets are rebuilt from them ── */
 function railSave(){
   if(!RW.routes.length&&!(RW.pair&&RW.jobKind==='plan'))return undefined;
-  const o={r:RW.routes.map(R=>({n:R.nodes.map(p=>[+p[0].toFixed(1),+p[1].toFixed(1)]),ph:R.ph,b:R.pr?rwBuiltRun(R):(R.built|0)}))};
+  const o={r:RW.routes.map(R=>({n:R.nodes.map(p=>[+p[0].toFixed(1),+p[1].toFixed(1)]),ph:R.ph,b:R.pr?rwBuiltRun(R):(R.built|0),e:R.pr?rwBuiltEnd(R):(R.builtEnd|0)}))};
   if(RW.pair&&RW.jobKind==='plan')o.pend=RW.pair.slice();
+  const cr=[];
+  for(const c of RW.crews){
+    const A=rwCrewAndroid(c),B=G.struct.find(q=>q.id===c.bot&&q.type==='battbot');
+    if(!(A&&B&&A.rw))continue;
+    const og=A.rwOrigin,pi=og&&og.pad?G.struct.indexOf(og.pad):-1,e={a:G.struct.indexOf(A),b:G.struct.indexOf(B),h:A.st==='rwHome'?1:0,e:c.end};
+    if(og&&Number.isFinite(og.x))e.og={p:pi,x:+og.x.toFixed(1),z:+og.z.toFixed(1)};
+    cr.push(e);
+  }
+  if(cr.length)o.crew=cr;
   return o;
 }
 function railValid(r){
   const f=v=>typeof v==='number'&&Number.isFinite(v);
   if(r===undefined)return true;
   if(!r||typeof r!=='object')return false;
-  const routeOK=q=>q&&typeof q==='object'&&Array.isArray(q.n)&&q.n.length>=3&&q.n.length<=4000&&q.n.every(p=>Array.isArray(p)&&p.length===2&&f(p[0])&&f(p[1]))&&(q.b===undefined||(Number.isInteger(q.b)&&q.b>=0));
+  const routeOK=q=>q&&typeof q==='object'&&Array.isArray(q.n)&&q.n.length>=3&&q.n.length<=4000&&q.n.every(p=>Array.isArray(p)&&p.length===2&&f(p[0])&&f(p[1]))&&(q.b===undefined||(Number.isInteger(q.b)&&q.b>=0))&&(q.e===undefined||(Number.isInteger(q.e)&&q.e>=0));
   if(r.r!==undefined&&(!Array.isArray(r.r)||r.r.length>24||!r.r.every(routeOK)))return false;
   if(r.n!==undefined&&!routeOK(r))return false;                    /* the first version of the railway saved a single route this way */
   if(r.pend!==undefined&&(!Array.isArray(r.pend)||r.pend.length!==2||r.pend.some(i=>![0,1,2].includes(i))))return false;
+  if(r.crew!==undefined){
+    const list=Array.isArray(r.crew)?r.crew:[r.crew];
+    if(list.length>2)return false;
+    for(const c of list){
+      if(!c||typeof c!=='object'||!Number.isInteger(c.a)||!Number.isInteger(c.b)||c.a<0||c.b<0||(c.h!==0&&c.h!==1)||(c.e!==undefined&&c.e!==0&&c.e!==1))return false;
+      if(c.og!==undefined&&(!c.og||!Number.isInteger(c.og.p)||c.og.p<-1||!f(c.og.x)||!f(c.og.z)))return false;
+    }
+  }
   return true;
 }
 function railLoad(r){
   rwResetAll();
   if(!r)return;
   const list=Array.isArray(r.r)?r.r:(r.n?[r]:[]);
-  for(const q of list){const R=rwNewRoute(q.n,q.ph==='done'?'done':'building',q.b|0);RW.routes.push(R);RW.queue.push(R)}
+  for(const q of list){const R=rwNewRoute(q.n,q.ph==='done'?'done':'building',q.b|0);R.builtEnd=q.e|0;RW.routes.push(R);RW.queue.push(R)}
+  /* the crews carry on where they left off: each android back on the job (or on its way home), its robot still escorting it */
+  for(const c of (Array.isArray(r.crew)?r.crew:(r.crew?[r.crew]:[]))){
+    const A=G.struct[c.a],B=G.struct[c.b];
+    if(A&&A.type==='android'&&B&&B.type==='battbot'){
+      RW.crews.push({android:A.id,bot:B.id,end:c.e|0});
+      A.rw=true;A.seg=-1;A.route=null;A.cur=null;A.planT=0;A.tgtT=0;A.apT=0;A.rwEnd=c.e|0;
+      A.rwOrigin=c.og?{pad:(c.og.p>=0&&G.struct[c.og.p]&&G.struct[c.og.p].type==='dockpad')?G.struct[c.og.p]:null,x:c.og.x,z:c.og.z}:{pad:null,x:A.x,z:A.z};
+      A.st=c.h?'rwHome':'rwPrep';
+    }
+  }
   if(r.pend&&G.waypoints[r.pend[0]]&&G.waypoints[r.pend[1]]&&rwOffice())rwStartPlan(r.pend[0],r.pend[1]);
 }
 
@@ -12113,7 +12222,7 @@ function drawMarkers(){
   const box=$('#markers');
   const W=innerWidth,H=innerHeight;
   let h='';
-  if(G.findOn)for(const f of scannerList()){
+  if(G.findOn)try{for(const f of scannerList()){
     const dx=f.x-P.x,dz=f.z-P.z,dd=Math.hypot(dx,dz);
     if(dd<3)continue;
     _v.set(f.x,heightAt(f.x,f.z)+1.2,f.z);
@@ -12123,7 +12232,7 @@ function drawMarkers(){
     if(sx<-40||sx>W+40||sy<-20||sy>H+20)continue;
     h+=`<div class="mk2 ${f.droid?'d':f.mark?'':'w'}" style="left:${sx.toFixed(0)}px;top:${sy.toFixed(0)}px">
       <span class="g">${f.droid?'◈':f.mark?'◆':'◇'}</span>${f.d.n} ${dd.toFixed(0)}m</div>`;
-  }
+  }}catch(e){console.warn('finder markers',e)}
   if(WAY){
     const p=projectHUDMarker(WAY.x,heightAt(WAY.x,WAY.z)+1.2,WAY.z);
     if(p){
@@ -12467,7 +12576,7 @@ function step(dt){
   autosaveAcc+=dt;
   if(autosaveAcc>20){autosaveAcc=0;saveGame()}
   hudAcc+=dt;
-  if(hudAcc>0.12){hudAcc=0;hudTick(dt);crawlerHud();drawMarkers();if(selectedPanel==='fab'&&Fab.state==='running'){const fb=$('#fq-bar'),fp=$('#fq-pct');if(fb){const p=clamp(1-Fab.ctx.left/Fab.ctx.total,0,1);fb.style.width=(p*100)+'%';fp.textContent=Math.round(p*100)+'%'}}}
+  if(hudAcc>0.12){hudAcc=0;hudTick(dt);try{crawlerHud()}catch(e){console.warn('crawler hud',e)}drawMarkers();if(selectedPanel==='fab'&&Fab.state==='running'){const fb=$('#fq-bar'),fp=$('#fq-pct');if(fb){const p=clamp(1-Fab.ctx.left/Fab.ctx.total,0,1);fb.style.width=(p*100)+'%';fp.textContent=Math.round(p*100)+'%'}}}
 }
 function frame(){
   requestAnimationFrame(frame);
