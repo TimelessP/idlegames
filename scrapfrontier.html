@@ -9353,20 +9353,23 @@ function rwDisposeGroup(g){
   g.traverse(o=>{if(o.userData&&o.userData.own&&o.geometry)o.geometry.dispose();if(o.isInstancedMesh&&o.dispose)o.dispose()});
 }
 function rwDropSections(R){if(R&&R.secs){for(const s of R.secs.values())if(s.g)rwDisposeGroup(s.g);R.secs.clear()}}
+/* sections are built around wherever the CAMERA is: the quadcopter when it is flying, otherwise the player. the world streamer does the same. */
 function rwRenderTick(){
-  const px=P.x,pz=P.z,Rd=(SET.draw+.5)*CFG.CH;let best=null;const hidden=[];
+  const V=Drone.on?Drone:P,px=V.x,pz=V.z,Rd=(SET.draw+.5)*CFG.CH,cands=[],hidden=[];
   for(const R of RW.routes){
     if(!R.pr||!R.meta)continue;
     for(let k=0;k<R.meta.length;k++){
       const m=R.meta[k],d=Math.hypot(m.cx-px,m.cz-pz)-m.r,sec=R.secs.get(k);
       if(d<Rd){
-        if(!sec||sec.dirty){if(!best||d<best.d)best={d,k,R}}
+        if(!sec||sec.dirty)cands.push({d,k,R});
         else{sec.g.visible=true;sec.t=RW.tick}
       }else if(sec){sec.g.visible=false;hidden.push([R,k,sec])}
     }
   }
-  if(best){
-    const {R,k}=best,old=R.secs.get(k);
+  /* nearest first; one a frame on foot, up to three while the drone is moving fast enough to need them */
+  cands.sort((a,b)=>a.d-b.d);
+  for(const {R,k} of cands.slice(0,Drone.on?3:1)){
+    const old=R.secs.get(k);
     if(old&&old.g)rwDisposeGroup(old.g);
     const g=rwBuildSection(R,k);scene.add(g);R.secs.set(k,{g,dirty:false,t:RW.tick});
   }
@@ -9837,9 +9840,11 @@ function trainStep(dt){
     if(P.aboard===T&&T.lever&&!uiBlocking())trainLeverInput(T,dt);
     else if(P.aboard!==T)T.lever=false;
     trainSim(T,dt);
-    const pr=T.R.pr,mid=rwAt(pr,T.d-TC_LT/2,_ta),dist=Math.hypot(mid.x-P.x,mid.z-P.z);
-    T.near=dist-TC_LT/2;
-    T.vis=P.aboard===T||dist<(SET.draw+.5)*CFG.CH+TC_LT;
+    /* near = how far from the player's ears (for sound); vnear = how far from the camera (the quadcopter when it is flying), which decides what is drawn */
+    const V=Drone.on?Drone:P,pr=T.R.pr,mid=rwAt(pr,T.d-TC_LT/2,_ta);
+    T.near=Math.hypot(mid.x-P.x,mid.z-P.z)-TC_LT/2;
+    T.vnear=Math.hypot(mid.x-V.x,mid.z-V.z)-TC_LT/2;
+    T.vis=P.aboard===T||T.vnear<(SET.draw+.5)*CFG.CH;
     for(const c of T.cars)c.g.visible=T.vis;
     if(!T.vis)continue;
     trainPose(T);
@@ -9864,11 +9869,11 @@ function trainLights(dt){
     TL.head.target=TL.tgt;scene.add(TL.room,TL.head,TL.tgt);
   }
   let T=trainOf();
-  if(!T){let bd=1e9;for(const t of TR.list)if(t.vis&&t.near<bd){bd=t.near;T=t}}
+  if(!T){let bd=1e9;for(const t of TR.list)if(t.vis&&t.vnear<bd){bd=t.vnear;T=t}}
   const k=Math.min(1,dt*6),on=!!(T&&T.vis&&T.lampsOn),night=isNight();
   if(!on){TL.room.intensity=lerp(TL.room.intensity,0,k);TL.head.intensity=lerp(TL.head.intensity,0,k);return}
   let ci=T.pc;
-  if(P.aboard!==T){let bd=1e9;T.cars.forEach((c,i)=>{const d=Math.hypot(c.x-P.x,c.z-P.z);if(d<bd){bd=d;ci=i}})}
+  if(P.aboard!==T){const V=Drone.on?Drone:P;let bd=1e9;T.cars.forEach((c,i)=>{const d=Math.hypot(c.x-V.x,c.z-V.z);if(d<bd){bd=d;ci=i}})}
   const c=T.cars[ci];
   c.g.localToWorld(TL.room.position.set(0,TC.F+1.95,0));
   TL.room.intensity=lerp(TL.room.intensity,(night?26:12)*(.97+.03*Math.sin(now()*7)),k);
