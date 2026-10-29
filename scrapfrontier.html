@@ -802,6 +802,7 @@ MATERIALS  (all generated at boot in forgeAsm; nothing is a loaded asset)
       aCanvas / aOlive  woven fabric, tide-line stains, stitched patches
       aRubber · aRope · aConc · aSoil · aCopper (verdigris) · aSolar (cracked, dusty)
       aGlass (dust haze)   aRockS (bedded risers)   aRockT (weathered ledges)
+      aGlassT  train windows: clear glass with per-texel alpha, so only the hard grime (streaks, caked patches) is opaque
   • Each sheet carries colour + height → normal map + a packed rough/metal map.
     Metal is where the paint is chipped through, never on clean paint.
   • UVs are in METRES (tiledGeo / extrude tile) so a 3 m sheet and a 3 cm rail wear
@@ -872,6 +873,17 @@ CONSTRUCTION KITS (bp_*) - see section 10c
   by a few mm per piece (bpVar) because neighbours share corners; keep moving parts in a K.dyn()
   group (the door leaf is s.leaf). Shelter: any kit piece within ~4 m (bpWarm, via nearWarm).
   Console helper: BP.give(6) fills the satchel with kits.
+
+TRAIN BENCHES (passenger wagon)
+  Each bench has two seats (TR_SEATS lists side + z centre; a seat is a hold-E station). Sitting sets T.seat = {ci,sx,lx,lz,ry}: the
+  player is pinned to the seat and the look direction is stored RELATIVE to the coach (ry), so P.yaw = coach yaw + ry every frame and the
+  view rides round the curves hands-free. trainSeatLook() is the one place that turns mouse / touch / pad input into ry.
+
+RAILWAY EXTENSION (planning office)
+  'extend the nearest track end to WPn' plans from a laid track end at its own heading and rail height (rwExtendGen), then re-profiles
+  the old nodes + the new ones as ONE longer route that is built only as far as that end had got (rwExtNodes / rwExtCommit). Either end can
+  be the one extended; the old buffer stop simply stops being an end. Cancelling while it runs deletes the line; finding no solution
+  leaves the line exactly as it was.
 
 ADDING A NEW ASSEMBLY
   1. Add its WORKS entry as usual.  2. Write asmName(K,s) and register it in ASMFN.
@@ -2153,6 +2165,13 @@ const glassFn=(u,v,q)=>{
   ST(q,[146,172,170]);BL(q,[190,176,148],sm_(.4,.85,d)*.7);BL(q,[96,82,60],sm_(.6,.8,st)*.3);
   q.h=.5;q.ro=lerp(.12,.7,sm_(.4,.85,d));q.me=0;
 };
+/* train windows: clear glass. the haze is thin; only the streaks and the caked patches are opaque (per-texel alpha, material opacity 1) */
+const glassTFn=(u,v,q)=>{
+  const d=pfb(u,v,5,5,191,4),st=pfb(u,v,14,2,193,2),hz=sm_(.5,.9,d),gr=sm_(.6,.8,st),cake=sm_(.74,.92,d);
+  ST(q,[150,176,176]);BL(q,[190,176,148],hz*.4+cake*.4);BL(q,[96,82,60],gr*.5);
+  q.h=.5;q.ro=lerp(.1,.6,hz);q.me=0;
+  q.a=Math.round(255*clamp(.3+hz*.07+Math.max(cake*.75,gr*.9)*.5,0,.95));
+};
 const copperFn=(u,v,q)=>{
   const f=pfb(u,v,8,8,201,4),vd=sm_(.4,.7,pfb(u,v,6,6,203,4));
   ST(q,[150,88,54]);BL(q,[84,134,112],vd*.85);BL(q,[52,36,28],sm_(.6,.8,f)*.4);
@@ -2350,6 +2369,7 @@ async function forgeAsm(say_){
   await step('dusting glass and copper');
   asmMat('aSolar',256,.624,solarFn,{bump:1.6});
   asmMat('aGlass',128,1,glassFn,{bump:1,opacity:.6,side:D});
+  asmMat('aGlassT',128,1,glassTFn,{bump:1,opacity:1,side:D});
   asmMat('aCopper',128,.6,copperFn,{bump:2.6});
   await step('mixing enamel, growing cactus skin');
   asmMat('aRed',256,1,plateFn(ASMPAL.red,800,true),{bump:2.4});
@@ -2371,7 +2391,7 @@ async function forgeAsm(say_){
   await step('layering sandstone');
   asmMat('aRockS',512,2.2,rockSideFn,{bump:3.6});
   asmMat('aRockT',256,1.6,rockTopFn,{bump:3.2});
-  MAT.aGlass.depthWrite=false;
+  MAT.aGlass.depthWrite=false;MAT.aGlassT.depthWrite=false;
   traderPrewarm();
 }
 
@@ -5827,7 +5847,7 @@ function makeStructure(type,x,z,rot,y,o){
 function removeStructure(s,refund){
   if(s.deck){const di=DECKS.indexOf(s.deck);if(di>=0)DECKS.splice(di,1)}
   if(isDroid(s))scrRelease(s);
-  if(s.type==='railoffice'&&RW.job&&RW.jobKind==='plan'&&!G.struct.some(o=>o!==s&&o.type==='railoffice'))rwCancel();
+  if(s.type==='railoffice'&&RW.job&&['plan','xplan','xprof'].includes(RW.jobKind)&&!G.struct.some(o=>o!==s&&o.type==='railoffice'))rwCancel(true);
   if(s.type==='dockpad'){for(const r0 of G.struct)if(isDroid(r0)&&r0.pad===s){r0.pad=null;if(['dock','toPad','align','wait'].includes(r0.st))r0.st='seek'}s.robot=null;s.queue=[]}
   if(s.type==='crawler'&&(P.aboard===s||G.drive===s))leaveCrawler(s,true);
   else if(G.drive===s){if(s.type==='plane'||s.type==='heli')exitPlane(true);else exitBuggy()}
@@ -7331,7 +7351,7 @@ function playerTick(dt){
   P.hp=clamp(P.hp,0,1);
   if(P.hp<=0){if(P.aboard)leaveCrawler(P.aboard,true);Drifter.dispatch('die');P.hp=0.45;P.hyd=Math.max(P.hyd,0.45);P.nut=Math.max(P.nut,0.35);P.x=7;P.z=7;P.vx=P.vz=0;P.y=heightAt(7,7);Drifter.dispatch('revive');SFX('bad');log('you black out and wake at the old camp, parched.','bad')}
   /* hand */
-  const eye=1.68-0.62*Drifter.ctx.crouch-(G.drive?0.5:0);
+  const eye=1.68-0.62*Drifter.ctx.crouch-(G.drive?0.5:0)-((P.aboard&&P.aboard.seatK)?P.aboard.seatK*.56:0);
   const bobY=Math.sin(Drifter.ctx.bobT*2)*0.035*clamp(spd/4,0,1.6);
   const bobX=Math.cos(Drifter.ctx.bobT)*0.028*clamp(spd/4,0,1.6);
   camera.position.set(P.x+bobX*0.4,P.y+eye+bobY,P.z);
@@ -8656,7 +8676,7 @@ function padDraw(s,d){return s.charging?d.draw:SC.padIdle}
    §17  RAILWAY — planning (time-sliced generators), route, profile
    ─────────────────────────────────────────────────────────────────────── */
 const RWC={L:10,MAXG:.08,GAUGE:1.435,LIFT:.12,SS:1.5,SPS:4,SEC:8,BUDGET:240000,CELL:5,GOAL:12,SHORE_X:2.05};
-const RW={rail:null,pr:null,job:null,jobKind:'',dl:0,prog:0,msg:'',pair:null,laid:null,claim:null,secs:new Map(),why:'',whyT:-1e9,hc:new Map(),bc:new Map(),sleeperGeo:null,lineMat:null,tick:0};
+const RW={ext:null,hold:false,rail:null,pr:null,job:null,jobKind:'',dl:0,prog:0,msg:'',pair:null,laid:null,claim:null,secs:new Map(),why:'',whyT:-1e9,hc:new Map(),bc:new Map(),sleeperGeo:null,lineMat:null,tick:0};
 /* height cache on a 2 m lattice, bilinear between: the planner asks thousands of questions per frame */
 function rwH(x,z){
   const fx=Math.floor(x/2),fz=Math.floor(z/2),tx=x/2-fx,tz=z/2-fz,hc=RW.hc;
@@ -8702,12 +8722,13 @@ function rwHeap(){
 }
 /* heading-aware weighted A* on a lattice of 8 m steps with at most 22.5° of turn per step (≈20 m radius).
    status: found · exhausted (everything reachable has been tried) · budget (gave up; best is the closest it got) */
-function* rwAStar(sx,sz,gx,gz){
+function* rwAStar(sx,sz,gx,gz,seed){
   const L=RWC.L,W=2.0,open=rwHeap(),seen=new Map(),closed=[];
   const key=(x,z,h)=>(((Math.floor(x/RWC.CELL)+8192)*16384+(Math.floor(z/RWC.CELL)+8192))*16+h);
   const d0=Math.hypot(gx-sx,gz-sz)||1;let best=null,bestD=1e9,exp=0;
   const y0=rwH(sx,sz),face=Math.atan2(gz-sz,gx-sx);
   for(let h=0;h<16;h++){
+    if(seed&&seed.hs&&!seed.hs.includes(h))continue;      /* an extension may only leave in the direction the track end points */
     const turn=Math.abs(((h*TAU/16-face+Math.PI*3)%TAU)-Math.PI);
     const n={x:sx,z:sz,y:y0,h,g:turn>1.2?4:0,p:null,dead:false,tr:0,run:0};n.f=n.g+W*d0;seen.set(key(sx,sz,h),n);open.push(n);
   }
@@ -8877,6 +8898,7 @@ function rwSetProfile(R,pr){
 function rwFreeAndroids(){for(const s of G.struct)if(s.type==='android'&&s.rw){s.rw=false;s.cur=null;s.seg=-1;s.route=null;if(String(s.st).startsWith('rw'))s.st='seek'}}
 function rwResetAll(){
   for(const R of RW.routes){trainRemove(R);rwDropSections(R)}
+  RW.ext=null;RW.hold=false;
   RW.routes=[];RW.queue=[];RW.job=null;RW.jobKind='';RW.jobR=null;RW.pair=null;RW.why='';RW.crews=[];rwFreeAndroids();_fc.clear();
 }
 function rwDeleteRoute(R){
@@ -8884,6 +8906,7 @@ function rwDeleteRoute(R){
   const i=RW.routes.indexOf(R);if(i>=0)RW.routes.splice(i,1);
   RW.queue=RW.queue.filter(q=>q!==R);_fc.clear();
   if(RW.jobR===R){RW.job=null;RW.jobKind='';RW.jobR=null}
+  if(RW.ext&&RW.ext.c.R===R){RW.job=null;RW.jobKind='';RW.ext=null;RW.hold=false}
   for(const s of G.struct)if(s.type==='android'&&s.rw&&s.route===R){s.route=null;s.seg=-1;s.cur=null;s.st='rwHome'}
   RW.why='';
 }
@@ -8896,10 +8919,102 @@ function rwStartPlan(a,b){
   RW.job=rwPlanGen({x:A.x,z:A.z},{x:B.x,z:B.z});RW.jobKind='plan';RW.pair=[a,b];RW.prog=0;RW.msg='surveying the ground';RW.quiet=false;RW.jobR=null;
   log('the office begins planning a track from WP'+(a+1)+' to WP'+(b+1)+' — '+Math.hypot(A.x-B.x,A.z-B.z).toFixed(0)+' m apart','gold');SFX('craft');
 }
-function rwCancel(){
+function rwCancel(keep){
+  const X=RW.ext;
+  if(X){      /* an extension in progress: the line was taken into the plan, so cancelling now deletes it (unless the office itself was pulled down) */
+    const R=X.c.R;RW.job=null;RW.jobKind='';RW.pair=null;RW.jobR=null;RW.prog=0;RW.ext=null;RW.hold=false;
+    if(!keep&&RW.routes.includes(R)){rwDeleteRoute(R);log('extension cancelled — the line has been deleted','gold')}
+    else log('railway planning cancelled','gold');
+    SFX('place');saveGame();return;
+  }
   if(RW.jobKind==='prof'&&!RW.quiet&&RW.jobR){const i=RW.routes.indexOf(RW.jobR);if(i>=0)RW.routes.splice(i,1)}
   RW.job=null;RW.jobKind='';RW.pair=null;RW.jobR=null;RW.prog=0;
   log('railway planning cancelled','gold');SFX('place');saveGame();
+}
+
+/*  extending a line. the planner starts from a LAID track end, leaving it along its own heading and from its own rail height, plans on toward a
+    waypoint, and the result is joined to the line as ONE longer route that has only been built as far as that end had got. it works from either
+    end of a finished line, or from the head of a line still being built from one side; the buffer stop there simply stops being an end.  */
+const rwExtClear=()=>{RW.ext=null;RW.hold=false};
+function rwEndCands(){
+  const out=[];
+  for(const R of RW.routes){
+    const pr=R.pr;if(!pr||RW.jobR===R||(RW.ext&&RW.ext.c.R===R))continue;
+    const nS=pr.nSeg,bs=rwBuiltRun(R),be=rwBuiltEnd(R),done=R.ph==='done'||bs+be>=nS;
+    const mk=(side,i,sg)=>({R,side,i,done,x:pr.X[i],z:pr.Z[i],y:pr.Y[i]-RWC.LIFT,tx:pr.TX[i]*sg,tz:pr.TZ[i]*sg});
+    if(done){out.push(mk('far',pr.N-1,1),mk('start',0,-1))}
+    else if(bs>0&&be===0)out.push(mk('far',Math.min(pr.N-1,bs*RWC.SPS),1));                    /* built from the start only: its head is the track end */
+    else if(be>0&&bs===0)out.push(mk('start',Math.min(pr.N-1,(nS-be)*RWC.SPS),-1));            /* built from the far end only */
+  }
+  return out;
+}
+function rwNearestEnd(wi){
+  const B=G.waypoints[wi];if(!B)return null;
+  let c=null,bd=1e9;for(const q of rwEndCands()){const d=Math.hypot(q.x-B.x,q.z-B.z);if(d<bd){bd=d;c=q}}
+  return c?{c,d:bd}:null;
+}
+function rwStartExtend(wi){
+  const B=G.waypoints[wi];
+  if(!B){log('that waypoint must be set first','bad');SFX('bad');return}
+  if(RW.job){log('the planners are still busy with another job','bad');SFX('bad');return}
+  const n=rwNearestEnd(wi);
+  if(!n){log('there is no laid track end to extend yet','bad');SFX('bad');return}
+  const c=n.c;
+  RW.ext={c,wi,nodes:null};RW.hold=!c.done;       /* a line still being built stands still while it is re-planned */
+  RW.job=rwExtendGen(c,{x:B.x,z:B.z});RW.jobKind='xplan';RW.pair=null;RW.prog=0;RW.msg='surveying from the track end';RW.quiet=false;RW.jobR=null;
+  log('the office begins planning an extension from the '+(c.done?(c.side==='far'?'far':'start')+' end':'head')+' of the line at '+rwPos([c.x,c.z])+' toward WP'+(wi+1)+' · '+n.d.toFixed(0)+' m away','gold');SFX('craft');
+}
+function* rwExtendGen(c,B){
+  RW.hc.clear();RW.bc.clear();RW.prog=0;RW.msg='surveying from the track end';
+  const L=RWC.L,d0=Math.hypot(c.x-B.x,c.z-B.z),a0=Math.atan2(c.tz,c.tx);
+  if(d0<RWC.GOAL*2){RW.msg='that waypoint is already at the end of the track';return null}
+  /* the first step runs straight on from the track end (a few degrees either way if the ground insists) */
+  let s1=null;
+  for(const da of [0,.15,-.15,.3,-.3,.45,-.45]){
+    const a=a0+da,x=c.x+Math.cos(a)*L,z=c.z+Math.sin(a)*L;
+    if(rwStep(c.x,c.z,c.y,x,z,0)>=0){s1={x,z,a};break}
+  }
+  if(!s1){RW.msg='the ground straight ahead of that track end is too steep or blocked';return null}
+  yield;
+  const h=((Math.round(s1.a/(TAU/16))%16)+16)%16;
+  const r=yield* rwAStar(s1.x,s1.z,B.x,B.z,{hs:[h]});
+  let path,note='';
+  if(r.status==='found')path=rwChain(r.node);
+  else if(r.status==='budget'&&r.node){path=rwChain(r.node);note='no gentle route found in the search budget — extended as far as it got'}
+  else{RW.msg='no gentle extension exists from that track end';return null}
+  path=[[c.x,c.z]].concat(path);
+  const e=path[path.length-1],dE=Math.hypot(e[0]-B.x,e[1]-B.z);
+  if(r.status!=='found'&&dE>d0-L*2){RW.msg='the search could not get any closer to that waypoint';return null}
+  if(path.length<3){RW.msg='the waypoint is too close to the track end to extend toward';return null}
+  if(!note&&dE>1&&dE<RWC.GOAL*1.5)path.push([B.x,B.z]);
+  RW.prog=Math.max(RW.prog,.85);
+  const cl=rwCutLoops(path);path=cl.P;
+  if(cl.cut)note=(note?note+'; ':'')+(cl.trunc?'the extension would have doubled back on itself, so it stops where it meets itself':'removed '+cl.cut+' loop'+(cl.cut>1?'s':''));
+  if(path.length<3){RW.msg='the extension came out too short to use';return null}
+  return{nodes:path,note};
+}
+/* the old nodes that stay, then the new ones: for the far end they follow on; for the start end the new ones are turned about and go in front */
+function rwExtNodes(c,nn){
+  const R=c.R,pr=R.pr,ns=R.nodes;
+  const idx=ns.map(p=>{let bi=0,bd=1e18;for(let i=0;i<pr.N;i++){const d=(pr.X[i]-p[0])**2+(pr.Z[i]-p[1])**2;if(d<bd){bd=d;bi=i}}return bi});
+  const keep=[];
+  if(c.side==='far'){
+    for(let j=0;j<ns.length;j++)if(idx[j]<=c.i-2)keep.push(ns[j]);
+    return keep.concat([[c.x,c.z]],nn.slice(1));
+  }
+  for(let j=0;j<ns.length;j++)if(idx[j]>=c.i+2)keep.push(ns[j]);
+  return nn.slice().reverse().concat(keep);
+}
+function rwExtCommit(X,pr){
+  const R=X.c.R,c=X.c,S=RWC.SPS;
+  let J=0,bd=1e18;for(let i=0;i<pr.N;i++){const d=(pr.X[i]-c.x)**2+(pr.Z[i]-c.z)**2;if(d<bd){bd=d;J=i}}
+  const nS=pr.nSeg;let b=0,e=0;
+  if(c.side==='far')b=clamp(Math.floor(J/S),0,nS-1);else e=clamp(nS-Math.ceil(J/S),0,nS-1);     /* built exactly as far as the old track end */
+  const hadTrain=!!R.train;
+  trainRemove(R);R.trainTried=false;R.trainSave=null;R.train=null;
+  R.nodes=X.nodes;R.bb=null;R.built=b;R.builtEnd=e;R.ph='building';
+  rwSetProfile(R,pr);_fc.clear();RW.why='';
+  log('railway extended: '+pr.len.toFixed(0)+' m in all, '+(nS-b-e)+' new sections to build ('+rwPos(rwEnds(R).a)+' → '+rwPos(rwEnds(R).b)+')'+(hadTrain?' · the train is taken off the line until it is complete again':'')+'. the crew carries on','good');SFX('craft');saveGame();
 }
 function rwJobTick(){
   if(!RW.job){
@@ -8908,7 +9023,7 @@ function rwJobTick(){
   }
   RW.dl=performance.now()+3.2;
   let r;
-  try{r=RW.job.next()}catch(e){console.error(e);RW.job=null;RW.pair=null;RW.jobR=null;log('the planners could not make sense of that ground','bad');return}
+  try{r=RW.job.next()}catch(e){console.error(e);RW.job=null;RW.pair=null;RW.jobR=null;rwExtClear();log('the planners could not make sense of that ground','bad');return}
   if(!r.done)return;
   const v=r.value,kind=RW.jobKind;RW.job=null;
   if(kind==='plan'){
@@ -8922,6 +9037,20 @@ function rwJobTick(){
     rwSetProfile(R,v);_fc.clear();
     if(R.ph==='done'&&!R.train){try{trainSpawn(R,R.trainSave)}catch(e){console.error('train spawn',e)}}
     if(!wasQuiet){log('railway planned: '+v.len.toFixed(0)+' m in '+v.nSeg+' sections ('+rwPos(rwEnds(R).a)+' → '+rwPos(rwEnds(R).b)+'). build an android and a battery robot and the crew will start','good');SFX('craft');saveGame()}
+  }else if(kind==='xplan'){
+    const X=RW.ext;if(!X)return;
+    if(!v){log(RW.msg||'the planners found no way to extend that line — it stays as it was','bad');SFX('bad');rwExtClear();RW.prog=0;return}
+    if(v.note)log('planners: '+v.note,'gold');
+    const nodes=rwExtNodes(X.c,v.nodes);
+    if(!nodes||nodes.length<3){log('the extension could not be joined to the line — it stays as it was','bad');SFX('bad');rwExtClear();return}
+    X.nodes=nodes;
+    RW.job=rwProfileGen(nodes);RW.jobKind='xprof';RW.jobR=X.c.R;RW.msg='joining the extension to the line';RW.prog=Math.max(RW.prog,.88);
+  }else if(kind==='xprof'){
+    const X=RW.ext;RW.jobR=null;RW.jobKind='';rwExtClear();RW.prog=0;
+    if(!X)return;
+    if(!v){log('the survey of that extension came out unusable — the line stays as it was','bad');SFX('bad');return}
+    if(!RW.routes.includes(X.c.R))return;
+    rwExtCommit(X,v);
   }
 }
 function rwTick(dt){
@@ -8935,7 +9064,7 @@ function rwTick(dt){
    Without both, nothing happens: the player has to build at least one of each. ── */
 Object.assign(AN_TXT,{rwPrep:'reading the plan',rwWalk:'walking to the track head',rwFab:'fabricating track parts',rwLay:'laying track',rwHome:'walking back to its charge pad',rwWait:'waiting for parts'});
 const rwOffice=()=>G.struct.find(o=>o.type==='railoffice')||null;
-const rwActive=()=>RW.routes.find(r=>r.pr&&r.ph==='building')||null;
+const rwActive=()=>RW.hold?null:(RW.routes.find(r=>r.pr&&r.ph==='building')||null);
 const rwBuilding=()=>!!(rwActive()&&rwOffice());
 const rwLaidCount=R=>{let n=0;if(R&&R.laid)for(let i=0;i<R.laid.length;i++)n+=R.laid[i];return n};
 function rwBuiltRun(R){let n=0;while(R&&R.laid&&n<R.laid.length&&R.laid[n])n++;return n}
@@ -9385,7 +9514,7 @@ function rwOfficeAction(s){
     Day.ctx.day++;respawnScrap();G.epochDay=Day.ctx.day-1;Day.ctx.t=0.02;log('you sleep. the day turns over.','good');SFX('craft');saveGame();
   }};
   if(RW.job&&RW.jobKind&&!RW.quiet){
-    return{label:'cancel railway planning',sub:'planning '+Math.round(RW.prog*100)+'% · '+RW.msg+' · hold E to cancel',time:1.2,run(){rwCancel()}};
+    return{label:'cancel railway planning',sub:'planning '+Math.round(RW.prog*100)+'% · '+RW.msg+' · hold E to cancel'+(RW.ext?' (this deletes the line being extended)':''),time:1.2,run(){rwCancel()}};
   }
   const n=RW.routes.length,act=rwActive();
   let sub=n?n+' route'+(n>1?'s':'')+(act?' · building '+rwLaidCount(act)+' / '+act.pr.nSeg+' sections'+(RW.why?' · '+RW.why:''):' · all complete'):'hold E — choose two waypoints to be the track ends';
@@ -9394,13 +9523,21 @@ function rwOfficeAction(s){
 }
 function rwOpenDialog(){
   const W=G.waypoints,pairs=[[0,1],[0,2],[1,2]];
-  let first=-1,h=`<p class="desc" style="margin-bottom:10px">The office plans a gently graded, meandering line with no points, switches or loops. It may move either end a little (or a long way, if one stands on ground no track can leave). No materials are needed to plan. Building needs one android and one battery robot.</p><div class="lbl" style="margin:6px 0">new route between</div>`;
+  let first=-1,h=`<p class="desc" style="margin-bottom:10px">The office plans a gently graded, meandering line with no points, switches or loops. It may move either end a little (or a long way, if one stands on ground no track can leave). No materials are needed to plan. Building needs one android and one battery robot. An existing line can also be extended from its nearest laid track end toward a waypoint; the extension carries on from that end's own heading and height. Cancelling an extension while it is being planned deletes that line.</p><div class="lbl" style="margin:6px 0">new route between</div>`;
   pairs.forEach(([a,b],i)=>{
     const ok=W[a]&&W[b],d=ok?Math.hypot(W[a].x-W[b].x,W[a].z-W[b].z):0;
     if(ok&&first<0)first=i;
     h+=`<label class="card ${ok?'':'locked'}" style="display:flex;gap:10px;align-items:center;padding:10px;margin:6px 0;cursor:${ok?'pointer':'not-allowed'}">
       <input type="radio" name="rwpair" value="${i}" ${ok?'':'disabled'} ${i===first?'checked':''} style="width:20px;height:20px">
       <span><b>WP${a+1} ⇄ WP${b+1}</b><br><span class="lbl">${ok?d.toFixed(0)+' m apart':'set both waypoints first'}</span></span></label>`;
+  });
+  h+=`<div class="lbl" style="margin:12px 0 6px">or extend a line from its nearest track end</div>`;
+  [0,1,2].forEach(w=>{
+    const near=W[w]?rwNearestEnd(w):null,ok=!!near,i=3+w;
+    if(ok&&first<0)first=i;
+    h+=`<label class="card ${ok?'':'locked'}" style="display:flex;gap:10px;align-items:center;padding:10px;margin:6px 0;cursor:${ok?'pointer':'not-allowed'}">
+      <input type="radio" name="rwpair" value="${i}" ${ok?'':'disabled'} ${i===first?'checked':''} style="width:20px;height:20px">
+      <span><b>nearest track end → WP${w+1}</b><br><span class="lbl">${ok?'from '+rwPos([near.c.x,near.c.z])+' · '+near.d.toFixed(0)+' m away':(W[w]?'no laid track end to extend yet':'set the waypoint first')}</span></span></label>`;
   });
   h+=`<div class="rule"></div><div class="lbl" style="margin:6px 0">routes (${RW.routes.length})</div>`;
   if(!RW.routes.length)h+=`<p class="desc">none yet.</p>`;
@@ -9414,7 +9551,8 @@ function rwOpenDialog(){
     {label:'plan route',cls:'pri',fn(){
       const el=document.querySelector('input[name=rwpair]:checked');
       if(!el){log('no waypoint pair chosen','bad');SFX('bad');return}
-      const p=pairs[+el.value];rwStartPlan(p[0],p[1]);
+      const v=+el.value;if(v>=3){rwStartExtend(v-3);return}
+      const p=pairs[v];rwStartPlan(p[0],p[1]);
     }},
     {label:'close',cls:'gho'}
   ]);
@@ -9729,7 +9867,7 @@ function trainShell(K,ctx,o){
     for(const h of holes){
       fill(x,.06,z,h.z0,F,F+H,sg+3);
       fill(x,.06,h.z0,h.z1,F,h.y0,sg+7);fill(x,.06,h.z0,h.z1,h.y1,F+H,sg+9);     /* sill and header */
-      if(h.glass){K.box('aGlass',x,(h.y0+h.y1)/2,(h.z0+h.z1)/2,.02,h.y1-h.y0+.04,h.z1-h.z0+.04);
+      if(h.glass){K.box('aGlassT',x,(h.y0+h.y1)/2,(h.z0+h.z1)/2,.02,h.y1-h.y0+.04,h.z1-h.z0+.04);
         for(const zz of [h.z0,h.z1])K.box('aBare',x,(h.y0+h.y1)/2,zz,.075,h.y1-h.y0+.05,.05);
         for(const yy of [h.y0,h.y1])K.box('aBare',x,yy,(h.z0+h.z1)/2,.075,.05,h.z1-h.z0+.05)}
       else{for(const zz of [h.z0,h.z1])K.box('aBare',x,F+1.0,zz,.08,2.0,.06)}          /* door frame */
@@ -9852,7 +9990,7 @@ function trainBodyLoco(K,ctx){
   /* the driver's window fills its opening exactly (x ±.95, F+1.05 to F+1.95 in the wall plane z=4.17): two panes tucked 2 cm behind the frame all round,
      and the frame itself (sill, head, two jambs, a centre post) standing proud of the wall on both faces, so nothing can show between glass and frame */
   const wz=TC.len/2-.03;
-  for(const sx of [-1,1])K.box('aGlass',sx*.49,F+1.5,wz,.94,.94,.02);
+  for(const sx of [-1,1])K.box('aGlassT',sx*.49,F+1.5,wz,.94,.94,.02);
   for(const y of [F+1.08,F+1.92])K.box('aBare',0,y,wz,1.92,.06,.1);
   for(const x of [-.95,.95])K.box('aBare',x,F+1.5,wz,.06,.9,.1);
   K.box('aBare',0,F+1.5,wz,.07,.9,.1);
@@ -9878,8 +10016,9 @@ function trainBodyLoco(K,ctx){
   }
   /* the lamp switch on the cab bulkhead; a lit headlamp on the nose */
   K.box('aBare',-1.15,F+1.25,1.35,.02,.16,.1);K.box('aRust',-1.14,F+1.25,1.35,.015,.08,.03);
+  K.box('aBare',-1.15,F+1.25,1.82,.02,.16,.1);K.box('aOchre',-1.14,F+1.25,1.82,.015,.08,.03);          /* the headlamp switch, beside the cabin one */
   K.box('aPlate',0,F+.95,TC.len/2+.02,.4,.3,.04);
-  const hl=K.box('lampOn',0,F+.95,TC.len/2+.05,.26,.2,.03);K.dyn(hl);ctx.lamps.push(hl);
+  const hl=K.box('lampOn',0,F+.95,TC.len/2+.05,.26,.2,.03);K.dyn(hl);ctx.heads.push(hl);
   /* roof: a solar array in two rows of three, tilted slightly toward the sun, on a frame; vents and a battery fan */
   for(let r=0;r<3;r++)for(const sx of [-1,1]){
     const z=-2.6+r*2.6;
@@ -9899,7 +10038,7 @@ TR_COL.passenger=[[-1.2,-.6,.85,2.6],[.6,1.2,.85,2.6],[-1.2,-.72,2.85,3.6],[.72,
 TR_COL.goods=TR_GOODS.map(b=>[b[0]-b[2]/2,b[0]+b[2]/2,b[1]-b[3]/2,b[1]+b[3]/2]).concat([[.55,1.2,.9,1.7],[-1.2,-.55,.65,1.65],[.6,1.15,-1.6,-.75]]);
 const TR_DOORS={loco:[-1.4],passenger:[0],goods:[0]};
 function trainBuildCar(kind){
-  const K=asmKit(),ctx={axles:[],lamps:[],kind};
+  const K=asmKit(),ctx={axles:[],lamps:[],heads:[],kind};
   trainChassis(K,ctx);
   (kind==='loco'?trainBodyLoco:kind==='goods'?trainBodyGoods:trainBodyPassenger)(K,ctx);
   trainLadders(K,TR_DOORS[kind]);
@@ -9915,12 +10054,12 @@ function trainSpawn(R,sv){
   if(R.train||!R.pr||R.trainTried)return;
   R.trainTried=true;
   if(R.pr.len<TC_LT+TC.endGap*2+6){log('that line is too short to run a train on','bad');return}
-  const T={type:'train',id:_trId++,R,cars:[],d:0,v:0,thr:0,thrT:0,auto:true,dir:1,wait:TC.waitEnd,lm:0,lampsOn:false,pow:TC.B*.6,brake:false,brakeT:0,
+  const T={type:'train',id:_trId++,R,cars:[],d:0,v:0,thr:0,thrT:0,auto:true,dir:1,wait:TC.waitEnd,lm:0,hm:0,lampsOn:false,headOn:false,seat:null,seatK:0,pow:TC.B*.6,brake:false,brakeT:0,
     lever:false,pc:0,ds:0,msgT:-1e9,vis:false,silent:false,pitchOf:0,spd:0};
   T.d=TC_LIM(T).lo;
   if(sv){
     T.d=clamp(+sv.d||T.d,TC_LIM(T).lo,TC_LIM(T).hi);T.v=clamp(+sv.v||0,-TC.vmax,TC.vmax);T.auto=sv.a!==0;T.dir=sv.dr<0?-1:1;
-    T.wait=clamp(+sv.w||0,0,TC.waitEnd);T.lm=(sv.l===1||sv.l===2)?sv.l:0;T.pow=clamp(+sv.p||TC.B*.6,0,TC.B);
+    T.wait=clamp(+sv.w||0,0,TC.waitEnd);T.lm=(sv.l===1||sv.l===2)?sv.l:0;T.hm=(sv.hl===1||sv.hl===2)?sv.hl:0;T.pow=clamp(+sv.p||TC.B*.6,0,TC.B);
     if(!T.auto){T.thr=clamp(T.v/(T.v>=0?TC.vmax:TC.vrev),-1,1)}
   }
   for(const kind of TC_KINDS){const c=trainBuildCar(kind);c.g.visible=false;scene.add(c.g);c.yaw=0;c.x=0;c.z=0;c.stn=null;T.cars.push(c)}
@@ -9936,12 +10075,13 @@ function trainRemove(R){
   TR.list.splice(TR.list.indexOf(T),1);R.train=null;
 }
 function trainSave(T){
-  const o={d:+T.d.toFixed(1),v:+T.v.toFixed(2),a:T.auto?1:0,dr:T.dir,w:+T.wait.toFixed(0),l:T.lm|0,p:+T.pow.toFixed(0)};
-  if(P.aboard===T)o.ab={c:T.pc,x:+P.lx.toFixed(2),z:+P.lz.toFixed(2)};
+  const o={d:+T.d.toFixed(1),v:+T.v.toFixed(2),a:T.auto?1:0,dr:T.dir,w:+T.wait.toFixed(0),l:T.lm|0,hl:T.hm|0,p:+T.pow.toFixed(0)};
+  if(P.aboard===T)o.ab=T.seat?{c:T.seat.ci,x:+T.seat.ex.toFixed(2),z:+T.seat.lz.toFixed(2)}:{c:T.pc,x:+P.lx.toFixed(2),z:+P.lz.toFixed(2)};     /* a seated player is saved standing in the aisle beside the seat */
   return o;
 }
 const trainOf=()=>(P.aboard&&P.aboard.type==='train')?P.aboard:null;
-const trainLevered=()=>{const T=trainOf();return !!(T&&T.lever)};
+const trainLevered=()=>{const T=trainOf();return !!(T&&(T.lever||T.seat))};      /* at the lever or on a bench: the walking keys do nothing */
+const trainSeated=()=>{const T=trainOf();return !!(T&&T.seat)};
 
 /* ── motion: heavy, gradual, and held back from the buffers ── */
 function trainAutoStep(T,dt,lim){
@@ -9957,6 +10097,7 @@ function trainSim(T,dt){
   const lim=TC_LIM(T),night=isNight(),sun=night?0:clamp(sunDir.y*1.4,0,1);
   const dark=night||sun<.22||WINDMUL.value>1.8;
   T.lampsOn=T.lm===1||(T.lm!==2&&dark);
+  T.headOn=T.hm===1||(T.hm!==2&&dark);
   if(T.auto){
     trainAutoStep(T,dt,lim);
     T.thr+=clamp(T.thrT-T.thr,-.22*dt,.22*dt);               /* the lever eases over to where the timetable wants it */
@@ -9974,7 +10115,7 @@ function trainSim(T,dt){
   const nd=T.d+T.v*dt;
   if(nd>lim.hi||nd<lim.lo){T.d=clamp(nd,lim.lo,lim.hi);T.v=0}else T.d=nd;
   T.ds=T.v*dt;T.spd=Math.abs(T.v);
-  const use=T.spd/TC.vmax*TC.drain+(T.lampsOn?TC.lamp*TC_KINDS.length:0);
+  const use=T.spd/TC.vmax*TC.drain+(T.lampsOn?TC.lamp*TC_KINDS.length*.7:0)+(T.headOn?TC.lamp*TC_KINDS.length*.3:0);
   T.pow=clamp(T.pow+(TC.solar*sun-use)*dt,0,TC.B);
   if(T.pow<=.5&&(T.v!==0||T.auto)&&now()-T.msgT>30){T.msgT=now();if(!T.silent)log('the loco\'s battery is flat — the train coasts to a stop and waits for sun','bad')}
 }
@@ -9994,7 +10135,12 @@ function trainToggleAuto(){
 function trainLightMode(){
   const T=trainOf();if(!T)return;
   T.lm=(T.lm+1)%3;
-  log('train lights: '+TC_LM[T.lm]+(T.lm===0?' — on when it gets dark':T.lm===1?' — always lit':' — dark'),'gold');SFX('click');
+  log('cabin lights: '+TC_LM[T.lm]+(T.lm===0?' — on when it gets dark':T.lm===1?' — always lit':' — dark'),'gold');SFX('click');
+}
+function trainHeadMode(){
+  const T=trainOf();if(!T)return;
+  T.hm=(T.hm+1)%3;
+  log('headlamp: '+TC_LM[T.hm]+(T.hm===0?' — on when it gets dark':T.hm===1?' — always lit':' — dark'),'gold');SFX('click');
 }
 function trainSleep(T){
   eLock=true;
@@ -10045,7 +10191,8 @@ function trainStep(dt){
     const on=T.lampsOn;
     for(const c of T.cars){
       for(const ax of c.axles)ax.rotation.x+=T.ds/TC.wr;
-      for(const b of c.lamps){b.material=on?MAT.lampOn:MAT.aRubber}       /* a lamp that is off is dark, not a dimmer glow */
+      for(const b of c.lamps){b.material=on?MAT.lampOn:MAT.aRubber}
+      for(const b of c.heads)b.material=T.headOn?MAT.lampOn:MAT.aRubber;       /* a lamp that is off is dark, not a dimmer glow */
       if(c.lever)c.lever.rotation.x=lerp(c.lever.rotation.x,-T.thr*.7,Math.min(1,dt*6));
       if(c.needle)c.needle.rotation.z=lerp(c.needle.rotation.z,1.2-2.4*clamp(T.spd/TC.vmax,0,1),Math.min(1,dt*4));
       if(c.gauge){const f=clamp(T.pow/TC.B,.03,1);c.gauge.scale.x=.3*f;c.gauge.position.x=-.2+.15*f}
@@ -10064,17 +10211,20 @@ function trainLights(dt){
   }
   let T=trainOf();
   if(!T){let bd=1e9;for(const t of TR.list)if(t.vis&&t.vnear<bd){bd=t.vnear;T=t}}
-  const k=Math.min(1,dt*6),on=!!(T&&T.vis&&T.lampsOn),night=isNight();
-  if(!on){TL.room.intensity=lerp(TL.room.intensity,0,k);TL.head.intensity=lerp(TL.head.intensity,0,k);return}
-  let ci=T.pc;
-  if(P.aboard!==T){const V=Drone.on?Drone:P;let bd=1e9;T.cars.forEach((c,i)=>{const d=Math.hypot(c.x-V.x,c.z-V.z);if(d<bd){bd=d;ci=i}})}
-  const c=T.cars[ci];
-  c.g.localToWorld(TL.room.position.set(0,TC.F+1.95,0));
-  TL.room.intensity=lerp(TL.room.intensity,(night?26:12)*(.97+.03*Math.sin(now()*7)),k);
-  const n=T.cars[0];
-  n.g.localToWorld(TL.head.position.set(0,TC.F+.95,TC.len/2+.15));
-  n.g.localToWorld(TL.tgt.position.set(0,TC.F-.3,TC.len/2+60));
-  TL.head.intensity=lerp(TL.head.intensity,night?220:70,k);
+  const k=Math.min(1,dt*6),night=isNight(),vis=!!(T&&T.vis);
+  /* the cabin light and the headlamp are separate switches */
+  if(vis&&T.lampsOn){
+    let ci=T.pc;
+    if(P.aboard!==T){const V=Drone.on?Drone:P;let bd=1e9;T.cars.forEach((c,i)=>{const d=Math.hypot(c.x-V.x,c.z-V.z);if(d<bd){bd=d;ci=i}})}
+    T.cars[ci].g.localToWorld(TL.room.position.set(0,TC.F+1.95,0));
+    TL.room.intensity=lerp(TL.room.intensity,(night?26:12)*(.97+.03*Math.sin(now()*7)),k);
+  }else TL.room.intensity=lerp(TL.room.intensity,0,k);
+  if(vis&&T.headOn){
+    const n=T.cars[0];
+    n.g.localToWorld(TL.head.position.set(0,TC.F+.95,TC.len/2+.15));
+    n.g.localToWorld(TL.tgt.position.set(0,TC.F-.3,TC.len/2+60));
+    TL.head.intensity=lerp(TL.head.intensity,night?220:70,k);
+  }else TL.head.intensity=lerp(TL.head.intensity,0,k);
 }
 function trainLeverInput(T,dt){
   const inp=(Keys.KeyW||Keys.ArrowUp?1:0)-(Keys.KeyS||Keys.ArrowDown?1:0)+TOUCH.z;
@@ -10089,10 +10239,10 @@ function trainLeverInput(T,dt){
 function trainBoard(T,ci,sg){
   if(Math.abs(T.v)>1.5){log('the train is moving too fast to climb aboard','bad');SFX('bad');return}
   eLock=true;closePanel();
-  const c=T.cars[ci];P.aboard=T;T.pc=ci;T.lever=false;
+  const c=T.cars[ci];P.aboard=T;T.pc=ci;T.lever=false;T.seat=null;T.seatK=0;T.ry=null;
   P.lx=sg*.8;P.lz=TR_DOORS[c.kind][0];P.hy=0;P.vy=0;P.ground=true;
   P.yaw=c.yaw+sg*Math.PI/2;P.pitch=-.05;
-  log('aboard the '+TC_NAME[c.kind]+' · the whole train is open end to end · loco: E at the lever · L auto · O lights · Z all stop','gold');SFX('clunk');
+  log('aboard the '+TC_NAME[c.kind]+' · the whole train is open end to end · loco: E at the lever · L auto · O cabin lights · N headlamp · Z all stop','gold');SFX('clunk');
 }
 function trainLeave(T,silent,ci,sg,force){
   if(P.aboard!==T)return;
@@ -10101,7 +10251,7 @@ function trainLeave(T,silent,ci,sg,force){
   const c=T.cars[T.pc]||T.cars[0],side=sg||(P.lx<0?-1:1);
   const w=c.g.localToWorld(new THREE.Vector3(side*3.3,0,clamp(P.lz,-3,3)));
   P.x=w.x;P.z=w.z;P.y=heightAt(P.x,P.z);P.vx=P.vz=P.vy=0;P.hy=0;P.ground=true;
-  P.aboard=null;T.lever=false;
+  P.aboard=null;T.lever=false;T.seat=null;T.seatK=0;T.ry=null;
   if(!silent){log('climbed down','gold');SFX('clunk')}
 }
 function trainDropPos(T){return{x:P.x,z:P.z,yaw:P.yaw}}
@@ -10119,6 +10269,16 @@ function trainHit(kind,x,z,nxt,prv){
 }
 const _tw=new THREE.Vector3();
 function trainWalk(T,dt){
+  T.seatK=lerp(T.seatK||0,T.seat?1:0,Math.min(1,dt*7));
+  if(T.seat){                         /* sitting: pinned to the seat, the look direction follows the coach */
+    const sc=T.cars[T.seat.ci];T.pc=T.seat.ci;
+    P.lx=T.seat.lx;P.lz=T.seat.lz;P.hy=0;P.vy=0;P.vx=P.vz=0;P.ground=true;
+    const w=sc.g.localToWorld(_tw.set(P.lx,TC.F,P.lz));P.x=w.x;P.y=w.y;P.z=w.z;
+    P.yaw=sc.yaw+T.ry;
+    return;
+  }
+  if(T.ry==null)T.ry=P.yaw-T.cars[T.pc].yaw;
+  const c0=T.cars[T.pc];
   if(!isFinite(P.lx))P.lx=0;if(!isFinite(P.lz))P.lz=0;if(!isFinite(P.hy))P.hy=0;if(!isFinite(P.vy))P.vy=0;
   let c=T.cars[T.pc]||T.cars[0];
   const cs=Math.cos(c.yaw),sn=Math.sin(c.yaw);
@@ -10139,6 +10299,8 @@ function trainWalk(T,dt){
     const w=c.g.localToWorld(_tw.set(P.lx,TC.F+P.hy,P.lz)),n=T.cars[to].g.worldToLocal(w.clone());
     T.pc=to;P.lx=n.x;P.lz=n.z;c=T.cars[to];
   }
+  if(c!==c0)T.ry+=c0.yaw-c.yaw;           /* stepped into the next car: keep looking the same way in the world */
+  P.yaw=c.yaw+T.ry;
   const w=c.g.localToWorld(_tw.set(P.lx,TC.F+P.hy,P.lz));
   P.x=w.x;P.y=w.y;P.z=w.z;
 }
@@ -10146,6 +10308,33 @@ function trainWalk(T,dt){
 /* ── stations: things to hold E on, each in its own car's frame ── */
 function trainLeverRelease(T){
   return{id:'tlever',lx:0,lz:0,r:99,deck:1,act(){return{label:'throttle lever',sub:'W / S move the lever · '+(T.thr<0?'reverse ':'')+Math.round(Math.abs(T.thr)*100)+'% · hold E to let go',time:.3,run(){T.lever=false;log('let go of the lever','gold');SFX('click')}}}};
+}
+/* ── the benches ── */
+const TR_SEATS=[[-1,1.72],[1,1.72],[1,-2.15]];        /* which side of the aisle, and the z of the middle of the bench */
+function trainSeatRelease(T){
+  return{id:'tseatrel',lx:0,lz:0,r:99,deck:1,act(){return{label:'bench seat',sub:'hold E · stand up · the mouse looks round the coach',time:.3,run(){trainStand(T)}}}};
+}
+function trainSit(T,ci,sx,lz,lx,ry,ex){
+  const c=T.cars[ci];eLock=true;
+  T.pc=ci;T.lever=false;T.seat={ci,sx,lx:lx===undefined?sx*.84:lx,lz,ex:ex===undefined?sx*.22:ex};T.ry=ry===undefined?sx*Math.PI/2:ry;       /* benches face across the aisle */
+  P.lx=T.seat.lx;P.lz=lz;P.hy=0;P.vy=0;P.vx=P.vz=0;P.ground=true;
+  P.yaw=c.yaw+T.ry;P.pitch=-.04;
+  log('seated · the view now turns with the coach · look out of a door or window and let the journey roll by · hold E to stand','gold');SFX('click');
+}
+function trainStand(T){
+  if(!T.seat)return;
+  eLock=true;P.lx=T.seat.ex;P.lz=T.seat.lz;T.seat=null;
+  log('stood up','gold');SFX('place');
+}
+/* mouse / touch / pad look anywhere aboard a train, seated or walking: the angle is kept relative to the coach (T.ry), so the coach turning under you turns the view with it */
+function trainSeatLook(dx,dy){
+  const T=trainOf();if(!T||Drone.on)return false;
+  const f=.0021*SET.sens*binoLook(),c=T.cars[T.pc]||T.cars[0];
+  if(T.ry==null)T.ry=P.yaw-c.yaw;
+  T.ry=((T.ry-dx*f+Math.PI)%TAU+TAU)%TAU-Math.PI;
+  P.pitch=clamp(P.pitch-dy*f,-1.4,1.4);
+  P.yaw=c.yaw+T.ry;
+  return true;
 }
 function trainHorn(T){
   if(T.silent||!A.ctx||!SET.audio)return;
@@ -10171,20 +10360,25 @@ function trainStations(T,ci){
     }
     return{label:TC_NAME[kind],sub:'hold E · climb aboard'+(T.auto?' · the train is in auto mode':''),time:.6,run(){trainBoard(T,ci,sg)}};
   }});
-  const lights=(lx,lz)=>S.push({id:'tlamp',lx,lz,r:1.3,deck:1,act(){return{label:'lamp switch',sub:'lights: '+TC_LM[T.lm]+' · hold E to change (also O)',time:.25,run(){trainLightMode()}}}});
+  const lights=(lx,lz,r)=>S.push({id:'tlamp',lx,lz,r:r||1.3,deck:1,act(){return{label:'cabin light switch',sub:'cabin lights: '+TC_LM[T.lm]+' · hold E to change (also O)',time:.25,run(){trainLightMode()}}}});
+  const head=(lx,lz,r)=>S.push({id:'thead',lx,lz,r,deck:1,act(){return{label:'headlamp switch',sub:'headlamp: '+TC_LM[T.hm]+' · hold E to change (also N)',time:.25,run(){trainHeadMode()}}}});
   if(kind==='loco'){
     S.push({id:'tlevr',lx:.55,lz:2.75,r:1.5,deck:1,act(){return{label:'throttle lever',sub:'hold E · take the lever · '+(T.auto?'auto mode — moving it switches to manual':'manual'),time:.4,run(){
-      T.lever=true;T.pc=ci;P.lx=.55;P.lz=2.8;P.hy=0;P.vy=0;P.yaw=c.yaw+Math.PI;P.pitch=-.28;eLock=true;
+      T.lever=true;T.pc=ci;P.lx=.55;P.lz=2.8;P.hy=0;P.vy=0;P.yaw=c.yaw+Math.PI;T.ry=Math.PI;P.pitch=-.28;eLock=true;
       log('at the lever: W / S (or the stick) forward and reverse · gradual · Z all stop · hold E to let go','gold');SFX('click');
     }}}});
+    S.push({id:'tseatd',lx:-.3,lz:2.65,r:1.1,deck:1,act(){return{label:'driver\'s seat',sub:'hold E · sit · the view turns with the loco',time:.35,run(){trainSit(T,ci,-1,2.68,-.62,Math.PI,.1)}}}});
     S.push({id:'tauto',lx:-.45,lz:3.0,r:1.4,deck:1,act(){return{label:'timetable board',sub:'auto mode is '+(T.auto?'ON':'off')+' · hold E to switch (also L)',time:.3,run(){trainToggleAuto()}}}});
     S.push({id:'thorn',lx:.9,lz:3.05,r:1.2,deck:1,act(){return{label:'horn cord',sub:'hold E · sound the horn',time:.2,run(){trainHorn(T)}}}});
-    lights(-1.0,1.4);
+    lights(-1.0,1.3,.75);head(-1.0,1.85,.75);
     S.push({id:'tbatt',lx:-.9,lz:-.2,r:1.8,deck:1,act(){return{label:'battery bank',sub:Math.round(T.pow/TC.B*100)+'% · solar on the roof · '+(T.v?'running':'standing'),time:0,run(){}}}});
   }else if(kind==='goods'){
     S.push({id:'tstore',lx:0,lz:-2.9,r:2.0,deck:1,act(){return{label:'storage crates',sub:'+'+WORKS.freight.cap.mass+' kg carry capacity while the goods van exists · hold E for the satchel',time:.3,run(){openPanel('satchel')}}}});
   }else if(kind==='passenger'){
     lights(1.0,.7);
+    /* the benches: two seats each. hold E at one to sit; the view then rides with the coach */
+    TR_SEATS.forEach(([sx,zc],bi)=>{for(const dz of [-.42,.42]){const lz=zc+dz;S.push({id:'tseat'+bi+(dz<0?'a':'b'),lx:sx*.55,lz,r:1.05,deck:1,act(){
+      return{label:'bench seat',sub:'hold E · sit · the view turns with the coach, so you can watch the journey hands free',time:.35,run(){trainSit(T,ci,sx,lz)}}}})}});
     const buy=(id,lx,label,item,price,txt)=>S.push({id,lx,lz:3.2,r:1.5,deck:1,act(){return{label,sub:'$'+price+' · '+txt+' · unlimited · you have $'+(G.cash||0),time:.5,run(){
       if((G.cash||0)<price){log('not enough scrap — it costs $'+price,'bad');SFX('bad');return}
       G.cash-=price;invAdd(item,1);log('bought '+itemName(item)+' for $'+price,'good');SFX('coin');
@@ -10205,6 +10399,7 @@ function trainPick(){
     const aboard=P.aboard===T;
     if(!aboard&&!T.vis)continue;
     if(aboard&&T.lever)return{kind:'station',ref:T.leverStn||(T.leverStn=trainLeverRelease(T)),s:T,d:0};
+    if(aboard&&T.seat)return{kind:'station',ref:T.seatStn||(T.seatStn=trainSeatRelease(T)),s:T,d:0};
     for(let ci=0;ci<T.cars.length;ci++){
       const c=T.cars[ci];
       if(!aboard&&Math.hypot(c.x-P.x,c.z-P.z)>9)continue;
@@ -10228,11 +10423,11 @@ function trainHud(el,T){
   const cmp=matchMedia('(max-width:700px),(max-height:520px),(pointer:coarse)').matches;
   const wait=T.auto&&T.wait>0?'waiting '+Math.ceil(T.wait)+' s':T.auto?'→ '+(T.dir>0?'far end':'start')+' · '+Math.max(0,Math.round(T.dir>0?lim.hi-T.d:T.d-lim.lo))+' m':'manual';
   const kv=(l,v)=>`<div class="kv" style="display:flex;justify-content:space-between"><span class="lbl">${l}</span><span class="num">${v}</span></div>`;
-  const h=`<div class="crf"><div class="crt"><b>${TC_NAME[T.cars[T.pc].kind]}</b><i>${T.lever?'at the lever':'aboard'}</i></div>
+  const h=`<div class="crf"><div class="crt"><b>${TC_NAME[T.cars[T.pc].kind]}</b><i>${T.lever?'at the lever':T.seat?'seated':'aboard'}</i></div>
    <div class="meter"><div class="row"><span class="lbl">battery</span><span class="num">${Math.round(pc*100)}%</span></div><div class="bar ${pc<.15?'bd':'am'}"><i style="width:${(pc*100).toFixed(1)}%"></i></div></div>
    <div class="meter"><div class="row"><span class="lbl">throttle lever</span><span class="num">${T.thr<0?'rev ':''}${Math.round(Math.abs(T.thr)*100)}% · ${kmh.toFixed(1)} km/h</span></div><div class="bar sg"><i style="width:${lev}%"></i></div></div>
-   ${kv('mode (L)',T.auto?'auto · '+wait:'manual')}${kv('lights (O)',TC_LM[T.lm]+(T.lampsOn?' · lit':''))}${kv('along the line',Math.round(T.d-TC_LT)+' / '+Math.round(T.R.pr.len-TC_LT)+' m')}
-   <div class="crk">${T.lever?'<span class="kbd">W</span><span class="kbd">S</span> lever ':''}<span class="kbd">L</span> auto <span class="kbd">O</span> lights <span class="kbd">Z</span> all stop</div></div>
+   ${kv('mode (L)',T.auto?'auto · '+wait:'manual')}${kv('cabin lights (O)',TC_LM[T.lm]+(T.lampsOn?' · lit':''))}${kv('headlamp (N)',TC_LM[T.hm]+(T.headOn?' · lit':''))}${kv('along the line',Math.round(T.d-TC_LT)+' / '+Math.round(T.R.pr.len-TC_LT)+' m')}
+   <div class="crk">${T.lever?'<span class="kbd">W</span><span class="kbd">S</span> lever ':''}<span class="kbd">L</span> auto <span class="kbd">O</span> cabin <span class="kbd">N</span> head <span class="kbd">Z</span> all stop</div></div>
    <div class="crm">
     <div class="hrow"><b>BATT</b><span class="bar ${pc<.15?'bd':'am'}"><i style="width:${(pc*100).toFixed(1)}%"></i></span></div>
     <div class="hrow"><b>${T.thr<0?'REV':'THR'}</b><span class="bar ${T.thr<0?'bd':'sg'}"><i style="width:${lev}%"></i></span></div>
@@ -12961,6 +13156,7 @@ RENDER.help=()=>`<div class="help">
   </div>
   <div class="keygrid">
     <span class="kbd">O</span><span>crawler lights: auto (on when it gets dark, not just at night) → on → off. Also the lamp switch on the console</span>
+    <span class="kbd">N</span><span>aboard a train: headlamp (auto → on → off). <span class="kbd">O</span> works the cabin lights, separately. Hold E at a bench to sit: the view then turns with the coach, so you can watch the journey hands free</span>
     <span class="kbd">U</span><span>screenshot mode: hide every piece of interface, press again to bring it back (or use the camera button under ☰)</span>
   </div>
   <p>Its solar canopy fills the battery in about two days of sun; a full pack drives it for one day. The deck has a dew harvester and still, two crop troughs, a kite winch, lockers (+120 kg) and a bunk you can sleep in while it travels.</p>
@@ -13069,12 +13265,13 @@ addEventListener('keydown',e=>{
       break;
     case 'KeyR': if(Build.on)buildTurn(1); break;
     case 'Space':
-      if(!uiBlocking()&&P.ground&&!P.dead&&!G.drive&&!(Bino.on||Drone.on)){P.vy=7.1;P.ground=false;Drifter.dispatch('air');SFX('step')}
+      if(!uiBlocking()&&P.ground&&!P.dead&&!G.drive&&!trainSeated()&&!(Bino.on||Drone.on)){P.vy=7.1;P.ground=false;Drifter.dispatch('air');SFX('step')}
       e.preventDefault();break;
     case 'KeyK': toggleKite(); break;
     case 'KeyV': toggleView(); break;
     case 'KeyF': toggleFinder(); break;
-    case 'KeyN': if(isPlane()){SET.invert=!SET.invert;saveSettings();log('pitch '+(SET.invert?'inverted — W pulls up':'normal — W noses down'))} break;
+    case 'KeyN': if(!e.repeat&&trainOf()){trainHeadMode();break}
+      if(isPlane()){SET.invert=!SET.invert;saveSettings();log('pitch '+(SET.invert?'inverted — W pulls up':'normal — W noses down'))} break;
     case 'KeyG':{ // eat the best thing in the bag
       const f=['stew','jerky','pear','root','bean'].find(k=>G.inv[k]>0);
       if(f)eat(f);else log('nothing edible in the satchel','bad');
@@ -13114,6 +13311,7 @@ addEventListener('mousemove',e=>{
   if(uiBlocking())return;
   const dx=e.movementX||0,dy=e.movementY||0;
   if(isPlane()){planeLook(dx,dy);return}
+  if(trainSeatLook(dx,dy))return;
   if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='crawler'))){
     const look=G.drive.look,turn=dx*0.0021*SET.sens;
     look.yaw=((look.yaw-turn+Math.PI)%TAU+TAU)%TAU-Math.PI;
@@ -13496,7 +13694,7 @@ let touchSync=()=>{};
    '<div id="joy"><small>move</small><i></i></div><div id="lookr"><small>look</small><i></i></div>'+
    '<div id="thrl"><small>thr</small><div class="trk"><i></i><div class="brk">BRK</div></div><b>0</b></div>'+
    '<div id="tc"><button class="tcb big" data-k="act">act</button><button class="tcb" data-k="jump">jump</button><button class="tcb" data-k="run">run</button></div>'+
-   '<div id="tc2"><button class="tcb" data-k="view">view</button><button class="tcb" data-k="halt">stop</button><button class="tcb" data-k="tauto">auto</button><button class="tcb" data-k="tlamp">lights</button><button class="tcb" data-k="ctr">centre</button><button class="tcb" data-k="rec">recover</button><button class="tcb" data-k="set">set</button><button class="tcb" data-k="turn">turn</button><button class="tcb" data-k="scan">scan</button><button class="tcb" data-k="bino">look</button><button class="tcb" data-k="dup">up</button><button class="tcb" data-k="ddn">down</button><button class="tcb" data-k="kite">kite</button><button class="tcb" data-k="eat">eat</button><button class="tcb" data-k="crouch">crouch</button><button class="tcb" data-k="stow">stow</button></div>');
+   '<div id="tc2"><button class="tcb" data-k="view">view</button><button class="tcb" data-k="halt">stop</button><button class="tcb" data-k="tauto">auto</button><button class="tcb" data-k="tlamp">cabin</button><button class="tcb" data-k="thead">head</button><button class="tcb" data-k="ctr">centre</button><button class="tcb" data-k="rec">recover</button><button class="tcb" data-k="set">set</button><button class="tcb" data-k="turn">turn</button><button class="tcb" data-k="scan">scan</button><button class="tcb" data-k="bino">look</button><button class="tcb" data-k="dup">up</button><button class="tcb" data-k="ddn">down</button><button class="tcb" data-k="kite">kite</button><button class="tcb" data-k="eat">eat</button><button class="tcb" data-k="crouch">crouch</button><button class="tcb" data-k="stow">stow</button></div>');
   const tc=$('#tc'),tc2=$('#tc2'),J=$('#joy'),LR=$('#lookr'),knob=J.querySelector('i'),lknob=LR.querySelector('i');
   const btn=k=>document.querySelector('.tcb[data-k='+k+']');
   const actB=btn('act'),jumpB=btn('jump');
@@ -13530,7 +13728,7 @@ let touchSync=()=>{};
     jumpB.textContent=pl?'thr':'jump';
     btn('view').classList.toggle('hid',!drv);
     const crw=crawlerOf();
-    btn('halt').classList.toggle('hid',!(crw||trainOf()));btn('tauto').classList.toggle('hid',!trainOf());btn('tlamp').classList.toggle('hid',!trainOf());
+    btn('halt').classList.toggle('hid',!(crw||trainOf()));btn('tauto').classList.toggle('hid',!trainOf());btn('tlamp').classList.toggle('hid',!trainOf());btn('thead').classList.toggle('hid',!trainOf());
     btn('ctr').classList.toggle('hid',!(crw&&crw.seated));
     btn('rec').classList.toggle('hid',!(Hands.ctx.alt&&!drv));
     btn('set').classList.toggle('hid',!Build.on);
@@ -13547,11 +13745,11 @@ let touchSync=()=>{};
     switch(b.dataset.k){
       case 'act':if(G.drive){eLock=true;exitBuggy();break}Keys['KeyE']=true;b.classList.add('hot');break;
       case 'rec':Keys['KeyX']=true;b.classList.add('hot');break;
-      case 'jump':if(isPlane()){G.drive.thr=G.drive.thr>0.3?0:0.7;break}if(!uiBlocking()&&P.ground&&!G.drive&&!(Bino.on||Drone.on)){P.vy=7.1;P.ground=false;Drifter.dispatch('air');SFX('step')}break;
+      case 'jump':if(isPlane()){G.drive.thr=G.drive.thr>0.3?0:0.7;break}if(!uiBlocking()&&P.ground&&!G.drive&&!trainSeated()&&!(Bino.on||Drone.on)){P.vy=7.1;P.ground=false;Drifter.dispatch('air');SFX('step')}break;
       case 'run':Keys['ShiftLeft']=!Keys['ShiftLeft'];b.classList.toggle('hot',!!Keys['ShiftLeft']);b.setAttribute('aria-pressed',String(!!Keys['ShiftLeft']));break;
       case 'crouch':Keys['KeyZ']=!Keys['KeyZ'];b.classList.toggle('hot',!!Keys['KeyZ']);b.setAttribute('aria-pressed',String(!!Keys['KeyZ']));break;
       case 'view':toggleView();break;
-      case 'tauto':trainToggleAuto();break;case 'tlamp':trainLightMode();break;
+      case 'tauto':trainToggleAuto();break;case 'tlamp':trainLightMode();break;case 'thead':trainHeadMode();break;
       case 'halt':crawlerHalt();b.classList.add('hot');setTimeout(()=>b.classList.remove('hot'),260);break;
       case 'ctr':crawlerCentre();b.classList.add('hot');setTimeout(()=>b.classList.remove('hot'),260);break;
       case 'stow':if(!G.drive&&G.tool!=='hands'){G.tool='hands';refreshViewModel();log('stowed the tool')}break;
@@ -13583,6 +13781,7 @@ let touchSync=()=>{};
       if(!uiBlocking()){
       const dx=(t.clientX-look.x)*2.5,dy=(t.clientY-look.y)*2.5;
       if(isPlane())planeLook(dx,dy);
+      else if(trainSeatLook(dx,dy)){}
       else if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='crawler'))){
         const view=G.drive.look,turn=dx*0.0021*SET.sens;
         view.yaw=((view.yaw-turn+Math.PI)%TAU+TAU)%TAU-Math.PI;
@@ -13898,11 +14097,11 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden&&ready&&!sk
     switch(k){
       case 'act':if(G.drive){eLock=true;exitBuggy();break}Keys.KeyE=true;b.classList.add('hot');setTimeout(()=>{Keys.KeyE=false;b.classList.remove('hot')},180);break;
       case 'rec':Keys.KeyX=true;b.classList.add('hot');setTimeout(()=>{Keys.KeyX=false;b.classList.remove('hot')},180);break;
-      case 'jump':if(isPlane()){G.drive.thr=G.drive.thr>0.3?0:0.7;break}if(!uiBlocking()&&P.ground&&!G.drive&&!(Bino.on||Drone.on)){P.vy=7.1;P.ground=false;Drifter.dispatch('air');SFX('step')}break;
+      case 'jump':if(isPlane()){G.drive.thr=G.drive.thr>0.3?0:0.7;break}if(!uiBlocking()&&P.ground&&!G.drive&&!trainSeated()&&!(Bino.on||Drone.on)){P.vy=7.1;P.ground=false;Drifter.dispatch('air');SFX('step')}break;
       case 'run':Keys.ShiftLeft=!Keys.ShiftLeft;b.classList.toggle('hot',!!Keys.ShiftLeft);b.setAttribute('aria-pressed',String(!!Keys.ShiftLeft));break;
       case 'crouch':Keys.KeyZ=!Keys.KeyZ;b.classList.toggle('hot',!!Keys.KeyZ);b.setAttribute('aria-pressed',String(!!Keys.KeyZ));break;
       case 'view':toggleView();break;
-      case 'tauto':trainToggleAuto();break;case 'tlamp':trainLightMode();break;
+      case 'tauto':trainToggleAuto();break;case 'tlamp':trainLightMode();break;case 'thead':trainHeadMode();break;
       case 'halt':crawlerHalt();break;
       case 'ctr':crawlerCentre();break;
       case 'stow':if(!G.drive&&G.tool!=='hands'){G.tool='hands';refreshViewModel();log('stowed the tool')}break;
@@ -13987,6 +14186,7 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden&&ready&&!sk
     const dx=rx*520*dt,dy=ry*520*dt;
     if((Math.abs(dx)+Math.abs(dy))>.001&&!uiBlocking()){
       if(isPlane())planeLook(dx,dy);
+      else if(trainSeatLook(dx,dy)){}
       else if(G.drive&&(G.drive.type==='buggy'||G.drive.type==='crawler')){
         const v=G.drive.look,turn=dx*.0021*SET.sens;
         v.yaw=((v.yaw-turn+Math.PI)%TAU+TAU)%TAU-Math.PI;v.pitch=clamp(v.pitch-dy*.0021*SET.sens,-1.2,1.2);
