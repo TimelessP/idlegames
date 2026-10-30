@@ -7963,7 +7963,7 @@ const isDroid=s=>s.type==='scrappy'||s.type==='android';
 const SC={B:100,perM:100/400,speed:1.7,turn:2.6,chg:2.0,padDraw:6,padIdle:.25,range:100,want:90,place:5,R:.6,margin:8,
   dockTol:.8,scan:1.6};
 const SC_SCRAP=new Set(['wreck','pod','tank','ruin','plateheap','pipeheap','gearpile','canheap','wirecoil','crate','barrel','stone','stack','saltcrust','cactus','shrub']);
-const SC_TXT={seek:'looking for a charge pad',dock:'on the pad',toScrap:'heading for scrap',work:'salvaging',toPad:'heading home',wait:'waiting for the charge pad',align:'docking',dead:'out of power',idle:'idle'};
+const SC_TXT={seek:'looking for a charge pad',dock:'on the pad',toScrap:'heading for scrap',work:'salvaging',toPad:'heading home',haul:'escorted to a charge pad',wait:'waiting for the charge pad',align:'docking',dead:'out of power',idle:'idle'};
 const scrDist=(ax,az,bx,bz)=>Math.hypot(ax-bx,az-bz);
 function scrInit(s){
   s.pos=new THREE.Vector3(s.x,s.y,s.z);s.yaw=s.rot||0;s.speed=0;s.yawRate=0;
@@ -8109,9 +8109,14 @@ function scrapStep(s,dt){
       const np=scrNearestPad(s);
       if(!np){s.st='idle';break}
       const need=np.d*1.1+2;
-      if(scrRange(s)<need){s.st='idle';if(!battAssist(s)&&now()-s.msgT>20){s.msgT=now();log('scrappy cannot reach a charge pad on what it has left','bad')}break}
+      s.esc=false;
+      if(scrRange(s)<need){
+        const b=battBotFor(s);
+        if(b&&s.pow>=2&&scrDist(s.pos.x,s.pos.z,b.pos.x,b.pos.z)<=BB.range+2){s.pad=np.pad;s.esc=true;s.holdT=0;s.st='haul';break}   /* help is here: set off together */
+        s.st='idle';if(!b&&now()-s.msgT>20){s.msgT=now();log('scrappy cannot reach a charge pad on what it has left','bad')}break}
       s.pad=np.pad;s.st='toPad';break;
     }
+    case 'haul':moving=scrHaul(s,dt);break;
     case 'idle':{                                   /* no usable pad yet: look again now and then */
       s.speed=0;s.idleT+=dt;
       if(s.idleT>2){s.idleT=0;if(scrPads().length)s.st='seek'}
@@ -8459,9 +8464,14 @@ function androidStep(s,dt){
     case 'seek':{
       s.speed=0;const np=scrNearestPad(s);
       if(!np){s.st='idle';break}
-      if(scrRange(s)<np.d*1.1+2){s.st='idle';if(!battAssist(s)&&now()-s.msgT>20){s.msgT=now();log('android cannot reach a charge pad on what it has left','bad')}break}
+      s.esc=false;
+      if(scrRange(s)<np.d*1.1+2){
+        const b=battBotFor(s);
+        if(b&&s.pow>=2&&scrDist(s.pos.x,s.pos.z,b.pos.x,b.pos.z)<=BB.range+2){s.pad=np.pad;s.esc=true;s.holdT=0;s.st='haul';break}
+        s.st='idle';if(!b&&now()-s.msgT>20){s.msgT=now();log('android cannot reach a charge pad on what it has left','bad')}break}
       s.pad=np.pad;s.st='toPad';break;
     }
+    case 'haul':moving=scrHaul(s,dt);break;
     case 'idle':{s.speed=0;s.idleT+=dt;if(s.idleT>2){s.idleT=0;if(scrPads().length)s.st='seek'}break}
     case 'dead':s.speed+=clamp(-s.speed,-4*dt,4*dt);break;
     case 'toPad':{
@@ -9320,7 +9330,28 @@ function rwAndroidStep(s,dt){
 const BB={B:400,rate:7,range:7.5,solar:1.6,eff:.88,start:60};
 /* is a working battery robot on its way to this droid (or already charging it)? While one is, the droid is not stranded: it waits for the help instead of
    reporting that it cannot reach a pad. Checked fresh every tick, so it lapses the moment that robot is picked up, goes flat, or takes another job. */
-function battAssist(d){for(const o of G.struct)if(o.type==='battbot'&&o.st!=='flat'&&o.pow>BB.B*.02&&o.tgt===d)return true;return false}
+const battBotFor=d=>G.struct.find(o=>o.type==='battbot'&&(o.st==='tend'||o.st==='revive')&&o.pow>BB.B*.02&&o.tgt===d)||null;
+const battAssist=d=>!!battBotFor(d);
+/* a droid sitting idle because even a full charge cannot get it to the nearest pad — it needs a battery robot to come and walk it home */
+function scrStranded(o){if((o.st!=='idle'&&o.st!=='seek')||o.rw)return false;const np=scrNearestPad(o);return !!np&&scrRange(o)<np.d*1.1+2}
+/* the escorted journey home: the droid sets off only while its battery robot is beside it, stops and waits whenever the robot lags or goes away
+   (and gives up after a few seconds so it can ask again), and hands over to the normal pad routine once it is next to the pad. */
+function scrHaul(s,dt){
+  const pad=s.pad;
+  if(!pad||!G.struct.includes(pad)){s.esc=false;s.st='seek';return false}
+  const here=scrDist(s.pos.x,s.pos.z,pad.x,pad.z);
+  if(here<5){s.esc=false;s.st='toPad';return false}
+  const b=battBotFor(s),alone=scrRange(s)>=here*1.1+2;
+  if(!alone&&(!b||scrDist(s.pos.x,s.pos.z,b.pos.x,b.pos.z)>BB.range+5)){
+    s.speed+=clamp(-s.speed,-5*dt,5*dt);
+    s.holdT=b?0:(s.holdT||0)+dt;
+    if(s.holdT>4){s.holdT=0;s.esc=false;s.st='idle';s.idleT=0}      /* help has gone: wait again until some arrives */
+    return false;
+  }
+  s.holdT=0;
+  scrDrive(s,dt,pad.x,pad.z,3,null,1);
+  return true;
+}
 const BB_TXT={home:'at home',rest:'resting in the sun',escort:'following the track crew',revive:'going to reboot a droid',tend:'charging a droid',flat:'flat — waiting for sun'};
 function battInit(s){
   scrInit(s);s.pow=BB.start;s.st='home';s.hx=s.x;s.hz=s.z;s.tgt=null;s.tendT=0;s.charging=false;s.msgT=-1e9;
@@ -9350,20 +9381,20 @@ function battStep(s,dt){
     else if(crewA){mode='escort';goal=[crewA.pos.x,crewA.pos.z];tol=4.2}
     else{
       /* normal duty: reboot the fallen, top up the low, otherwise go home */
-      if(s.tgt&&(!G.struct.includes(s.tgt)||s.tendT>70||(s.tgt.st!=='dead'&&(s.tgt.pow>=SC.B*.88||s.tgt.st==='dock'))))s.tgt=null;
+      if(s.tgt&&(!G.struct.includes(s.tgt)||s.tendT>70||(s.tgt.st!=='dead'&&(s.tgt.st==='dock'||(!s.tgt.esc&&!scrStranded(s.tgt)&&s.tgt.pow>=SC.B*.88)))))s.tgt=null;     /* an escorted or stranded droid is kept, even when full, until it has reached its pad */
       if(!s.tgt){
         let best=null,bd=1e9;
         for(const o of G.struct){
           if(!isDroid(o)||o.rw)continue;
           const d=scrDist(s.pos.x,s.pos.z,o.x,o.z);      /* no distance limit: a battery robot goes as far as it takes to reach a fallen or stranded droid */
-          if(o.st!=='dead'&&!(o.pow<SC.B*.3&&!['dock','align','toPad','wait'].includes(o.st)))continue;
+          if(o.st!=='dead'&&!(o.pow<SC.B*.3&&!['dock','align','toPad','wait'].includes(o.st))&&!scrStranded(o))continue;
           if(d<bd){bd=d;best=o}
         }
         if(best){s.tgt=best;s.tendT=0}
       }
       if(s.tgt){
         mode=s.tgt.st==='dead'?'revive':'tend';goal=[s.tgt.x,s.tgt.z];tol=mode==='revive'?2.3:3;
-        if(scrDist(s.pos.x,s.pos.z,s.tgt.x,s.tgt.z)<BB.range+3)s.tendT+=dt;      /* the 70 s tending limit counts time at the droid, not the drive out to it */
+        if(!s.tgt.esc&&scrDist(s.pos.x,s.pos.z,s.tgt.x,s.tgt.z)<BB.range+3)s.tendT+=dt;      /* the 70 s tending limit counts time at the droid, not the drive out to it */
         if(mode==='revive'&&scrDist(s.pos.x,s.pos.z,s.tgt.x,s.tgt.z)<tol+.5){
           const o=s.tgt;o.st='seek';o.pow=Math.max(o.pow,12);o.deadMsg=false;o.rw=false;o.speed=0;
           if(scrDist(P.x,P.z,o.x,o.z)<90)log('battery robot rebooted '+(o.type==='android'?'an android':'a scrappy droid'),'good');
