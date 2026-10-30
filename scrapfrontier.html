@@ -8675,7 +8675,7 @@ function padDraw(s,d){return s.charging?d.draw:SC.padIdle}
 /* ───────────────────────────────────────────────────────────────────────
    §17  RAILWAY — planning (time-sliced generators), route, profile
    ─────────────────────────────────────────────────────────────────────── */
-const RWC={L:10,MAXG:.08,GAUGE:1.435,LIFT:.12,SS:1.5,SPS:4,SEC:8,BUDGET:240000,CELL:5,GOAL:12,SHORE_X:2.05};
+const RWC={L:10,MAXG:.08,GAUGE:1.435,LIFT:.12,SS:1.5,SPS:4,SEC:8,BUDGET:240000,CELL:5,GOAL:12,SHORE_X:2.05,SHORE_MAX:1.8,BR_STEPS:6,BR_DIP:.45};
 const RW={ext:null,hold:false,rail:null,pr:null,job:null,jobKind:'',dl:0,prog:0,msg:'',pair:null,laid:null,claim:null,secs:new Map(),why:'',whyT:-1e9,hc:new Map(),bc:new Map(),sleeperGeo:null,lineMat:null,tick:0};
 /* height cache on a 2 m lattice, bilinear between: the planner asks thousands of questions per frame */
 function rwH(x,z){
@@ -8698,20 +8698,39 @@ function rwBlocked(x,z){
   }
   RW.bc.set(k,v);return v;
 }
-/* one lattice step: -1 if it cannot be built, else what it costs. Gentle grade, gentle cross-slope, little cut and fill. */
-function rwStep(x,z,y,x2,z2,tc){
-  const L=RWC.L,y2=rwH(x2,z2);
-  if(Math.abs(y2-y)/L>RWC.MAXG)return -1;
-  const mx=(x+x2)/2,mz=(z+z2)/2,ym=rwH(mx,mz);
-  if(Math.abs(ym-(y+y2)/2)>.45)return -1;
-  const dx=(x2-x)/L,dz=(z2-z)/L,px=-dz,pz=dx;
+/* one lattice step: -1 if it cannot be built, else what it costs. Gentle grade, gentle cross-slope, little cut and fill.
+   RIDGE BRIDGING: where the ground falls away between two ridges (a dune valley) the bed is carried across level on shoring boards,
+   as long as the boards can hold it on BOTH sides of the track (never more than SHORE_MAX above the ground beside it) and the span
+   meets firm ground again within BR_STEPS lattice steps. rwStepY / rwStepBr hand back the bed height and bridged-run length reached. */
+let rwStepY=0,rwStepBr=0;
+function rwStep(x,z,y,x2,z2,tc,br){
+  const L=RWC.L,g2=rwH(x2,z2),MG=RWC.MAXG*L,SM=RWC.SHORE_MAX;br=br|0;
+  let y2=g2,bridge=false;
+  if(g2>y+MG)return -1;                                   /* ground climbs faster than a track may: never bridged, only ever cut */
+  if(g2<y-MG){y2=y;bridge=true}                           /* ground drops away faster than a track may descend: carry the bed level */
+  const mx=(x+x2)/2,mz=(z+z2)/2,dx=(x2-x)/L,dz=(z2-z)/L,px=-dz,pz=dx,SX=RWC.SHORE_X;
+  const ym=rwH(mx,mz),cm=(y+y2)/2;
+  if(ym-cm>.45)return -1;                                 /* a bump in the way (it would have to be cut away) */
+  let maxFill=0;
+  for(const t of [.25,.5,.75,1]){                          /* the bed above the ground, at the centre and under each shoring wall */
+    const bx=x+(x2-x)*t,bz=z+(z2-z)*t,yb=y+(y2-y)*t;
+    const f=Math.max(yb-rwH(bx,bz),yb-rwH(bx+px*SX,bz+pz*SX),yb-rwH(bx-px*SX,bz-pz*SX));
+    if(f>maxFill)maxFill=f;
+  }
+  if(cm-ym>RWC.BR_DIP)bridge=true;                      /* a valley between two near-level nodes counts too */
+  let br2=0;
+  if(bridge){
+    if(maxFill>SM)return -1;                              /* the boards cannot hold it on one side or the other */
+    br2=br+1;if(br2>RWC.BR_STEPS)return -1;               /* it must reach the far ridge */
+  }
   const a=rwH(x2+px*1.8,z2+pz*1.8),b=rwH(x2-px*1.8,z2-pz*1.8),c=rwH(x2+px*3.4,z2+pz*3.4),d=rwH(x2-px*3.4,z2-pz*3.4);
   const cross=Math.max(Math.abs(a-b)/3.6,Math.abs(c-d)/6.8);
   if(cross>.30)return -1;
   const dev=Math.max(Math.abs(a-y2),Math.abs(b-y2),Math.abs(c-y2),Math.abs(d-y2));
-  if(dev>2.4)return -1;
+  if(dev>(bridge?SM+.6:2.4))return -1;
   if(rwBlocked(x2,z2))return -1;
-  return L+Math.abs(y2-y)*10+cross*cross*90+Math.max(0,dev-.5)*5+tc;
+  rwStepY=y2;rwStepBr=br2;
+  return L+Math.abs(y2-y)*10+cross*cross*90+Math.max(0,dev-.5)*5+tc+(bridge?9+maxFill*7:0);
 }
 /* binary min-heap on .f */
 function rwHeap(){
@@ -8724,19 +8743,19 @@ function rwHeap(){
    status: found · exhausted (everything reachable has been tried) · budget (gave up; best is the closest it got) */
 function* rwAStar(sx,sz,gx,gz,seed){
   const L=RWC.L,W=2.0,open=rwHeap(),seen=new Map(),closed=[];
-  const key=(x,z,h)=>(((Math.floor(x/RWC.CELL)+8192)*16384+(Math.floor(z/RWC.CELL)+8192))*16+h);
+  const key=(x,z,h,b)=>((((Math.floor(x/RWC.CELL)+8192)*16384+(Math.floor(z/RWC.CELL)+8192))*16+h)*2+(b?1:0));
   const d0=Math.hypot(gx-sx,gz-sz)||1;let best=null,bestD=1e9,exp=0;
   const y0=rwH(sx,sz),face=Math.atan2(gz-sz,gx-sx);
   for(let h=0;h<16;h++){
     if(seed&&seed.hs&&!seed.hs.includes(h))continue;      /* an extension may only leave in the direction the track end points */
     const turn=Math.abs(((h*TAU/16-face+Math.PI*3)%TAU)-Math.PI);
-    const n={x:sx,z:sz,y:y0,h,g:turn>1.2?4:0,p:null,dead:false,tr:0,run:0};n.f=n.g+W*d0;seen.set(key(sx,sz,h),n);open.push(n);
+    const n={x:sx,z:sz,y:y0,h,g:turn>1.2?4:0,p:null,dead:false,tr:0,run:0,br:0};n.f=n.g+W*d0;seen.set(key(sx,sz,h,0),n);open.push(n);
   }
   while(open.n()){
     const n=open.pop();if(n.dead)continue;
     const hd=Math.hypot(gx-n.x,gz-n.z);
-    if(hd<bestD){bestD=hd;best=n;RW.prog=Math.max(RW.prog,clamp(1-hd/d0,0,1)*.8)}
-    if(hd<RWC.GOAL)return{status:'found',node:n,closed,best:n};
+    if(hd<bestD&&!n.br){bestD=hd;best=n;RW.prog=Math.max(RW.prog,clamp(1-hd/d0,0,1)*.8)}
+    if(hd<RWC.GOAL&&!n.br)return{status:'found',node:n,closed,best:n};
     n.done=true;closed.push(n);
     if(++exp>RWC.BUDGET)return{status:'budget',node:best,closed,best};
     for(let t=-1;t<=1;t++){
@@ -8744,11 +8763,12 @@ function* rwAStar(sx,sz,gx,gz,seed){
          the longer a curve keeps turning the dearer it gets, so the planner prefers wide sweeps round obstacles. */
       const run2=t===0?0:(t===n.tr?n.run+1:1);if(run2>8)continue;
       const h2=(n.h+t+16)&15,a=h2*TAU/16,x2=n.x+Math.cos(a)*L,z2=n.z+Math.sin(a)*L;
-      const k=key(x2,z2,h2),o=seen.get(k);if(o&&o.done)continue;
-      const c=rwStep(n.x,n.z,n.y,x2,z2,t===0?0:2.2*(1+.45*run2)+(t!==0&&n.tr!==0&&t!==n.tr?9:0));if(c<0)continue;
+      const c=rwStep(n.x,n.z,n.y,x2,z2,t===0?0:2.2*(1+.45*run2)+(t!==0&&n.tr!==0&&t!==n.tr?9:0),n.br);if(c<0)continue;
+      const yN=rwStepY,brN=rwStepBr;
+      const k=key(x2,z2,h2,brN),o=seen.get(k);if(o&&o.done)continue;
       const g2=n.g+c;if(o&&o.g<=g2)continue;
       if(o)o.dead=true;
-      const m={x:x2,z:z2,y:rwH(x2,z2),h:h2,g:g2,p:n,dead:false,tr:t,run:run2};m.f=g2+W*Math.hypot(gx-x2,gz-z2);seen.set(k,m);open.push(m);
+      const m={x:x2,z:z2,y:yN,h:h2,g:g2,p:n,dead:false,tr:t,run:run2,br:brN};m.f=g2+W*Math.hypot(gx-x2,gz-z2);seen.set(k,m);open.push(m);
     }
     if((exp&31)===0&&performance.now()>RW.dl)yield;
   }
@@ -8851,22 +8871,43 @@ function* rwProfileGen(nodes){
     Y0[i]=groundAt(Xf[i],Zf[i]);
     if((i&31)===31&&performance.now()>RW.dl)yield;
   }
-  for(let i=0;i<N;i++){let s=0,c=0;for(let k=-5;k<=5;k++){const j=i+k;if(j<0||j>=N)continue;s+=Y0[j];c++}Y[i]=s/c}
-  const mg=RWC.MAXG*.9*RWC.SS;
-  for(let pass=0;pass<3;pass++){
-    for(let i=1;i<N;i++)Y[i]=clamp(Y[i],Y[i-1]-mg,Y[i-1]+mg);
-    for(let i=N-2;i>=0;i--)Y[i]=clamp(Y[i],Y[i+1]-mg,Y[i+1]+mg);
-  }
   for(let i=0;i<N;i++){
     const rx=-TZ[i],rz=TX[i];
     GR[i]=groundAt(Xf[i]+rx*RWC.SHORE_X,Zf[i]+rz*RWC.SHORE_X);GL[i]=groundAt(Xf[i]-rx*RWC.SHORE_X,Zf[i]-rz*RWC.SHORE_X);
     if((i&31)===31&&performance.now()>RW.dl)yield;
   }
+  for(let i=0;i<N;i++){let s=0,c=0;for(let k=-5;k<=5;k++){const j=i+k;if(j<0||j>=N)continue;s+=Y0[j];c++}Y[i]=s/c}
+  /* RIDGE BRIDGING: a morphological closing (widest first, then back) fills every dip narrower than the longest span to the height of its
+     lower rim, so the bed runs level from ridge to ridge instead of following the valley down and up. A dip is only bridged when the
+     shoring boards can hold the bed on BOTH sides of the track along the whole span, and it has firm ground at each end; otherwise the
+     bed follows the ground exactly as before. */
+  {
+    const hw=Math.round(RWC.BR_STEPS*RWC.L*.5/RWC.SS),D=new Float32Array(N),C=new Float32Array(N);
+    for(let i=0;i<N;i++){let m=-1e9;for(let k=Math.max(0,i-hw);k<=Math.min(N-1,i+hw);k++)if(Y[k]>m)m=Y[k];D[i]=m}
+    for(let i=0;i<N;i++){let m=1e9;for(let k=Math.max(0,i-hw);k<=Math.min(N-1,i+hw);k++)if(D[k]<m)m=D[k];C[i]=Math.max(Y[i],m)}
+    for(let i=1;i<N-1;){
+      if(C[i]-Y[i]<=.05){i++;continue}
+      let a=i;while(a>0&&C[a-1]-Y[a-1]>.05)a--;
+      let b=i;while(b<N-1&&C[b+1]-Y[b+1]>.05)b++;
+      let ok=a>0&&b<N-1,deep=0;
+      for(let k=a;k<=b&&ok;k++){
+        const f=C[k]-Y[k];if(f>deep)deep=f;
+        if(C[k]-GL[k]>RWC.SHORE_MAX||C[k]-GR[k]>RWC.SHORE_MAX||C[k]-Y0[k]>RWC.SHORE_MAX)ok=false;
+      }
+      if(ok&&deep>=RWC.BR_DIP){for(let k=a;k<=b;k++)Y[k]=C[k]}
+      i=b+1;
+    }
+  }
+  const mg=RWC.MAXG*.9*RWC.SS;
+  for(let pass=0;pass<3;pass++){
+    for(let i=1;i<N;i++)Y[i]=clamp(Y[i],Y[i-1]-mg,Y[i-1]+mg);
+    for(let i=N-2;i>=0;i--)Y[i]=clamp(Y[i],Y[i+1]-mg,Y[i+1]+mg);
+  }
   for(let i=0;i<N;i++)Y[i]+=RWC.LIFT;      /* sit the bed a little proud of the ground: no z-fighting on flats, and ridge crests are not buried */
   const nSeg=Math.ceil((N-1)/RWC.SPS),plate=new Uint8Array(nSeg);let cx=0,cz=0;
   for(let k=0;k<nSeg;k++){
     let mx=0;for(let i=k*RWC.SPS;i<=Math.min(N-1,k*RWC.SPS+RWC.SPS);i++)mx=Math.max(mx,Y[i]-.1-(GL[i]-.35),Y[i]-.1-(GR[i]-.35));
-    plate[k]=mx>.7+RWC.LIFT?1:0;
+    plate[k]=mx>1.5+RWC.LIFT?2:mx>.7+RWC.LIFT?1:0;      /* a tall bridged wall takes two plates' worth of boards */
   }
   /* S: arc length along the finished line. rolling stock is placed by distance along it, so the cars cannot lag or jerk */
   const S=new Float32Array(N);for(let i=1;i<N;i++)S[i]=S[i-1]+Math.hypot(Xf[i]-Xf[i-1],Zf[i]-Zf[i-1]);
@@ -8971,7 +9012,7 @@ function* rwExtendGen(c,B){
   let s1=null;
   for(const da of [0,.15,-.15,.3,-.3,.45,-.45]){
     const a=a0+da,x=c.x+Math.cos(a)*L,z=c.z+Math.sin(a)*L;
-    if(rwStep(c.x,c.z,c.y,x,z,0)>=0){s1={x,z,a};break}
+    if(rwStep(c.x,c.z,c.y,x,z,0,0)>=0){s1={x,z,a};break}
   }
   if(!s1){RW.msg='the ground straight ahead of that track end is too steep or blocked';return null}
   yield;
@@ -9120,7 +9161,7 @@ function rwCrewTick(dt){
 const RW_LAYREC={o:['rail',0],i:{},t:1};
 function rwNeed(R,k){
   const n={rail:1,sleeper:1,stone:1};
-  if(R.pr.plate[k])n.plate=1;
+  if(R.pr.plate[k])n.plate=R.pr.plate[k];
   if(k===0||k===R.pr.nSeg-1){n.rod=2;n.plate=(n.plate||0)+1}       /* the buffer stops */
   return n;
 }
@@ -9639,7 +9680,15 @@ function rwBuildRun(g,R,i0,i1){
       prev=cur;
     }
   }
-  const wm=gbMesh(W,MAT.aWood),pm=gbMesh(P,MAT.aRust);if(wm)g.add(wm);if(pm)g.add(pm);
+  /* a bridged run stands on filled ground between its boards: close each open end with a gravel face so the fill is never see-through */
+  const F=GB();
+  for(const i of [i0,i1]){
+    const rx=-pr.TZ[i],rz=pr.TX[i],gl=pr.GL[i],gr=pr.GR[i],tp=pr.Y[i]-.1,bt=Math.min(gl,gr,groundAt(pr.X[i],pr.Z[i]))-.38;
+    if(tp-.55-bt<.12)continue;
+    const e=RWC.SHORE_X-.04,hn=[pr.TX[i]*(i===i0?-1:1),0,pr.TZ[i]*(i===i0?-1:1)];
+    gbQuad(F,[pr.X[i]-rx*e,tp-.55,pr.Z[i]-rz*e],[pr.X[i]+rx*e,tp-.55,pr.Z[i]+rz*e],[pr.X[i]+rx*e,bt,pr.Z[i]+rz*e],[pr.X[i]-rx*e,bt,pr.Z[i]-rz*e],hn,[0,(tp-.55)/1.2,e*2/1.2,(tp-.55)/1.2,e*2/1.2,bt/1.2,0,bt/1.2]);
+  }
+  const wm=gbMesh(W,MAT.aWood),pm=gbMesh(P,MAT.aRust),fm=gbMesh(F,MAT.aGravel||MAT.aSoil);if(wm)g.add(wm);if(pm)g.add(pm);if(fm)g.add(fm);
 }
 /* a buffer stop at each end of the line: a timber beam on a steel trestle, carrying the same two buffers as the wagons at EXACTLY their height
    (BY above the ballast = rail head + the wagons' buffer height), so a train's buffers meet them head on */
