@@ -11381,7 +11381,7 @@ function liqInit(s){
   const d=WORKS[s.type].liq,defs=d.cs||[{cap:d.cap,fixed:d.fixed,type:d.type}];
   if(d.ext==='water'){                                                       /* the water tank: its store is the tank's own water, so the group logic and the hose agree */
     const cap0=WORKS[s.type].cap.fluid;
-    s.cs=[{type:'water',fixed:'water',ext:1,get amt(){return s.water},set amt(v){s.water=v},get cap(){return Math.max(0,cap0-s.dew)}}];
+    s.cs=[{type:'water',fixed:'water',ext:1,capShow:cap0,get amt(){return s.water},set amt(v){s.water=v},get cap(){return Math.max(0,cap0-s.dew)}}];
   }else s.cs=defs.map(c=>({type:c.fixed||c.type||null,amt:0,cap:c.cap,fixed:c.fixed||null}));
   s.liq=s.cs[0];s.workK=0;
   s.ports=d.ports.map((p,i)=>({i,lx:p.x,lz:p.z,ly:p.y,ox:p.ox,oz:p.oz,pump:!!p.pump,auto:p.auto||null,c:s.cs[p.c||0],dir:p.dir||'in',on:false,hose:null,name:p.n||('port '+(i+1))}));
@@ -11412,7 +11412,7 @@ function liqNetCheck(a,b){
   return 'cannot connect — that would link '+[...types.keys()].map(t=>LQ.types[t].n).join(' with ')+' through the hoses already joined';
 }
 const liqTypeName=L=>L.type?LQ.types[L.type].n:'empty';
-const liqInfo=(s,c)=>{c=c||s.liq;return liqTypeName(c)+' · '+Math.round(c.amt)+' / '+c.cap};
+const liqInfo=(s,c)=>{c=c||s.liq;return liqTypeName(c)+' · '+Math.round(c.amt)+' / '+Math.round(c.capShow||c.cap)};      /* capShow: what the container is rated for, when the room left differs (the water tank shares its space with dew) */
 function liqMismatch(a,b){                                       /* two containers */
   const ta=a.amt>.01?a.type:null,tb=b.amt>.01?b.type:null;
   if(a.fixed&&b.fixed&&a.fixed!==b.fixed)return 'these two take different liquids';
@@ -11433,19 +11433,26 @@ function liqNewHose(s,pi){
   if(!LQ.mat){LQ.mat=new THREE.MeshStandardMaterial({color:0x1d1d20,roughness:.85,metalness:.05});LQ.geo=new THREE.CylinderGeometry(.04,.04,1,6)}
   H.mesh=new THREE.InstancedMesh(LQ.geo,LQ.mat,N-1);H.mesh.frustumCulled=false;H.mesh.castShadow=true;
   H.nozzle=new THREE.Mesh(new THREE.BoxGeometry(.1,.26,.1),new THREE.MeshStandardMaterial({color:0xb08a3a,roughness:.5,metalness:.6}));H.nozzle.frustumCulled=false;
-  scene.add(H.mesh);scene.add(H.nozzle);
+  H.nozzle2=new THREE.Mesh(H.nozzle.geometry.clone(),H.nozzle.material.clone());H.nozzle2.frustumCulled=false;
+  scene.add(H.mesh);scene.add(H.nozzle);scene.add(H.nozzle2);
   LQ.hoses.push(H);return H;
 }
 function liqKill(H){
   for(const e of [H.a,H.b])if(e&&e.s.ports&&e.s.ports[e.pi]&&e.s.ports[e.pi].hose===H){e.s.ports[e.pi].hose=null;e.s.ports[e.pi].on=false}
   if(LQ.held===H)LQ.held=null;
-  scene.remove(H.mesh);scene.remove(H.nozzle);H.mesh.dispose();H.nozzle.geometry.dispose();H.nozzle.material.dispose();
+  scene.remove(H.mesh);scene.remove(H.nozzle);scene.remove(H.nozzle2);H.mesh.dispose();H.nozzle.geometry.dispose();H.nozzle.material.dispose();H.nozzle2.geometry.dispose();H.nozzle2.material.dispose();
   const i=LQ.hoses.indexOf(H);if(i>=0)LQ.hoses.splice(i,1);
 }
 const _lqm=new THREE.Matrix4(),_lqq=new THREE.Quaternion(),_lqp=new THREE.Vector3(),_lqs=new THREE.Vector3(),_lqy=new THREE.Vector3(0,1,0),_lqv=new THREE.Vector3();
+/* which way a port faces, as a unit vector in the world (ports face +z unless they say otherwise) */
+function liqPortDir(s,pi){
+  const p=s.ports[pi],ox=p.ox||0,oz=p.oz===undefined?.32:p.oz,l=Math.hypot(ox,oz)||1,y=p.ly===undefined?.55:p.ly;
+  const a=liqW(s,p.lx+ox,y,p.lz+oz),b=liqW(s,p.lx+ox+ox/l,y,p.lz+oz+oz/l),dx=b.x-a.x,dz=b.z-a.z,n=Math.hypot(dx,dz)||1;
+  return{x:dx/n,z:dz/n};
+}
 function liqHoseStep(H,dt){
-  const N=LQ.N,A=liqPortPos(H.a.s,H.a.pi);let B;
-  if(H.b)B=liqPortPos(H.b.s,H.b.pi);
+  const N=LQ.N,A=liqPortPos(H.a.s,H.a.pi),dA=liqPortDir(H.a.s,H.a.pi);let B,dB=null;
+  if(H.b){B=liqPortPos(H.b.s,H.b.pi);dB=liqPortDir(H.b.s,H.b.pi)}
   else if(H.retract){                                           /* winding itself back in, hands-free */
     const f=H.free||H.lastB,dx=A.x-f.x,dy=A.y-f.y,dz=A.z-f.z,d=Math.hypot(dx,dy,dz);
     if(d<.55){liqKill(H);return}
@@ -11455,23 +11462,32 @@ function liqHoseStep(H,dt){
   const dist=Math.hypot(B.x-A.x,B.y-A.y,B.z-A.z),want=clamp(dist*1.12+(H.retract?.4:1.0),.8,LQ.maxLen);
   if(H.b&&dist>LQ.maxLen+2){liqDisconnect(H,H.b.s,H.b.pi);log('the hose was pulled free','gold');return}
   H.len+=(want-H.len)*Math.min(1,dt*(H.retract?9:5));
-  const seg=H.len/(N-1),g=9.8*dt*dt;
-  for(let i=1;i<N-1;i++){
+  const seg=H.len/(N-1),g=9.8*dt*dt,stub=clamp(seg,.15,.55);
+  /* the first node past a port, and the last before a plugged-in one, are held out along the port's direction, so the end piece sits in its socket
+     the way a fitting would, instead of hanging down with the rope. Nodes below lo and from hi up are fixed. */
+  const lo=2,hi=H.b?N-2:N-1;
+  const pin=()=>{
+    H.x[0]=A.x;H.y[0]=A.y;H.z[0]=A.z;H.x[1]=A.x+dA.x*stub;H.y[1]=A.y;H.z[1]=A.z+dA.z*stub;
+    H.x[N-1]=B.x;H.y[N-1]=B.y;H.z[N-1]=B.z;
+    if(dB){H.x[N-2]=B.x+dB.x*stub;H.y[N-2]=B.y;H.z[N-2]=B.z+dB.z*stub}
+  };
+  for(let i=lo;i<hi;i++){
     const vx=(H.x[i]-H.px[i])*.95,vy=(H.y[i]-H.py[i])*.95,vz=(H.z[i]-H.pz[i])*.95;
     H.px[i]=H.x[i];H.py[i]=H.y[i];H.pz[i]=H.z[i];
     H.x[i]+=vx;H.y[i]+=vy-g;H.z[i]+=vz;
   }
-  H.x[0]=A.x;H.y[0]=A.y;H.z[0]=A.z;H.x[N-1]=B.x;H.y[N-1]=B.y;H.z[N-1]=B.z;
-  for(let it=0;it<10;it++){
+  pin();
+  for(let it=0;it<12;it++){
     for(let i=0;i<N-1;i++){
-      const dx=H.x[i+1]-H.x[i],dy=H.y[i+1]-H.y[i],dz=H.z[i+1]-H.z[i],d=Math.hypot(dx,dy,dz)||1e-6,k=(d-seg)/d*.5;
-      const p0=i===0,p1=i===N-2;
-      if(!p0){H.x[i]+=dx*k*(p1?2:1);H.y[i]+=dy*k*(p1?2:1);H.z[i]+=dz*k*(p1?2:1)}
-      if(!p1){H.x[i+1]-=dx*k*(p0?2:1);H.y[i+1]-=dy*k*(p0?2:1);H.z[i+1]-=dz*k*(p0?2:1)}
+      const fa=i<lo||i>=hi,fb=i+1<lo||i+1>=hi;
+      if(fa&&fb)continue;
+      const dx=H.x[i+1]-H.x[i],dy=H.y[i+1]-H.y[i],dz=H.z[i+1]-H.z[i],d=Math.hypot(dx,dy,dz)||1e-6,k=(d-seg)/d*(fa||fb?1:.5);
+      if(!fa){H.x[i]+=dx*k;H.y[i]+=dy*k;H.z[i]+=dz*k}
+      if(!fb){H.x[i+1]-=dx*k;H.y[i+1]-=dy*k;H.z[i+1]-=dz*k}
     }
-    H.x[0]=A.x;H.y[0]=A.y;H.z[0]=A.z;H.x[N-1]=B.x;H.y[N-1]=B.y;H.z[N-1]=B.z;
+    pin();
   }
-  for(let i=1;i<N-1;i++){                                       /* the ground: it lies there and drags */
+  for(let i=lo;i<hi;i++){                                       /* the ground: it lies there and drags */
     const gy=heightAt(H.x[i],H.z[i])+.05;
     if(H.y[i]<gy){H.y[i]=gy;H.x[i]=H.px[i]+(H.x[i]-H.px[i])*.5;H.z[i]=H.pz[i]+(H.z[i]-H.pz[i])*.5}
   }
@@ -11481,6 +11497,7 @@ function liqHoseStep(H,dt){
     _lqp.set((H.x[i]+H.x[i+1])/2,(H.y[i]+H.y[i+1])/2,(H.z[i]+H.z[i+1])/2);_lqs.set(1,l,1);
     _lqm.compose(_lqp,_lqq,_lqs);H.mesh.setMatrixAt(i,_lqm);
     if(i===N-2){H.nozzle.position.copy(_lqp);H.nozzle.quaternion.copy(_lqq)}
+    if(i===0){H.nozzle2.position.copy(_lqp);H.nozzle2.quaternion.copy(_lqq)}
   }
   H.mesh.instanceMatrix.needsUpdate=true;
 }
@@ -11491,6 +11508,7 @@ function liqTake(s,pi){
   log('hose out — '+LQ.maxLen+' m. Plug it into another port, or back into this one to wind it in','gold',1);
 }
 function liqConnect(H,s,pi){
+  if(!LQ.hoses.includes(H)||H.b||s.ports[pi].hose||!liqAlive(s)||!liqAlive(H.a.s))return;            /* the world changed while the key was held: do nothing */
   H.b={s,pi};H.held=false;s.ports[pi].hose=H;LQ.held=null;
   for(const e of [H.a,H.b])e.s.ports[e.pi].on=false;
   SFX('clunk');log('hose connected — set the pump direction, then switch it on','good',1);
@@ -11528,11 +11546,13 @@ function liqAction(h){
     if(s.isCar&&Math.abs(s.T.v)>.05&&!p.hose)return{label:p.name,sub:'the train must be standing still first',time:0,run(){}};
     if(H){
       if(H.a.s===s&&H.a.pi===h.pi)return{label:'return hose',sub:'hold E — let it wind back into '+p.name,time:.3,run(){liqRetract(H)}};
-      if(p.hose)return{label:p.name,sub:'a hose is already plugged in here',time:0,run(){}};
+      if(p.hose)return{label:p.name,sub:p.hose.b?'a hose is already plugged in here':'a hose is still winding in here — one moment',time:0,run(){}};
+      if(H.a.s.ports[H.a.pi].c===p.c)return{label:p.name,sub:'a container cannot be hosed to itself',time:0,run(){}};
       const bad=liqNetCheck(H.a.s.ports[H.a.pi].c,p.c);
       if(bad)return{label:p.name,sub:bad,time:0,run(){}};
       return{label:'plug in hose',sub:'hold E — connect it to '+p.name+' · '+info,time:.7,run(){liqConnect(H,s,h.pi)}};
     }
+    if(p.hose&&!p.hose.b)return{label:p.name,sub:'its hose is still winding in — one moment',time:0,run(){}};
     if(p.hose)return{label:'unplug hose',sub:'hold E — it winds itself back · '+p.name+' · '+info,time:.6,run(){liqDisconnect(p.hose,s,h.pi)}};
     return{label:'take hose',sub:'hold E — pull out a '+LQ.maxLen+' m hose from '+p.name+' · '+info,time:.5,run(){liqTake(s,h.pi)}};
   }
@@ -11607,7 +11627,26 @@ function liqVisual(s,dt){
     const k=1+.22*Math.sin(T*17)+.12*Math.sin(T*29.3);s.sFlame.visible=w>.05;s.sFlame.scale.set(.8*k,Math.max(.05,w*1.7*k),.8*k);
   }
 }
+let _lqAudit=0;
+/* once a second, check that ports and hoses agree with each other, and quietly repair or remove anything that does not (a hose a port does not know,
+   a port holding a hose that is gone, a hose held by nobody that would otherwise follow the player's hand) */
+function liqAudit(dt){
+  _lqAudit+=dt;if(_lqAudit<1)return;_lqAudit=0;
+  for(const H of LQ.hoses.slice()){
+    let bad=false;
+    for(const e of [H.a,H.b]){if(!e)continue;if(!e.s.ports||!e.s.ports[e.pi]||!liqAlive(e.s)||e.s.ports[e.pi].hose!==H)bad=true}
+    if(H.b&&H.a.s===H.b.s&&H.a.pi===H.b.pi)bad=true;
+    if(bad){liqKill(H);continue}
+    if(!H.b&&!H.held&&!H.retract){H.retract=true;H.free=H.lastB}
+    if(H.held&&LQ.held!==H){H.held=false;H.retract=true;H.free=H.lastB}
+  }
+  if(LQ.held&&!LQ.hoses.includes(LQ.held))LQ.held=null;
+  const chk=s=>{if(s.ports)for(const p of s.ports)if(p.hose&&(!LQ.hoses.includes(p.hose)||(p.hose.a.s!==s&&!(p.hose.b&&p.hose.b.s===s))))p.hose=null};
+  for(const s of G.struct)chk(s);
+  for(const T of TR.list)for(const c of T.cars)chk(c);
+}
 function liqStep(dt){
+  liqAudit(dt);
   const H0=LQ.held;
   if(H0){
     if(P.aboard||G.drive||P.dead||!liqAlive(H0.a.s))liqRetract(H0);
@@ -11715,7 +11754,7 @@ function asmLorry(K,s){
   K.box('aOchre',0,2.0,1.88,1.74,.1,.06);K.box('aOchre',0,2.0,.72,1.74,.1,.06);
   for(const sg of [-1,1])K.box('aOchre',sg*.84,2.0,1.3,.06,.1,1.2);
   K.box('aGlass',0,1.65,1.9,1.62,.68,.012);K.box('aGlass',0,1.65,.7,1.62,.68,.012);              /* windscreen, rear glass */
-  for(const sg of [-1,1])for(const z of [1.09,1.51])K.box('aGlass',sg*.855,1.65,z,.012,.68,.36);   /* side glass */
+  for(const sg of [-1,1]){K.box('aGlass',sg*.855,1.625,1.0225,.012,.65,.505);K.box('aGlass',sg*.855,1.625,1.5875,.012,.65,.525)}   /* side glass: edge to edge between the pillars */
   K.box('aPlate',0,2.07,1.3,1.84,.05,1.36);K.box('aBare',0,2.11,1.3,1.4,.03,1.0);
   for(const sg of [-1,1])K.box('aBare',sg*.862,1.0,1.1,.01,.05,.2);                              /* door handles */
   K.box('aRubber',0,1.0,1.93,1.2,.34,.03);for(let i=0;i<4;i++)K.box('aBare',0,.88+i*.08,1.95,1.0,.015,.02);
