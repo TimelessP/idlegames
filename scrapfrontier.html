@@ -842,6 +842,14 @@ LIQUIDS & OIL (§09g)
     WORKS entries with needs:'oilseep' snap onto the nearest seep while building and refuse to go anywhere else. liqWork() runs the derrick
     (rate crude/s) and refinery (rate crude/s, yield diesel per crude) from the grid's current (s.pw / s.pratio).
 
+DIESEL TRAINS (§18)
+  • Each line has a train kind, R.tk ('solar' | 'diesel'), chosen per route in the planning office. TC_SETS lists the cars of each kind; a train carries its
+    own T.kinds, T.lt (length), T.vmax/vrev/acc and T.dz (diesel). Add a car kind: a trainBody… function (the shared chassis is added for you), an entry in
+    TC_NAME / TR_DOORS, a walk-obstacle function called from trainHit, and (if it holds liquid) an entry in TC_LIQ — trainCarLiq then gives it containers,
+    ports and hotspots in its own frame, exactly as for a structure, and the hose system works on it unchanged.
+  • 'dlocoR' is the tail loco: the same body turned about (c.sign = -1), driven from its own cab — W moves the train the way that cab points.
+  • A diesel train burns fuel from the two locos' fixed-diesel tanks (trainFuelUse), and will not move while a hose is plugged into any of its cars.
+
 TERRAIN (§05b)
   • heightAt(x,z) is still the single source of truth for every vehicle, the player and the spawner. It is now a
     pure function of (SEED, x, z): the original rolling hills, plus 1200 m macro cells (valley / massif / mesa /
@@ -6031,7 +6039,7 @@ function gridTick(dt){
   G.findBoost=1+G.struct.reduce((a,s)=>a+(((WORKS[s.type].boost&&s.fsm.ctx.live)?WORKS[s.type].boost.find:0)*Math.max(0,1-((s.x-P.x)**2+(s.z-P.z)**2)/8100)),0);
   let maxCap=90;
   for(const s of G.struct)if(WORKS[s.type].cap&&WORKS[s.type].cap.mass)maxCap+=WORKS[s.type].cap.mass;
-  for(const T of TR.list)maxCap+=WORKS.freight.cap.mass;      // each goods van is a freight container's worth of room
+  for(const T of TR.list)maxCap+=WORKS.freight.cap.mass*Math.max(1,T.cars.filter(c=>c.kind==='goods').length);      // each goods van is a freight container's worth of room
   G.cap=maxCap;
 }
 
@@ -9233,6 +9241,9 @@ function rwSpot(R,k){
   o={x:pick.x,z:pick.z,mx:pr.X[i],mz:pr.Z[i],yaw:Math.atan2(-rx*pick.s2,-rz*pick.s2)};R.spots.set(k,o);return o;
 }
 /* scrap in the way of a laid section is cleared; and scrap that grows back keeps off the line altogether */
+/* loose scrap that building over a seep may clear: stones, stacks and scrap piles — never a landmark or a big solid */
+const BUILD_FIXED=['outcrop','spire','mast','ruin','wreck','pod','tank'];
+const buildClutter=f=>!(BUILD_FIXED.includes(f.t)||String(f.id).endsWith('_L'));
 function rwClearScrap(R,k){
   const pr=R.pr,i0=k*RWC.SPS,i1=Math.min(pr.N-1,i0+RWC.SPS);
   for(const f of featuresNear((pr.X[i0]+pr.X[i1])/2,(pr.Z[i0]+pr.Z[i1])/2,11)){
@@ -9658,7 +9669,11 @@ function rwOpenDialog(){
     const e=rwEnds(R),len=R.pr?R.pr.len.toFixed(0)+' m':'surveying…',st=!R.pr?'surveying':R.ph==='done'?'complete':(R===rwActive()?'building ':'queued ')+rwLaidCount(R)+' / '+R.pr.nSeg;
     h+=`<div class="card" style="padding:10px;margin:6px 0"><div class="top"><b>${rwPos(e.a)} → ${rwPos(e.b)}</b>
       <button class="btn sm gho" data-rwdel="${i}">delete</button></div>
-      <p class="desc">${len} · ${st}</p></div>`;
+      <p class="desc">${len} · ${st}</p>
+      <div style="display:flex;gap:6px;align-items:center;margin-top:6px"><span class="lbl">train</span>
+        <button class="btn sm ${R.tk==='diesel'?'gho':'pri'}" data-rwtk="${i}:solar">solar electric</button>
+        <button class="btn sm ${R.tk==='diesel'?'pri':'gho'}" data-rwtk="${i}:diesel">diesel</button></div>
+      <p class="desc" style="margin-top:4px">${R.tk==='diesel'?'diesel: a loco at each end, 3 tankers, 3 passenger wagons, 3 goods vans — '+Math.ceil(trainLenOf(TC_SETS.diesel.length)+TC.endGap*2+6)+' m of line or more, refuelled by hose':'solar electric: one loco, a passenger wagon and a goods van — runs on sun, no fuel'}</p></div>`;
   });
   MODAL.open('railway planning','§17 · routes and plans',h,[
     {label:'plan route',cls:'pri',fn(){
@@ -9670,6 +9685,8 @@ function rwOpenDialog(){
     {label:'close',cls:'gho'}
   ]);
   $('#md-b').onclick=e=>{
+    const tk=e.target.closest&&e.target.closest('[data-rwtk]');
+    if(tk){const [ri,k]=tk.dataset.rwtk.split(':'),R=RW.routes[+ri];if(R)rwSetTrainKind(R,k);return}
     const b=e.target.closest&&e.target.closest('[data-rwdel]');if(!b)return;
     const R=RW.routes[+b.dataset.rwdel];if(!R)return;
     if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='confirm delete';b.classList.remove('gho');b.classList.add('pri');return}
@@ -9832,7 +9849,7 @@ function rwRenderTick(){
 /* ── saves: only the routes (nodes) and how much of each is laid. the assets are rebuilt from them ── */
 function railSave(){
   if(!RW.routes.length&&!(RW.pair&&RW.jobKind==='plan'))return undefined;
-  const o={r:RW.routes.map(R=>({n:R.nodes.map(p=>[+p[0].toFixed(1),+p[1].toFixed(1)]),ph:R.ph,b:R.pr?rwBuiltRun(R):(R.built|0),e:R.pr?rwBuiltEnd(R):(R.builtEnd|0),...(R.train?{t:trainSave(R.train)}:R.trainSave?{t:R.trainSave}:{})}))};
+  const o={r:RW.routes.map(R=>({n:R.nodes.map(p=>[+p[0].toFixed(1),+p[1].toFixed(1)]),ph:R.ph,b:R.pr?rwBuiltRun(R):(R.built|0),e:R.pr?rwBuiltEnd(R):(R.builtEnd|0),...(R.train?{t:trainSave(R.train)}:R.trainSave?{t:R.trainSave}:{}),...(R.tk==='diesel'?{tk:'d'}:{})}))};
   if(RW.pair&&RW.jobKind==='plan')o.pend=RW.pair.slice();
   const cr=[];
   for(const c of RW.crews){
@@ -9867,7 +9884,7 @@ function railLoad(r){
   rwResetAll();
   if(!r)return;
   const list=Array.isArray(r.r)?r.r:(r.n?[r]:[]);
-  for(const q of list){const R=rwNewRoute(q.n,q.ph==='done'?'done':'building',q.b|0);R.builtEnd=q.e|0;R.trainSave=q.t;RW.routes.push(R);RW.queue.push(R)}
+  for(const q of list){const R=rwNewRoute(q.n,q.ph==='done'?'done':'building',q.b|0);R.builtEnd=q.e|0;R.trainSave=q.t;R.tk=q.tk==='d'?'diesel':'solar';RW.routes.push(R);RW.queue.push(R)}
   /* the crews carry on where they left off: each android back on the job (or on its way home), its robot still escorting it */
   for(const c of (Array.isArray(r.crew)?r.crew:(r.crew?[r.crew]:[]))){
     const A=G.struct[c.a],B=G.struct[c.b];
@@ -9893,9 +9910,11 @@ function railLoad(r){
 const TC={gauge:1.435,wb:5,wr:.42,len:8.4,gap:1.2,F:1.18,H:2.25,hw:1.2,hlI:4.1,railTop:.27,
   vmax:11,vrev:8.5,acc:.32,dec:.5,halt:1.7,endDec:.42,endGap:.5,waitEnd:120,
   B:1000,solar:1.1,drain:.5,lamp:.03,hornR:100,cruise:.78};
-const TC_KINDS=['loco','passenger','goods'];
-const TC_PITCH=TC.len+TC.gap,TC_LT=TC_KINDS.length*TC.len+(TC_KINDS.length-1)*TC.gap;
-const TC_NAME={loco:'solar loco',passenger:'passenger wagon',goods:'goods van'};
+const TC_SETS={solar:['loco','passenger','goods'],diesel:['dloco','tanker','tanker','tanker','passenger','passenger','passenger','goods','goods','goods','dlocoR']};
+const TC_KINDS=TC_SETS.solar;
+const TC_PITCH=TC.len+TC.gap,trainLenOf=n=>n*TC.len+(n-1)*TC.gap;
+const TC_NAME={loco:'solar loco',dloco:'diesel loco',dlocoR:'diesel loco',tanker:'tanker car',passenger:'passenger wagon',goods:'goods van'};
+const TC_DIESEL={vmax:14,vrev:14,acc:.3,fuelCap:600,fuelIdle:.012,fuelRun:.55,fuel0:.5};          /* diesel: faster, stronger, a longer train */
 const TC_LM=['auto','on','off'];
 const TR={list:[]};           /* every train that exists (one per finished line) */
 
@@ -10157,46 +10176,213 @@ const TR_GOODS=[[-.8,-3.35,.9,.9],[-.85,-2.2,.7,.9],[-.85,2.3,.7,.7],[-.85,3.2,.
 TR_COL.loco=[[-.95,.95,3.3,3.95],[-.88,-.36,2.35,2.95],[-1.2,-.74,-3.9,-2.0],[-1.2,-.74,-.8,.95],[.74,1.2,-3.9,-2.0],[.74,1.2,-.8,.95]];
 TR_COL.passenger=[[-1.2,-.6,.85,2.6],[.6,1.2,.85,2.6],[-1.2,-.72,2.85,3.6],[.72,1.2,2.85,3.6],[-1.2,-.3,-3.85,-1.6],[.66,1.2,-3.0,-1.3],[.58,1.15,-1.05,-.6]];
 TR_COL.goods=TR_GOODS.map(b=>[b[0]-b[2]/2,b[0]+b[2]/2,b[1]-b[3]/2,b[1]+b[3]/2]).concat([[.55,1.2,.9,1.7],[-1.2,-.55,.65,1.65],[.6,1.15,-1.6,-.75]]);
-const TR_DOORS={loco:[-1.4],passenger:[0],goods:[0]};
+const TR_DOORS={loco:[-1.4],passenger:[0],goods:[0],dloco:[1.05],dlocoR:[-1.05],tanker:[0]};
 function trainBuildCar(kind){
-  const K=asmKit(),ctx={axles:[],lamps:[],heads:[],kind};
+  const K=asmKit(),ctx={axles:[],lamps:[],heads:[],kind,sign:1},base=kind==='dlocoR'?'dloco':kind;
   trainChassis(K,ctx);
-  (kind==='loco'?trainBodyLoco:kind==='goods'?trainBodyGoods:trainBodyPassenger)(K,ctx);
+  (base==='loco'?trainBodyLoco:base==='dloco'?trainBodyDLoco:base==='tanker'?trainBodyTanker:base==='goods'?trainBodyGoods:trainBodyPassenger)(K,ctx);
   trainLadders(K,TR_DOORS[kind]);
   const g=K.finish();_tg.clear();
   g.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true}});
-  ctx.g=g;return ctx;
+  if(kind==='dlocoR'){const w=new THREE.Group();g.rotation.y=Math.PI;w.add(g);ctx.g=w;ctx.sign=-1}else ctx.g=g;     /* the tail loco is the same body turned about */
+  return ctx;
+}
+/* ───────────────────────────────────────────────────────────────────────
+   DIESEL STOCK — the diesel loco (a central cab with always-open doors, a hood and a walkway skirt with a railing each end), and the tanker
+   (a barrel on a flat with a catwalk and railing down both sides). A diesel train is loco · 3 tankers · 3 passenger wagons · 3 goods vans · loco:
+   the tail loco is the same body turned about ('dlocoR'), so it can be driven from either end.
+   ─────────────────────────────────────────────────────────────────────── */
+function trainRails(K,F,zs,gapA,gapB,xs){
+  for(const sg of xs||[-1,1]){
+    const x=sg*1.3;
+    for(const z of zs)K.tube('aGalv',profCircle(.025,6),[V3(x,F,z),V3(x,F+1.02,z)],{tile:.3});
+    for(let i=0;i<zs.length-1;i++){
+      if(zs[i]>=gapA&&zs[i+1]<=gapB)continue;
+      for(const y of [F+.55,F+1.0])K.tube('aGalv',profCircle(.02,6),[V3(x,y,zs[i]),V3(x,y,zs[i+1])],{tile:.3});
+    }
+  }
+  for(const ez of [-4.1,4.1])for(const sg of [-1,1]){                   /* the ends: a short rail each side, the middle left open for the gangway */
+    for(const x of [sg*.78,sg*1.3])K.tube('aGalv',profCircle(.025,6),[V3(x,F,ez),V3(x,F+1.02,ez)],{tile:.3});
+    for(const y of [F+.55,F+1.0])K.tube('aGalv',profCircle(.02,6),[V3(sg*.78,y,ez),V3(sg*1.3,y,ez)],{tile:.3});
+  }
+}
+function trainGauge(K,ctx,x,y,z){
+  const g=new THREE.BoxGeometry(1,1,1);g.translate(0,.5,0);
+  const m=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:0xc98a2a}));m.scale.set(.028,.001,.028);m.position.set(x,y,z);m.userData.ci=0;
+  K.g.add(m);K.dyn(m);(ctx.sGauges=ctx.sGauges||[]).push(m);
+}
+function trainBodyDLoco(K,ctx){
+  const F=TC.F;
+  /* walkway plates, rails (a gap at the ladders), the hoods */
+  for(const sg of [-1,1])K.box('aPlate',sg*1.06,F+.012,0,.46,.024,7.9);
+  trainRails(K,F,[-4.05,-3.0,-1.95,-.9,.15,1.7,2.75,3.8],.15,1.7);
+  K.box('aOchre',0,F+.88,2.82,1.5,1.76,1.75);K.box('aBare',0,F+1.78,2.82,1.56,.05,1.8);                       /* front hood */
+  K.box('aRubber',0,F+.9,3.7,1.2,1.2,.03);for(let i=-2;i<=2;i++)K.box('aBare',i*.22,F+.9,3.72,.03,1.2,.02);
+  for(const sg of [-1,1]){K.box('aBare',sg*.76,F+.9,2.82,.015,1.1,1.4);K.box('aBare',sg*.76,F+1.5,2.82,.02,.05,1.55)}
+  K.box('aBlue',0,F+1.05,-2.82,1.5,2.1,1.75);K.box('aBare',0,F+2.12,-2.82,1.56,.05,1.8);                       /* rear hood: the engine */
+  K.box('aRubber',0,F+1.0,-3.7,1.2,1.5,.03);for(let i=-2;i<=2;i++)K.box('aBare',i*.22,F+1.0,-3.72,.03,1.5,.02);
+  for(const sg of [-1,1]){for(const z of [-3.4,-2.82,-2.24])K.box('aBare',sg*.76,F+1.05,z,.015,1.3,.4)}
+  K.disc('aBare',.5,.05,0,F+2.17,-3.0,'y',null,.4,20);for(let k=0;k<3;k++)K.box('aRust',0,F+2.2,-3.0,.9,.02,.12,0,k*Math.PI/3,0);
+  K.pipe('aGalv',.09,[V3(.38,F+2.1,-2.3),V3(.38,F+3.0,-2.3)],.05);K.lathe('aGalv',[[0,0],[.14,0],[.12,.08],[0,.1]],.38,F+3.0,-2.3,12);
+  for(const sg of [-1,1]){const lg=K.box('lampOn',0,F+(sg>0?1.35:1.45),sg*3.74,.26,.2,.03);K.dyn(lg);ctx.heads.push(lg);K.box('aPlate',0,F+(sg>0?1.35:1.45),sg*3.72,.34,.28,.04)}
+  /* the cab: side walls with two doorways each side that never close, a big front window over the desk */
+  for(const sg of [-1,1]){
+    const x=sg*.87;
+    for(const zc of [-1.7,1.7])K.box('aPlate',x,F+1.15,zc,.06,2.3,.4);
+    K.box('aPlate',x,F+.5,0,.06,1.0,1.2);K.box('aPlate',x,F+2.15,0,.06,.3,1.2);K.box('aGlassT',x,F+1.5,0,.02,1.0,1.1);
+    for(const zc of [-1.05,1.05]){
+      K.box('aPlate',x,F+2.15,zc,.06,.3,.9);
+      for(const dz of [-.47,.47])K.box('aBare',x,F+1.0,zc+dz,.09,2.0,.05);
+    }
+  }
+  K.box('aPlate',0,F+.5,1.88,1.74,1.0,.06);K.box('aPlate',0,F+2.15,1.88,1.74,.3,.06);
+  for(const sx of [-1,1])K.box('aGlassT',sx*.43,F+1.55,1.88,.84,.95,.02);K.box('aBare',0,F+1.55,1.88,.06,.95,.08);
+  K.box('aPlate',0,F+1.15,-1.88,1.74,2.3,.06);
+  K.box('aPlate',0,F+2.34,0,2.1,.08,4.1);for(const sg of [-1,1])K.box('aBare',sg*1.05,F+2.4,0,.04,.08,4.1);
+  const lm=K.box('lampOn',0,F+2.27,0,.3,.04,.3);K.dyn(lm);ctx.lamps.push(lm);K.box('aBare',0,F+2.29,0,.34,.03,.34);
+  /* the desk, facing the cab; its instruments face the driver */
+  K.box('aBlue',0,F+.5,1.65,1.5,1.0,.5);K.box('aBare',0,F+1.02,1.65,1.56,.04,.54);
+  K.box('aRubber',-.45,F+.8,1.39,.5,.18,.012);K.box('aBare',-.45,F+.8,1.395,.54,.22,.01);
+  const needle=new THREE.Group();needle.position.set(.62,F+.85,1.38);K.g.add(needle);
+  K.box('aRubber',0,0,-.004,.34,.34,.012,0,0,0,needle);K.box('aBare',0,.1,-.012,.012,.2,.01,0,0,0,needle);K.dyn(needle);ctx.needle=needle;
+  K.box('aBare',-.05,F+.8,1.385,.34,.2,.01);
+  const gauge=K.box('aGlass',-.05,F+.8,1.38,.3,.06,.012);K.dyn(gauge);ctx.gauge=gauge;K.box('aRubber',-.05,F+.8,1.386,.32,.1,.006);
+  const lever=new THREE.Group();lever.position.set(.35,F+1.04,1.5);K.g.add(lever);
+  K.box('aBare',0,.0,0,.2,.05,.2,0,0,0,lever);K.box('aGalv',0,.2,0,.028,.4,.028,0,0,0,lever);K.mesh(new THREE.SphereGeometry(.05,10,8),'aRust',0,.42,0,0,0,0,lever);
+  K.dyn(lever);ctx.lever=lever;K.box('aBare',.35,F+1.05,1.5,.12,.02,.4);
+  for(let i=-3;i<=3;i++)K.box('aBare',.35,F+1.065,1.5+i*.055,.1,.01,.012);
+  K.box('aRust',.72,F+1.06,1.4,.06,.14,.06);K.mesh(new THREE.SphereGeometry(.05,8,6),'aGalv',.72,F+1.2,1.4,0,0,0);
+  K.box('aWood',-.45,F+.45,.72,.5,.08,.5);K.box('aWood',-.45,F+.8,.5,.5,.55,.07);K.box('aBare',-.45,F+.22,.72,.07,.44,.07);   /* driver's seat */
+  K.box('aBare',-.8,F+1.25,-.5,.02,.16,.1);K.box('aRust',-.79,F+1.25,-.5,.015,.08,.03);K.box('aBare',-.8,F+1.25,-1.0,.02,.16,.1);K.box('aOchre',-.79,F+1.25,-1.0,.015,.08,.03);
+  /* underneath: the diesel tank between the axles, gearboxes at the axles */
+  K.box('aRust',0,.68,0,1.4,.42,3.2);K.box('aBare',0,.9,0,1.44,.04,3.24);
+  for(const z of [-TC.wb/2,TC.wb/2])K.box('aBare',0,.55,z,1.0,.3,.5);
+  /* the fuel ports, one each side of the engine hood, with a sight glass above each */
+  for(const sg of [-1,1]){
+    K.pipe('aRust',.04,[V3(sg*.7,.78,-1.4),V3(sg*1.1,.82,-2.3),V3(sg*1.25,F-.05,-2.6),V3(sg*1.28,F+.3,-2.6)],.1,{tile:.5});
+    K.box('aCopper',sg*1.3,F+.3,-2.6,.2,.14,.14);K.box('aBare',sg*1.41,F+.3,-2.6,.03,.19,.19);
+    K.box('aBare',sg*.78,F+1.0,-3.35,.03,.92,.1);K.tube('aGlass',profCircle(.02,8),[V3(sg*.795,F+.58,-3.35),V3(sg*.795,F+1.42,-3.35)],{tile:.5});
+    trainGauge(K,ctx,sg*.81,F+.58,-3.35);
+  }
+  ctx.sGaugeH=.84;
+}
+function trainBodyTanker(K,ctx){
+  const F=TC.F;
+  for(const sg of [-1,1])K.box('aPlate',sg*.96,F+.012,0,.66,.024,7.9);
+  trainRails(K,F,[-4.05,-3.0,-1.9,-.75,.75,1.9,3.0,4.05],-.75,.75);
+  /* the barrel, banded, on two saddles */
+  K.mesh(latheGeo([[0,-3.2],[.3,-3.2],[.52,-3.1],[.6,-2.9],[.62,-2.6],[.62,2.6],[.6,2.9],[.52,3.1],[.3,3.2],[0,3.2]],28,1.2),'aGalv',0,F+.95,0,Math.PI/2,0,0);
+  for(const z of [-2.2,-.8,.8,2.2])K.mesh(latheGeo([[.615,-.04],[.64,-.03],[.64,.03],[.615,.04]],28,.4),'aBare',0,F+.95,z,Math.PI/2,0,0);
+  for(const z of [-2.4,2.4]){K.box('aRust',0,F+.2,z,1.2,.38,.3);K.box('aBare',0,F+.4,z,1.0,.04,.34)}
+  K.lathe('aGalv',[[0,0],[.28,0],[.3,.06],[.26,.14],[.1,.18],[0,.18]],0,F+1.57,0,16);K.lathe('aBare',[[.02,0],[.3,0],[.3,.02],[.02,.02]],0,F+1.57,0,16);
+  /* the couplings, one each side at the forward end, and a sight glass each side at the back */
+  for(const sg of [-1,1]){
+    K.pipe('aRust',.04,[V3(sg*.35,F+.36,2.45),V3(sg*.6,F+.1,2.45),V3(sg*1.2,F+.09,2.45),V3(sg*1.28,F+.3,2.45)],.1,{tile:.5});
+    K.box('aPlate',sg*.9,F+.07,2.45,.62,.1,.2);
+    K.box('aCopper',sg*1.3,F+.3,2.45,.2,.14,.14);K.box('aBare',sg*1.41,F+.3,2.45,.03,.19,.19);
+    K.box('aPlate',sg*.665,F+.95,-1.7,.04,1.02,.14);K.tube('aGlass',profCircle(.02,8),[V3(sg*.69,F+.5,-1.7),V3(sg*.69,F+1.4,-1.7)],{tile:.5});
+    trainGauge(K,ctx,sg*.71,F+.5,-1.7);
+  }
+  ctx.sGaugeH=.9;
+}
+/* walk-obstacles. The tanker: the barrel, with a catwalk either side and a cross-over at each end. */
+function trainHitTanker(x,z,nxt,prv){
+  const ax=Math.abs(x),az=Math.abs(z),L=TC.len/2,reach=(z>0?nxt:prv)?L+1.2:L+.73;
+  const lane=az>L-.1&&az<=reach&&ax<=.72;                     /* the lane starts inside the deck's end, so there is no dead strip to step into */
+  if(!lane&&!(az<=L-.05&&ax<=1.18))return true;
+  return az<=3.3&&ax<.76;
+}
+/* The diesel loco, in its own frame (nose +z). The tail loco calls this mirrored. The cab (|x|<.8, |z|<1.9) has a doorway each side at z ±1.05; the hoods
+   are blocks |x|<.8, 1.9<|z|<3.7; the skirt walkway runs round them, |x| up to 1.2. A gangway lane leads on only where there is a car to walk to. */
+function trainHitDLoco(x,z,nxt,prv){
+  const ax=Math.abs(x),az=Math.abs(z),L=TC.len/2,nb=z>0?nxt:prv;
+  if(az>L-.1&&az<=L+1.2&&ax<=.72)return !nb;                   /* the gangway lane: only where there is a car to walk to */
+  if(az>L-.05||ax>1.2)return true;
+  if(az>1.76&&az<3.9&&ax<.94)return true;                                   /* the hoods */
+  if(az<=1.95){
+    if(ax>.78&&ax<.96)return Math.abs(az-1.05)>.45;                        /* the cab walls: open at the two doorways */
+    if(ax<=.78&&(az>1.75||z>1.28))return true;                            /* the walls at each end, and the desk */
+  }
+  return false;
+}
+const TC_LIQ={
+  dloco:{cs:[{cap:TC_DIESEL.fuelCap,fixed:'diesel'}],ports:[{x:1.3,y:TC.F+.3,z:-2.6,ox:.3,oz:0,n:'fuel port (right)'},{x:-1.3,y:TC.F+.3,z:-2.6,ox:-.3,oz:0,n:'fuel port (left)'}]},
+  tanker:{cs:[{cap:1500}],ports:[{x:1.3,y:TC.F+.3,z:2.45,ox:.3,oz:0,n:'tank port (right)'},{x:-1.3,y:TC.F+.3,z:2.45,ox:-.3,oz:0,n:'tank port (left)'}]}
+};
+/* a car with liquid in it: the same containers, ports and hotspots as a structure, in the car's own frame (the tail loco's turned about) */
+function trainCarLiq(c,T,saved,fresh){
+  const base=c.kind==='dlocoR'?'dloco':c.kind,d=TC_LIQ[base];if(!d)return;
+  const m=c.kind==='dlocoR'?-1:1;
+  c.isCar=true;c.T=T;c.workK=0;
+  c.cs=d.cs.map(q=>({type:q.fixed||null,amt:0,cap:q.cap,fixed:q.fixed||null}));c.liq=c.cs[0];
+  c.ports=d.ports.map((p,i)=>({i,lx:p.x*m,ly:p.y,lz:p.z*m,ox:p.ox*m,oz:p.oz*m,pump:false,auto:null,c:c.cs[0],dir:'in',on:false,hose:null,name:p.n}));
+  c.hots=c.ports.map(p=>({s:c,pi:p.i,k:'sock',x:p.lx+p.ox*.62,y:p.ly,z:p.lz+p.oz*.62}));
+  if(Array.isArray(saved)){saved.forEach((q,i)=>{const k=c.cs[i];if(!k||!q)return;if(q.t&&LQ.types[q.t]&&(!k.fixed||k.fixed===q.t))k.type=q.t;if(Number.isFinite(+q.a))k.amt=clamp(+q.a,0,k.cap);if(!k.amt&&!k.fixed)k.type=null})}
+  else if(fresh&&base==='dloco'){c.cs[0].amt=c.cs[0].cap*TC_DIESEL.fuel0}
+}
+const trainHosed=T=>T.dz&&T.cars.some(c=>c.ports&&c.ports.some(p=>p.hose));
+const trainLocos=T=>T.cars.filter(c=>c.kind==='dloco'||c.kind==='dlocoR');
+function trainFuelOf(T){let a=0,k=0;for(const c of trainLocos(T)){a+=c.cs[0].amt;k+=c.cs[0].cap}return{amt:a,cap:k}}
+/* burning diesel: a little standing, more with speed, drawn equally from both locos' tanks */
+function trainFuelUse(T,dt){
+  const L=trainLocos(T);let tot=0,cap=0;
+  for(const c of L){tot+=c.cs[0].amt;cap+=c.cs[0].cap}
+  const use=(TC_DIESEL.fuelIdle+T.spd/T.vmax*TC_DIESEL.fuelRun)*dt;
+  if(use>0&&tot>0)for(const c of L){c.cs[0].amt=Math.max(0,c.cs[0].amt-use*(c.cs[0].amt/tot))}
+  tot=0;for(const c of L)tot+=c.cs[0].amt;
+  T.pow=cap?tot/cap*TC.B:0;
+  if(T.pow<=.5&&(T.v!==0||T.auto)&&now()-T.msgT>30){T.msgT=now();if(!T.silent)log('the train is out of diesel — it coasts to a stop. Hose some into a loco’s fuel port','bad')}
+}
+function rwSetTrainKind(R,k){
+  if((R.tk||'solar')===k)return;
+  if(R.train&&P.aboard===R.train){log('step off the train first','bad');SFX('bad');return}
+  R.tk=k;
+  if(R.train)trainRemove(R);
+  R.trainSave=null;R.trainTried=false;
+  log('that line will run a '+(k==='diesel'?'diesel':'solar-electric')+' train'+(R.ph==='done'?' — a new one is brought to the start of the line':' once it is finished'),'good');
+  SFX('place');saveGame();rwOpenDialog();
 }
 
 /* ── a train: created when a line is finished, saved by where it is and what mode it is in ── */
 let _trId=1;
-const TC_LIM=T=>({lo:TC_LT+TC.endGap,hi:T.R.pr.len-TC.endGap});
+const TC_LIM=T=>({lo:T.lt+TC.endGap,hi:T.R.pr.len-TC.endGap});
 function trainSpawn(R,sv){
   if(R.train||!R.pr||R.trainTried)return;
   R.trainTried=true;
-  if(R.pr.len<TC_LT+TC.endGap*2+6){log('that line is too short to run a train on','bad');return}
-  const T={type:'train',id:_trId++,R,cars:[],d:0,v:0,thr:0,thrT:0,auto:true,dir:1,wait:TC.waitEnd,lm:0,hm:0,lampsOn:false,headOn:false,seat:null,seatK:0,pow:TC.B*.6,brake:false,brakeT:0,
-    lever:false,pc:0,ds:0,msgT:-1e9,vis:false,silent:false,pitchOf:0,spd:0};
+  let kind=R.tk==='diesel'?'diesel':'solar',kinds=TC_SETS[kind],lt=trainLenOf(kinds.length);
+  if(sv&&((sv.k==='d')!==(kind==='diesel')))sv=null;                       /* the saved train is not this line's kind: start a fresh one */
+  if(R.pr.len<lt+TC.endGap*2+6){
+    const sl=trainLenOf(TC_SETS.solar.length);
+    if(kind==='diesel'&&R.pr.len>=sl+TC.endGap*2+6){log('that line is too short for the long diesel train ('+Math.ceil(lt+TC.endGap*2+6)+' m needed) — a solar train runs on it instead','gold');kind='solar';kinds=TC_SETS.solar;lt=sl;R.tk='solar';sv=null}
+    else{log('that line is too short to run a train on','bad');return}
+  }
+  const dz=kind==='diesel';
+  const T={type:'train',id:_trId++,R,cars:[],kinds,lt,dz,vmax:dz?TC_DIESEL.vmax:TC.vmax,vrev:dz?TC_DIESEL.vrev:TC.vrev,acc:dz?TC_DIESEL.acc:TC.acc,
+    d:0,v:0,thr:0,thrT:0,auto:true,dir:1,wait:TC.waitEnd,lm:0,hm:0,lampsOn:false,headOn:false,seat:null,seatK:0,pow:TC.B*.6,brake:false,brakeT:0,
+    lever:false,pc:0,ds:0,msgT:-1e9,hoseT:-1e9,vis:false,silent:false,pitchOf:0,spd:0};
   T.d=TC_LIM(T).lo;
   if(sv){
-    T.d=clamp(+sv.d||T.d,TC_LIM(T).lo,TC_LIM(T).hi);T.v=clamp(+sv.v||0,-TC.vmax,TC.vmax);T.auto=sv.a!==0;T.dir=sv.dr<0?-1:1;
+    T.d=clamp(+sv.d||T.d,TC_LIM(T).lo,TC_LIM(T).hi);T.v=clamp(+sv.v||0,-T.vmax,T.vmax);T.auto=sv.a!==0;T.dir=sv.dr<0?-1:1;
     T.wait=clamp(+sv.w||0,0,TC.waitEnd);T.lm=(sv.l===1||sv.l===2)?sv.l:0;T.hm=(sv.hl===1||sv.hl===2)?sv.hl:0;T.pow=clamp(+sv.p||TC.B*.6,0,TC.B);
-    if(!T.auto){T.thr=clamp(T.v/(T.v>=0?TC.vmax:TC.vrev),-1,1)}
+    if(!T.auto){T.thr=clamp(T.v/(T.v>=0?T.vmax:T.vrev),-1,1)}
   }
-  for(const kind of TC_KINDS){const c=trainBuildCar(kind);c.g.visible=false;scene.add(c.g);c.yaw=0;c.x=0;c.z=0;c.stn=null;T.cars.push(c)}
+  kinds.forEach((kd,i)=>{const c=trainBuildCar(kd);c.g.visible=false;scene.add(c.g);c.yaw=0;c.x=0;c.z=0;c.stn=null;trainCarLiq(c,T,sv&&sv.lq&&sv.lq[i],!sv);T.cars.push(c)});
   R.train=T;TR.list.push(T);
+  if(dz)trainFuelUse(T,0);
   trainPose(T);
-  if(!sv)log('a train has been added to the new line: a solar loco, a passenger wagon and a goods van. it starts in auto mode.','good');
-  if(sv&&sv.ab&&!P.aboard){T.pc=clamp(sv.ab.c|0,0,TC_KINDS.length-1);P.aboard=T;P.lx=+sv.ab.x||0;P.lz=+sv.ab.z||0;P.hy=0;P.vy=0;P.ground=true}
+  if(!sv)log(dz?'a diesel train has been added to the line: a loco at each end, three tankers, three passenger wagons and three goods vans. it starts in auto mode, with half a tank in each loco.':'a train has been added to the new line: a solar loco, a passenger wagon and a goods van. it starts in auto mode.','good');
+  if(sv&&sv.ab&&!P.aboard){T.pc=clamp(sv.ab.c|0,0,T.cars.length-1);P.aboard=T;P.lx=+sv.ab.x||0;P.lz=+sv.ab.z||0;P.hy=0;P.vy=0;P.ground=true}
 }
 function trainRemove(R){
   const T=R&&R.train;if(!T)return;
+  for(const c of T.cars)if(c.ports)liqDetach(c);
   if(P.aboard===T)trainLeave(T,true,T.pc,1,true);
   for(const c of T.cars){scene.remove(c.g);c.g.traverse(o=>{if(o.geometry&&o.geometry!==RW.sleeperGeo)o.geometry.dispose()})}
   TR.list.splice(TR.list.indexOf(T),1);R.train=null;
 }
 function trainSave(T){
   const o={d:+T.d.toFixed(1),v:+T.v.toFixed(2),a:T.auto?1:0,dr:T.dir,w:+T.wait.toFixed(0),l:T.lm|0,hl:T.hm|0,p:+T.pow.toFixed(0)};
+  if(T.dz){o.k='d';o.lq=T.cars.map(c=>c.cs?c.cs.map(q=>({t:q.type,a:+q.amt.toFixed(1)})):0)}
   if(P.aboard===T)o.ab=T.seat?{c:T.seat.ci,x:+T.seat.ex.toFixed(2),z:+T.seat.lz.toFixed(2)}:{c:T.pc,x:+P.lx.toFixed(2),z:+P.lz.toFixed(2)};     /* a seated player is saved standing in the aisle beside the seat */
   return o;
 }
@@ -10223,20 +10409,25 @@ function trainSim(T,dt){
     trainAutoStep(T,dt,lim);
     T.thr+=clamp(T.thrT-T.thr,-.22*dt,.22*dt);               /* the lever eases over to where the timetable wants it */
   }
-  let vt=T.thr>=0?T.thr*TC.vmax:T.thr*TC.vrev;
+  let vt=T.thr>=0?T.thr*T.vmax:T.thr*T.vrev;
   if(T.pow<=.5)vt=0;
+  if(trainHosed(T)){                                          /* a hose is still plugged in: the train stays where it is */
+    if(Math.abs(vt)>.05&&now()-T.hoseT>25){T.hoseT=now();if(!T.silent)log('the train stays put — a hose is still connected to it','gold')}
+    vt=0;
+  }
   /* never faster than can be stopped before the buffers */
   const stopV=g=>Math.sqrt(2*TC.endDec*Math.max(0,g-.15));
   if(vt>0)vt=Math.min(vt,stopV(lim.hi-T.d));else if(vt<0)vt=-Math.min(-vt,stopV(T.d-lim.lo));
   let a;
   if(T.brakeT>0){T.brakeT-=dt;a=TC.halt;if(Math.abs(T.v)<.01)T.brakeT=0}
-  else a=(Math.abs(vt)>Math.abs(T.v)&&(T.v===0||Math.sign(vt)===Math.sign(T.v)))?TC.acc:TC.dec;
+  else a=(Math.abs(vt)>Math.abs(T.v)&&(T.v===0||Math.sign(vt)===Math.sign(T.v)))?T.acc:TC.dec;
   T.v+=clamp(vt-T.v,-a*dt,a*dt);
   if(Math.abs(T.v)<.015&&Math.abs(vt)<.015)T.v=0;
   const nd=T.d+T.v*dt;
   if(nd>lim.hi||nd<lim.lo){T.d=clamp(nd,lim.lo,lim.hi);T.v=0}else T.d=nd;
   T.ds=T.v*dt;T.spd=Math.abs(T.v);
-  const use=T.spd/TC.vmax*TC.drain+(T.lampsOn?TC.lamp*TC_KINDS.length*.7:0)+(T.headOn?TC.lamp*TC_KINDS.length*.3:0);
+  if(T.dz){trainFuelUse(T,dt);return}
+  const use=T.spd/T.vmax*TC.drain+(T.lampsOn?TC.lamp*T.cars.length*.7:0)+(T.headOn?TC.lamp*T.cars.length*.3:0);
   T.pow=clamp(T.pow+(TC.solar*sun-use)*dt,0,TC.B);
   if(T.pow<=.5&&(T.v!==0||T.auto)&&now()-T.msgT>30){T.msgT=now();if(!T.silent)log('the loco\'s battery is flat — the train coasts to a stop and waits for sun','bad')}
 }
@@ -10302,20 +10493,20 @@ function trainStep(dt){
     else if(P.aboard!==T)T.lever=false;
     trainSim(T,dt);
     /* near = how far from the player's ears (for sound); vnear = how far from the camera (the quadcopter when it is flying), which decides what is drawn */
-    const V=Drone.on?Drone:P,pr=T.R.pr,mid=rwAt(pr,T.d-TC_LT/2,_ta);
-    T.near=Math.hypot(mid.x-P.x,mid.z-P.z)-TC_LT/2;
-    T.vnear=Math.hypot(mid.x-V.x,mid.z-V.z)-TC_LT/2;
+    const V=Drone.on?Drone:P,pr=T.R.pr,mid=rwAt(pr,T.d-T.lt/2,_ta);
+    T.near=Math.hypot(mid.x-P.x,mid.z-P.z)-T.lt/2;
+    T.vnear=Math.hypot(mid.x-V.x,mid.z-V.z)-T.lt/2;
     T.vis=P.aboard===T||T.vnear<(SET.draw+.5)*CFG.CH;
     for(const c of T.cars)c.g.visible=T.vis;
     if(!T.vis)continue;
     trainPose(T);
     const on=T.lampsOn;
     for(const c of T.cars){
-      for(const ax of c.axles)ax.rotation.x+=T.ds/TC.wr;
+      for(const ax of c.axles)ax.rotation.x+=(c.sign||1)*T.ds/TC.wr;
       for(const b of c.lamps){b.material=on?MAT.lampOn:MAT.aRubber}
       for(const b of c.heads)b.material=T.headOn?MAT.lampOn:MAT.aRubber;       /* a lamp that is off is dark, not a dimmer glow */
-      if(c.lever)c.lever.rotation.x=lerp(c.lever.rotation.x,-T.thr*.7,Math.min(1,dt*6));
-      if(c.needle)c.needle.rotation.z=lerp(c.needle.rotation.z,1.2-2.4*clamp(T.spd/TC.vmax,0,1),Math.min(1,dt*4));
+      if(c.lever)c.lever.rotation.x=lerp(c.lever.rotation.x,-T.thr*(c.sign||1)*.7,Math.min(1,dt*6));
+      if(c.needle)c.needle.rotation.z=lerp(c.needle.rotation.z,1.2-2.4*clamp(T.spd/T.vmax,0,1),Math.min(1,dt*4));
       if(c.gauge){const f=clamp(T.pow/TC.B,.03,1);c.gauge.scale.x=.3*f;c.gauge.position.x=-.2+.15*f}
     }
   }
@@ -10341,9 +10532,9 @@ function trainLights(dt){
     TL.room.intensity=lerp(TL.room.intensity,(night?26:12)*(.97+.03*Math.sin(now()*7)),k);
   }else TL.room.intensity=lerp(TL.room.intensity,0,k);
   if(vis&&T.headOn){
-    const n=T.cars[0];
-    n.g.localToWorld(TL.head.position.set(0,TC.F+.95,TC.len/2+.15));
-    n.g.localToWorld(TL.tgt.position.set(0,TC.F-.3,TC.len/2+60));
+    const rev=T.dz&&T.thr<-.05,n=rev?T.cars[T.cars.length-1]:T.cars[0],sg=rev?-1:1,nz=(n.kind==='loco'?TC.len/2:3.7)*sg,hy=n.kind==='loco'?TC.F+.95:TC.F+1.4;
+    n.g.localToWorld(TL.head.position.set(0,hy,nz+.15*sg));
+    n.g.localToWorld(TL.tgt.position.set(0,TC.F-.3,nz+60*sg));
     TL.head.intensity=lerp(TL.head.intensity,night?220:70,k);
   }else TL.head.intensity=lerp(TL.head.intensity,0,k);
 }
@@ -10352,7 +10543,7 @@ function trainLeverInput(T,dt){
   if(Math.abs(inp)>.05){
     if(T.auto){T.auto=false;log('manual mode — you have the lever','gold')}
     T.brakeT=0;
-    T.thr=clamp(T.thr+clamp(inp,-1,1)*.4*dt,-1,1);
+    T.thr=clamp(T.thr+clamp(inp,-1,1)*(T.cars[T.pc].sign||1)*.4*dt,-1,1);
   }
 }
 
@@ -10377,6 +10568,9 @@ function trainLeave(T,silent,ci,sg,force){
 }
 function trainDropPos(T){return{x:P.x,z:P.z,yaw:P.yaw}}
 function trainHit(kind,x,z,nxt,prv){
+  if(kind==='tanker')return trainHitTanker(x,z,nxt,prv);
+  if(kind==='dloco')return trainHitDLoco(x,z,nxt,prv);
+  if(kind==='dlocoR')return trainHitDLoco(-x,-z,prv,nxt);      /* the tail loco: the same cab, turned about */
   const ax=Math.abs(x),az=Math.abs(z);
   /* the doorway is ±.5 wide (the opening is ±.55); out in the open gangway ±.72. where another car lies on that side, the lane runs on well past the plate
      (to 1.2 m beyond the end wall), because a step can be 15 cm and must never land in a dead zone short of the switch to the next car at .68 */
@@ -10428,7 +10622,7 @@ function trainWalk(T,dt){
 
 /* ── stations: things to hold E on, each in its own car's frame ── */
 function trainLeverRelease(T){
-  return{id:'tlever',lx:0,lz:0,r:99,deck:1,act(){return{label:'throttle lever',sub:'W / S move the lever · '+(T.thr<0?'reverse ':'')+Math.round(Math.abs(T.thr)*100)+'% · hold E to let go',time:.3,run(){T.lever=false;log('let go of the lever','gold');SFX('click')}}}};
+  return{id:'tlever',lx:0,lz:0,r:99,deck:1,act(){return{label:'throttle lever',sub:'W / S move the lever · '+(T.thr*(T.cars[T.pc].sign||1)<0?'reverse ':'')+Math.round(Math.abs(T.thr)*100)+'% · hold E to let go',time:.3,run(){T.lever=false;log('let go of the lever','gold');SFX('click')}}}};
 }
 /* ── the benches ── */
 const TR_SEATS=[[-1,1.72],[1,1.72],[1,-2.15]];        /* which side of the aisle, and the z of the middle of the bench */
@@ -10493,6 +10687,19 @@ function trainStations(T,ci){
     S.push({id:'thorn',lx:.9,lz:3.05,r:1.2,deck:1,act(){return{label:'horn cord',sub:'hold E · sound the horn',time:.2,run(){trainHorn(T)}}}});
     lights(-1.0,1.3,.75);head(-1.0,1.85,.75);
     S.push({id:'tbatt',lx:-.9,lz:-.2,r:1.8,deck:1,act(){return{label:'battery bank',sub:Math.round(T.pow/TC.B*100)+'% · solar on the roof · '+(T.v?'running':'standing'),time:0,run(){}}}});
+  }else if(kind==='dloco'||kind==='dlocoR'){
+    const M=kind==='dlocoR'?-1:1,yw=kind==='dlocoR'?0:Math.PI;          /* the tail loco is the same cab turned about: its desk faces the rear of the train */
+    S.push({id:'tlevr',lx:M*.35,lz:M*1.12,r:1.5,deck:1,act(){return{label:'throttle lever',sub:'hold E · take the lever · W drives this loco’s way · '+(T.auto?'auto mode — moving it switches to manual':'manual'),time:.4,run(){
+      T.lever=true;T.pc=ci;P.lx=M*.35;P.lz=M*1.05;P.hy=0;P.vy=0;P.yaw=c.yaw+yw;T.ry=yw;P.pitch=-.28;eLock=true;
+      log('at the lever: W / S (or the stick) drive this loco’s way and back · gradual · Z all stop · hold E to let go','gold');SFX('click');
+    }}}});
+    S.push({id:'tseatd',lx:M*-.45,lz:M*.72,r:1.1,deck:1,act(){return{label:'driver’s seat',sub:'hold E · sit · the view turns with the loco',time:.35,run(){trainSit(T,ci,-M,M*.72,M*-.45,yw,M*.1)}}}});
+    S.push({id:'tauto',lx:M*-.45,lz:M*1.2,r:1.3,deck:1,act(){return{label:'timetable board',sub:'auto mode is '+(T.auto?'ON':'off')+' · hold E to switch (also L)',time:.3,run(){trainToggleAuto()}}}});
+    S.push({id:'thorn',lx:M*.72,lz:M*1.2,r:1.2,deck:1,act(){return{label:'horn cord',sub:'hold E · sound the horn',time:.2,run(){trainHorn(T)}}}});
+    lights(M*-.78,M*-.5,.8);head(M*-.78,M*-1.0,.8);
+    S.push({id:'tfuel',lx:0,lz:0,r:1.3,deck:1,act(){const f=trainFuelOf(T);return{label:'diesel tanks',sub:Math.round(f.amt)+' / '+f.cap+' across both locos · '+(T.v?'running':'standing')+' · fuel ports on the engine hood side of each loco',time:0,run(){}}}});
+  }else if(kind==='tanker'){
+    S.push({id:'ttank',lx:0,lz:-2.4,r:2.6,deck:1,act(){return{label:'tank car',sub:liqInfo(c)+' · hose ports on both sides at the forward end',time:0,run(){}}}});
   }else if(kind==='goods'){
     S.push({id:'tstore',lx:0,lz:-2.9,r:2.0,deck:1,act(){return{label:'storage crates',sub:'+'+WORKS.freight.cap.mass+' kg carry capacity while the goods van exists · hold E for the satchel',time:.3,run(){openPanel('satchel')}}}});
   }else if(kind==='passenger'){
@@ -10540,18 +10747,18 @@ function trainPick(){
 
 /* ── HUD ── */
 function trainHud(el,T){
-  const kmh=T.spd*3.6,pc=T.pow/TC.B,lev=Math.round((T.thr+1)/2*100),lim=TC_LIM(T);
+  const th=T.thr*(T.cars[T.pc].sign||1),kmh=T.spd*3.6,pc=T.pow/TC.B,lev=Math.round((th+1)/2*100),lim=TC_LIM(T);
   const cmp=matchMedia('(max-width:700px),(max-height:520px),(pointer:coarse)').matches;
   const wait=T.auto&&T.wait>0?'waiting '+Math.ceil(T.wait)+' s':T.auto?'→ '+(T.dir>0?'far end':'start')+' · '+Math.max(0,Math.round(T.dir>0?lim.hi-T.d:T.d-lim.lo))+' m':'manual';
   const kv=(l,v)=>`<div class="kv" style="display:flex;justify-content:space-between"><span class="lbl">${l}</span><span class="num">${v}</span></div>`;
   const h=`<div class="crf"><div class="crt"><b>${TC_NAME[T.cars[T.pc].kind]}</b><i>${T.lever?'at the lever':T.seat?'seated':'aboard'}</i></div>
-   <div class="meter"><div class="row"><span class="lbl">battery</span><span class="num">${Math.round(pc*100)}%</span></div><div class="bar ${pc<.15?'bd':'am'}"><i style="width:${(pc*100).toFixed(1)}%"></i></div></div>
-   <div class="meter"><div class="row"><span class="lbl">throttle lever</span><span class="num">${T.thr<0?'rev ':''}${Math.round(Math.abs(T.thr)*100)}% · ${kmh.toFixed(1)} km/h</span></div><div class="bar sg"><i style="width:${lev}%"></i></div></div>
-   ${kv('mode (L)',T.auto?'auto · '+wait:'manual')}${kv('cabin lights (O)',TC_LM[T.lm]+(T.lampsOn?' · lit':''))}${kv('headlamp (N)',TC_LM[T.hm]+(T.headOn?' · lit':''))}${kv('along the line',Math.round(T.d-TC_LT)+' / '+Math.round(T.R.pr.len-TC_LT)+' m')}
+   <div class="meter"><div class="row"><span class="lbl">${T.dz?'fuel':'battery'}</span><span class="num">${Math.round(pc*100)}%</span></div><div class="bar ${pc<.15?'bd':'am'}"><i style="width:${(pc*100).toFixed(1)}%"></i></div></div>
+   <div class="meter"><div class="row"><span class="lbl">throttle lever</span><span class="num">${th<0?'rev ':''}${Math.round(Math.abs(th)*100)}% · ${kmh.toFixed(1)} km/h</span></div><div class="bar sg"><i style="width:${lev}%"></i></div></div>
+   ${kv('mode (L)',T.auto?'auto · '+wait:'manual')}${kv('cabin lights (O)',TC_LM[T.lm]+(T.lampsOn?' · lit':''))}${kv('headlamp (N)',TC_LM[T.hm]+(T.headOn?' · lit':''))}${kv('along the line',Math.round(T.d-T.lt)+' / '+Math.round(T.R.pr.len-T.lt)+' m')}
    <div class="crk">${T.lever?'<span class="kbd">W</span><span class="kbd">S</span> lever ':''}<span class="kbd">L</span> auto <span class="kbd">O</span> cabin <span class="kbd">N</span> head <span class="kbd">Z</span> all stop</div></div>
    <div class="crm">
-    <div class="hrow"><b>BATT</b><span class="bar ${pc<.15?'bd':'am'}"><i style="width:${(pc*100).toFixed(1)}%"></i></span></div>
-    <div class="hrow"><b>${T.thr<0?'REV':'THR'}</b><span class="bar ${T.thr<0?'bd':'sg'}"><i style="width:${lev}%"></i></span></div>
+    <div class="hrow"><b>${T.dz?'FUEL':'BATT'}</b><span class="bar ${pc<.15?'bd':'am'}"><i style="width:${(pc*100).toFixed(1)}%"></i></span></div>
+    <div class="hrow"><b>${th<0?'REV':'THR'}</b><span class="bar ${th<0?'bd':'sg'}"><i style="width:${lev}%"></i></span></div>
     <div class="crs"><span>${kmh.toFixed(0)} km/h</span><span>${T.auto?'auto':'manual'}</span></div>
    </div>`;
   el.classList.toggle('cmp',cmp);el.innerHTML=h;el.classList.add('on');
@@ -10566,7 +10773,7 @@ function trainAud(dt){
   for(const T of TR.list){const d=P.aboard===T?0:T.near;if(d<nd){nd=d;near=T}}
   const t=A.ctx.currentTime;
   let vol=0,sp=0;
-  if(near&&nd<TC.hornR){vol=P.aboard===near?1:audVol(Math.max(0,nd),TC.hornR);sp=clamp(near.spd/TC.vmax,0,1)}
+  if(near&&nd<TC.hornR){vol=P.aboard===near?1:audVol(Math.max(0,nd),TC.hornR);sp=clamp(near.spd/near.vmax,0,1)}
   TAUD.rum.g.gain.setTargetAtTime(vol*.38*Math.pow(sp,.8),t,.45);TAUD.rum.fl.frequency.setTargetAtTime(105+sp*150,t,.4);
   TAUD.mid.g.gain.setTargetAtTime(vol*.1*Math.pow(sp,1.3),t,.45);TAUD.mid.fl.frequency.setTargetAtTime(280+sp*300,t,.4);
   if(near&&vol>0&&near.spd>.4){
@@ -11127,8 +11334,13 @@ function recoverAction(s){
 const LQ={rate:14,maxLen:30,N:26,hoses:[],held:null,mat:null,geo:null,
   types:{diesel:{n:'diesel',col:0xc98a2a},water:{n:'water',col:0x4aa3c8},oil:{n:'crude oil',col:0x5a4420}}};
 const _lqd=new THREE.Vector3();
-function liqW(s,lx,ly,lz){const c=Math.cos(s.rot),n=Math.sin(s.rot);return{x:s.x+lx*c+lz*n,y:s.y+ly,z:s.z-lx*n+lz*c}}
-const liqPortPos=(s,pi)=>{const p=s.ports[pi];return liqW(s,p.lx,.55,p.lz+.32)};
+const _lqv3=new THREE.Vector3();
+function liqW(s,lx,ly,lz){
+  if(s.isCar){_lqv3.set(lx,ly,lz);s.g.localToWorld(_lqv3);return{x:_lqv3.x,y:_lqv3.y,z:_lqv3.z}}      /* a train car: its own frame, y measured from the rail head */
+  const c=Math.cos(s.rot),n=Math.sin(s.rot);return{x:s.x+lx*c+lz*n,y:s.y+ly,z:s.z-lx*n+lz*c};
+}
+const liqAlive=s=>s.isCar?(TR.list.includes(s.T)&&s.T.cars.includes(s)):G.struct.includes(s);
+const liqPortPos=(s,pi)=>{const p=s.ports[pi];return liqW(s,p.lx+(p.ox||0),p.ly===undefined?.55:p.ly,p.lz+(p.oz===undefined?.32:p.oz))};
 function liqInit(s){
   const d=WORKS[s.type].liq,defs=d.cs||[{cap:d.cap,fixed:d.fixed,type:d.type}];
   s.cs=defs.map(c=>({type:c.fixed||c.type||null,amt:0,cap:c.cap,fixed:c.fixed||null}));s.liq=s.cs[0];s.workK=0;
@@ -11181,6 +11393,7 @@ function liqHoseStep(H,dt){
   }else B=liqHandPos();
   H.lastB={x:B.x,y:B.y,z:B.z};
   const dist=Math.hypot(B.x-A.x,B.y-A.y,B.z-A.z),want=clamp(dist*1.12+(H.retract?.4:1.0),.8,LQ.maxLen);
+  if(H.b&&dist>LQ.maxLen+2){liqDisconnect(H,H.b.s,H.b.pi);log('the hose was pulled free','gold');return}
   H.len+=(want-H.len)*Math.min(1,dt*(H.retract?9:5));
   const seg=H.len/(N-1),g=9.8*dt*dt;
   for(let i=1;i<N-1;i++){
@@ -11236,8 +11449,7 @@ function liqDetach(s){for(const p of (s.ports||[]))if(p.hose)liqKill(p.hose);}
 function liqPick(){
   if(G.drive)return null;
   let best=null,bs=-1;const cp=camera.position;camera.getWorldDirection(_lqd);const cd=_lqd;
-  for(const s of G.struct){
-    if(!s.hots||Math.hypot(s.x-P.x,s.z-P.z)>8)continue;
+  const look=s=>{
     for(const h of s.hots){
       const w=liqW(s,h.x,h.y,h.z),dx=w.x-cp.x,dy=w.y-cp.y,dz=w.z-cp.z,d=Math.hypot(dx,dy,dz);
       if(d>3.6)continue;
@@ -11245,12 +11457,15 @@ function liqPick(){
       if(dot<.972)continue;
       const sc=dot*10-d*.1;if(sc>bs){bs=sc;best={kind:'liq',ref:h,d}}
     }
-  }
+  };
+  for(const s of G.struct)if(s.hots&&Math.hypot(s.x-P.x,s.z-P.z)<=8)look(s);
+  for(const T of TR.list)if(T.vis&&T.dz)for(const c of T.cars)if(c.hots&&Math.hypot(c.x-P.x,c.z-P.z)<=8)look(c);
   return best;
 }
 function liqAction(h){
   const s=h.s,p=s.ports[h.pi],info=liqInfo(s,p.c),H=LQ.held;
   if(h.k==='sock'){
+    if(s.isCar&&Math.abs(s.T.v)>.05&&!p.hose)return{label:p.name,sub:'the train must be standing still first',time:0,run(){}};
     if(H){
       if(H.a.s===s&&H.a.pi===h.pi)return{label:'return hose',sub:'hold E — let it wind back into '+p.name,time:.3,run(){liqRetract(H)}};
       if(p.hose)return{label:p.name,sub:'a hose is already plugged in here',time:0,run(){}};
@@ -11300,7 +11515,7 @@ function liqWork(s,dt){
   return run;
 }
 function liqVisual(s,dt){
-  if(s.sGauges)s.sGauges.forEach((g,i)=>{const c=s.cs[i];if(!c)return;const f=clamp(c.amt/c.cap,0,1);g.scale.y=Math.max(.001,f*s.sGaugeH);g.visible=f>.002;if(c.type)g.material.color.setHex(LQ.types[c.type].col)});
+  if(s.sGauges)s.sGauges.forEach((g,i)=>{const c=s.cs[g.userData.ci!==undefined?g.userData.ci:i];if(!c)return;const f=clamp(c.amt/c.cap,0,1);g.scale.y=Math.max(.001,f*s.sGaugeH);g.visible=f>.002;if(c.type)g.material.color.setHex(LQ.types[c.type].col)});
   if(s.sLamps)for(const p of s.ports){
     const l=s.sLamps[p.i];
     if(l){const run=p.on||(p.auto&&s.workK>.3&&p.hose&&p.hose.b);l.material.color.setHex(run?0x7cff7c:p.hose&&p.hose.b?0xffb040:0x402020)}
@@ -11319,7 +11534,7 @@ function liqVisual(s,dt){
 function liqStep(dt){
   const H0=LQ.held;
   if(H0){
-    if(P.aboard||G.drive||P.dead||!G.struct.includes(H0.a.s))liqRetract(H0);
+    if(P.aboard||G.drive||P.dead||!liqAlive(H0.a.s))liqRetract(H0);
     else{                                                       /* the hose is only 30 m long */
       const A=liqPortPos(H0.a.s,H0.a.pi),dx=P.x-A.x,dz=P.z-A.z,d=Math.hypot(dx,dz),lim=LQ.maxLen-2;
       if(d>lim){P.x=A.x+dx/d*lim;P.z=A.z+dz/d*lim;P.vx=P.vz=0}
@@ -11328,6 +11543,7 @@ function liqStep(dt){
   for(const H of LQ.hoses.slice())liqHoseStep(H,dt);
   for(const H of LQ.hoses)if(H.a&&H.b)liqFlow(H,dt);
   for(const s of G.struct){if(!s.hots)continue;if(s.type==='derrick'||s.type==='refinery')liqWork(s,dt);liqVisual(s,dt)}
+  for(const T of TR.list)if(T.vis&&T.dz)for(const c of T.cars)if(c.hots)liqVisual(c,dt);
 }
 function liqSaveOne(s){return{c:s.cs.map(c=>({t:c.type,a:+c.amt.toFixed(2)})),p:s.ports.map(p=>({d:p.dir,o:p.on?1:0}))}}
 function liqLoadOne(s,d){
@@ -11435,8 +11651,13 @@ function asmDerrick(K,s){
   /* engine house with a spinning flywheel */
   K.box('aBlue',-2.45,.9,.2,1.3,1.2,1.7);K.box('aRust',-2.45,1.58,.2,1.4,.16,1.8);
   K.pipe('aGalv',.06,[V3(-2.2,1.6,-.4),V3(-2.2,3.0,-.4)],.05);
-  const fly=new THREE.Mesh(new THREE.CylinderGeometry(.5,.5,.1,20),new THREE.MeshStandardMaterial({color:0x6a4a28,roughness:.6,metalness:.4}));
-  fly.rotation.x=Math.PI/2;fly.position.set(-1.7,1.0,.2);K.g.add(fly);K.dyn(fly);s.sFly=fly;
+  /* the flywheel: its axis along z (the geometry is turned, not the mesh), so rotation.z spins it on its shaft; spokes make the turning show */
+  const fgeo=new THREE.CylinderGeometry(.5,.5,.1,20);fgeo.rotateX(Math.PI/2);
+  const fmat=new THREE.MeshStandardMaterial({color:0x6a4a28,roughness:.6,metalness:.4});
+  const fly=new THREE.Mesh(fgeo,fmat);fly.position.set(-1.7,1.0,.2);
+  for(let k=0;k<3;k++){const sp=new THREE.Mesh(new THREE.BoxGeometry(.92,.07,.05),new THREE.MeshStandardMaterial({color:0xb0a080,roughness:.5,metalness:.5}));sp.position.z=.07;sp.rotation.z=k*Math.PI/3;fly.add(sp)}
+  const hub=new THREE.Mesh(new THREE.CylinderGeometry(.09,.09,.16,10),fmat);hub.rotation.x=Math.PI/2;fly.add(hub);
+  K.g.add(fly);K.dyn(fly);s.sFly=fly;
   /* travelling block on its cable */
   const blk=new THREE.Mesh(new THREE.BoxGeometry(.4,.5,.4),new THREE.MeshStandardMaterial({color:0xc8782a,roughness:.55,metalness:.3}));
   blk.position.set(0,5,0);K.g.add(blk);K.dyn(blk);s.sBlock=blk;
@@ -11652,8 +11873,10 @@ function buildTick(){
     }
   }
   if(ok)for(const f of featuresNear(gx,gz,Math.max(d.size[0],d.size[2])*0.6)){
+    if(G.spents.has(f.id))continue;                                /* scrap you have already salvaged is gone, even though the world still lists it */
+    if(d.needs&&f.t!=='oilseep'&&!buildClutter(f))continue;        /* a derrick clears the loose scrap and stones round its seep; only landmarks stop it */
     if(['outcrop','spire','mast','wreck','pod','tank','stone','stack'].includes(f.t)&&Math.hypot(f.x-gx,f.z-gz)<Math.max(d.size[0],d.size[2])*0.55){
-      ok=false;reason='ground is occupied';break;
+      ok=false;reason='ground is occupied — a '+(f.d&&f.d.n||f.t)+' is '+Math.hypot(f.x-gx,f.z-gz).toFixed(1)+' m from the middle';break;
     }
   }
   if(ok&&!(G.inv[WORKS[Build.type].kit]>0)){ok=false;reason='no kit left'}
@@ -11667,6 +11890,12 @@ function tryPlace(){
   if(!Build.on||!Build.ok){SFX('bad');if(Build.reason)log(Build.reason,'bad');return}
   invTake(WORKS[Build.type].kit,1);
   const s=makeStructure(Build.type,Build.x,Build.z,Build.rot,Build.y);
+  if(WORKS[Build.type].needs){                                     /* clear the clutter off the seep, as the railway does for its track */
+    for(const f of featuresNear(s.x,s.z,Math.max(WORKS[s.type].size[0],WORKS[s.type].size[2])*.6+1)){
+      if(f.t==='oilseep'||G.spents.has(f.id)||!buildClutter(f))continue;
+      G.spents.add(f.id);const m=World.feats.get(f.id);if(m){dropFeat(m);World.feats.delete(f.id)}
+    }
+  }
   G.stats.built++;
   puff(s.x,s.y+0.3,s.z,7,0xc0a070,1.4);
   SFX('place');
