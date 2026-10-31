@@ -838,6 +838,12 @@ LIQUIDS & OIL (§09g)
     lever (s.sLev[]) and an on/off button. auto:'out' ports (derrick, refinery output) push whenever a hose joins them to something with room.
   • Liquids are physical: each container holds one type (LQ.types — diesel, water, oil, add more there), nothing is global. Liquid moves only
     along a connected hose, at LQ.rate. Pumps stop themselves when empty, full or about to mix liquids; fixed containers refuse other types.
+  • A hose may only join networks that carry one liquid between them (liqNetCheck): everything already hosed to either end, through tanks, tankers and lorries,
+    counts, and a container with a fixed type (loco, generator, derrick, the refinery's two ends, the water tank) counts as that liquid even when empty.
+  • Port fields: x,z (and y, ox, oz for a port that faces sideways or sits off the ground — a lorry's or a car's), pump (direction + on/off switches), auto:'out',
+    run:{x,y,z} (a run switch hotspot, s.run), and liq.dump:true (a dump valve, s.dump, drains LQ.dump units/s). The water tank's container is its own s.water.
+  • The lorry is a buggy-physics vehicle (type 'lorry' wherever the buggy is tested) with a liquid container and two ports; it will not drive while a hose is plugged in.
+    The diesel generator is a gen:{diesel:1} entry: gridTick burns its fixed-diesel tank while s.run, at full output.
   • Oil seeps are a landmark feature (t:'oilseep') seeded without the epoch — fixed for the life of the world — on flat salt flats only.
     WORKS entries with needs:'oilseep' snap onto the nearest seep while building and refuse to go anywhere else. liqWork() runs the derrick
     (rate crude/s) and refinery (rate crude/s, yield diesel per crude) from the grid's current (s.pw / s.pratio).
@@ -1537,6 +1543,12 @@ RECIPES.push(
   {o:['k_derrick',1],i:{hull:4,plate:10,rod:16,bolt:20,pipe:8,gear:4,bracket:6},t:16,g:'build',bench:true,d:'A lattice derrick that can only be assembled over an oil seep — the dark tar pools on salt flats. Draws current, fills its own 600-unit buffer with crude, and has one hose port.'},
   {o:['k_refinery',1],i:{hull:6,plate:14,pipe:14,rod:10,bolt:24,gear:3,wire:8,bracket:6,canister:4},t:20,g:'build',bench:true,d:'Distils crude oil into diesel. A hose into the crude port, a hose out of the diesel port. Draws current.'}
 );
+ITEMS.k_lorry={n:'tank lorry kit',c:'kit',v:460,w:0,g:'⛟',t:'#5aa0c8',s:'lorry'};
+ITEMS.k_dieselgen={n:'diesel generator kit',c:'kit',v:380,w:0,g:'⌁',t:'#c98a2a',s:'dieselgen'};
+RECIPES.push(
+  {o:['k_lorry',1],i:{hull:5,plate:8,gear:4,cell:5,wire:5,rod:6,bolt:10,bracket:3,canister:2,pipe:4},t:14,g:'build',bench:true,d:'A battery lorry with a 1200-unit tank on the back and a hose port each side: the last mile for diesel, water or oil. It charges from a grid within 15 m, and must have its hoses unplugged before it can drive.'},
+  {o:['k_dieselgen',1],i:{hull:3,plate:6,gear:4,rod:6,bolt:12,pipe:4,wire:6,bracket:3,canister:2},t:12,g:'build',bench:true,d:'Burns diesel from its own 300-unit tank to put 28 units/s on the grid while it runs. Hose diesel into the fuel port; the switch is on the front panel.'}
+);
 const ITEM_IDS=Object.keys(ITEMS);
 const CATNAME={part:'ferrous salvage',mat:'material',water:'water',food:'provisions',tool:'instruments',kit:'assemblies'};
 
@@ -1549,7 +1561,7 @@ const WORKS={
   harvester:{n:'dew harvester',kit:'k_harvest',d:'Condenses dew from the air: full rate at night, a third by day.',size:[1.6,2.4,1.6],r:6,gen:{fluid:0.9,at:'night'},draw:4,refund:['k_harvest',1]},
   purifier:{n:'solar still',kit:'k_purify',d:'Turns dew into water. Wants daylight.',size:[1.8,1.4,1.8],r:6,conv:{from:'dew',to:'water',rate:0.16,need:0.18,day:true},draw:5,refund:['k_purify',1]},
   trough:{n:'plant trough',kit:'k_trough',d:'Sow seed, feed water, harvest food in ~3 min.',size:[2.0,0.6,1.1],r:6,draw:{fluid:0.05},grow:1,refund:['k_trough',1]},
-  tank:{n:'water tank',kit:'k_tank',d:'Stores 200 units. Troughs and stoves draw from it.',size:[1.4,1.8,1.4],r:6,cap:{fluid:200},refund:['k_tank',1]},
+  tank:{n:'water tank',kit:'k_tank',d:'Stores 200 units. Troughs and stoves draw from it.',size:[1.4,1.8,1.4],r:6,cap:{fluid:200},liq:{ext:'water',ports:[{x:-.55,z:.7,pump:1,n:'water port'}]},refund:['k_tank',1]},
   lamp:{n:'lamp post',kit:'k_lamp',d:'Warm pool of light. Costs 3 units/s.',size:[0.4,3.0,0.4],r:6,draw:3,light:1,refund:['k_lamp',1]},
   battery:{n:'battery bank',kit:'k_battery',d:'Stores 200 units of current.',size:[1.6,1.0,1.0],r:7,cap:{pow:200},refund:['k_battery',1]},
   solar:{n:'solar array',kit:'k_solar',d:'+6..12 units/s while the sun is up.',size:[2.2,0.5,1.6],r:6,gen:{pow:11,at:'day'},refund:['k_solar',1]},
@@ -1564,9 +1576,11 @@ const WORKS={
   heli:{n:'scrap helicopter',kit:'k_heli',d:'Light electric helicopter: rotor spools in seconds, lands on skids, charges from a grid within 15 m. Needs ~8 m of near-level ground.',size:[6.8,3.4,9.4],r:8,warm:1,veh:{max:200,drain:0},cgh:1.42,dist:7,span:3.3,tailL:4.4,tailMax:0.3,tipMax:2.6,refund:['k_heli',1]},
   scrappy:{n:'scrappy droid',kit:'k_scrappy',d:'A junkyard droid on tank tracks. Charges on a shared pad, then salvages scrap, boulders, crates, cacti and salt pans within 100 m of it. 400 m per full charge.',size:[1.1,1.6,1.2],r:3,mobile:1,dist:3.4,refund:['k_scrappy',1]},
   android:{n:'android',kit:'k_android',d:'A two-legged fabricator. Charges on a shared pad, then walks to the nearest powered workbench and makes parts from the salvage in your satchel until you could fabricate one of every item. Pauses when raw salvage runs out or everything is stocked, and wakes when the stock falls again.',size:[.8,1.9,.6],r:3,mobile:1,dist:3.2,refund:['k_android',1]},
-  liqtank:{n:'liquid storage tank',kit:'k_liqtank',d:'Holds 2000 units of one liquid at a time. Two ports: take a hose, plug it into another container, set the pump direction and switch it on.',size:[3.5,3.0,3.1],r:5,dist:4.8,slopeR:2.2,liq:{cap:2000,ports:[{x:-1.35,z:1.2,pump:1,n:'port A'},{x:1.35,z:1.2,pump:1,n:'port B'}]},refund:['k_liqtank',1]},
+  liqtank:{n:'liquid storage tank',kit:'k_liqtank',d:'Holds 2000 units of one liquid at a time. Two ports: take a hose, plug it into another container, set the pump direction and switch it on.',size:[3.5,3.0,3.1],r:5,dist:4.8,slopeR:2.2,liq:{cap:2000,dump:true,ports:[{x:-1.35,z:1.2,pump:1,n:'port A'},{x:1.35,z:1.2,pump:1,n:'port B'}]},refund:['k_liqtank',1]},
   derrick:{n:'oil derrick',kit:'k_derrick',d:'Stands over an oil seep and pumps crude into its 600-unit buffer while it has current. Hose the crude from its port to a storage tank or straight into a refinery.',size:[5.6,10,4.4],r:8,draw:4,needs:'oilseep',rate:.9,dist:7,slopeR:2.5,liq:{cs:[{cap:600,fixed:'oil'}],ports:[{x:1.7,z:1.3,auto:'out',n:'crude out'}]},refund:['k_derrick',1]},
   refinery:{n:'oil refinery',kit:'k_refinery',d:'Distils crude into diesel (about 70% yield) while it has current. Hose crude into the left port; diesel comes out of the right port.',size:[6.4,8,4.8],r:8,draw:9,rate:1.6,yield:.7,dist:8,slopeR:3,liq:{cs:[{cap:300,fixed:'oil'},{cap:300,fixed:'diesel'}],ports:[{x:-2.2,z:2.0,c:0,n:'crude in'},{x:2.2,z:2.0,c:1,auto:'out',n:'diesel out'}]},refund:['k_refinery',1]},
+  lorry:{n:'liquid tank lorry',kit:'k_lorry',d:'A battery lorry carrying 1200 units of one liquid, with a hose port and pump controls each side between the axles. Its pump runs on a grid within 15 m or on its own battery. Drive it to where the pipes do not reach; unplug the hoses before you go.',size:[2.4,2.2,4.4],r:6,warm:1,veh:{max:140,drain:0.04},liq:{cap:1200,ports:[{x:1.0,y:.95,z:-.45,ox:.3,oz:0,pump:1,n:'port (right)'},{x:-1.0,y:.95,z:-.45,ox:-.3,oz:0,pump:1,n:'port (left)'}]},refund:['k_lorry',1]},
+  dieselgen:{n:'diesel generator',kit:'k_dieselgen',d:'Runs on diesel from its own 300-unit tank and feeds the grid within 15 m while it runs. Hose diesel into the fuel port, then use the run switch.',size:[2.9,2.6,1.9],r:7,gen:{pow:28,diesel:1},burn:.3,liq:{cs:[{cap:300,fixed:'diesel'}],ports:[{x:-.9,z:.75,n:'fuel port',run:{x:1.0,y:1.02,z:.8}}]},refund:['k_dieselgen',1]},
   dockpad:{n:'charge pad',kit:'k_dockpad',d:'Charges one scrappy droid at a time; others queue beside it. Draws 6 units/s while charging, a trickle otherwise.',size:[2.5,1.6,2.5],r:5,draw:6,dyn:1,dist:4.6,refund:['k_dockpad',1]},
   ramp:{n:'scrap ramp',kit:'k_ramp',d:'A plate deck 7 m wide, like the bridge but sloped: it starts at your feet and ends on the ground where you look (up to 100 m, up to 15° up or down). It may cut through terrain and objects. Crawler, buggy and microlite can all use it. Legs stand wherever the ground is within 10 m below the deck.',size:[7.4,3,12],r:12,dist:9,ramp:1,refund:['k_ramp',1]},
   bridge:{n:'scrap bridge',kit:'k_bridge',d:'A plate deck on trestles, 7 m wide: crawler, buggy and microlite can all cross. It starts at your feet and runs the way you face, up to 100 m, and ends at the first firm ground at deck height; with no far side it will not place. Legs stand only where the ground is within 10 m of the deck.',size:[7.4,3,12],r:4,dist:9,bridge:1,refund:['k_bridge',1]},
@@ -3032,6 +3046,17 @@ function asmTank(K,s){
   K.lathe('aCopper',[[0,-.06],[.07,-.06],[.075,-.02],[.05,.06],[.03,.14],[0,.14]],.0,.22,1.0,12);
   K.mesh(extrude(profCircle(.01,6),filletPath([V3(0,.36,1.0),V3(0,.46,1.0)],.02,2),{tile:.4}),'aBare');
   K.mesh(new THREE.TorusGeometry(.07,.01,5,14),'aBare',0,.48,1.0,0,0,0);
+  /* a hose port on the front-left, with its own pump controls; the sight tube now shows the level */
+  const px=-.55,pz=.7;s.sLamps=[];s.sLev=[];
+  K.box('aRust',px,.45,pz-.1,.4,.26,.3);K.pipe('aRust',.04,[V3(px,.5,.55),V3(px,.5,pz),V3(px,.55,pz+.05)],.1,{tile:.5});
+  K.box('aCopper',px,.55,pz+.2,.14,.14,.18);K.box('aBare',px,.55,pz+.3,.18,.18,.04);
+  K.tube('aGalv',profAngle(.05,.05,.006),[V3(px,.2,pz+.0),V3(px,1.0,pz+.0)],{tile:.5});
+  K.box('aBlue',px,1.1,pz+.05,.62,.34,.2);K.box('aRubber',px,1.1,pz+.152,.56,.28,.006);K.box('aHazard',px,.9,pz+.05,.5,.05,.2);
+  const lev=new THREE.Mesh(new THREE.BoxGeometry(.03,.16,.03),new THREE.MeshStandardMaterial({color:0xd8d0b0}));lev.position.set(px-.2,1.1,pz+.17);K.g.add(lev);K.dyn(lev);s.sLev[0]=lev;
+  K.box('aBare',px-.2,1.1,pz+.156,.1,.1,.012);K.box('aBare',px+.2,1.1,pz+.156,.13,.13,.012);K.box('aOchre',px+.2,1.1,pz+.164,.09,.09,.012);
+  const lamp=new THREE.Mesh(new THREE.SphereGeometry(.04,10,8),new THREE.MeshBasicMaterial({color:0x402020}));lamp.position.set(px,1.34,pz+.12);K.g.add(lamp);K.dyn(lamp);s.sLamps[0]=lamp;
+  const gg=new THREE.BoxGeometry(1,1,1);gg.translate(0,.5,0);const gm=new THREE.Mesh(gg,new THREE.MeshBasicMaterial({color:0x4aa3c8}));
+  gm.scale.set(.026,.001,.026);gm.position.set(-.78,.55,.18);gm.userData.ci=0;K.g.add(gm);K.dyn(gm);s.sGauges=[gm];s.sGaugeH=1.07;
   return K;
 }
 function asmTrough(K,s){
@@ -5499,7 +5524,7 @@ function asmStockShack(K,s){
   K.lathe('aBare',[[0,0],[.16,0],[.1,.07],[0,.1]],.9,vy+1.1,vz,10);
   return K;
 }
-const ASMFN={signboard:asmSignboard,stockshack:asmStockShack,bridge:asmBridge,ramp:asmBridge,shelter:asmShelter,wall:asmWall,workbench:asmWorkbench,pulp_mill:asmPulpMill,harvester:asmHarvester,purifier:asmPurifier,trough:asmTrough,tank:asmTank,lamp:asmLamp,battery:asmBattery,solar:asmSolar,windmill:asmWindmill,stove:asmStove,crate:asmCrate,freight:asmFreight,sign:asmSign,buggy:asmBuggy,plane:asmPlane,heli:asmHeli,mast:asmMast,crawler:asmCrawler,scrappy:asmScrappy,android:asmAndroid,dockpad:asmDockpad,bp_floor:asmBpFloor,bp_truss:asmBpTruss,bp_wall:asmBpWall,bp_half:asmBpHalf,bp_door:asmBpDoor,bp_stair:asmBpStair,railoffice:asmRailOffice,battbot:asmBattBot,liqtank:asmLiqTank,derrick:asmDerrick,refinery:asmRefinery};
+const ASMFN={signboard:asmSignboard,stockshack:asmStockShack,bridge:asmBridge,ramp:asmBridge,shelter:asmShelter,wall:asmWall,workbench:asmWorkbench,pulp_mill:asmPulpMill,harvester:asmHarvester,purifier:asmPurifier,trough:asmTrough,tank:asmTank,lamp:asmLamp,battery:asmBattery,solar:asmSolar,windmill:asmWindmill,stove:asmStove,crate:asmCrate,freight:asmFreight,sign:asmSign,buggy:asmBuggy,plane:asmPlane,heli:asmHeli,mast:asmMast,crawler:asmCrawler,scrappy:asmScrappy,android:asmAndroid,dockpad:asmDockpad,bp_floor:asmBpFloor,bp_truss:asmBpTruss,bp_wall:asmBpWall,bp_half:asmBpHalf,bp_door:asmBpDoor,bp_stair:asmBpStair,railoffice:asmRailOffice,battbot:asmBattBot,liqtank:asmLiqTank,derrick:asmDerrick,refinery:asmRefinery,lorry:asmLorry,dieselgen:asmDieselGen};
 const ASMRAD={mast:1.2,wreck:2.3,pod:2.0,tank:2.6,canheap:0,barrel:0,cactus:0,shrub:0,saltcrust:0,ruin:2.8,plateheap:1.6,pipeheap:2.0,gearpile:1.3,wirecoil:1.1,crate:0.8,stone:1.0,stack:0.6};
 const ASMFEAT={oilseep:featOilSeep,mast:featMast,wreck:featWreck,pod:featPod,tank:featTank,cactus:featCactus,shrub:featShrub,saltcrust:featSaltcrust,canheap:featCanheap,barrel:featBarrel,ruin:featRuin,plateheap:featPlateheap,pipeheap:featPipeheap,gearpile:featGearpile,wirecoil:featWirecoil,crate:featCrate,stone:featStone,stack:featStack};
 
@@ -5948,6 +5973,11 @@ function gridTick(dt){
       const d=WORKS[s.type];
       if(d.gen){
         let v=d.gen.pow||0;
+        if(d.gen.diesel){                                            /* the diesel generator: full output while it runs and has fuel, burning it */
+          const c=s.cs&&s.cs[0];
+          if(s.run&&c&&c.amt>.01){c.amt=Math.max(0,c.amt-(d.burn||.3)*dt);if(c.amt<=.01){c.amt=0;s.run=false;log('the generator has run out of diesel','bad')}}
+          else v=0;
+        }
         if(d.gen.wind)v=Math.max(0,(wind-3)/16)*v;
         if(d.gen.at==='day')v*=sunUp;
         s.gen=Math.max(0,v);gen+=s.gen;
@@ -7400,7 +7430,7 @@ function playerTick(dt){
   const bobX=Math.cos(Drifter.ctx.bobT)*0.028*clamp(spd/4,0,1.6);
   camera.position.set(P.x+bobX*0.4,P.y+eye+bobY,P.z);
   if(G.drive&&G.drive.camPos)camera.position.copy(G.drive.camPos);
-  const inBuggy=(G.drive&&(G.drive.type==='buggy'||G.drive.type==='crawler'));
+  const inBuggy=(G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'));
   const viewYaw=inBuggy?G.drive.yaw+Math.PI+G.drive.look.yaw:P.yaw;
   const viewPitch=inBuggy?G.drive.look.pitch:P.pitch;
   camera.rotation.set(viewPitch,viewYaw,Math.sin(Drifter.ctx.bobT)*0.004*clamp(spd/4,0,1.4),'YXZ');
@@ -10916,7 +10946,7 @@ function enterBuggy(s){
   buggyPark(s);
   P.yaw = s.yaw + Math.PI;
   P.pitch = 0;
-  log('buggy: W/S throttle · A/D steer · Space brake · V view · E step out','gold');
+  log((s.type==='lorry'?'lorry':'buggy')+': W/S throttle · A/D steer · Space brake · V view · E step out','gold');
   if(viewModel)viewModel.visible=SET.buggyView!=='chase';
   SFX('place');
 }
@@ -10941,7 +10971,7 @@ function exitBuggy(){
 }
 function toggleView(){
   if(isPlane()){G.drive.view=G.drive.view==='chase'?'cockpit':'chase';G.drive.look.y=G.drive.look.p=0;log(G.drive.view+' view');return}
-  if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='crawler'))){
+  if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'))){
     SET.buggyView=SET.buggyView==='chase'?'cockpit':'chase';saveSettings();
     if(viewModel)viewModel.visible=SET.buggyView!=='chase';
     log('buggy: '+(SET.buggyView==='chase'?'third-person':'first-person')+' view');
@@ -11078,7 +11108,7 @@ function driveTick(dt){
   if(G.drive.type==='heli')return heliTick(G.drive,dt);
   if(G.drive.type==='plane')return planeTick(G.drive,dt);
   if(G.drive.type==='crawler')return crawlerDriveTick(G.drive,dt);
-  const s=G.drive,V=WORKS.buggy.veh,bl=uiBlocking();
+  const s=G.drive,V=WORKS[s.type].veh,bl=uiBlocking();
   const thr=bl?0:((Keys['KeyW']||Keys['ArrowUp']?1:0)-(Keys['KeyS']||Keys['ArrowDown']?1:0)+TOUCH.z);
   const stg=bl?0:((Keys['KeyD']||Keys['ArrowRight']?1:0)-(Keys['KeyA']||Keys['ArrowLeft']?1:0)+TOUCH.x);
   const live=s.pow>0.3;
@@ -11088,7 +11118,7 @@ function driveTick(dt){
   s.steer=(s.steer||0)+clamp(stgIn-(s.steer||0),-7*dt,7*dt);            // the wheel takes a moment to swing
   const braking=!bl&&!!Keys['Space'];
   if(dt>0){
-    const n=Math.min(8,Math.max(1,Math.ceil(dt/0.009))),h=dt/n,inp={thr:live?s.throttle:0,stg:s.steer,brake:braking};
+    const n=Math.min(8,Math.max(1,Math.ceil(dt/0.009))),h=dt/n,inp={thr:live?s.throttle*(s.type==='lorry'?.6:1):0,stg:s.steer,brake:braking};      /* the lorry is the buggy's physics with less of the throttle */
     for(let i=0;i<n;i++)buggyStep(s,h,inp);
   }
   buggySync(s);
@@ -11109,7 +11139,7 @@ function driveTick(dt){
   
   // Update mesh position and the terrain-aligned visual orientation.
   s.mesh.updateMatrixWorld(true);
-  s.camPos = s.mesh.localToWorld(new THREE.Vector3(0, 1.6, 0.45));
+  s.camPos = s.mesh.localToWorld(s.type==='lorry'?new THREE.Vector3(0, 1.55, 1.1):new THREE.Vector3(0, 1.6, 0.45));
   if(SET.buggyView==='chase'){
     const L=s.look,vy=s.yaw+Math.PI+L.yaw,cp=Math.cos(L.pitch),D=7.2;
     let cx=s.pos.x+Math.sin(vy)*cp*D,cz=s.pos.z+Math.cos(vy)*cp*D;
@@ -11297,6 +11327,11 @@ function structAction(s){
     case 'crate':  return{label:'salvage bin',sub:'+'+d.cap.mass+' kg carry capacity',time:0,run(){}};
     case 'freight':return{label:'freight container',sub:'+'+d.cap.mass+' kg carry capacity',time:0,run(){}};
     case 'sign':   return{label:'trade sign',sub:st==='working'?'flying — pulls in distant traders':'no power to the flag',time:0,run(){}};
+    case 'lorry':{const pc=Math.round(s.pow/WORKS.lorry.veh.max*100),hosed=s.ports.some(p=>p.hose);
+      if(hosed)return{label:'liquid tank lorry',sub:liqInfo(s)+' · unplug its hoses before you drive',time:0,run(){}};
+      if(s.pow<2)return{label:'liquid tank lorry',sub:liqInfo(s)+' · battery flat — park within 15 m of power to charge ('+pc+'%)',time:0,run(){}};
+      return{label:'liquid tank lorry',sub:'hold E — climb in · '+pc+'% charge · '+liqInfo(s),time:0.4,run(){enterBuggy(s)}}}
+    case 'dieselgen':return{label:'diesel generator',sub:(s.run?'RUNNING':'off')+' · '+liqInfo(s)+' · hose diesel into the fuel port; the run switch is on the front panel',time:0,run(){}};
     case 'buggy':{const pc=Math.round(s.pow/WORKS.buggy.veh.max*100);
       if(s.pow<2)return{label:'electric sand buggy',sub:'battery flat — park within 15 m of power to charge ('+pc+'%)',time:0,run(){}};
       return{label:'electric sand buggy',sub:'hold E — climb in · '+pc+'% charge',time:0.4,run(){enterBuggy(s)}}}
@@ -11331,25 +11366,50 @@ function recoverAction(s){
    ground; it keeps only as much length out as it needs. Disconnect it at a socket and it winds itself back to the other end, hands-free.
    Add a new container: WORKS entry with liq:{…}, an asm mesh that sets s.sGauge / s.sLamps / s.sLev, and put its ports' hotspots at WORKS liq.ports.
    ─────────────────────────────────────────────────────────────────────── */
-const LQ={rate:14,maxLen:30,N:26,hoses:[],held:null,mat:null,geo:null,
+const LQ={rate:14,dump:8,lorryDraw:.8,maxLen:30,N:26,hoses:[],held:null,mat:null,geo:null,
   types:{diesel:{n:'diesel',col:0xc98a2a},water:{n:'water',col:0x4aa3c8},oil:{n:'crude oil',col:0x5a4420}}};
 const _lqd=new THREE.Vector3();
 const _lqv3=new THREE.Vector3();
 function liqW(s,lx,ly,lz){
-  if(s.isCar){_lqv3.set(lx,ly,lz);s.g.localToWorld(_lqv3);return{x:_lqv3.x,y:_lqv3.y,z:_lqv3.z}}      /* a train car: its own frame, y measured from the rail head */
+  const fr=s.isCar?s.g:(s.mesh&&WORKS[s.type].veh?s.mesh:null);                                          /* a train car or a lorry: its own frame (y from the rail head / the ground) */
+  if(fr){_lqv3.set(lx,ly,lz);fr.localToWorld(_lqv3);return{x:_lqv3.x,y:_lqv3.y,z:_lqv3.z}}
   const c=Math.cos(s.rot),n=Math.sin(s.rot);return{x:s.x+lx*c+lz*n,y:s.y+ly,z:s.z-lx*n+lz*c};
 }
 const liqAlive=s=>s.isCar?(TR.list.includes(s.T)&&s.T.cars.includes(s)):G.struct.includes(s);
 const liqPortPos=(s,pi)=>{const p=s.ports[pi];return liqW(s,p.lx+(p.ox||0),p.ly===undefined?.55:p.ly,p.lz+(p.oz===undefined?.32:p.oz))};
 function liqInit(s){
   const d=WORKS[s.type].liq,defs=d.cs||[{cap:d.cap,fixed:d.fixed,type:d.type}];
-  s.cs=defs.map(c=>({type:c.fixed||c.type||null,amt:0,cap:c.cap,fixed:c.fixed||null}));s.liq=s.cs[0];s.workK=0;
-  s.ports=d.ports.map((p,i)=>({i,lx:p.x,lz:p.z,pump:!!p.pump,auto:p.auto||null,c:s.cs[p.c||0],dir:p.dir||'in',on:false,hose:null,name:p.n||('port '+(i+1))}));
+  if(d.ext==='water'){                                                       /* the water tank: its store is the tank's own water, so the group logic and the hose agree */
+    const cap0=WORKS[s.type].cap.fluid;
+    s.cs=[{type:'water',fixed:'water',ext:1,get amt(){return s.water},set amt(v){s.water=v},get cap(){return Math.max(0,cap0-s.dew)}}];
+  }else s.cs=defs.map(c=>({type:c.fixed||c.type||null,amt:0,cap:c.cap,fixed:c.fixed||null}));
+  s.liq=s.cs[0];s.workK=0;
+  s.ports=d.ports.map((p,i)=>({i,lx:p.x,lz:p.z,ly:p.y,ox:p.ox,oz:p.oz,pump:!!p.pump,auto:p.auto||null,c:s.cs[p.c||0],dir:p.dir||'in',on:false,hose:null,name:p.n||('port '+(i+1))}));
   s.hots=[];
   for(const p of s.ports){
-    s.hots.push({s,pi:p.i,k:'sock',x:p.lx,y:.55,z:p.lz+.2});
-    if(p.pump){s.hots.push({s,pi:p.i,k:'dir',x:p.lx-.2,y:1.1,z:p.lz+.12});s.hots.push({s,pi:p.i,k:'pwr',x:p.lx+.2,y:1.1,z:p.lz+.12})}
+    const pd=d.ports[p.i];
+    s.hots.push({s,pi:p.i,k:'sock',x:p.lx+(p.ox||0)*.62,y:p.ly===undefined?.55:p.ly,z:p.lz+(p.oz===undefined?.2:p.oz*.62)});
+    if(p.pump){
+      if(p.ox!==undefined){const sx=Math.sign(p.ox)*.1;                                           /* a port that faces sideways (a lorry's): its controls are above it, either side along the vehicle */
+        s.hots.push({s,pi:p.i,k:'dir',x:p.lx+sx,y:p.ly+.43,z:p.lz-.15});s.hots.push({s,pi:p.i,k:'pwr',x:p.lx+sx,y:p.ly+.43,z:p.lz+.15})}
+      else{s.hots.push({s,pi:p.i,k:'dir',x:p.lx-.2,y:1.1,z:p.lz+.12});s.hots.push({s,pi:p.i,k:'pwr',x:p.lx+.2,y:1.1,z:p.lz+.12})}
+    }
+    if(pd.run)s.hots.push({s,pi:p.i,k:'run',x:pd.run.x,y:pd.run.y,z:pd.run.z});
   }
+  if(d.dump)s.hots.push({s,pi:0,k:'dump',x:0,y:.95,z:1.42});
+}
+/* A hose joins whole networks: everything already hosed to either end, through tanks, tankers and lorries. A network may carry one liquid only — a
+   container with a fixed type (a loco, a generator, a derrick, a refinery's two ends, the water tank) counts as that liquid even when empty. */
+function liqNetOf(a,b){
+  const set=new Set([a]);if(b)set.add(b);
+  for(let grow=true;grow;){grow=false;for(const H of LQ.hoses){if(!H.b)continue;const x=H.a.s.ports[H.a.pi].c,y=H.b.s.ports[H.b.pi].c;if(set.has(x)!==set.has(y)){set.add(x);set.add(y);grow=true}}}
+  return set;
+}
+function liqNetCheck(a,b){
+  const types=new Map();
+  for(const c of liqNetOf(a,b)){const t=c.fixed||(c.amt>.01?c.type:null);if(t&&!types.has(t))types.set(t,c)}
+  if(types.size<2)return null;
+  return 'cannot connect — that would link '+[...types.keys()].map(t=>LQ.types[t].n).join(' with ')+' through the hoses already joined';
 }
 const liqTypeName=L=>L.type?LQ.types[L.type].n:'empty';
 const liqInfo=(s,c)=>{c=c||s.liq;return liqTypeName(c)+' · '+Math.round(c.amt)+' / '+c.cap};
@@ -11469,12 +11529,20 @@ function liqAction(h){
     if(H){
       if(H.a.s===s&&H.a.pi===h.pi)return{label:'return hose',sub:'hold E — let it wind back into '+p.name,time:.3,run(){liqRetract(H)}};
       if(p.hose)return{label:p.name,sub:'a hose is already plugged in here',time:0,run(){}};
-      const bad=liqMismatch(H.a.s.ports[H.a.pi].c,p.c);
+      const bad=liqNetCheck(H.a.s.ports[H.a.pi].c,p.c);
       if(bad)return{label:p.name,sub:bad,time:0,run(){}};
       return{label:'plug in hose',sub:'hold E — connect it to '+p.name+' · '+info,time:.7,run(){liqConnect(H,s,h.pi)}};
     }
     if(p.hose)return{label:'unplug hose',sub:'hold E — it winds itself back · '+p.name+' · '+info,time:.6,run(){liqDisconnect(p.hose,s,h.pi)}};
     return{label:'take hose',sub:'hold E — pull out a '+LQ.maxLen+' m hose from '+p.name+' · '+info,time:.5,run(){liqTake(s,h.pi)}};
+  }
+  if(h.k==='dump'){
+    return{label:'dump valve',sub:(s.dump?'OPEN — draining into the ground · hold E to close':'closed · hold E to open it and drain this tank away')+' · '+liqInfo(s),time:.7,
+      run(){s.dump=!s.dump;SFX('click');log(s.dump?'dump valve open — the tank is draining away':'dump valve closed',s.dump?'gold':'good',s.dump?2:1)}};
+  }
+  if(h.k==='run'){
+    return{label:'generator switch',sub:(s.run?'RUNNING':'off')+' · '+liqInfo(s,p.c)+' · hold E to switch '+(s.run?'off':'on'),time:.4,
+      run(){if(!s.run&&p.c.amt<=.01){log('no diesel — hose some into the fuel port first','bad');SFX('bad');return}s.run=!s.run;SFX('click');log(s.run?'generator running':'generator stopped','gold',1)}};
   }
   if(h.k==='dir'){
     return{label:'pump direction',sub:(p.dir==='in'?'IN — pulls liquid into this tank':'OUT — pushes this tank’s liquid down the hose')+' · hold E to switch',time:.25,
@@ -11493,6 +11561,12 @@ function liqFlow(H,dt){
   const quiet=!man.length;                                        /* a derrick or refinery output that is blocked just waits, silently */
   const dirs=on.map(e=>{const o=e===H.a?H.b:H.a,p=pt(e);return(p.auto==='out'||p.dir==='out')?{src:p.c,dst:pt(o).c}:{src:pt(o).c,dst:p.c}});
   const stop=why=>{if(quiet)return;for(const e of man)pt(e).on=false;log('pump stopped — '+why,'gold',2);SFX('click')};
+  for(const e of man){                                          /* a lorry's pump runs on a grid within range, or else on the lorry's own battery */
+    const v=e.s;if(!WORKS[v.type]||!WORKS[v.type].veh)continue;
+    if(v.pw>.5&&(v.pratio||0)>.1)continue;
+    if(v.pow>1){v.pow=Math.max(0,v.pow-LQ.lorryDraw*dt);continue}
+    return stop('the lorry has no power for its pump — park within 15 m of a grid, or charge its battery');
+  }
   if(dirs.length>1&&dirs[0].src!==dirs[1].src)return stop('the two pumps were pulling against each other');
   const{src:SL,dst:DL}=dirs[0];
   if(SL.amt<=.01)return stop('the source is empty');
@@ -11511,6 +11585,7 @@ function liqWork(s,dt){
     const I=s.cs[0],O=s.cs[1],Y=WORKS.refinery.yield;
     if(k>0&&I.amt>.01&&O.amt<O.cap-.01){const q=Math.min(WORKS.refinery.rate*k*dt,I.amt,(O.cap-O.amt)/Y);I.amt-=q;O.amt+=q*Y;run=q>0}
   }
+  else if(s.type==='dieselgen')run=!!s.run&&s.cs[0].amt>.01;
   s.workK+=((run?1:0)-s.workK)*Math.min(1,dt*2);
   return run;
 }
@@ -11518,9 +11593,10 @@ function liqVisual(s,dt){
   if(s.sGauges)s.sGauges.forEach((g,i)=>{const c=s.cs[g.userData.ci!==undefined?g.userData.ci:i];if(!c)return;const f=clamp(c.amt/c.cap,0,1);g.scale.y=Math.max(.001,f*s.sGaugeH);g.visible=f>.002;if(c.type)g.material.color.setHex(LQ.types[c.type].col)});
   if(s.sLamps)for(const p of s.ports){
     const l=s.sLamps[p.i];
-    if(l){const run=p.on||(p.auto&&s.workK>.3&&p.hose&&p.hose.b);l.material.color.setHex(run?0x7cff7c:p.hose&&p.hose.b?0xffb040:0x402020)}
-    const v=s.sLev&&s.sLev[p.i];if(v)v.rotation.z=p.dir==='in'?.6:-.6;
+    if(l){const run=p.on||(p.auto&&s.workK>.3&&p.hose&&p.hose.b)||(s.type==='dieselgen'&&s.run);l.material.color.setHex(run?0x7cff7c:p.hose&&p.hose.b?0xffb040:0x402020)}
+    const v=s.sLev&&s.sLev[p.i];if(v)v.rotation[s.sLevAxis||'z']=p.dir==='in'?.6:-.6;
   }
+  if(s.sDump)s.sDump.material.color.setHex(s.dump?0xff3a20:0x402020);
   const T=now(),w=s.workK||0;
   if(s.sBlock){                                                   /* derrick: the travelling block rides up and down the tower */
     const y=lerp(2.6,8.2,.5+.5*Math.sin(T*.7)*w+.0);s.sBlock.position.y=y;
@@ -11542,20 +11618,24 @@ function liqStep(dt){
   }
   for(const H of LQ.hoses.slice())liqHoseStep(H,dt);
   for(const H of LQ.hoses)if(H.a&&H.b)liqFlow(H,dt);
-  for(const s of G.struct){if(!s.hots)continue;if(s.type==='derrick'||s.type==='refinery')liqWork(s,dt);liqVisual(s,dt)}
+  for(const s of G.struct){if(!s.hots)continue;if(s.type==='derrick'||s.type==='refinery'||s.type==='dieselgen')liqWork(s,dt);
+    if(s.dump&&s.liq.amt>0){s.liq.amt=Math.max(0,s.liq.amt-LQ.dump*dt);if(s.liq.amt<=.01){s.liq.amt=0;if(!s.liq.fixed)s.liq.type=null;s.dump=false;log('the tank has drained empty — dump valve closed','gold',1)}}
+    else if(s.dump&&s.liq.amt<=0){s.dump=false}
+    liqVisual(s,dt)}
   for(const T of TR.list)if(T.vis&&T.dz)for(const c of T.cars)if(c.hots)liqVisual(c,dt);
 }
-function liqSaveOne(s){return{c:s.cs.map(c=>({t:c.type,a:+c.amt.toFixed(2)})),p:s.ports.map(p=>({d:p.dir,o:p.on?1:0}))}}
+function liqSaveOne(s){return{c:s.cs.map(c=>({t:c.type,a:+c.amt.toFixed(2)})),p:s.ports.map(p=>({d:p.dir,o:p.on?1:0})),...(s.run?{r:1}:{}),...(s.dump?{x:1}:{})}}
 function liqLoadOne(s,d){
   if(!d||typeof d!=='object')return;
   const list=Array.isArray(d.c)?d.c:[{t:d.t,a:d.a}];                /* older saves hold one container's t/a directly */
   list.forEach((q,i)=>{
-    const c=s.cs[i];if(!c||!q)return;
+    const c=s.cs[i];if(!c||!q||c.ext)return;                 /* the water tank's water is saved with the tank itself */
     if(q.t&&LQ.types[q.t]&&(!c.fixed||c.fixed===q.t))c.type=q.t;
     if(Number.isFinite(+q.a))c.amt=clamp(+q.a,0,c.cap);
     if(!c.amt&&!c.fixed)c.type=null;
   });
   if(Array.isArray(d.p))d.p.forEach((q,i)=>{const p=s.ports[i];if(p&&q){p.dir=q.d==='out'?'out':'in';p.on=!!q.o&&p.pump}});
+  s.run=!!d.r&&WORKS[s.type].gen&&s.cs[0].amt>.01;s.dump=!!d.x&&WORKS[s.type].liq.dump&&s.liq.amt>0;
 }
 function liqSave(){
   const out=[];
@@ -11595,6 +11675,9 @@ function asmLiqTank(K,s){
   K.box('aBare',0,1.42,1.09,.18,1.82,.05);K.tube('aGlass',profCircle(.025,8),[V3(0,.55,1.12),V3(0,2.3,1.12)],{tile:.5});
   const gm=new THREE.Mesh((()=>{const g=new THREE.BoxGeometry(1,1,1);g.translate(0,.5,0);return g})(),new THREE.MeshBasicMaterial({color:0xc98a2a}));
   gm.scale.set(.034,.001,.034);gm.position.set(0,.55,1.121);K.g.add(gm);K.dyn(gm);s.sGauges=[gm];s.sGaugeH=1.75;
+  K.box('aRust',0,.55,1.38,.46,.5,.3);K.box('aHazard',0,.82,1.38,.42,.05,.28);                  /* the dump valve: a red wheel and a lamp */
+  K.disc('aRed',.12,.03,0,.62,1.54,'z',null,.3,14);K.box('aBare',0,.62,1.5,.03,.03,.1);
+  const dl=new THREE.Mesh(new THREE.SphereGeometry(.04,10,8),new THREE.MeshBasicMaterial({color:0x402020}));dl.position.set(0,.9,1.44);K.g.add(dl);K.dyn(dl);s.sDump=dl;
   s.sLamps=[];s.sLev=[];
   ports.forEach((p,i)=>{
     const px=p.x,pz=p.z;
@@ -11610,6 +11693,101 @@ function asmLiqTank(K,s){
     const lamp=new THREE.Mesh(new THREE.SphereGeometry(.04,10,8),new THREE.MeshBasicMaterial({color:0x402020}));lamp.position.set(px,1.34,pz+.02);K.g.add(lamp);K.dyn(lamp);s.sLamps[i]=lamp;
     K.box('aPlate',px,1.27,pz+.06,.2,.05,.012);
   });
+  return K;
+}
+
+/* LAST_MILE_MARK */
+/* ───────────────────────────────────────────────────────────────────────
+   LAST MILE — the liquid tank lorry (drives on the buggy's rigid-body physics, with a tank on the back and a hose port each side)
+   and the diesel generator (fixed-diesel tank, one fuel port, a run switch; feeds the grid while it runs and has fuel)
+   ─────────────────────────────────────────────────────────────────────── */
+function asmLorry(K,s){
+  const ports=WORKS.lorry.liq.ports;
+  for(const x of [-.6,.6])K.tube('aRust',profChannel(.07,.14,.008),[V3(x,.5,-2.05),V3(x,.5,2.05)],{tile:.7});
+  for(const z of [-1.8,-.9,0,.9,1.8])K.tube('aGalv',profChannel(.05,.07,.006),[V3(-.62,.46,z),V3(.62,.46,z)],{tile:.6});
+  K.box('aPlate',0,.58,-.1,1.34,.03,4.1);
+  /* cab-over, hollow: floor, lower panels, corner pillars and a roof, with glass in the openings so you can see in from outside and out from the seat */
+  K.box('aBare',0,.62,1.3,1.76,.05,1.26);
+  for(const sg of [-1,1])K.box('aOchre',sg*.84,.97,1.3,.04,.66,1.2);                           /* door panels */
+  K.box('aOchre',0,.97,1.88,1.7,.66,.04);K.box('aOchre',0,.97,.72,1.7,.66,.04);                  /* front and back lower panels */
+  for(const sg of [-1,1])for(const z of [.74,1.88])K.box('aOchre',sg*.84,1.65,z,.06,.74,.06);   /* corner pillars */
+  for(const sg of [-1,1])K.box('aOchre',sg*.84,1.65,1.3,.05,.74,.05);                           /* B-pillars */
+  K.box('aOchre',0,2.0,1.88,1.74,.1,.06);K.box('aOchre',0,2.0,.72,1.74,.1,.06);
+  for(const sg of [-1,1])K.box('aOchre',sg*.84,2.0,1.3,.06,.1,1.2);
+  K.box('aGlass',0,1.65,1.9,1.62,.68,.012);K.box('aGlass',0,1.65,.7,1.62,.68,.012);              /* windscreen, rear glass */
+  for(const sg of [-1,1])for(const z of [1.09,1.51])K.box('aGlass',sg*.855,1.65,z,.012,.68,.36);   /* side glass */
+  K.box('aPlate',0,2.07,1.3,1.84,.05,1.36);K.box('aBare',0,2.11,1.3,1.4,.03,1.0);
+  for(const sg of [-1,1])K.box('aBare',sg*.862,1.0,1.1,.01,.05,.2);                              /* door handles */
+  K.box('aRubber',0,1.0,1.93,1.2,.34,.03);for(let i=0;i<4;i++)K.box('aBare',0,.88+i*.08,1.95,1.0,.015,.02);
+  K.box('aBare',0,.74,2.0,1.96,.14,.1);K.box('aBare',0,.74,-2.1,1.96,.14,.1);
+  for(const x of [-.6,.6])K.sphere('lampOn',.1,x,1.15,1.94,1,1,.7);
+  for(const x of [-.8,.8])K.box('aRust',x,.74,-2.14,.2,.1,.03);
+  /* inside: dash, seat, wheel */
+  K.box('aBlue',0,1.1,1.78,1.5,.3,.16);K.box('aBare',0,1.26,1.78,1.54,.03,.2);
+  K.box('aCanvas',0,.88,1.0,.8,.14,.6);K.box('aCanvas',0,1.25,.78,.8,.6,.12,-.1,0,0);
+  K.mesh(new THREE.TorusGeometry(.19,.018,6,18),'aRubber',0,1.32,1.56,.5,0,0);K.tube('aGalv',profCircle(.022,8),[V3(0,1.0,1.74),V3(0,1.27,1.6)],{tile:.4});
+  /* the tank: a banded barrel on saddles, a hatch, a rear rail */
+  K.mesh(latheGeo([[0,-1.2],[.25,-1.2],[.48,-1.12],[.58,-.98],[.6,-.7],[.6,.7],[.58,.98],[.48,1.12],[.25,1.2],[0,1.2]],24,1.0),'aGalv',0,1.45,-.75,Math.PI/2,0,0);
+  for(const z of [-1.5,-.75,0])K.mesh(latheGeo([[.595,-.04],[.62,-.03],[.62,.03],[.595,.04]],24,.4),'aBare',0,1.45,z,Math.PI/2,0,0);
+  for(const z of [-1.5,0]){K.box('aRust',0,.78,z,1.3,.34,.22);K.box('aBare',0,.97,z,1.1,.04,.26)}
+  K.lathe('aGalv',[[0,0],[.24,0],[.26,.05],[.22,.12],[.08,.15],[0,.15]],0,2.04,-.75,14);
+  /* wheels, mudguards: where the physics puts them */
+  s.wheels=[];
+  for(const x of [-1.0,1.0])for(const z of [-1.35,1.35]){
+    const arc=[];for(let i=0;i<=10;i++){const a=-.15+i/10*Math.PI*.95;arc.push(V3(x,.4+Math.sin(a)*.56,z+Math.cos(a)*.56*(z>0?1:-1)))}
+    K.tube(z>0?'aOchre':'aPlate',profRect(.012,.34),arc,{tile:.8,up:V3(1,0,0)});
+    const w=new THREE.Group();w.position.set(x,.4,z);K.g.add(w);
+    const tyre=K.lathe('aRubber',[[.2,-.19],[.3,-.2],[.39,-.16],[.42,-.06],[.42,.06],[.39,.16],[.3,.2],[.2,.19]],0,0,0,22,w,.7);tyre.rotation.z=Math.PI/2;
+    const hub=K.lathe('aBare',[[0,-.18],[.2,-.18],[.2,.18],[0,.18]],0,0,0,14,w,.4);hub.rotation.z=Math.PI/2;
+    const cap=K.lathe('aRust',[[0,0],[.06,0],[.07,.03],[0,.07]],0,0,0,10,w,.2);cap.rotation.z=x>0?-Math.PI/2:Math.PI/2;cap.position.x=x>0?.18:-.18;
+    K.box('aGalv',x>0?.04:-.04,0,0,.01,.0,.0,0,0,0,w);w.children[w.children.length-1].visible=false;
+    K.dyn(w);s.wheels.push(w);
+    K.tube('aBare',profCircle(.03,8),[V3(x*.55,.46,z),V3(x*.95,.4,z)],{tile:.4});
+  }
+  /* the hose ports, one each side at the back, with a sight glass above them */
+  s.sLamps=[];s.sLev=[];s.sLevAxis='x';s.sGauges=[];s.sGaugeH=.95;
+  for(const sg of [-1,1]){
+    K.box('aPlate',sg*.8,.9,-.45,.4,.07,.3);K.box('aBare',sg*.66,.94,-.45,.1,.16,.2);
+    K.pipe('aRust',.04,[V3(sg*.35,.97,-.45),V3(sg*.62,.93,-.45),V3(sg*.94,.95,-.45)],.1,{tile:.5});
+    K.box('aCopper',sg*1.0,.95,-.45,.2,.14,.14);K.box('aBare',sg*1.11,.95,-.45,.03,.19,.19);
+    K.tube('aGalv',profAngle(.05,.05,.006),[V3(sg*.98,.7,-.45),V3(sg*.98,1.2,-.45)],{tile:.5});                       /* the pump panel: direction lever, on/off button, lamp */
+    K.box('aBlue',sg*.98,1.38,-.45,.14,.34,.5);K.box('aRubber',sg*1.054,1.38,-.45,.008,.28,.44);K.box('aHazard',sg*.98,1.19,-.45,.14,.04,.5);
+    const pi=sg>0?0:1;
+    const lev=new THREE.Mesh(new THREE.BoxGeometry(.03,.16,.03),new THREE.MeshStandardMaterial({color:0xd8d0b0}));lev.position.set(sg*1.075,1.38,-.6);K.g.add(lev);K.dyn(lev);s.sLev[pi]=lev;
+    K.box('aBare',sg*1.062,1.38,-.6,.012,.1,.1);K.box('aBare',sg*1.062,1.38,-.3,.012,.13,.13);K.box('aOchre',sg*1.07,1.38,-.3,.012,.09,.09);
+    const lamp=new THREE.Mesh(new THREE.SphereGeometry(.04,10,8),new THREE.MeshBasicMaterial({color:0x402020}));lamp.position.set(sg*1.06,1.52,-.45);K.g.add(lamp);K.dyn(lamp);s.sLamps[pi]=lamp;
+    K.box('aPlate',sg*.665,1.45,.15,.04,1.04,.14);K.tube('aGlass',profCircle(.02,8),[V3(sg*.69,.98,.15),V3(sg*.69,1.93,.15)],{tile:.5});
+    const g=new THREE.BoxGeometry(1,1,1);g.translate(0,.5,0);const gm=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:0xc98a2a}));
+    gm.scale.set(.028,.001,.028);gm.position.set(sg*.71,.98,.15);gm.userData.ci=0;K.g.add(gm);K.dyn(gm);s.sGauges.push(gm);
+  }
+  return K;
+}
+function asmDieselGen(K,s){
+  const P0=WORKS.dieselgen.liq.ports[0];
+  K.mesh(bevBox(2.9,.22,1.9,.06,.04),'aConc',0,.11,0,0,0,0);
+  K.box('aBlue',0,.98,0,2.4,1.3,1.2);K.box('aBare',0,1.64,0,2.46,.04,1.26);
+  for(const sg of [-1,1])K.box('aRust',sg*1.22,.98,0,.06,1.3,1.2);
+  for(let i=0;i<6;i++)K.box('aBare',-.2,.5+i*.15,.615,1.9,.03,.02);                       /* louvres */
+  K.mesh(latheGeo([[0,-.5],[.45,-.5],[.5,-.4],[.5,.4],[.45,.5],[0,.5]],20,.8),'aRust',-1.0,1.0,-.2,0,0,Math.PI/2);       /* alternator */
+  K.pipe('aGalv',.09,[V3(-.55,1.66,-.3),V3(-.55,2.5,-.3)],.05);K.lathe('aGalv',[[0,0],[.15,0],[.13,.08],[0,.1]],-.55,2.5,-.3,12);
+  K.box('aBare',.2,1.75,-.3,.7,.14,.5);
+  /* the cooling fan, turning on the front face while it runs */
+  const fg=new THREE.CylinderGeometry(.42,.42,.06,22);fg.rotateX(Math.PI/2);
+  const fmat=new THREE.MeshStandardMaterial({color:0x444850,roughness:.6,metalness:.5});
+  const fan=new THREE.Mesh(fg,fmat);fan.position.set(.55,.98,.68);
+  for(let k=0;k<3;k++){const bl=new THREE.Mesh(new THREE.BoxGeometry(.8,.12,.03),new THREE.MeshStandardMaterial({color:0xb0a080,roughness:.5,metalness:.5}));bl.position.z=.05;bl.rotation.z=k*Math.PI/3;fan.add(bl)}
+  K.g.add(fan);K.dyn(fan);s.sFly=fan;
+  K.tube('aGalv',profCircle(.014,6),[V3(.13,.55,.7),V3(.97,.55,.7)],{tile:.4});K.tube('aGalv',profCircle(.014,6),[V3(.13,1.4,.7),V3(.97,1.4,.7)],{tile:.4});   /* fan guard */
+  /* fuel: the port, its sight glass, and the run switch on a little panel */
+  s.sLamps=[];s.sGauges=[];s.sGaugeH=.9;
+  K.box('aRust',P0.x,.4,P0.z-.1,.5,.3,.4);K.pipe('aRust',.045,[V3(P0.x,.62,.4),V3(P0.x,.5,P0.z-.1),V3(P0.x,.55,P0.z-.05)],.1,{tile:.5});
+  K.box('aCopper',P0.x,.55,P0.z+.2,.16,.16,.2);K.box('aBare',P0.x,.55,P0.z+.31,.2,.2,.04);
+  K.box('aBare',-.3,1.0,.625,.1,1.04,.03);K.tube('aGlass',profCircle(.02,8),[V3(-.3,.55,.65),V3(-.3,1.45,.65)],{tile:.5});
+  const g=new THREE.BoxGeometry(1,1,1);g.translate(0,.5,0);const gm=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:0xc98a2a}));
+  gm.scale.set(.028,.001,.028);gm.position.set(-.3,.55,.656);gm.userData.ci=0;K.g.add(gm);K.dyn(gm);s.sGauges.push(gm);
+  K.box('aBlue',1.0,1.15,.64,.5,.42,.1);K.box('aRubber',1.0,1.15,.695,.44,.36,.01);
+  K.box('aBare',1.0,1.0,.7,.14,.14,.03);K.box('aOchre',1.0,1.0,.718,.1,.1,.012);                                          /* run button */
+  const lamp=new THREE.Mesh(new THREE.SphereGeometry(.045,10,8),new THREE.MeshBasicMaterial({color:0x402020}));lamp.position.set(1.0,1.27,.71);K.g.add(lamp);K.dyn(lamp);s.sLamps[0]=lamp;
   return K;
 }
 
@@ -12750,7 +12928,7 @@ function questPool(){
   base.delete('cloth');
   const ok=new Set(base);let ch=true;
   while(ch){ch=false;for(const r of RECIPES){const o=r.o[0];if(ok.has(o)||o==='cloth')continue;if(Object.keys(r.i).every(i=>i!=='cloth'&&ok.has(i))){ok.add(o);ch=true}}}
-  const never=new Set(['book','welder','finder','kite','cloth','k_buggy','k_plane','k_heli','k_crawler','k_scrappy','k_android','k_dockpad','k_liqtank','k_derrick','k_refinery','k_bridge','k_ramp','drone','binoculars']);
+  const never=new Set(['book','welder','finder','kite','cloth','k_buggy','k_plane','k_heli','k_crawler','k_scrappy','k_android','k_dockpad','k_liqtank','k_derrick','k_refinery','k_lorry','k_dieselgen','k_bridge','k_ramp','drone','binoculars']);
   return QP.pool=[...ok].filter(id=>ITEMS[id]&&!never.has(id)&&!(ITEMS[id].c==='kit'&&ITEMS[id].v>190))
     .map(id=>({id,v:ITEMS[id].v,w:ITEMS[id].w||0,kit:ITEMS[id].c==='kit',base:base.has(id)}));
 }
@@ -13112,7 +13290,7 @@ function detailHtml(kind){
     <div class="kv"><span class="lbl">wind</span><span class="num">${Day.ctx.wind.toFixed(0)} kn${WINDMUL.value>1.8?' · dust storm':''}</span></div>`;
   }
   const mt=(l,v,c)=>`<div class="meter"><div class="row"><span class="lbl">${l}</span><span class="num">${Math.round(v*100)}%</span></div><div class="bar ${c}"><i style="width:${(v*100).toFixed(1)}%"></i></div></div>`;
-  const tool=G.drive?(isPlane()?(G.drive.type==='heli'?'helicopter '+Math.round(G.drive.pow/HL.max*100)+'%':'microlite '+Math.round(G.drive.pow/PL.max*100)+'%'):(G.drive.type==='crawler'?'crawler '+Math.round(G.drive.pow/CR.B*100)+'%':'buggy '+Math.round(G.drive.pow/WORKS.buggy.veh.max*100)+'%')):(G.tool==='hands'?'bare hands':itemName(G.tool));
+  const tool=G.drive?(isPlane()?(G.drive.type==='heli'?'helicopter '+Math.round(G.drive.pow/HL.max*100)+'%':'microlite '+Math.round(G.drive.pow/PL.max*100)+'%'):(G.drive.type==='crawler'?'crawler '+Math.round(G.drive.pow/CR.B*100)+'%':(G.drive.type==='lorry'?'lorry ':'buggy ')+Math.round(G.drive.pow/WORKS[G.drive.type].veh.max*100)+'%')):(G.tool==='hands'?'bare hands':itemName(G.tool));
   const kv=(l,v)=>`<div class="kv"><span class="lbl">${l}</span><span class="num">${v}</span></div>`;
   return mt('hydration',satShown(P.hyd),'sk')+mt('nutrition',satShown(P.nut),'am')+mt('stamina',P.sta,'sg')+mt('integrity',P.hp,'bd')+'<div class="rule"></div>'+
     kv('scrap',G.cash||0)+kv('grid load',Grid.supply.toFixed(0)+' / '+Grid.demand.toFixed(0)+' w')+kv('structures',G.struct.length)+
@@ -13394,7 +13572,7 @@ function carTabsHTML(k,entries,cats){
 const WCATS=[['camp','camp'],['water','water'],['power','power'],['storage','storage'],['transport','transport'],['crew','crew'],['kit','building kit']];
 const WCAT={shelter:'camp',wall:'camp',workbench:'camp',pulp_mill:'camp',stove:'camp',lamp:'camp',sign:'camp',signboard:'camp',mast:'camp',
   harvester:'water',purifier:'water',trough:'water',tank:'water',battery:'power',solar:'power',windmill:'power',
-  crate:'storage',freight:'storage',stockshack:'storage',buggy:'transport',plane:'transport',heli:'transport',crawler:'transport',dockpad:'transport',liqtank:'storage',ramp:'transport',bridge:'transport',railoffice:'transport',
+  crate:'storage',freight:'storage',stockshack:'storage',buggy:'transport',lorry:'transport',plane:'transport',heli:'transport',crawler:'transport',dockpad:'transport',liqtank:'storage',ramp:'transport',bridge:'transport',railoffice:'transport',
   scrappy:'crew',android:'crew',battbot:'crew'};
 const workCat=k=>WCAT[k]||(WORKS[k]&&WORKS[k].bp?'kit':'camp');
 const CATTABS=()=>CATS.map(c=>[c,CATNAME[c]]);
@@ -14061,7 +14239,7 @@ addEventListener('mousemove',e=>{
   const dx=e.movementX||0,dy=e.movementY||0;
   if(isPlane()){planeLook(dx,dy);return}
   if(trainSeatLook(dx,dy))return;
-  if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='crawler'))){
+  if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'))){
     const look=G.drive.look,turn=dx*0.0021*SET.sens;
     look.yaw=((look.yaw-turn+Math.PI)%TAU+TAU)%TAU-Math.PI;
     look.pitch=clamp(look.pitch-dy*0.0021*SET.sens,-1.2,1.2);
@@ -14531,7 +14709,7 @@ let touchSync=()=>{};
       const dx=(t.clientX-look.x)*2.5,dy=(t.clientY-look.y)*2.5;
       if(isPlane())planeLook(dx,dy);
       else if(trainSeatLook(dx,dy)){}
-      else if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='crawler'))){
+      else if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'))){
         const view=G.drive.look,turn=dx*0.0021*SET.sens;
         view.yaw=((view.yaw-turn+Math.PI)%TAU+TAU)%TAU-Math.PI;
         view.pitch=clamp(view.pitch-dy*0.0021*SET.sens,-1.2,1.2);
@@ -14937,7 +15115,7 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden&&ready&&!sk
     if((Math.abs(dx)+Math.abs(dy))>.001&&!uiBlocking()){
       if(isPlane())planeLook(dx,dy);
       else if(trainSeatLook(dx,dy)){}
-      else if(G.drive&&(G.drive.type==='buggy'||G.drive.type==='crawler')){
+      else if(G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler')){
         const v=G.drive.look,turn=dx*.0021*SET.sens;
         v.yaw=((v.yaw-turn+Math.PI)%TAU+TAU)%TAU-Math.PI;v.pitch=clamp(v.pitch-dy*.0021*SET.sens,-1.2,1.2);
         P.yaw=G.drive.yaw+Math.PI+v.yaw;P.pitch=v.pitch;
