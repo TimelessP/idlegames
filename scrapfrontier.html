@@ -856,7 +856,7 @@ CUTTINGS & TUNNELS (§09h)
   • Terrain: TCUT is a 16 m spatial hash of boxes, applied inside terrainSample by tcutApply. A cutting box carves a trench (floor = bed, 1:1.2 banks); a tunnel
     box leaves the mountain alone, raises the ground over the roof to a safe minimum (easing off past the first and last 4 m and 13 m to either side), and carries a floor
     that is solid only to an actor within 1.9 m of it (_deckY, as decks, inverted), plus walls (tcutWall). The first and last 3.9 m of a tunnel are ALSO carved open
-    ('mouth'), so the portal slab (4.6 m thick) hides the heightfield's steep face.
+    ('mouth'), and the terrain cells over the mouth are left out of the chunk mesh (HOLE boxes), so the heightfield's ramp is never a plug across the tube.
     groundRaw/massRaw sample without cuts — the planner and profile must use them, or a route would plan against its own trench. Boxes are made per LAID
     segment (tcutSeg, from rwClearScrap) and rebuilt from the route on load (tcutRebuild, from rwSetProfile); deleting a route removes them. Chunks that a box
     touches are dropped and rebuilt a few per frame (TCDIRTY), and the horizon once things settle.
@@ -1849,6 +1849,7 @@ function buildChunk(cx,cz){
     sA.set(A,o*4);sB.set(B,o*4);
   }
   for(let j=0;j<CFG.N;j++)for(let i=0;i<CFG.N;i++){
+    if(TCUT.size&&tcutHole(x0+(i+.5)*STEP,z0+(j+.5)*STEP))continue;        // over a tunnel mouth: no triangles inside the tube (§09h)
     const a=j*VER+i,b=a+1,c=a+VER,d=c+1;
     idx.push(a,c,b,b,c,d);
   }
@@ -11436,7 +11437,8 @@ const TCDIRTY=new Set();let TCHOR=0;
 function tcutApply(x,z,h){
   const l=TCUT.get(tcutKey(x,z));if(!l)return h;
   for(let i=0;i<l.length;i++){
-    const k=l[i],ex=x-k.x,ez=z-k.z,u=ex*k.tx+ez*k.tz;
+    const k=l[i];if(k.hole)continue;
+    const ex=x-k.x,ez=z-k.z,u=ex*k.tx+ez*k.tz;
     if(u<-k.hL||u>k.hL)continue;
     const v=Math.abs(-ex*k.tz+ez*k.tx),bed=k.y0+(k.y1-k.y0)*((u+k.hL)/(2*k.hL));
     if(k.tun){
@@ -11453,6 +11455,13 @@ function tcutApply(x,z,h){
     const c=bed+Math.max(0,v-k.hw)*k.sl;if(c<h)h=c;
   }
   return h;
+}
+/* is this point inside a HOLE: terrain triangles that would stand inside a tunnel mouth (the heightfield cannot make a vertical face, so the ramp between the
+   carved mouth and the mountain would be a plug across the tube). The chunk builder leaves those cells out; the portal's headwall roofs the gap from above. */
+function tcutHole(x,z){
+  const l=TCUT.get(tcutKey(x,z));if(!l)return false;
+  for(let i=0;i<l.length;i++){const k=l[i];if(!k.hole)continue;const ex=x-k.x,ez=z-k.z,u=ex*k.tx+ez*k.tz;if(u<-k.hL||u>k.hL)continue;if(Math.abs(-ex*k.tz+ez*k.tx)<=k.hw)return true}
+  return false;
 }
 function tcutDirty(x0,z0,x1,z1){
   const C=CFG.CH;
@@ -11480,7 +11489,7 @@ function tcutSeg(R,k){
   const pr=R.pr;if(!pr||!pr.T)return;
   if(!R.cutSegs)R.cutSegs=new Set();if(R.cutSegs.has(k))return;R.cutSegs.add(k);
   const S=RWC.SPS,i0=k*S,i1=Math.min(pr.N-1,i0+S),T=pr.T;
-  const MOUTH=3.9;                                                  /* a tunnel's first and last few metres stay carved open, behind the portal slab, so the heightfield's steep face is hidden inside it */
+  const MOUTH=2.6;                                                  /* a tunnel's first and last 2.6 m stay carved open, inside the headwall, so the heightfield's steep face starts behind the portal */
   const runEnds=i=>{let A=i,B=i+1;while(A>0&&T[A-1]===2)A--;while(B<pr.N-1&&T[B+1]===2)B++;return[A,B]};
   const cls=i=>{
     if(T[i]===2&&T[i+1]===2){const[A,B]=runEnds(i);return(pr.S[i]-pr.S[A]<MOUTH||pr.S[B]-pr.S[i+1]<MOUTH)?3:2}
@@ -11499,6 +11508,10 @@ function tcutSeg(R,k){
     }
     i=b;
   }
+  /* the holes over each portal's mouth, once per portal, with the segment that holds the tunnel's first or last station */
+  const hole=(st,dir)=>{const tx=pr.TX[st],tz=pr.TZ[st];tcutAdd({x:pr.X[st]+dir*tx*3,z:pr.Z[st]+dir*tz*3,tx,tz,hL:2,hw:3.4,rw:3.4,y0:0,y1:0,hole:true,tun:false,owner:R})};
+  for(let st=Math.max(1,i0);st<i1;st++)if(T[st]===2&&T[st-1]===1)hole(st,1);
+  for(let st=i0+1;st<=i1&&st<pr.N-1;st++)if(T[st]===2&&T[st+1]===1)hole(st,-1);
 }
 function tcutRebuild(R){
   tcutRemoveOwner(R);
@@ -11528,11 +11541,10 @@ const TUN_RING_L=(()=>{const o=[0];for(let j=1;j<TUN_RING.length;j++)o.push(o[j-
 function rwTunMats(){
   if(RW.tunMat)return;
   const conc=MAT.aConc;
-  /* lit like everything else: the mountain's shadow keeps it dark, and a low morning or evening sun reaches in through the mouths. A faint emissive means it is never pitch black. */
-  RW.tunMat=new THREE.MeshLambertMaterial({map:conc&&conc.map||null,color:0xb8b0a0,emissive:0x16130f,side:THREE.DoubleSide});
+  /* nothing special: the game's own concrete, double sided, that casts and takes shadows like any other material — so it blocks the sun and keeps the track inside it dark */
+  RW.tunMat=conc?conc.clone():new THREE.MeshStandardMaterial({color:0x8e8a80,roughness:.95});RW.tunMat.side=THREE.DoubleSide;
   RW.lampMat=new THREE.MeshBasicMaterial({color:0xffe2a8,side:THREE.DoubleSide});
-  RW.portalMat=conc?conc.clone():new THREE.MeshStandardMaterial({color:0x8e8a80,roughness:.95});
-  RW.portalMat.side=THREE.DoubleSide;
+  RW.portalMat=conc?conc.clone():new THREE.MeshStandardMaterial({color:0x8e8a80,roughness:.95});RW.portalMat.side=THREE.DoubleSide;
 }
 function rwBuildTunnel(g,R,i0,i1){
   const pr=R.pr,T=pr.T;if(!T)return;
@@ -11556,7 +11568,7 @@ function rwBuildTunnel(g,R,i0,i1){
       const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
       geo.setAttribute('uv',new THREE.BufferAttribute(uv,2));geo.setIndex(idx);geo.computeVertexNormals();
       rwTunMats();
-      const m=new THREE.Mesh(geo,RW.tunMat);m.userData.own=true;m.frustumCulled=false;m.receiveShadow=true;g.add(m);
+      const m=new THREE.Mesh(geo,RW.tunMat);m.userData.own=true;m.frustumCulled=false;m.castShadow=true;m.receiveShadow=true;g.add(m);
       if(lamps.length){
         const lp=new Float32Array(lamps.length*12),li=[];
         lamps.forEach((st,q)=>{const rx=-pr.TZ[st],rz=pr.TX[st],tx=pr.TX[st],tz=pr.TZ[st],y=pr.Y[st]+4.12,cx=pr.X[st],cz=pr.Z[st],w=.5,l=.9;
@@ -11573,12 +11585,12 @@ function rwBuildTunnel(g,R,i0,i1){
 function rwPortal(g,R,i,dir){
   const pr=R.pr,tx=pr.TX[i]*dir,tz=pr.TZ[i]*dir;
   let dP=0;for(let q=0;q<=6;q++){const j=clamp(i+dir*q,0,pr.N-1);dP=Math.max(dP,pr.D?pr.D[j]:0,pr.G[j]-(pr.Y[j]-RWC.LIFT))}      /* how deep the cut is at the face */
-  const wP=clamp(3.1+(dP+1.2)/1.2+1.2,9,18),H=Math.max(6.2,dP+.5);
+  const wP=8,H=Math.max(6.2,dP+.5);                                  /* a headwall: wide enough to roof the hole over the mouth, with the cutting's earth face standing either side of it */
   const shape=new THREE.Shape();shape.moveTo(-wP,-1.0);shape.lineTo(wP,-1.0);shape.lineTo(wP,H);shape.lineTo(-wP,H);shape.closePath();
   const hole=new THREE.Path(),ar=2.75;hole.moveTo(-ar,-.62);hole.lineTo(-ar,1.7);
   for(let k=1;k<12;k++){const th=Math.PI-k/12*Math.PI;hole.lineTo(Math.cos(th)*ar,1.7+Math.sin(th)*ar)}
   hole.lineTo(ar,1.7);hole.lineTo(ar,-.62);hole.closePath();shape.holes.push(hole);
-  const geo=new THREE.ExtrudeGeometry(shape,{depth:4.6,bevelEnabled:false});
+  const geo=new THREE.ExtrudeGeometry(shape,{depth:6.6,bevelEnabled:false});
   {const uv=geo.attributes.uv;for(let q=0;q<uv.count;q++)uv.setXY(q,uv.getX(q)*.3,uv.getY(q)*.3)}       /* the extruder's UVs are in metres */
   rwTunMats();
   const m=new THREE.Mesh(geo,RW.portalMat);
