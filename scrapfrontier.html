@@ -851,10 +851,12 @@ LIQUIDS & OIL (§09g)
 CUTTINGS & TUNNELS (§09h)
   • The planner may dig through rising ground on MASSIFS only (never dunes or flats): level, so the bed stays where it went in. rwStep returns a dig step
     (rwStepDig/rwStepTn); A* nodes carry .dig and .tn; a path node is [x,z,flag] where the flag marks the step INTO it as a dig (saved as a 3rd value).
-    The profile holds the bed level through each dug run, then pr.T classifies every station by how deep the bed is below the raw ground:
-    0 open, 1 cutting (<COVER), 2 tunnel (>=COVER, 5.4 m); pr.G is the raw ground, pr.tunLen/cutLen are totals. Anything that turns a path about must use rwRev.
+    The profile holds the bed level through each dug run, then pr.T classifies stations near a dig by what is around the bed: 2 tunnel needs COVER (5.4 m) of
+    ground over the roof across ±4.5 m (a cliff edge is not cover), 1 cutting is anything rising beside the bed within ±2.4 m (pr.D: how deep), 0 open; pr.G is the raw ground, pr.tunLen/cutLen are totals. Anything that turns a path about must use rwRev.
   • Terrain: TCUT is a 16 m spatial hash of boxes, applied inside terrainSample by tcutApply. A cutting box carves a trench (floor = bed, 1:1.2 banks); a tunnel
-    box leaves the mountain alone and carries a floor that is solid only to an actor within 1.9 m of it (_deckY, as decks, inverted), plus walls (tcutWall).
+    box leaves the mountain alone, raises the ground over the roof to a safe minimum (easing off past the first and last 4 m and 13 m to either side), and carries a floor
+    that is solid only to an actor within 1.9 m of it (_deckY, as decks, inverted), plus walls (tcutWall). The first and last 3.9 m of a tunnel are ALSO carved open
+    ('mouth'), so the portal slab (4.6 m thick) hides the heightfield's steep face.
     groundRaw/massRaw sample without cuts — the planner and profile must use them, or a route would plan against its own trench. Boxes are made per LAID
     segment (tcutSeg, from rwClearScrap) and rebuilt from the route on load (tcutRebuild, from rwSetProfile); deleting a route removes them. Chunks that a box
     touches are dropped and rebuilt a few per frame (TCDIRTY), and the horizon once things settle.
@@ -9032,10 +9034,22 @@ function* rwProfileGen(nodes){
     for(let i=N-2;i>=0;i--)Y[i]=clamp(Y[i],Y[i+1]-mg,Y[i+1]+mg);
   }
   for(let i=0;i<N;i++)Y[i]+=RWC.LIFT;      /* sit the bed a little proud of the ground: no z-fighting on flats, and ridge crests are not buried */
-  /* how deep is the bed below the ground? 0 open · 1 cutting · 2 tunnel (cover of COVER or more). a tunnel shorter than 12 m is just a deep cutting. */
-  const Tc=new Uint8Array(N);let tunLen=0,cutLen=0;
-  for(let i=0;i<N;i++)if(Fa[i]){const d=Y0[i]-(Y[i]-RWC.LIFT);Tc[i]=d>=RWC.COVER?2:d>.45?1:0}
-  for(let i=0;i<N;){if(Tc[i]!==2){i++;continue}let b=i;while(b+1<N&&Tc[b+1]===2)b++;if(b-i+1<8)for(let k=i;k<=b;k++)Tc[k]=1;i=b+1}
+  /* how deep is the bed below the ground? 0 open · 1 cutting · 2 tunnel (cover of COVER or more). a tunnel shorter than 24 m is just a deep cutting. */
+  const Tc=new Uint8Array(N),Dd=new Float32Array(N);let tunLen=0,cutLen=0;
+  {
+    /* near anything that dug: look at the whole corridor, not just the centre line. A tunnel needs cover over the roof across ±4.5 m (so the mountain
+       is solid either side, not a cliff edge); anything that rises beside the bed inside ±2.4 m is a cutting. Dd: how deep the corridor is (sets the width of the trench). */
+    const near=new Uint8Array(N);for(let i=0;i<N;i++)if(Fa[i])for(let k=Math.max(0,i-12);k<=Math.min(N-1,i+12);k++)near[k]=1;
+    for(let i=0;i<N;i++){
+      if(!near[i])continue;
+      const bed=Y[i]-RWC.LIFT,rx=-TZ[i],rz=TX[i];let side=1e9,rise=Y0[i]-bed;
+      for(const o of [-4.5,-2.5,0,2.5,4.5]){const g=groundRaw(Xf[i]+rx*o,Zf[i]+rz*o)-bed;if(g<side)side=g}
+      for(const o of [-2.4,-1.2,1.2,2.4]){const g=groundRaw(Xf[i]+rx*o,Zf[i]+rz*o)-bed;if(g>rise)rise=g}
+      Dd[i]=Math.max(0,rise);
+      if(Fa[i]&&side>=RWC.COVER)Tc[i]=2;else if(rise>.45)Tc[i]=1;
+    }
+  }
+  for(let i=0;i<N;){if(Tc[i]!==2){i++;continue}let b=i;while(b+1<N&&Tc[b+1]===2)b++;if(b-i+1<16)for(let k=i;k<=b;k++)Tc[k]=1;i=b+1}
   for(let i=0;i<N;i++){if(Tc[i]===2)tunLen+=RWC.SS;else if(Tc[i]===1)cutLen+=RWC.SS}
   const nSeg=Math.ceil((N-1)/RWC.SPS),plate=new Uint8Array(nSeg);let cx=0,cz=0;
   for(let k=0;k<nSeg;k++){
@@ -9045,7 +9059,7 @@ function* rwProfileGen(nodes){
   /* S: arc length along the finished line. rolling stock is placed by distance along it, so the cars cannot lag or jerk */
   const S=new Float32Array(N);for(let i=1;i<N;i++)S[i]=S[i-1]+Math.hypot(Xf[i]-Xf[i-1],Zf[i]-Zf[i-1]);
   const len=S[N-1];
-  return{N,X:Xf,Z:Zf,Y,TX,TZ,GL,GR,nSeg,plate,len,S,T:Tc,G:Y0,tunLen,cutLen};
+  return{N,X:Xf,Z:Zf,Y,TX,TZ,GL,GR,nSeg,plate,len,S,T:Tc,G:Y0,D:Dd,tunLen,cutLen};
 }
 
 /* ── routes, and the job pump: planning and profiling are generators, run for a few ms a frame ──
@@ -11425,7 +11439,16 @@ function tcutApply(x,z,h){
     const k=l[i],ex=x-k.x,ez=z-k.z,u=ex*k.tx+ez*k.tz;
     if(u<-k.hL||u>k.hL)continue;
     const v=Math.abs(-ex*k.tz+ez*k.tx),bed=k.y0+(k.y1-k.y0)*((u+k.hL)/(2*k.hL));
-    if(k.tun){if(!_noDeck&&v<=k.hw&&Math.abs(_deckY-bed)<1.9)return bed;continue}      /* a tunnel floor: solid to whoever is inside the tunnel, and only to them */
+    if(k.tun){
+      /* the mountain never dips below a safe roof over the tunnel: at least bed+up for ±hw, easing back to the natural ground by ±rw, and easing in over the
+         first and last few metres so the portal's own trench is not walled across. (not for the planner: _noCut) */
+      if(!_noCut&&v<k.rw){
+        const e=Math.min((k.ds+u+k.hL)-4,(k.de-(u+k.hL))-4)/12;
+        if(e>0){const f=e>=1?1:e*e*(3-2*e),q=v<=k.hw?0:(v-k.hw)/(k.rw-k.hw),w=1-q*q*(3-2*q),tg=bed+k.up*f*w;if(tg>h)h=tg}
+      }
+      if(!_noDeck&&v<=k.fw&&Math.abs(_deckY-bed)<1.9)return bed;                  /* the floor: solid to whoever is inside the tunnel, and only to them */
+      continue;
+    }
     if(_noCut||v>k.rw)continue;
     const c=bed+Math.max(0,v-k.hw)*k.sl;if(c<h)h=c;
   }
@@ -11441,13 +11464,13 @@ function tcutAdd(k){
   const r=Math.hypot(k.hL,Math.max(k.rw,k.hw))+1,x0=Math.floor((k.x-r)/16),x1=Math.floor((k.x+r)/16),z0=Math.floor((k.z-r)/16),z1=Math.floor((k.z+r)/16);
   k.cells=[];
   for(let cz=z0;cz<=z1;cz++)for(let cx=x0;cx<=x1;cx++){const key=(cx+4096)*8192+cz+4096;let l=TCUT.get(key);if(!l){l=[];TCUT.set(key,l)}l.push(k);k.cells.push(key)}
-  k.r=r;if(!k.tun)tcutDirty(k.x-r,k.z-r,k.x+r,k.z+r);
+  k.r=r;tcutDirty(k.x-r,k.z-r,k.x+r,k.z+r);
 }
 function tcutRemoveOwner(owner){
   for(let i=TCUTS.length-1;i>=0;i--){
     const k=TCUTS[i];if(k.owner!==owner)continue;
     for(const key of k.cells){const l=TCUT.get(key);if(!l)continue;const j=l.indexOf(k);if(j>=0)l.splice(j,1);if(!l.length)TCUT.delete(key)}
-    if(!k.tun)tcutDirty(k.x-k.r,k.z-k.r,k.x+k.r,k.z+k.r);
+    tcutDirty(k.x-k.r,k.z-k.r,k.x+k.r,k.z+k.r);
     TCUTS.splice(i,1);
   }
   if(owner&&owner.cutSegs)owner.cutSegs.clear();
@@ -11457,16 +11480,23 @@ function tcutSeg(R,k){
   const pr=R.pr;if(!pr||!pr.T)return;
   if(!R.cutSegs)R.cutSegs=new Set();if(R.cutSegs.has(k))return;R.cutSegs.add(k);
   const S=RWC.SPS,i0=k*S,i1=Math.min(pr.N-1,i0+S),T=pr.T;
-  const cls=i=>(T[i]===2&&T[i+1]===2)?2:(T[i]>=1||T[i+1]>=1)?1:0;
+  const MOUTH=3.9;                                                  /* a tunnel's first and last few metres stay carved open, behind the portal slab, so the heightfield's steep face is hidden inside it */
+  const runEnds=i=>{let A=i,B=i+1;while(A>0&&T[A-1]===2)A--;while(B<pr.N-1&&T[B+1]===2)B++;return[A,B]};
+  const cls=i=>{
+    if(T[i]===2&&T[i+1]===2){const[A,B]=runEnds(i);return(pr.S[i]-pr.S[A]<MOUTH||pr.S[B]-pr.S[i+1]<MOUTH)?3:2}
+    return(T[i]>=1||T[i+1]>=1)?1:0;
+  };
   for(let i=i0;i<i1;){
     const c=cls(i);if(!c){i++;continue}
     let b=i+1;while(b<i1&&cls(b)===c)b++;
     const a=i,dx=pr.X[b]-pr.X[a],dz=pr.Z[b]-pr.Z[a],len=Math.hypot(dx,dz)||1e-6;
-    let dmax=0;for(let j=a;j<=b;j++)dmax=Math.max(dmax,pr.G[j]-(pr.Y[j]-RWC.LIFT));
-    const box={x:(pr.X[a]+pr.X[b])/2,z:(pr.Z[a]+pr.Z[b])/2,tx:dx/len,tz:dz/len,hL:len/2+.4,y0:pr.Y[a]-RWC.LIFT,y1:pr.Y[b]-RWC.LIFT,owner:R};
-    if(c===2){box.tun=true;box.hw=3.0;box.rw=3.0;box.sl=0;box.wl=2.3}
-    else{box.tun=false;box.hw=3.1;box.sl=1.2;box.rw=3.1+(dmax+2)/1.2}
-    tcutAdd(box);
+    let dmax=0;for(let j=a;j<=b;j++)dmax=Math.max(dmax,pr.D?pr.D[j]:0,pr.G[j]-(pr.Y[j]-RWC.LIFT));
+    const base={x:(pr.X[a]+pr.X[b])/2,z:(pr.Z[a]+pr.Z[b])/2,tx:dx/len,tz:dz/len,hL:len/2+.4,y0:pr.Y[a]-RWC.LIFT,y1:pr.Y[b]-RWC.LIFT,owner:R};
+    if(c!==2){const box=Object.assign({},base,{tun:false,hw:3.1,sl:1.2,rw:3.1+(dmax+2)/1.2});tcutAdd(box)}
+    if(c>=2){
+      const[A,B]=runEnds(a);
+      tcutAdd(Object.assign({},base,{tun:true,fw:3.0,wl:2.3,hw:5,rw:13,up:5.6,ds:pr.S[a]-pr.S[A]-.4,de:pr.S[B]-pr.S[a]+.4}));
+    }
     i=b;
   }
 }
@@ -11494,6 +11524,16 @@ function tcutTick(){
 /* ── the meshes: a lining ring along each tunnel stretch (lit by lamp bays and daylight at the portals, and not by the sun, so no light leaks through the
    mountain), and a concrete portal slab where a cutting meets a tunnel ── */
 const TUN_RING=(()=>{const p=[[-2.55,-.62],[-2.55,1.7]];for(let k=1;k<12;k++){const th=Math.PI-k/12*Math.PI;p.push([Math.cos(th)*2.55,1.7+Math.sin(th)*2.55])}p.push([2.55,1.7],[2.55,-.62]);return p})();
+const TUN_RING_L=(()=>{const o=[0];for(let j=1;j<TUN_RING.length;j++)o.push(o[j-1]+Math.hypot(TUN_RING[j][0]-TUN_RING[j-1][0],TUN_RING[j][1]-TUN_RING[j-1][1]));o.push(o[o.length-1]+5.1);return o})();
+function rwTunMats(){
+  if(RW.tunMat)return;
+  const conc=MAT.aConc;
+  /* lit like everything else: the mountain's shadow keeps it dark, and a low morning or evening sun reaches in through the mouths. A faint emissive means it is never pitch black. */
+  RW.tunMat=new THREE.MeshLambertMaterial({map:conc&&conc.map||null,color:0xb8b0a0,emissive:0x16130f,side:THREE.DoubleSide});
+  RW.lampMat=new THREE.MeshBasicMaterial({color:0xffe2a8,side:THREE.DoubleSide});
+  RW.portalMat=conc?conc.clone():new THREE.MeshStandardMaterial({color:0x8e8a80,roughness:.95});
+  RW.portalMat.side=THREE.DoubleSide;
+}
 function rwBuildTunnel(g,R,i0,i1){
   const pr=R.pr,T=pr.T;if(!T)return;
   for(let i=i0;i<=i1;){
@@ -11502,21 +11542,28 @@ function rwBuildTunnel(g,R,i0,i1){
     let A=a,B=b;while(A>0&&T[A-1]===2)A--;while(B<pr.N-1&&T[B+1]===2)B++;
     const n=b-a+1,RN=TUN_RING.length;
     if(n>=2){
-      const pos=new Float32Array(n*RN*3),col=new Float32Array(n*RN*3),idx=[];
+      const pos=new Float32Array(n*RN*3),uv=new Float32Array(n*RN*2),idx=[],lamps=[];
       for(let s=0;s<n;s++){
         const st=a+s,rx=-pr.TZ[st],rz=pr.TX[st],Y=pr.Y[st];
-        const m=pr.S[st]%24,dl=Math.min(m,24-m),lamp=Math.max(0,1-dl/3.2),dp=Math.min(pr.S[st]-pr.S[A],pr.S[B]-pr.S[st]),day=Math.max(0,1-dp/18);
-        const br=Math.max(.2+.55*lamp,.25+.75*day*day);
         for(let j=0;j<RN;j++){
           const q=(s*RN+j)*3,px=TUN_RING[j][0],py=TUN_RING[j][1];
           pos[q]=pr.X[st]+rx*px;pos[q+1]=Y+py;pos[q+2]=pr.Z[st]+rz*px;
-          const fl=py<-.5?.75:1;col[q]=.78*br*fl;col[q+1]=.74*br*fl;col[q+2]=.66*br*fl;
+          uv[(s*RN+j)*2]=TUN_RING_L[j]*.3;uv[(s*RN+j)*2+1]=pr.S[st]*.3;
         }
         if(s>0)for(let j=0;j<RN;j++){const j2=(j+1)%RN,p0=(s-1)*RN+j,p1=(s-1)*RN+j2,p2=s*RN+j,p3=s*RN+j2;idx.push(p0,p1,p2,p1,p3,p2)}
+        const m=pr.S[st]%24;if(m<RWC.SS&&pr.S[st]-pr.S[A]>3&&pr.S[B]-pr.S[st]>3)lamps.push(st);          /* a lamp fixture every 24 m, away from the mouths */
       }
-      const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(pos,3));geo.setAttribute('color',new THREE.BufferAttribute(col,3));geo.setIndex(idx);
-      if(!RW.tunMat)RW.tunMat=new THREE.MeshBasicMaterial({vertexColors:true,side:THREE.DoubleSide});
-      const m=new THREE.Mesh(geo,RW.tunMat);m.userData.own=true;m.frustumCulled=false;g.add(m);
+      const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
+      geo.setAttribute('uv',new THREE.BufferAttribute(uv,2));geo.setIndex(idx);geo.computeVertexNormals();
+      rwTunMats();
+      const m=new THREE.Mesh(geo,RW.tunMat);m.userData.own=true;m.frustumCulled=false;m.receiveShadow=true;g.add(m);
+      if(lamps.length){
+        const lp=new Float32Array(lamps.length*12),li=[];
+        lamps.forEach((st,q)=>{const rx=-pr.TZ[st],rz=pr.TX[st],tx=pr.TX[st],tz=pr.TZ[st],y=pr.Y[st]+4.12,cx=pr.X[st],cz=pr.Z[st],w=.5,l=.9;
+          const c=[[-w,-l],[w,-l],[w,l],[-w,l]];c.forEach(([a1,b1],k)=>{lp[q*12+k*3]=cx+rx*a1+tx*b1;lp[q*12+k*3+1]=y;lp[q*12+k*3+2]=cz+rz*a1+tz*b1});li.push(q*4,q*4+1,q*4+2,q*4,q*4+2,q*4+3)});
+        const lg=new THREE.BufferGeometry();lg.setAttribute('position',new THREE.BufferAttribute(lp,3));lg.setIndex(li);
+        const lm=new THREE.Mesh(lg,RW.lampMat);lm.userData.own=true;lm.frustumCulled=false;g.add(lm);
+      }
     }
     if(a===A&&A>0&&T[A-1]===1)rwPortal(g,R,A,1);
     if(b===B&&B<pr.N-1&&T[B+1]===1)rwPortal(g,R,B,-1);
@@ -11524,13 +11571,16 @@ function rwBuildTunnel(g,R,i0,i1){
   }
 }
 function rwPortal(g,R,i,dir){
-  const pr=R.pr,tx=pr.TX[i]*dir,tz=pr.TZ[i]*dir,wP=9,H=6.2;
+  const pr=R.pr,tx=pr.TX[i]*dir,tz=pr.TZ[i]*dir;
+  let dP=0;for(let q=0;q<=6;q++){const j=clamp(i+dir*q,0,pr.N-1);dP=Math.max(dP,pr.D?pr.D[j]:0,pr.G[j]-(pr.Y[j]-RWC.LIFT))}      /* how deep the cut is at the face */
+  const wP=clamp(3.1+(dP+1.2)/1.2+1.2,9,18),H=Math.max(6.2,dP+.5);
   const shape=new THREE.Shape();shape.moveTo(-wP,-1.0);shape.lineTo(wP,-1.0);shape.lineTo(wP,H);shape.lineTo(-wP,H);shape.closePath();
   const hole=new THREE.Path(),ar=2.75;hole.moveTo(-ar,-.62);hole.lineTo(-ar,1.7);
   for(let k=1;k<12;k++){const th=Math.PI-k/12*Math.PI;hole.lineTo(Math.cos(th)*ar,1.7+Math.sin(th)*ar)}
   hole.lineTo(ar,1.7);hole.lineTo(ar,-.62);hole.closePath();shape.holes.push(hole);
-  const geo=new THREE.ExtrudeGeometry(shape,{depth:2.6,bevelEnabled:false});
-  if(!RW.portalMat)RW.portalMat=new THREE.MeshStandardMaterial({color:0x8e8a80,roughness:.95,metalness:.02,side:THREE.DoubleSide});
+  const geo=new THREE.ExtrudeGeometry(shape,{depth:4.6,bevelEnabled:false});
+  {const uv=geo.attributes.uv;for(let q=0;q<uv.count;q++)uv.setXY(q,uv.getX(q)*.3,uv.getY(q)*.3)}       /* the extruder's UVs are in metres */
+  rwTunMats();
   const m=new THREE.Mesh(geo,RW.portalMat);
   m.position.set(pr.X[i],pr.Y[i],pr.Z[i]);m.rotation.y=Math.atan2(tx,tz);m.castShadow=true;m.receiveShadow=true;m.userData.own=true;g.add(m);
 }
@@ -13597,11 +13647,46 @@ function openBook(){
   $('#md-t').textContent='scrap journal';
   $('#md-s').textContent=`${G.bookPages.length} page${G.bookPages.length===1?'':'s'} · page ${bookPageIndex+1}`;
 }
+/* ── test cheats: write  cheat:name  on a journal page and the words vanish and it happens. cheat:help lists them. ── */
+function rwInstantBuild(){
+  let n=0;
+  for(const R of RW.routes){
+    if(!R.pr||!R.laid||R.ph==='done')continue;
+    for(let k=0;k<R.pr.nSeg;k++)if(!R.laid[k]){R.laid[k]=1;R.claim[k]=0;rwClearScrap(R,k);n++}
+    for(const sec of R.secs.values())sec.dirty=true;
+    R.ph='done';RW.why='';try{trainSpawn(R,null)}catch(e){console.error('train spawn',e)}
+  }
+  if(n)saveGame();
+  return n?'built '+n+' track sections at once':'no unfinished railway to build';
+}
+const CHEATS={
+  help:{d:'this list',run(){return null}},
+  instant_track_build:{d:'finish every railway being built, at once (cuttings, tunnels, trains and all)',run:rwInstantBuild},
+  diesel:{d:'add 1500 diesel to the nearest liquid container within 30 m',run:()=>LIQ.give('diesel',1500)},
+  water:{d:'add 1500 water to the nearest liquid container within 30 m',run:()=>LIQ.give('water',1500)},
+  oil:{d:'add 1500 crude oil to the nearest liquid container within 30 m',run:()=>LIQ.give('oil',1500)},
+  loco_fuel:{d:'fill the fuel tank of every diesel loco',run(){let n=0;for(const R of RW.routes)if(R.train&&R.train.dz)for(const c of trainLocos(R.train)){c.cs[0].amt=c.cs[0].cap;n++}return n?'filled '+n+' loco tanks':'no diesel train yet'}},
+  bp_kits:{d:'give 6 of each blueprint piece (floor, truss, wall, half wall, door, stair)',run(){BP.give(6);return 'given'}}
+};
+function cheatScan(text){
+  let used=false;
+  const out=text.replace(/cheat:([a-z0-9_]+)/g,(m,name,off)=>{
+    const c=CHEATS[name];if(!c)return m;used=true;
+    if(name==='help'){
+      /* the list goes onto the page itself. each name is written with a space before the colon, which the scanner does not match, so it can never run itself */
+      return(off>0?'\n':'')+'— cheats —\n'+Object.keys(CHEATS).map(k=>'cheat : '+k+'  —  '+CHEATS[k].d).join('\n')+'\n(to run one, write the word cheat, a colon straight after it, then the name with no spaces; it runs and the words vanish)\n';
+    }
+    else{let r;try{r=c.run()}catch(e){r='failed: '+e.message}if(r)log('cheat '+name+': '+r,'gold',3)}
+    return '';
+  });
+  return used?out:text;
+}
 $('#md-b').addEventListener('input',e=>{
   const text=e.target.closest('[data-book-text]');
   if(!text)return;
   const page=G.bookPages[bookPageIndex];
   if(!page)return;
+  {const cleaned=cheatScan(text.value);if(cleaned!==text.value)text.value=cleaned}
   page.text=text.value.slice(0,5000);
   const note=$('#md-b .book-note');if(note)note.textContent=`${page.text.length} / 5000 characters · ${page.strokes.length} ink marks`;
   saveBookSoon();
