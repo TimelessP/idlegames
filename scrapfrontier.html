@@ -849,6 +849,9 @@ LIQUIDS & OIL (§09g)
     (rate crude/s) and refinery (rate crude/s, yield diesel per crude) from the grid's current (s.pw / s.pratio).
 
 CUTTINGS & TUNNELS (§09h)
+  • TWO TERRAINS are drawn: the streamed chunk meshes, and the horizon mesh (buildHorizon: 160 segments × 72 rings, ~6–13 m cells, 3.2 m BELOW the ground) that
+    fills under the chunks and is the visible terrain beyond ~220 m. Both sample terrainSample, so cuts show in both, but the horizon's grid is far coarser than
+    a trench, so tcutUnder() holds its vertices down near every cutting and tunnel. cheat:noclip lets the drone go through the ground to look at both.
   • The planner may dig through rising ground on MASSIFS only (never dunes or flats): level, so the bed stays where it went in. rwStep returns a dig step
     (rwStepDig/rwStepTn); A* nodes carry .dig and .tn; a path node is [x,z,flag] where the flag marks the step INTO it as a dig (saved as a 3rd value).
     The profile holds the bed level through each dug run, then pr.T classifies stations near a dig by what is around the bed: 2 tunnel needs COVER (5.4 m) of
@@ -5698,7 +5701,7 @@ function buildHorizon(){
     for(let a=0;a<=SEG;a++,n++){
       const an=a/SEG*TAU,x=Math.cos(an)*rad,z=Math.sin(an)*rad;
       _noDeck=true;terrainSample(ox+x,oz+z,lod,_hs);_noDeck=false;
-      pos[n*3]=x;pos[n*3+1]=_hs.h-3.2;pos[n*3+2]=z;uv[n*2]=(ox+x)/9;uv[n*2+1]=(oz+z)/9;
+      pos[n*3]=x;pos[n*3+1]=TCUTS.length?Math.min(_hs.h-3.2,tcutUnder(ox+x,oz+z,rad)):_hs.h-3.2;pos[n*3+2]=z;uv[n*2]=(ox+x)/9;uv[n*2+1]=(oz+z)/9;
       tintBase(ox+x,oz+z,t);
       const k=1-(rad/RR)*0.30;
       col[n*3]=t[0]*k;col[n*3+1]=t[1]*k;col[n*3+2]=t[2]*k;
@@ -11085,10 +11088,13 @@ function droneFly(dt){
   Drone.vx+=(ix*13-Drone.vx)*a;Drone.vz+=(iz*13-Drone.vz)*a;Drone.vy+=(lift*6-Drone.vy)*a;
   Drone.x+=Drone.vx*dt;Drone.z+=Drone.vz*dt;Drone.y+=Drone.vy*dt;
   /* it cannot pass through walls or fly into the ground */
-  const pp={x:Drone.x,y:Drone.y-.4,z:Drone.z};bpCollide(pp,1);Drone.x=pp.x;Drone.z=pp.z;
+  /* (cheat:noclip turns all of this off, so the drone can go through the ground and walls and look at what is underneath) */
   const sv=_deckY;_deckY=Drone.y;const gh=heightAt(Drone.x,Drone.z);_deckY=sv;
-  if(Drone.y<gh+.6){Drone.y=gh+.6;if(Drone.vy<0)Drone.vy=0}
-  const fy=bpFloorY(Drone.x,Drone.z,Drone.y+.3);if(fy!==null&&Drone.y<fy+.5){Drone.y=fy+.5;if(Drone.vy<0)Drone.vy=0}
+  if(!Drone.noclip){
+    const pp={x:Drone.x,y:Drone.y-.4,z:Drone.z};bpCollide(pp,1);Drone.x=pp.x;Drone.z=pp.z;
+    if(Drone.y<gh+.6){Drone.y=gh+.6;if(Drone.vy<0)Drone.vy=0}
+    const fy=bpFloorY(Drone.x,Drone.z,Drone.y+.3);if(fy!==null&&Drone.y<fy+.5){Drone.y=fy+.5;if(Drone.vy<0)Drone.vy=0}
+  }
   if(Drone.y>Drone.hy+350){Drone.y=Drone.hy+350;if(Drone.vy>0)Drone.vy=0}
   Drone.bat-=dt/DRONE_SECS;
   if(Drone.bat<=0){Drone.bat=0;droneOff('battery depleted — the drone returned home on its own');return}
@@ -11120,7 +11126,7 @@ function droneHud(){
   $('#dbt').textContent=Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0');
   $('#dinfo').classList.toggle('low',Drone.bat<.2);
   $('#ddist').textContent=dist<1000?Math.round(dist)+' m':(dist/1000).toFixed(2)+' km';
-  const gh=heightAt(Drone.x,Drone.z);$('#dalt').textContent='alt '+Math.max(0,Math.round(Drone.y-gh))+' m';
+  const gh=heightAt(Drone.x,Drone.z);$('#dalt').textContent='alt '+(Drone.noclip?Math.round(Drone.y-gh):Math.max(0,Math.round(Drone.y-gh)))+' m'+(Drone.noclip?' · NOCLIP':'');
   /* where is home? on screen if it is in view, otherwise pinned to the edge in its direction */
   _dnq.copy(camera.quaternion).invert();_dnv.set(Drone.hx-Drone.x,Drone.hy-Drone.y,Drone.hz-Drone.z).applyQuaternion(_dnq);
   const th=Math.tan(camera.fov*Math.PI/360),el=$('#dhome'),ar=el.querySelector('i');
@@ -11462,6 +11468,21 @@ function tcutHole(x,z){
   const l=TCUT.get(tcutKey(x,z));if(!l)return false;
   for(let i=0;i<l.length;i++){const k=l[i];if(!k.hole)continue;const ex=x-k.x,ez=z-k.z,u=ex*k.tx+ez*k.tz;if(u<-k.hL||u>k.hL)continue;if(Math.abs(-ex*k.tz+ez*k.tx)<=k.hw)return true}
   return false;
+}
+/* The far/under terrain (the horizon mesh, 3.2 m below the chunks) has a grid of 6–13 m: far too coarse to follow a trench, so between its vertices it can bridge
+   across a deep cutting or ride up into a tunnel mouth. Near any cutting or tunnel its vertices are held down to just below the bed (a margin of about one grid
+   cell, wider for the coarse rings), whatever the sampled ground says. Returns the cap, or a huge number when nothing is near. */
+function tcutUnder(x,z,rad){
+  let best=1e9;const m=Math.max(7,.045*rad);
+  for(let i=0;i<TCUTS.length;i++){
+    const k=TCUTS[i];if(k.hole)continue;
+    const ex=x-k.x,ez=z-k.z,lim=k.r+m+2;if(ex>lim||ex<-lim||ez>lim||ez<-lim)continue;
+    const u=ex*k.tx+ez*k.tz,v=-ex*k.tz+ez*k.tx;
+    const du=Math.max(0,Math.abs(u)-k.hL),dv=Math.max(0,Math.abs(v)-(k.tun?k.hw:Math.max(k.hw,k.rw)));
+    if(Math.hypot(du,dv)>m)continue;
+    const c=k.y0+(k.y1-k.y0)*clamp((u+k.hL)/(2*k.hL),0,1)-.7;if(c<best)best=c;
+  }
+  return best;
 }
 function tcutDirty(x0,z0,x1,z1){
   const C=CFG.CH;
@@ -13678,7 +13699,9 @@ const CHEATS={
   water:{d:'add 1500 water to the nearest liquid container within 30 m',run:()=>LIQ.give('water',1500)},
   oil:{d:'add 1500 crude oil to the nearest liquid container within 30 m',run:()=>LIQ.give('oil',1500)},
   loco_fuel:{d:'fill the fuel tank of every diesel loco',run(){let n=0;for(const R of RW.routes)if(R.train&&R.train.dz)for(const c of trainLocos(R.train)){c.cs[0].amt=c.cs[0].cap;n++}return n?'filled '+n+' loco tanks':'no diesel train yet'}},
-  bp_kits:{d:'give 6 of each blueprint piece (floor, truss, wall, half wall, door, stair)',run(){BP.give(6);return 'given'}}
+  bp_kits:{d:'give 6 of each blueprint piece (floor, truss, wall, half wall, door, stair)',run(){BP.give(6);return 'given'}},
+  noclip:{d:'the quadcopter can fly through the ground and walls (Shift to sink): look at what is underneath',run(){Drone.noclip=true;return 'drone noclip ON — launch the drone, hold Shift to descend through the terrain'}},
+  clip:{d:'the quadcopter collides with the ground and walls again',run(){Drone.noclip=false;return 'drone noclip OFF'}}
 };
 function cheatScan(text){
   let used=false;
