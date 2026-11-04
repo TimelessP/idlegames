@@ -5689,7 +5689,9 @@ function buildSky(){
   }
 }
 /* full terrain underlay: detailed beneath streamed chunks, coarser toward the far plane */
-function buildHorizon(){
+/* The horizon mesh takes about a second of CPU to build (~11,400 terrain samples), so it is written as a generator that yields every few vertices and
+   the game steps it a few milliseconds a frame (World.hzJob). buildHorizon() runs it to the end at once, for the places that need the answer now. */
+function* buildHorizonGen(){
   const RR=1500,INNER_R=CFG.CH*(CFG.draw+1)*1.5,INNER_RINGS=56,FAR_RINGS=16,
         RINGS=INNER_RINGS+FAR_RINGS-1,SEG=160,ox=World.hx||0,oz=World.hz||0;
   const NV=RINGS*(SEG+1),pos=new Float32Array(NV*3),uv=new Float32Array(NV*2),col=new Float32Array(NV*3),zc=new Float32Array(NV*7),idx=[];
@@ -5706,6 +5708,7 @@ function buildHorizon(){
       const k=1-(rad/RR)*0.30;
       col[n*3]=t[0]*k;col[n*3+1]=t[1]*k;col[n*3+2]=t[2]*k;
       const q=n*7;zc[q]=_hs.clay;zc[q+1]=_hs.dune;zc[q+2]=_hs.wash;zc[q+3]=_hs.salt;zc[q+4]=_hs.mass;zc[q+5]=_hs.ramp;zc[q+6]=_hs.plat;
+      if((n&15)===15)yield;
     }
   }
   for(let r=0;r<RINGS-1;r++)for(let a=0;a<SEG;a++){
@@ -5716,17 +5719,40 @@ function buildHorizon(){
   g.setAttribute('position',new THREE.BufferAttribute(pos,3));
   g.setAttribute('uv',new THREE.BufferAttribute(uv,2));
   g.setAttribute('color',new THREE.BufferAttribute(col,3));
-  g.setIndex(idx);g.computeVertexNormals();
+  g.setIndex(idx);yield;g.computeVertexNormals();yield;
   const nor=g.attributes.normal.array,sA=new Float32Array(NV*4),sB=new Float32Array(NV*4),A=[0,0,0,0],B=[0,0,0,0];
   for(let i=0;i<NV;i++){
     const ny=Math.max(nor[i*3+1],.05),gg=Math.sqrt(Math.max(0,1-ny*ny))/ny,q=i*7;
     splatWeights(zc[q],zc[q+1],zc[q+2],zc[q+3],zc[q+4],zc[q+5],zc[q+6],gg,A,B);
     sA.set(A,i*4);sB.set(B,i*4);
+    if((i&511)===511)yield;
   }
   g.setAttribute('aSA',new THREE.BufferAttribute(sA,4));
   g.setAttribute('aSB',new THREE.BufferAttribute(sB,4));
-  return new THREE.Mesh(g,MAT.terrain);
+  const mesh=new THREE.Mesh(g,MAT.terrain);mesh.userData.cx=ox;mesh.userData.cz=oz;
+  return mesh;
 }
+function buildHorizon(){const g=buildHorizonGen();let r;do{r=g.next()}while(!r.done);return r.value}
+/* after a cutting or tunnel is added or removed: re-sample just the vertices near it, in place (cheap), instead of rebuilding the whole mesh */
+function* horizonPatchGen(x0,z0,x1,z1,near){
+  const H=World.horizon;if(!H)return;
+  const RR=1500,INNER_R=CFG.CH*(CFG.draw+1)*1.5,INNER_RINGS=56,FAR_RINGS=16,RINGS=INNER_RINGS+FAR_RINGS-1,SEG=160,ox=H.userData.cx,oz=H.userData.cz;
+  const P=H.geometry.attributes.position.array,m=18;let n=0,changed=0;
+  for(let r=0;r<RINGS;r++){
+    const f=r<INNER_RINGS?r/(INNER_RINGS-1):(r-(INNER_RINGS-1))/(FAR_RINGS-1);
+    const rad=r<INNER_RINGS?INNER_R*f:INNER_R*Math.pow(RR/INNER_R,f),lod=rad>INNER_R*1.15?1:0;
+    for(let a=0;a<=SEG;a++,n++){
+      const an=a/SEG*TAU,x=Math.cos(an)*rad,z=Math.sin(an)*rad,wx=ox+x,wz=oz+z;
+      if(near){if(tcutUnder(wx,wz,rad)>1e8)continue}                    // only the vertices that sit near a cutting or tunnel
+      else if(wx<x0-m||wx>x1+m||wz<z0-m||wz>z1+m)continue;
+      _noDeck=true;terrainSample(wx,wz,lod,_hs);_noDeck=false;
+      P[n*3+1]=TCUTS.length?Math.min(_hs.h-3.2,tcutUnder(wx,wz,rad)):_hs.h-3.2;
+      if((++changed&7)===0){H.geometry.attributes.position.needsUpdate=true;yield}
+    }
+  }
+  if(changed)H.geometry.attributes.position.needsUpdate=true;
+}
+function horizonPatch(x0,z0,x1,z1,near){const g=horizonPatchGen(x0,z0,x1,z1,near);let r;do{r=g.next()}while(!r.done)}
 
 /* ───────────────────────────────────────────────────────────────────────
    §07  CHRONOMETER — 20 min per revolution, night is the short quarter
@@ -11439,7 +11465,7 @@ function recoverAction(s){
    the portal slabs are meshes in the track sections. Boxes: {x,z,tx,tz,hL,y0,y1,hw,rw,sl,tun,wl,owner}.
    ─────────────────────────────────────────────────────────────────────── */
 const tcutKey=(x,z)=>(Math.floor(x/16)+4096)*8192+Math.floor(z/16)+4096;
-const TCDIRTY=new Set();let TCHOR=0;
+const TCDIRTY=new Set();let TCHOR=0,TCHB=null;
 function tcutApply(x,z,h){
   const l=TCUT.get(tcutKey(x,z));if(!l)return h;
   for(let i=0;i<l.length;i++){
@@ -11487,7 +11513,8 @@ function tcutUnder(x,z,rad){
 function tcutDirty(x0,z0,x1,z1){
   const C=CFG.CH;
   for(let cz=Math.floor(z0/C);cz<=Math.floor(z1/C);cz++)for(let cx=Math.floor(x0/C);cx<=Math.floor(x1/C);cx++)TCDIRTY.add(chunkKey(cx,cz));
-  TCHOR=now()+2;
+  TCHOR=now()+1;
+  TCHB=TCHB?[Math.min(TCHB[0],x0),Math.min(TCHB[1],z0),Math.max(TCHB[2],x1),Math.max(TCHB[3],z1)]:[x0,z0,x1,z1];
 }
 function tcutAdd(k){
   TCUTS.push(k);
@@ -11553,7 +11580,7 @@ function tcutWall(x,z,y){
 }
 function tcutTick(){
   if(TCDIRTY.size){let n=0;for(const key of TCDIRTY){TCDIRTY.delete(key);if(World.chunks.has(key)){dropChunk(key);World.cx=1e9}if(++n>=3)break}}
-  if(TCHOR&&now()>TCHOR&&!TCDIRTY.size){TCHOR=0;if(World.rebuildHorizon)World.rebuildHorizon()}
+  if(TCHOR&&now()>TCHOR&&!TCDIRTY.size){TCHOR=0;const b=TCHB;TCHB=null;if(b&&World.horizonPatch)World.horizonPatch(b[0],b[1],b[2],b[3])}
 }
 /* ── the meshes: a lining ring along each tunnel stretch (lit by lamp bays and daylight at the portals, and not by the sun, so no light leaks through the
    mountain), and a concrete portal slab where a cutting meets a tunnel ── */
@@ -13090,13 +13117,15 @@ function rampPlace(){
 const World={chunks:new Map(),feats:new Map(),group:null,cx:1e9,cz:1e9,built:0,tris:0};
 function worldInit(){
   World.group=new THREE.Group();scene.add(World.group);
-  World.rebuildHorizon=()=>{
+  /* swap a finished horizon mesh in. renderOrder 1: drawn after the chunks, which hide most of it, so those pixels fail the depth test before the (expensive) terrain shader runs. */
+  World.setHorizon=(m)=>{
     if(World.horizon){scene.remove(World.horizon);World.horizon.geometry.dispose()}
-    World.horizon=buildHorizon();
-    World.horizon.receiveShadow=true;
-    World.horizon.position.set(World.hx||0,0,World.hz||0);
-    scene.add(World.horizon);
+    World.horizon=m;m.receiveShadow=true;m.renderOrder=1;m.visible=!World.horizonOff;
+    m.position.set(m.userData.cx,0,m.userData.cz);scene.add(m);
   };
+  World.rebuildHorizon=()=>{World.hzJob=null;World.setHorizon(buildHorizon())};
+  World.hzPJobs=[];
+  World.horizonPatch=(...a)=>World.hzPJobs.push(horizonPatchGen(...a));          // queued, and stepped a few milliseconds a frame (streamTick)
   World.rebuildHorizon();
 }
 function chunkKey(cx,cz){return cx+','+cz}
@@ -13178,8 +13207,16 @@ function streamTick(px,pz){
   if(World.horizon){
     const qx=Math.round(px/128)*128,qz=Math.round(pz/128)*128;
     if(World.hx!==qx||World.hz!==qz){
-      World.hx=qx;World.hz=qz;World.rebuildHorizon();
+      World.hx=qx;World.hz=qz;World.hzJob=buildHorizonGen();                 // a new centre: build it a few milliseconds a frame (the old mesh stays until it is done)
     }
+  }
+  if(World.hzJob){
+    const t0=performance.now();let r;do{r=World.hzJob.next()}while(!r.done&&performance.now()-t0<3);
+    if(r.done){World.hzJob=null;World.setHorizon(r.value);if(TCUTS.length)World.hzPJobs.push(horizonPatchGen(0,0,0,0,true))}      // cuttings made while it was being built
+  }
+  if(World.hzPJobs&&World.hzPJobs.length){
+    const t0=performance.now();let r;do{r=World.hzPJobs[0].next()}while(!r.done&&performance.now()-t0<3);
+    if(r.done)World.hzPJobs.shift();
   }
 }
 
@@ -13705,7 +13742,9 @@ const CHEATS={
   loco_fuel:{d:'fill the fuel tank of every diesel loco',run(){let n=0;for(const R of RW.routes)if(R.train&&R.train.dz)for(const c of trainLocos(R.train)){c.cs[0].amt=c.cs[0].cap;n++}return n?'filled '+n+' loco tanks':'no diesel train yet'}},
   bp_kits:{d:'give 6 of each blueprint piece (floor, truss, wall, half wall, door, stair)',run(){BP.give(6);return 'given'}},
   noclip:{d:'the quadcopter can fly through the ground and walls (Shift to sink): look at what is underneath',run(){Drone.noclip=true;return 'drone noclip ON — launch the drone, hold Shift to descend through the terrain'}},
-  clip:{d:'the quadcopter collides with the ground and walls again',run(){Drone.noclip=false;return 'drone noclip OFF'}}
+  clip:{d:'the quadcopter collides with the ground and walls again',run(){Drone.noclip=false;return 'drone noclip OFF'}},
+  horizon_off:{d:'hide the under/far terrain mesh (to compare frame rate; the far horizon vanishes too)',run(){World.horizonOff=true;if(World.horizon)World.horizon.visible=false;return 'horizon mesh hidden'}},
+  horizon_on:{d:'show the under/far terrain mesh again',run(){World.horizonOff=false;if(World.horizon)World.horizon.visible=true;return 'horizon mesh shown'}}
 };
 function cheatScan(text){
   let used=false;
