@@ -849,9 +849,15 @@ LIQUIDS & OIL (§09g)
     (rate crude/s) and refinery (rate crude/s, yield diesel per crude) from the grid's current (s.pw / s.pratio).
 
 CUTTINGS & TUNNELS (§09h)
-  • TWO TERRAINS are drawn: the streamed chunk meshes, and the horizon mesh (buildHorizon: 160 segments × 72 rings, ~6–13 m cells, 3.2 m BELOW the ground) that
-    fills under the chunks and is the visible terrain beyond ~220 m. Both sample terrainSample, so cuts show in both, but the horizon's grid is far coarser than
-    a trench, so tcutUnder() holds its vertices down near every cutting and tunnel. cheat:noclip lets the drone go through the ground to look at both.
+  • TWO TERRAINS are drawn: the streamed chunk meshes, and the horizon mesh (buildHorizonGen: 160 segments × 72 rings, ~6–13 m cells) that is the visible terrain beyond the
+    chunks. The horizon is at the EXACT ground height (MAT.terrainFar). Round the player it is cut away per pixel in the shader (uFar: x, z, hole radius = (draw−1.5) chunks) and, in the
+    overlap ring out to one chunk beyond, tucked ~1.2 m under the fine terrain (uBias) so the two never z-fight; polygonOffset makes the fine terrain win depth ties. Where a cutting
+    is, tcutUnder() holds its vertices down to the floor (a 6–13 m grid cannot follow a trench); horizonPatch re-samples just those vertices in place. Both terrains sample the same
+    function, so no height and no random sequence changes. cheat:noclip / cheat:horizon_off let you look at them.
+  • Tunnel MOUTHS (TMOUTH → TMU uniforms, the 4 nearest): the terrain shader discards fragments inside the tube (below the crown, inside the lining width, 0–7 m from the portal face),
+    so the heightfield's ramp is never a plug, and the portal headwall can be a standard height above the crown instead of reaching the mountain top.
+  • FEATURES are generated against the ground as it was (_noCut), so what the random sequences pick never changes; then featureRailFilter drops anything within 6.5 m of any route
+    (built or planned) or inside a cutting's footprint, and re-seats the rest on the ground as it now is. Cuts invalidate the cached cells (tcutDirty) so chunks regenerate them.
   • The planner may dig through rising ground on MASSIFS only (never dunes or flats): level, so the bed stays where it went in. A dig (cuttings + tunnel) may run
     RWC.TUN_STEPS (130 × 10 m = 1.3 km) through ground up to RWC.DIG_MAX (140 m) above the bed, so a 500 m tunnel with approach cuttings fits; RWC.TUN_COST (2.4 × the
     surface) keeps the weighted search from exploring the whole plain before it accepts a tunnel. rwMass() caches the massif test (6 m lattice). rwStep returns a dig step
@@ -1161,22 +1167,28 @@ function forgeTerrainTextures(){
 }
 /* ground material: eight layers blended per fragment by vertex weights, per-pixel steepness and each layer's own
    relief (so edges follow pebbles and cracks, never straight lines); domain-warped and de-tiled; cliffs triplanar */
-function makeTerrainMaterial(){
+/* shared by every terrain material: up to 4 tunnel mouths near the camera. a = (x, z, inward direction x, z), b = (bed y, u0, u1, 1 if used). Terrain fragments inside a mouth's
+   tube — below the crown, inside the lining's width, from the portal face in to u1 — are thrown away: the heightfield's ramp from the carved mouth up to the mountain would
+   otherwise stand inside the tunnel like a plug. Everything above the crown stays, so the mountain is whole. */
+const TMU={uMA:{value:[0,1,2,3].map(()=>new THREE.Vector4())},uMB:{value:[0,1,2,3].map(()=>new THREE.Vector4())}};
+function makeTerrainMaterial(far){
   tsSync();
   const m=new THREE.MeshStandardMaterial({vertexColors:true,roughness:1,metalness:0,dithering:true});
-  const U={uWind:{value:new THREE.Vector2(_wc,_ws)},tNoise:{value:TEX.tNoise}};
+  const U={uWind:{value:new THREE.Vector2(_wc,_ws)},tNoise:{value:TEX.tNoise},uMA:TMU.uMA,uMB:TMU.uMB};
+  if(far){U.uFar={value:new THREE.Vector4(0,0,1e9,40)};U.uBias={value:1.2}}       // the far terrain: (player x, z, hole radius, tuck band), and how far it tucks under the fine terrain
   const names=['tSand','tDune','tClay','tWash','tStrata','tCap','tSalt','tScree'];
   names.forEach((n,i)=>{U['tL'+i]={value:TEX[n]}});
   m.userData.U=U;
   m.onBeforeCompile=(sh)=>{
     Object.assign(sh.uniforms,U);
     sh.vertexShader=sh.vertexShader
-      .replace('#include <common>','#include <common>\nattribute vec4 aSA;\nattribute vec4 aSB;\nvarying vec4 vSA;\nvarying vec4 vSB;\nvarying vec3 vWP;\nvarying vec3 vWN;')
-      .replace('#include <begin_vertex>','#include <begin_vertex>\nvSA=aSA;vSB=aSB;vWP=(modelMatrix*vec4(transformed,1.0)).xyz;vWN=normalize(mat3(modelMatrix)*objectNormal);');
+      .replace('#include <common>','#include <common>\nattribute vec4 aSA;\nattribute vec4 aSB;\nvarying vec4 vSA;\nvarying vec4 vSB;\nvarying vec3 vWP;\nvarying vec3 vWN;'+(far?'\nuniform vec4 uFar;\nuniform float uBias;':''))
+      .replace('#include <begin_vertex>','#include <begin_vertex>'+(far?'\n{vec3 w0=(modelMatrix*vec4(transformed,1.0)).xyz;float d0=length(w0.xz-uFar.xy);transformed.y-=uBias*(1.0-smoothstep(uFar.z,uFar.z+uFar.w,d0));}':'')+'\nvSA=aSA;vSB=aSB;vWP=(modelMatrix*vec4(transformed,1.0)).xyz;vWN=normalize(mat3(modelMatrix)*objectNormal);');
     const hdr=`#include <common>
 uniform sampler2D tL0;uniform sampler2D tL1;uniform sampler2D tL2;uniform sampler2D tL3;
 uniform sampler2D tL4;uniform sampler2D tL5;uniform sampler2D tL6;uniform sampler2D tL7;
 uniform sampler2D tNoise;uniform vec2 uWind;
+uniform vec4 uMA[4];uniform vec4 uMB[4];${far?'uniform vec4 uFar;':''}
 varying vec4 vSA;varying vec4 vSB;varying vec3 vWP;varying vec3 vWN;
 float gBump;
 float lmn(vec3 c){return dot(c,vec3(.299,.587,.114));}`;
@@ -1224,9 +1236,16 @@ float lmn(vec3 c){return dot(c,vec3(.299,.587,.114));}`;
   vec3 grad=sign(det)*(dhx*r1+dhy*r2);
   normal=normalize(abs(det)*normal-grad);
 }`;
-    sh.fragmentShader=sh.fragmentShader.replace('#include <common>',hdr).replace('#include <map_fragment>',body).replace('#include <normal_fragment_maps>',bump);
+    const cut=`void main() {
+  for(int i=0;i<4;i++){
+    vec4 a=uMA[i],b=uMB[i];
+    if(b.w>.5){vec2 d=vWP.xz-a.xy;float u=d.x*a.z+d.y*a.w,v=-d.x*a.w+d.y*a.z;if(u>b.y&&u<b.z&&abs(v)<3.3&&vWP.y<b.x+5.0)discard;}
+  }${far?'\n  if(length(vWP.xz-uFar.xy)<uFar.z)discard;':''}`;
+    sh.fragmentShader=sh.fragmentShader.replace('#include <common>',hdr).replace('#include <map_fragment>',body).replace('#include <normal_fragment_maps>',bump).replace('void main() {',cut);
   };
-  m.customProgramCacheKey=()=>'terrain-splat-1';
+  if(far){m.polygonOffset=true;m.polygonOffsetFactor=1;m.polygonOffsetUnits=1}      // where the two terrains overlap, the fine one wins any depth tie
+  m.userData.U=U;
+  m.customProgramCacheKey=()=>far?'terrain-splat-far-2':'terrain-splat-2';
   return m;
 }
 function forgeTextures(){
@@ -1650,7 +1669,7 @@ function saltAt(x,z,h){ return smooth(0.63,0.79,fbm(x*0.0019-31,z*0.0019+17,SEED
    Only the crags above the ramp are climbing-only.  The camp's cell is always open valley.            */
 const MC=1200,MCG=60;
 let _tsSeed=null,_wc=1,_ws=0,_camp=0;
-const _mcc=new Map(),DECKS=[],FDECK=new Map(),TCUT=new Map(),TCUTS=[];      /* TCUT: cuttings and tunnel floors, in a 16 m spatial hash (see §09h) */      /* FDECK: the 3 m sheet floors, in an 8 m spatial hash so hundreds of them cost one lookup per sample */
+const _mcc=new Map(),DECKS=[],FDECK=new Map(),TCUT=new Map(),TCUTS=[],TMOUTH=[];      /* TCUT: cuttings and tunnel floors, in a 16 m spatial hash (see §09h) */      /* FDECK: the 3 m sheet floors, in an 8 m spatial hash so hundreds of them cost one lookup per sample */
 let _noDeck=false,_noCut=false,_deckY=1e9;      /* _noDeck: sample the bare ground (meshes, trestle legs). _deckY: a deck is solid only to whoever is within 1.2 m of its height, so you can walk (and drive) underneath a high span */
 function tsSync(){
   if(_tsSeed===SEED)return;
@@ -1921,7 +1940,33 @@ function nearKit(x,z,r){
   }catch(e){}                                                                              // before the world exists: nothing is built
   return false;
 }
+/* Features are GENERATED against the ground as it was before any railway (_noCut), so what the random sequences pick never changes, wherever a cutting is. Then, afterwards:
+   anything within 6.5 m of any railway line (built or only planned) is left out, anything standing inside a cutting's footprint is left out, and what is left is set
+   down on the ground as it now is (a rock beside a cutting no longer floats over it). */
 function cellFeaturesRaw(cx,cz){
+  _noCut=true;let out;try{out=cellFeaturesGen(cx,cz)}finally{_noCut=false}
+  return featureRailFilter(out);
+}
+function tcutInCut(x,z){
+  const l=TCUT.get(tcutKey(x,z));if(!l)return false;
+  for(let i=0;i<l.length;i++){const k=l[i];if(k.tun||k.hole)continue;const ex=x-k.x,ez=z-k.z,u=ex*k.tx+ez*k.tz;if(u<-k.hL||u>k.hL)continue;if(Math.abs(-ex*k.tz+ez*k.tx)<=k.rw)return true}
+  return false;
+}
+function featureRailFilter(out){
+  let routes=false;try{routes=RW.routes.length>0}catch(e){}
+  if(!routes&&!TCUT.size)return out;
+  const res=[];
+  for(const f of out){
+    if(routes&&rwNearTrack(f.x,f.z,6.5))continue;
+    if(TCUT.size){
+      if(tcutInCut(f.x,f.z))continue;
+      if(TCUT.get(tcutKey(f.x,f.z))){_noDeck=true;_noCut=true;terrainSample(f.x,f.z,0,_hs);const raw=_hs.h;_noCut=false;terrainSample(f.x,f.z,0,_hs);_noDeck=false;f.y+=_hs.h-raw}
+    }
+    res.push(f);
+  }
+  return res;
+}
+function cellFeaturesGen(cx,cz){
   const r=rngAt(cx,cz,SEED^0x5f3a91);
   const out=[],bx=cx*FCELL,bz=cz*FCELL;
   const n=3+Math.floor(r()*2);
@@ -2017,7 +2062,7 @@ function buildGeo(){
 function buildMats(){
   const std=(o)=>new THREE.MeshStandardMaterial(Object.assign({roughness:0.95,metalness:0.05},o));
   MAT.sand=std({map:TEX.sand,normalMap:TEX.sandN,normalScale:new THREE.Vector2(1.1,1.1),vertexColors:true,roughness:1,metalness:0,dithering:true});
-  MAT.terrain=makeTerrainMaterial();
+  MAT.terrain=makeTerrainMaterial();MAT.terrainFar=makeTerrainMaterial(true);
   MAT.rock=std({map:TEX.rock,normalMap:TEX.rockN,roughness:1,metalness:0,flatShading:false});
   MAT.rust=std({map:TEX.rust,normalMap:TEX.rustN,roughness:0.82,metalness:0.55});
   MAT.rustDark=std({map:TEX.rust,color:0x8a6a55,roughness:0.9,metalness:0.45});
@@ -5705,7 +5750,7 @@ function* buildHorizonGen(){
     for(let a=0;a<=SEG;a++,n++){
       const an=a/SEG*TAU,x=Math.cos(an)*rad,z=Math.sin(an)*rad;
       _noDeck=true;terrainSample(ox+x,oz+z,lod,_hs);_noDeck=false;
-      pos[n*3]=x;pos[n*3+1]=TCUTS.length?Math.min(_hs.h-3.2,tcutUnder(ox+x,oz+z,rad)):_hs.h-3.2;pos[n*3+2]=z;uv[n*2]=(ox+x)/9;uv[n*2+1]=(oz+z)/9;
+      pos[n*3]=x;pos[n*3+1]=TCUTS.length?Math.min(_hs.h,tcutUnder(ox+x,oz+z,rad)):_hs.h;pos[n*3+2]=z;uv[n*2]=(ox+x)/9;uv[n*2+1]=(oz+z)/9;
       tintBase(ox+x,oz+z,t);
       const k=1-(rad/RR)*0.30;
       col[n*3]=t[0]*k;col[n*3+1]=t[1]*k;col[n*3+2]=t[2]*k;
@@ -5731,7 +5776,7 @@ function* buildHorizonGen(){
   }
   g.setAttribute('aSA',new THREE.BufferAttribute(sA,4));
   g.setAttribute('aSB',new THREE.BufferAttribute(sB,4));
-  const mesh=new THREE.Mesh(g,MAT.terrain);mesh.userData.cx=ox;mesh.userData.cz=oz;
+  const mesh=new THREE.Mesh(g,MAT.terrainFar);mesh.userData.cx=ox;mesh.userData.cz=oz;
   return mesh;
 }
 function buildHorizon(){const g=buildHorizonGen();let r;do{r=g.next()}while(!r.done);return r.value}
@@ -5748,7 +5793,7 @@ function* horizonPatchGen(x0,z0,x1,z1,near){
       if(near){if(tcutUnder(wx,wz,rad)>1e8)continue}                    // only the vertices that sit near a cutting or tunnel
       else if(wx<x0-m||wx>x1+m||wz<z0-m||wz>z1+m)continue;
       _noDeck=true;terrainSample(wx,wz,lod,_hs);_noDeck=false;
-      P[n*3+1]=TCUTS.length?Math.min(_hs.h-3.2,tcutUnder(wx,wz,rad)):_hs.h-3.2;
+      P[n*3+1]=TCUTS.length?Math.min(_hs.h,tcutUnder(wx,wz,rad)):_hs.h;
       if((++changed&7)===0){H.geometry.attributes.position.needsUpdate=true;yield}
     }
   }
@@ -9129,7 +9174,7 @@ function rwResetAll(){
   RW.routes=[];RW.queue=[];RW.job=null;RW.jobKind='';RW.jobR=null;RW.pair=null;RW.why='';RW.crews=[];rwFreeAndroids();_fc.clear();
 }
 function rwDeleteRoute(R){
-  trainRemove(R);rwDropSections(R);tcutRemoveOwner(R);
+  trainRemove(R);rwDropSections(R);tcutRemoveOwner(R);_fc.clear();
   const i=RW.routes.indexOf(R);if(i>=0)RW.routes.splice(i,1);
   RW.queue=RW.queue.filter(q=>q!==R);_fc.clear();
   if(RW.jobR===R){RW.job=null;RW.jobKind='';RW.jobR=null}
@@ -11507,18 +11552,20 @@ function tcutHole(x,z){
    across a deep cutting or ride up into a tunnel mouth. Near any cutting or tunnel its vertices are held down to just below the bed (a margin of about one grid
    cell, wider for the coarse rings), whatever the sampled ground says. Returns the cap, or a huge number when nothing is near. */
 function tcutUnder(x,z,rad){
+  if(rad>300)return 1e9;                                              // beyond the fine terrain: the far terrain is all there is, leave it alone
   let best=1e9;const m=Math.max(7,.045*rad);
   for(let i=0;i<TCUTS.length;i++){
-    const k=TCUTS[i];if(k.hole)continue;
+    const k=TCUTS[i];if(k.hole||k.tun)continue;
     const ex=x-k.x,ez=z-k.z,lim=k.r+m+2;if(ex>lim||ex<-lim||ez>lim||ez<-lim)continue;
     const u=ex*k.tx+ez*k.tz,v=-ex*k.tz+ez*k.tx;
-    const du=Math.max(0,Math.abs(u)-k.hL),dv=Math.max(0,Math.abs(v)-(k.tun?k.hw:Math.max(k.hw,k.rw)));
+    const du=Math.max(0,Math.abs(u)-k.hL),dv=Math.max(0,Math.abs(v)-Math.max(k.hw,k.rw));
     if(Math.hypot(du,dv)>m)continue;
     const c=k.y0+(k.y1-k.y0)*clamp((u+k.hL)/(2*k.hL),0,1)-.7;if(c<best)best=c;
   }
   return best;
 }
 function tcutDirty(x0,z0,x1,z1){
+  for(let cz=Math.floor(z0/FCELL);cz<=Math.floor(z1/FCELL);cz++)for(let cx=Math.floor(x0/FCELL);cx<=Math.floor(x1/FCELL);cx++)_fc.delete(cx+','+cz);
   const C=CFG.CH;
   for(let cz=Math.floor(z0/C);cz<=Math.floor(z1/C);cz++)for(let cx=Math.floor(x0/C);cx<=Math.floor(x1/C);cx++)TCDIRTY.add(chunkKey(cx,cz));
   TCHOR=now()+1;
@@ -11532,6 +11579,7 @@ function tcutAdd(k){
   k.r=r;tcutDirty(k.x-r,k.z-r,k.x+r,k.z+r);
 }
 function tcutRemoveOwner(owner){
+  for(let i=TMOUTH.length-1;i>=0;i--)if(TMOUTH[i].owner===owner)TMOUTH.splice(i,1);
   for(let i=TCUTS.length-1;i>=0;i--){
     const k=TCUTS[i];if(k.owner!==owner)continue;
     for(const key of k.cells){const l=TCUT.get(key);if(!l)continue;const j=l.indexOf(k);if(j>=0)l.splice(j,1);if(!l.length)TCUT.delete(key)}
@@ -11564,8 +11612,8 @@ function tcutSeg(R,k){
     }
     i=b;
   }
-  /* the holes over each portal's mouth, once per portal, with the segment that holds the tunnel's first or last station */
-  const hole=(st,dir)=>{const tx=pr.TX[st],tz=pr.TZ[st];tcutAdd({x:pr.X[st]+dir*tx*3,z:pr.Z[st]+dir*tz*3,tx,tz,hL:2,hw:3.4,rw:3.4,y0:0,y1:0,hole:true,tun:false,owner:R})};
+  /* a record for each portal's mouth (see TMU): where the terrain shader throws away the heightfield's ramp inside the tube. once per portal, with the segment that holds the tunnel's first or last station */
+  const hole=(st,dir)=>{TMOUTH.push({x:pr.X[st],z:pr.Z[st],tx:dir*pr.TX[st],tz:dir*pr.TZ[st],bed:pr.Y[st]-RWC.LIFT,owner:R})};
   for(let st=Math.max(1,i0);st<i1;st++)if(T[st]===2&&T[st-1]!==2)hole(st,1);
   for(let st=i0+1;st<=i1&&st<pr.N-1;st++)if(T[st]===2&&T[st+1]!==2)hole(st,-1);
 }
@@ -11645,7 +11693,7 @@ function rwBuildTunnel(g,R,i0,i1){
 function rwPortal(g,R,i,dir){
   const pr=R.pr,tx=pr.TX[i]*dir,tz=pr.TZ[i]*dir;
   let dP=0;for(let q=0;q<=6;q++){const j=clamp(i+dir*q,0,pr.N-1);dP=Math.max(dP,pr.D?pr.D[j]:0,pr.G[j]-(pr.Y[j]-RWC.LIFT))}      /* how deep the cut is at the face */
-  const wP=8,H=Math.max(6.2,dP+.5);                                  /* a headwall: wide enough to roof the hole over the mouth, with the cutting's earth face standing either side of it */
+  const wP=8,H=TUN_HC+TUN_W+1.3;                                     /* a headwall: a standard height above the tube's crown (the mountain rises above it as it likes), wide enough to hold the opening with the cutting's earth face either side */
   const shape=new THREE.Shape();shape.moveTo(-wP,-1.0);shape.lineTo(wP,-1.0);shape.lineTo(wP,H);shape.lineTo(-wP,H);shape.closePath();
   const hole=new THREE.Path(),ar=2.75;hole.moveTo(-ar,-.62);hole.lineTo(-ar,1.7);
   for(let k=1;k<12;k++){const th=Math.PI-k/12*Math.PI;hole.lineTo(Math.cos(th)*ar,1.7+Math.sin(th)*ar)}
@@ -13203,7 +13251,19 @@ function streamWorld(px,pz){
   want.sort((a,b)=>a[2]-b[2]);
   World.want=want;World.wi=0;
 }
+function terrainUniforms(px,pz){
+  if(MAT.terrainFar){                                              // the far terrain is cut away round the player, a little inside the fine terrain's edge
+    const holeR=Math.max(24,(SET.draw-1.5)*CFG.CH);MAT.terrainFar.userData.U.uFar.value.set(px,pz,holeR,CFG.CH);
+  }
+  const near=[];for(const m of TMOUTH){const d=(m.x-px)**2+(m.z-pz)**2;if(d<250*250)near.push([d,m])}
+  near.sort((a,b)=>a[0]-b[0]);
+  for(let i=0;i<4;i++){
+    const a=TMU.uMA.value[i],b=TMU.uMB.value[i],e=near[i];
+    if(e){const m=e[1];a.set(m.x,m.z,m.tx,m.tz);b.set(m.bed,-.02,7.0,1)}else b.set(0,0,0,0);
+  }
+}
 function streamTick(px,pz){
+  terrainUniforms(px,pz);
   streamWorld(px,pz);
   if(!World.want)return;
   let built=0;
