@@ -9154,10 +9154,18 @@ function rwExtCommit(X,pr){
   if(c.side==='far')b=clamp(Math.floor(J/S),0,nS-1);else e=clamp(nS-Math.ceil(J/S),0,nS-1);     /* built exactly as far as the old track end */
   const hadTrain=!!R.train;
   trainRemove(R);R.trainTried=false;R.trainSave=null;R.train=null;
-  const oL=R.laid,nO=oL?oL.length:0,sh=c.side==='far'?0:pr.nSeg-nO;let ls='';
-  for(let i=0;i<pr.nSeg;i++){const j=i-sh;ls+=oL&&j>=0&&j<nO&&oL[j]?'1':'0'}
-  R.laidStr=ls;                                             /* the old sections stay where they were; the new ones are not down yet */
-  if(c.side==='far')R.pb=pr.nSeg-1;else{R.pa=0;R.pb=R.pb+sh}   /* the planned line now runs to the new end; a chunk pulled up at the far end stays off the plan */
+  const oL=R.laid,nO=oL.length,oPa=R.pa,oPb=R.pb,fr=!!X.free;
+  let ls='';
+  if(c.side==='far'){
+    const sF=clamp(Math.round(c.i/RWC.SPS),0,nO);             /* the old sections up to the track end stay; the new ones follow */
+    for(let i=0;i<pr.nSeg;i++)ls+=i<sF?(oL[i]?'1':'0'):(fr?'1':'0');
+    R.pb=pr.nSeg-1;
+  }else{
+    const kept=nO-oPa,sh=pr.nSeg-kept;                         /* the nodes before the old planned start are dropped; the rest keep their sections */
+    for(let i=0;i<pr.nSeg;i++)ls+=i<sh?(fr?'1':'0'):(oL[oPa+i-sh]?'1':'0');
+    R.pa=0;R.pb=oPb-oPa+sh;
+  }
+  R.laidStr=ls;                                               /* the new sections are down at once when the extension was laid by look; otherwise the crew lays them */
   R.nodes=X.nodes;R.bb=null;R.built=b;R.builtEnd=e;R.ph='building';
   rwSetProfile(R,pr);_fc.clear();RW.why='';
   log('railway extended: '+pr.len.toFixed(0)+' m in all, '+(nS-b-e)+' new sections to build ('+rwPos(rwEnds(R).a)+' → '+rwPos(rwEnds(R).b)+')'+(hadTrain?' · the train is taken off the line until it is complete again':'')+'. the crew carries on','good');SFX('craft');saveGame();
@@ -11227,7 +11235,7 @@ function frontDot(x,z){
   return (dx*fwd.x+dz*fwd.z)/d;
 }
 function pickTarget(){
-  if(G.drive)return null;
+  if(G.drive||XLN.on)return null;
   let best=null,score=-1;
   for(const f of featuresNear(P.x,P.z,G.reach+1.4)){
     if(G.spents.has(f.id))continue;
@@ -11296,6 +11304,11 @@ function trackPick(){
   for(const R of RW.routes){
     if(!R.pr||!R.laid)continue;
     for(let e=0;e<2;e++){
+      const bf=rwBufferAt(R,e);
+      if(bf){
+        const bd=Math.hypot(bf.x-P.x,bf.z-P.z);
+        if(bd<=G.reach+3.5&&aimedAtBuffer(R,e)){R.bufs=R.bufs||[{R,e:0},{R,e:1}];return{kind:'buffer',ref:R.bufs[e],d:bd,s:9}}
+      }
       const k=rwTipIndex(R,e);if(k<0)continue;
       const i=Math.min(R.pr.N-1,k*RWC.SPS+2),x=R.pr.X[i],z=R.pr.Z[i];
       const d=Math.hypot(x-P.x,z-P.z);if(d>G.reach+2.6)continue;
@@ -11303,7 +11316,7 @@ function trackPick(){
       const s=dot*2-d*0.25+0.3;
       if(s>score){
         score=s;
-        R.tips=R.tips||[{R,e:0},{R,e:1}];                 /* a stable ref, so the hold survives frames */
+        R.tips=R.tips||[{R,e:0},{R,e:1}];
         best={kind:'track',ref:R.tips[e],d,s};
       }
     }
@@ -11319,6 +11332,105 @@ function trackAction(ref){
     log('pulled up a section of track at the '+end+' — a rail pair and a sleeper set go to your satchel. the planned line is shorter by that section','gold');
     saveGame();
   }};
+}
+/* ── extending a line by looking: aim at a buffer stop and press E; the ground under the crosshair is the new end ──
+   the planner is the same one the crew's extensions use, so the same slope, obstacle and track-clearance rules apply.
+   green = it can be laid: E lays it at once, with no parts. red = it cannot: E ends the extension. E at the buffer ends it too. */
+const XLN={on:false,R:null,e:0,c:null,prevE:false,gen:null,tgt:null,res:null,line:null,lineKey:'',mat:{}};
+const XLN_MAX=150;
+function rwBufferAt(R,e){
+  if(!R||!R.pr||!R.laid)return null;
+  const pr=R.pr,S=RWC.SPS,k=e===0?R.pa:R.pb;
+  if(!R.laid[k])return null;
+  const i=e===0?Math.min(pr.N-1,R.pa*S):(R.pb>=pr.nSeg-1?pr.N-1:Math.min(pr.N-1,(R.pb+1)*S));
+  return{i,x:pr.X[i],y:pr.Y[i]+.5,z:pr.Z[i]};
+}
+function viewRay(){const cp=Math.cos(P.pitch);return{O:camera.position,D:{x:-Math.sin(P.yaw)*cp,y:Math.sin(P.pitch),z:-Math.cos(P.yaw)*cp}}}
+function aimedAtBuffer(R,e){
+  const bf=rwBufferAt(R,e);if(!bf)return false;
+  const {O,D}=viewRay(),vx=bf.x-O.x,vy=bf.y-O.y,vz=bf.z-O.z,l=Math.hypot(vx,vy,vz);
+  if(l<.5||l>14)return false;
+  return (vx*D.x+vy*D.y+vz*D.z)/l>Math.cos(7*Math.PI/180);
+}
+/* the candidate end the planner starts from: the same shape as the ones rwEndCands offers */
+function rwExtEnd(R,e){
+  const pr=R.pr,nS=pr.nSeg,S=RWC.SPS;
+  const i=e===0?Math.min(pr.N-1,R.pa*S):(R.pb>=nS-1?pr.N-1:Math.min(pr.N-1,(R.pb+1)*S)),sg=e===0?-1:1;
+  return{R,side:e===0?'start':'far',i,done:rwAllLaid(R),x:pr.X[i],z:pr.Z[i],y:pr.Y[i]-RWC.LIFT,tx:pr.TX[i]*sg,tz:pr.TZ[i]*sg};
+}
+function trackExtStart(R,e){
+  if(RW.job){log('the planners are still busy with another job','bad');SFX('bad');return}
+  if(!R.pr||!R.laid)return;
+  XLN.on=true;XLN.R=R;XLN.e=e;XLN.c=rwExtEnd(R,e);XLN.gen=null;XLN.tgt=null;XLN.res=null;XLN.lineKey='';XLN.prevE=true;   /* the E that started this is not a press */
+  log('extending the line: look at the ground where it should end. green: E lays it at once, for no parts. red, or E at the buffer: the extension ends','gold');SFX('pick');
+}
+function trackExtEnd(msg){
+  XLN.on=false;XLN.gen=null;XLN.res=null;XLN.tgt=null;XLN.lineKey='';
+  if(XLN.line){scene.remove(XLN.line);XLN.line.geometry.dispose();XLN.line=null}
+  if(msg)log(msg,'gold');
+}
+function trackExtDraw(){
+  if(!XLN.tgt){if(XLN.line){scene.remove(XLN.line);XLN.line.geometry.dispose();XLN.line=null;XLN.lineKey=''}return}
+  const c=XLN.c,ok=!!(XLN.res&&XLN.res.ok),st=!XLN.res?'c':ok?'g':'r';
+  const pts=ok?XLN.res.nodes:[[c.x,c.z],[XLN.tgt.x,XLN.tgt.z]];
+  const key=st+'|'+XLN.tgt.x.toFixed(1)+'|'+XLN.tgt.z.toFixed(1)+'|'+pts.length;
+  if(key===XLN.lineKey)return;
+  XLN.lineKey=key;
+  if(XLN.line){scene.remove(XLN.line);XLN.line.geometry.dispose();XLN.line=null}
+  const pos=[];for(const p of pts)pos.push(p[0],groundAt(p[0],p[1])+.5,p[1]);
+  const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  const col=st==='g'?0x9aae6f:st==='r'?0xc4442c:0xf0b93f;
+  if(!XLN.mat[st])XLN.mat[st]=new THREE.LineBasicMaterial({color:col,transparent:true,opacity:.9,depthWrite:false});
+  XLN.line=new THREE.Line(geo,XLN.mat[st]);XLN.line.frustumCulled=false;XLN.line.renderOrder=5;scene.add(XLN.line);
+}
+function trackExtTick(){
+  if(!XLN.on)return;
+  const R=XLN.R,e=XLN.e;
+  if(G.tool!=='crowbar'){trackExtEnd('the salvage bar is put away — the extension ends');return}
+  if(!RW.routes.includes(R)||!R.pr){trackExtEnd();return}
+  if(G.drive||uiBlocking()){trackExtEnd();return}
+  const eDown=!!Keys['KeyE'],press=eDown&&!XLN.prevE;XLN.prevE=eDown;
+  if(press){
+    if(aimedAtBuffer(R,e)){trackExtEnd('extension stopped');SFX('place');return}
+    if(XLN.res&&XLN.res.ok){trackExtPlace();return}
+    if(XLN.res&&!XLN.res.ok){trackExtEnd('no line can be laid there — the extension ends');SFX('bad');return}
+    /* still surveying: the press waits for the answer */
+  }
+  const {O,D}=viewRay(),c=XLN.c;
+  const hit=bpTerrainHit(O,D,RP.MAX+16);
+  if(!hit){if(XLN.tgt){XLN.tgt=null;XLN.gen=null;XLN.res={ok:false,reason:'look at the ground'}}}
+  else if(!XLN.tgt||Math.hypot(hit.x-XLN.tgt.x,hit.z-XLN.tgt.z)>2.5){
+    XLN.tgt={x:hit.x,z:hit.z};XLN.gen=null;
+    const d=Math.hypot(hit.x-c.x,hit.z-c.z);
+    if(d>XLN_MAX)XLN.res={ok:false,reason:'that is more than '+XLN_MAX+' m away'};
+    else if(d<RWC.GOAL*2)XLN.res={ok:false,reason:'look further out: the line needs room to run on'};
+    else{XLN.res=null;XLN.gen=rwExtendGen(c,{x:hit.x,z:hit.z})}
+  }
+  if(XLN.gen){
+    const t0=performance.now();
+    try{
+      while(performance.now()-t0<4){
+        const r=XLN.gen.next();
+        if(r.done){XLN.gen=null;XLN.res=r.value?{ok:true,nodes:r.value.nodes}:{ok:false,reason:RW.msg||'no line can be planned there'};break}
+      }
+    }catch(err){console.error(err);XLN.gen=null;XLN.res={ok:false,reason:'the planners could not make sense of that ground'}}
+  }
+  trackExtDraw();
+  const why=!XLN.tgt?'look at the ground where the line should end':!XLN.res?'surveying the ground':XLN.res.ok?'green — E lays it now, at no cost':(XLN.res.reason||'red')+' · E ends the extension';
+  setPrompt('extend the line',why+' · E at the buffer stops',0);
+}
+function trackExtPlace(){
+  const c=XLN.c,R=XLN.R;
+  if(RW.job){log('the planners are still busy with another job','bad');SFX('bad');return}
+  const nodes=rwExtNodes(c,XLN.res.nodes);
+  if(!nodes||nodes.length<3){trackExtEnd('the extension could not be joined to the line');SFX('bad');return}
+  RW.ext={c,wi:-1,nodes,free:true};RW.hold=!c.done;
+  RW.job=rwProfileGen(nodes);RW.jobKind='xprof';RW.jobR=R;RW.msg='laying the extension';RW.prog=.88;
+  trackExtEnd();
+  log('the line is extended — laid at once, no parts used','good');SFX('craft');
+}
+function bufferAction(ref){
+  return{label:'extend the line',sub:'hold E — then look at the ground where it should end',time:.25,run(){trackExtStart(ref.R,ref.e)}};
 }
 function featureAction(f){
   if(f.t==='oilseep')return{label:'oil seep',sub:'crude seeps up here — assemble a derrick over it',time:0,run(){}};
@@ -12227,7 +12339,7 @@ const Hands=machine('hands',{
       const a=t.kind==='feature'?featureAction(t.ref)
               :t.kind==='station'?t.ref.act()
               :t.kind==='struct'?structAction(t.ref)
-              :t.kind==='track'?trackAction(t.ref):t.kind==='liq'?liqAction(t.ref)
+              :t.kind==='track'?trackAction(t.ref):t.kind==='buffer'?bufferAction(t.ref):t.kind==='liq'?liqAction(t.ref)
               :{label:'speak with '+t.ref.name,sub:t.ref.title+' — open the ledger',time:0,run(){openPanel('trade')}};
       if(!a){m.ctx.alt=null;setPrompt(t.ref.d.n+' — landmark',t.ref.d.mark?'too solid to take anything from it':'nothing to salvage here',0);m.ctx.a=null;return}
       m.ctx.a=a;
@@ -14533,6 +14645,7 @@ RENDER.help=()=>`<div class="help">
   <ol>
     <li><b>Salvage.</b> Every heap of junk is a machine. Hold <code>E</code> on it. A crowbar multiplies what comes out.</li>
     <li><b>Pulling up track.</b> With the salvage bar in hand, hold <code>E</code> on either end of a laid line to lift one 6 m section. Its rails and sleepers come back to your satchel.</li>
+    <li><b>Extending track.</b> With the salvage bar in hand, aim at a buffer stop and press <code>E</code>. Look at the ground where the line should end: green means it can be laid, and <code>E</code> lays it at once for no parts. Red, or <code>E</code> at the buffer, ends it.</li>
     <li><b>Fabricate.</b> <code>C</code> opens the bench. Everything you can make is assembled from parts you have pulled apart.</li>
     <li><b>Assemble.</b> <code>B</code> lists the works. Craft the kit, set it down in the world, and it starts doing its job.</li>
     <li><b>Dismantle.</b> <code>3</code> takes an item back apart, one step up the fabricator's list: a batch goes in, and every part that made it comes out. Use it to undo a mistake or to free up a rare part.</li>
@@ -15329,6 +15442,7 @@ function step(dt){
   scrappyStep(dt);
   liqStep(dt);
   rwTick(dt);
+  trackExtTick();
   audTick(dt);
   const blocked=uiBlocking();
   if(!blocked)playerTick(dt);else playerTick(0);
