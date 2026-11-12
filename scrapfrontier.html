@@ -1446,6 +1446,7 @@ RECIPES.push(
 );
 ITEMS.k_lorry={n:'tank lorry kit',c:'kit',v:460,w:0,g:'⛟',t:'#5aa0c8',s:'lorry'};
 ITEMS.k_dieselgen={n:'diesel generator kit',c:'kit',v:380,w:0,g:'⌁',t:'#c98a2a',s:'dieselgen'};
+ITEMS.k_ecliptix={n:'ecliptix core cube',c:'kit',v:4000,w:0,g:'◈',t:'#f3e3b5',s:'ecliptix',d:'Pearl and gold, warm at the core. Set it down and it waits. Hold E on it to unfold the hovership.'};
 RECIPES.push(
   {o:['k_lorry',1],i:{hull:5,plate:8,gear:4,cell:5,wire:5,rod:6,bolt:10,bracket:3,canister:2,pipe:4},t:14,g:'build',bench:true,d:'A battery lorry with a 1200-unit tank on the back and a hose port each side: the last mile for diesel, water or oil. It charges from a grid within 15 m, and must have its hoses unplugged before it can drive.'},
   {o:['k_dieselgen',1],i:{hull:3,plate:6,gear:4,rod:6,bolt:12,pipe:4,wire:6,bracket:3,canister:2},t:12,g:'build',bench:true,d:'Burns diesel from its own 300-unit tank to put 28 units/s on the grid while it runs. Hose diesel into the fuel port; the switch is on the front panel.'}
@@ -1495,6 +1496,7 @@ const WORKS={
 };
 WORKS.railoffice={n:'railway planning office',kit:'k_railoffice',d:'Plans a gently graded railway between two of your waypoints, then androids build it. Hold E to start, or to cancel while it is planning.',size:[4.5,2.9,3.8],r:6,dist:5.4,slopeR:2.2,warm:1,refund:['k_railoffice',1]};
 WORKS.battbot={n:'battery robot',kit:'k_battbot',d:'Solar-powered, on tank tracks. Follows the railway crew and charges androids wirelessly; otherwise reboots and tops up droids that are flat.',size:[1.5,1.6,1.6],r:3,mobile:1,dist:3.6,refund:['k_battbot',1]};
+WORKS.ecliptix={n:'ecliptix core cube',kit:'k_ecliptix',d:'A one-metre cube of pearl enamel and gold with a warm core. Hold E on it to unfold an a-grav hovership: a cabin with a captain\'s chair, a lounge, a bed, and food and water that never run out. Recover it to take it back into the satchel.',size:[1.1,1.1,1.1],r:6,dist:4,slopeR:1.0,warm:1,refund:['k_ecliptix',1]};
 /* ───────────────────────────────────────────────────────────────────────
    §05a  RENDERER BOOT
   three.js is loaded from the build's local vendor directory.  If that
@@ -5862,6 +5864,7 @@ function makeStructure(type,x,z,rot,y,o){
   if(type==='heli')heliInit(s);
   G.struct.push(s);
   if(type==='crawler')crawlerInit(s);
+  if(type==='ecliptix')eclInit(s);
   if(type==='scrappy')scrInit(s);
   if(type==='android')androidInit(s);
   if(type==='battbot')battInit(s);
@@ -5876,6 +5879,7 @@ function removeStructure(s,refund){
   if(isDroid(s))scrRelease(s);
   if(s.type==='railoffice'&&RW.job&&['plan','xplan','xprof'].includes(RW.jobKind)&&!G.struct.some(o=>o!==s&&o.type==='railoffice'))rwCancel(true);
   if(s.type==='dockpad'){for(const r0 of G.struct)if(isDroid(r0)&&r0.pad===s){r0.pad=null;if(['dock','toPad','align','wait'].includes(r0.st))r0.st='seek'}s.robot=null;s.queue=[]}
+  if(s.type==='ecliptix'&&(P.aboard===s||G.drive===s))eclLeave(s,true);
   if(s.type==='crawler'&&(P.aboard===s||G.drive===s))leaveCrawler(s,true);
   else if(G.drive===s){if(s.type==='plane'||s.type==='heli')exitPlane(true);else exitBuggy()}
   if(WORKS[s.type].bp)bpUnindex(s);
@@ -5896,7 +5900,7 @@ function findStructureNear(x,z,r){
 }
 const inRange=(s,px,pz)=>{const r=WORKS[s.type].r||6;return (s.x-px)**2+(s.z-pz)**2<r*r};
 const nearPower=(px,pz,rad)=>G.struct.some(s=>((s.gen>0.4||s.pow>1)&&((s.x-px)**2+(s.z-pz)**2<rad*rad)));
-const nearWarm=(px,pz)=>bpWarm(px,pz)||(P.aboard&&P.aboard.type==='train')||G.struct.some(s=>(WORKS[s.type].warm||0)&&(s.type==='crawler'?crawlerWarm(s,px,pz):((s.x-px)**2+(s.z-pz)**2<16)));
+const nearWarm=(px,pz)=>bpWarm(px,pz)||(P.aboard&&P.aboard.type==='train')||G.struct.some(s=>(WORKS[s.type].warm||0)&&(s.type==='crawler'?crawlerWarm(s,px,pz):s.type==='ecliptix'?P.aboard===s:((s.x-px)**2+(s.z-pz)**2<16)));
 function assemblyPowerDraw(draw){
   const amount=typeof draw==='number'?draw:(draw&&draw.pow)||0;
   return Number.isFinite(amount)?Math.max(0,amount):0;
@@ -6034,6 +6038,486 @@ function gridTick(dt){
 /* ───────────────────────────────────────────────────────────────────────
    §08b  STRUCTURE MODELS
    ─────────────────────────────────────────────────────────────────────── */
+/* ───────────────────────────────────────────────────────────────────────
+   §05h  THE ECLIPTIX CORE CUBE  —  a pearl-and-gold cube that unfolds into an a-grav hovership
+   Cube form: one metre of pearl enamel and polished gold with a warm core, set down on any clear ground.
+   Hold E on it to unfold: the hovership hangs a metre above the ground on IPC1, which is unconstrained
+   (no battery, no sun, no dew). She steers like the crawler but floats over the ground, and crushes small
+   clutter rather than stopping for it. Inside: a captain's chair at the helm, a lounge of two sofas either
+   side of a table, a bed (sleep until first light), and food and water dispensers that never run out.
+   Hold E on the rear hatch to board. Nothing here is scrap: every surface is enamel, leather, glass and gold.
+   ─────────────────────────────────────────────────────────────────────── */
+const ECL={vmax:100/3.6,vrev:3,acc:2.2,dec:3.0,turn:.66,hover:1.25,hoverMin:.6,hoverMax:40,climb:4,lowH:1.25,cruise:40,arrive:9,rad:2.9,
+  ECD:.3,                                             /* the cabin floor, above the hull's origin */
+  SEAT:{x:0,y:.62,z:2.1},                             /* the captain's chair: cushion top, and where you sit */
+  SOFA_Y:.58,                                         /* sofa cushion top */
+  BOARD:{x:.3,z:-1.9}};                                /* where you stand when you come aboard */
+/* lounge seats: hold E to sit. ly is the look direction in the ship's frame, so the view faces across the table */
+const ECL_LM=['auto — on at night','always on','off'];
+const ECL_SEATS=[
+  {x:-.9,z:-.2,ly:-Math.PI/2},{x:-.9,z:.75,ly:-Math.PI/2},
+  {x: .9,z:-.2,ly: Math.PI/2},{x: .9,z:.75,ly: Math.PI/2}];
+/* walk-obstacles inside the cabin, local [x0,x1,z0,z1] */
+const ECL_BOX=[
+  [-.5,.5,1.7,2.5],                                   /* captain's chair and pedestal */
+  [-1.2,1.2,2.6,3.2],                                 /* helm console */
+  [-1.3,-.6,-.6,1.2],[.6,1.3,-.6,1.2],                /* the two sofas */
+  [-1.33,-.42,-3.3,-1.2],                             /* bed */
+  [.88,1.3,-2.6,-2.0],[.88,1.3,-1.9,-1.3]             /* food and water dispensers, on the right wall */
+];
+/* flat materials: glass and the lights, which must read as glass and light rather than as painted surfaces */
+const ECL_MAT_SPEC={
+  eGlass: {color:0xa9dcea,roughness:.06,metalness:.2,transparent:true,opacity:.42,depthWrite:false},
+  eLight: {color:0xfff1d0,emissive:0xffd28a,emissiveIntensity:1.4,roughness:.4},
+  eLightOff: {color:0x4a443c,roughness:.5},
+  eGlow:  {color:0x9fe6ff,emissive:0x52c8ff,emissiveIntensity:1.6,roughness:.3},
+  eCore:  {color:0xfff0c8,emissive:0xffb347,emissiveIntensity:2.6,roughness:.3}
+};
+/* ── painted surfaces for the cabin. Each is periodic (integer frequencies, wrapped noise) so it tiles without a seam,
+   and each is chosen for what the object is in the canon: pearl enamel hull, polished gold fittings, midnight navy
+   lacquer, pebbled cream leather, veined pale marble, fine linen. Colour, height, roughness and metal are set per pixel. ── */
+const eclPearlFn=(u,v,q)=>{
+  const peel=pfb(u,v,40,40,401,2),warm=pfb(u,v,3,3,403,3),fine=pfb(u,v,120,120,405,1);
+  ST(q,[238,233,222]);
+  BL(q,[247,242,231],sm_(.4,.8,peel)*.5);                 /* orange-peel of hand-rubbed enamel */
+  BL(q,[222,210,190],sm_(.5,.9,warm)*.35);                /* a warm cast in the lacquer */
+  q.h=.5+(peel-.5)*.05+(fine-.5)*.03;
+  q.ro=lerp(.22,.42,peel);q.me=.02;
+};
+const eclGoldFn=(u,v,q)=>{
+  const br=pfb(u,v,2,40,411,3),sp=pfb(u,v,6,6,413,2);     /* streaks run along u: brushed lengthwise */
+  ST(q,[196,158,86]);
+  BL(q,[236,204,134],sm_(.45,.85,br)*.7);
+  BL(q,[160,120,60],sm_(.6,.9,sp)*.25);
+  q.h=.5+(br-.5)*.04;
+  q.ro=lerp(.16,.34,br);q.me=.96;
+};
+const eclNavyFn=(u,v,q)=>{
+  const weave=pfb(u,v,96,96,421,1),blot=pfb(u,v,5,5,423,4),cr=sm_(.55,.8,pfb(u,v,24,24,425,2));
+  ST(q,[30,46,68]);
+  BL(q,[46,66,94],sm_(.45,.8,blot)*.6);
+  BL(q,[18,28,44],cr*.3);
+  q.h=.5+(weave-.5)*.05;
+  q.ro=lerp(.3,.5,blot);q.me=.08;
+};
+const eclLeatherFn=(u,v,q)=>{
+  const f=vor(u,v,28,431,[]),pebble=1-sm_(0,.42,f[0]),mott=pfb(u,v,6,6,433,4);   /* pebbled grain */
+  ST(q,[226,212,184]);
+  BL(q,[204,186,154],mott*.35);
+  BL(q,[244,234,212],pebble*.3);
+  q.h=.5+pebble*.12;
+  q.ro=lerp(.55,.72,mott);q.me=0;
+};
+const eclMarbleFn=(u,v,q)=>{
+  const w=pfb(u,v,3,3,441,4);
+  const vein=Math.pow(1-Math.abs(Math.sin(TAU*(2*u+v+w*1.6))),14);         /* integer frequencies: periodic */
+  const vein2=Math.pow(1-Math.abs(Math.sin(TAU*(u-2*v+pfb(u,v,5,5,443,3)*1.1))),22);
+  ST(q,[242,238,229]);
+  BL(q,[220,212,198],sm_(.4,.8,pfb(u,v,4,4,445,4))*.5);
+  BL(q,[168,146,108],Math.min(1,vein*.55));
+  BL(q,[196,178,140],vein2*.35);
+  q.h=.5+(pfb(u,v,40,40,447,2)-.5)*.02;
+  q.ro=.16;q.me=0;
+};
+const eclLinenFn=(u,v,q)=>{
+  const wu=.5+.5*Math.sin(TAU*96*u),wv=.5+.5*Math.sin(TAU*96*v),thread=(wu+wv)*.5;   /* 96 threads per tile */
+  ST(q,[250,248,242]);
+  BL(q,[236,233,226],thread*.35);
+  q.h=.5+thread*.04;q.ro=.9;q.me=0;
+};
+function eclMats(){
+  if(MAT.eHull)return;
+  asmMat('eHull',256,1.6,eclPearlFn,{bump:1.6,grain:'panel'});
+  asmMat('eGold',256,1,eclGoldFn,{bump:1.2,grain:'long'});
+  asmMat('eNavy',256,1.2,eclNavyFn,{bump:1.4,grain:'panel'});
+  asmMat('eLeather',256,.8,eclLeatherFn,{bump:3});
+  asmMat('eMarble',512,2.4,eclMarbleFn,{bump:1.2});
+  asmMat('eLinen',256,.9,eclLinenFn,{bump:.8});
+  for(const k in ECL_MAT_SPEC){const m=new THREE.MeshStandardMaterial(ECL_MAT_SPEC[k]);m.userData.tile=1;MAT[k]=m}
+}
+function asmEcliptixCube(K,s){
+  K.box('eGold',0,.03,0,1.04,.06,1.04);                                   /* plinth */
+  K.box('eHull',0,.55,0,.96,.96,.96);                                     /* shell: pearl enamel */
+  for(const sx of [-1,1])for(const sz of [-1,1])K.box('eGold',sx*.485,.55,sz*.485,.03,.98,.03);   /* gold corner posts */
+  K.box('eGlass',0,.55,.482,.62,.6,.01);                                  /* a window of glass on the front and back */
+  K.box('eGlass',0,.55,-.482,.62,.6,.01);
+  const core=K.sphere('eCore',.2,0,.55,0);K.dyn(core);s.cCore=core;     /* the warm core, breathing */
+  K.mesh(new THREE.TorusGeometry(.3,.012,6,28),'eGold',0,.55,0,Math.PI/2,0,0);   /* a gold ring round it */
+}
+function asmEcliptixShip(K,s){
+  const E=ECL.ECD;
+  /* hover pods and their blue underglow */
+  for(const sx of [-1,1]){K.box('eNavy',sx*1.15,-.32,0,.6,.4,6.2);K.box('eGlow',sx*1.15,-.575,0,.36,.03,5.6)}
+  K.box('eHull',0,-.05,0,2.8,.2,7.0);                                     /* underside slab */
+  K.box('eMarble',0,.22,0,2.7,.16,6.8);                                   /* cabin floor */
+  for(const sx of [-1,1]){                                                /* side walls: enamel, a band of glass, and a crown */
+    K.box('eHull',sx*1.42,.75,0,.14,.9,6.9);
+    K.box('eGlass',sx*1.42,1.75,0,.12,1.1,6.6);
+    K.box('eHull',sx*1.42,2.4,0,.14,.2,6.9);
+    K.box('eGold',sx*1.5,1.2,0,.03,.06,6.8);
+  }
+  K.box('eHull',0,2.6,0,2.9,.2,6.9);                                      /* roof */
+  K.box('eGold',0,2.72,0,.5,.03,6.6);
+  s.cLamps=[];s.cLights=[];
+  for(const sx of [-1,1])s.cLamps.push(K.dyn(K.box('eLight',sx*.8,2.46,0,.12,.02,5.4)));   /* ceiling light strips */
+  /* the light they throw: a point light under each strip, as the train's cabin room light. Off until switched on */
+  for(const sx of [-1,1]){const L=new THREE.PointLight(0xffd9a6,0,11,1.4);L.position.set(sx*.8,2.3,0);K.g.add(L);s.cLights.push(L)}
+  /* front: a windscreen of glass over an enamel plate */
+  K.box('eHull',0,.8,3.42,2.96,1.0,.16);
+  K.box('eGlass',0,1.9,3.42,2.96,1.2,.1);
+  K.box('eGold',0,.8,3.52,.5,.08,.02);
+  /* rear: enamel bulkhead, and the gold hatch door on the outside */
+  K.box('eHull',0,.8,-3.42,2.8,1.0,.16);
+  K.box('eHull',0,1.9,-3.42,2.8,1.2,.16);
+  K.box('eGold',0,1.25,-3.52,1.3,1.9,.06);
+  K.tube('eGold',profRect(.5,.06),[V3(0,.2,-3.6),V3(0,-.6,-4.5)],{tile:1});   /* telescopic gangway to the sand */
+  /* captain's chair: gold pedestal, leather seat and back, gold arms, helm console in front */
+  K.mesh(new THREE.CylinderGeometry(.12,.18,.24,16),'eGold',0,E+.12,2.1);
+  K.box('eLeather',0,.54,2.1,.72,.16,.7);
+  K.box('eLeather',0,1.1,1.8,.74,.9,.14);
+  for(const sx of [-1,1])K.box('eGold',sx*.42,.8,2.1,.08,.08,.6);
+  K.box('eNavy',0,.7,2.9,2.3,.7,.5);
+  K.box('eGlow',0,1.08,2.92,1.8,.04,.3);
+  /* lounge: two sofas facing across the aisle. the aisle is kept clear: nothing stands between them */
+  for(const sx of [-1,1]){
+    K.box('eLeather',sx*.98,.44,.3,.72,.28,1.8);
+    K.box('eLeather',sx*1.25,.85,.3,.18,.6,1.8);
+  }
+  /* bed at the rear, left: navy platform, linen, gold throw, pillows, leather headboard */
+  K.box('eNavy',-.88,.36,-2.25,.94,.12,2.0);
+  K.box('eLinen',-.88,.5,-2.25,.9,.16,1.9);
+  K.box('eGold',-.88,.6,-1.85,.92,.04,.55);
+  K.box('eLinen',-.88,.64,-3.0,.6,.14,.3);
+  K.box('eLeather',-.88,.9,-3.27,.94,.9,.1);
+  /* the rear door, on the inside of the rear wall: a leaf set into the wall, a gold frame, a handle, a porthole and a lit
+     hatch sign, so it reads as a door from inside and is a station you can leave by */
+  K.box('eHull',0,1.24,-3.31,.72,1.84,.04);
+  K.box('eGold',-.38,1.24,-3.3,.04,1.92,.06);
+  K.box('eGold',.38,1.24,-3.3,.04,1.92,.06);
+  K.box('eGold',0,2.18,-3.3,.8,.04,.06);
+  K.sphere('eGold',.035,.26,1.2,-3.27);
+  K.box('eGlass',0,1.6,-3.27,.26,.3,.01);
+  K.box('eGlow',0,2.02,-3.27,.22,.04,.02);
+  /* food and water dispensers, on the right wall, with glass fronts */
+  K.box('eHull',1.12,1.15,-2.3,.4,1.7,.5);
+  K.box('eGlass',.9,1.2,-2.3,.02,1.2,.42);
+  K.box('eGold',.9,1.92,-2.3,.02,.08,.3);
+  K.box('eHull',1.12,1.15,-1.6,.4,1.7,.5);
+  K.box('eGlow',.9,1.2,-1.6,.02,1.2,.42);
+  K.box('eGold',.9,1.92,-1.6,.02,.08,.3);
+}
+ASMFN.ecliptix=(K,s)=>{eclMats();if(s.form==='ship')asmEcliptixShip(K,s);else asmEcliptixCube(K,s)};
+/* ── lifecycle ── */
+function eclInit(s){
+  const ship=s.form==='ship';
+  s.yaw=s.rot||0;
+  s.hoverH=clamp(s.hoverH||ECL.hover,ECL.hoverMin,ECL.hoverMax);
+  if(ship)s.y=groundAt(s.x,s.z)+s.hoverH;
+  s.pos=new THREE.Vector3(s.x,s.y,s.z);
+  s.speed=0;s.thr=0;s.str=0;s.yawRate=0;s.bobT=0;s.look={yaw:0,pitch:0};
+  s.seatI=null;s.pyaw=null;s.halt=true;s.hitT=-1e9;s.msgT=-1e9;s.seated=false;
+  s.auto=null;s.autoIdx=-1;
+  s.lm=s.lm|0;
+}
+function eclPlace(s){
+  s.mesh.position.copy(s.pos);s.mesh.rotation.set(0,s.yaw,0,'YXZ');s.mesh.updateMatrixWorld(true);
+}
+/* rebuild the mesh for the current form, in place: used when unfolding, folding and loading */
+function eclRebuild(s){
+  if(s.mesh){scene.remove(s.mesh);s.mesh.traverse(o=>{if(o.isMesh&&o.userData.own)o.geometry.dispose()})}
+  s.cCore=null;s.cLamps=null;s.cLights=null;eclInit(s);
+  s.mesh=structureMesh(s);
+  eclPlace(s);
+}
+function eclUnfold(s){
+  s.form='ship';eclRebuild(s);
+  log('the core cube unfolds into an a-grav hovership. she hangs a metre above the ground, humming on infinite power, and waits for you','gold');
+  SFX('craft');saveGame();
+}
+function eclFold(s){
+  s.form='cube';s.y=heightAt(s.x,s.z);eclRebuild(s);
+  log('the hovership folds back into a core cube. it sits on the sand, quiet and warm','gold');
+  SFX('craft');saveGame();
+}
+/* ── the sim: throttle and wheel set the targets, the hull follows them ── */
+/* the hovership is half-slipped: nothing in the world stops her. she follows the bare ground beneath (decks and
+   structures are ignored, so she passes through them), at the height the helm has set. Reverse flips the wheel. */
+function eclSim(s,dt){
+  const target=s.thr>=0?s.thr*ECL.vmax:s.thr*ECL.vrev;
+  const d=target-s.speed;
+  s.speed+=Math.max(-ECL.dec*dt,Math.min(ECL.acc*dt,d));
+  const sp=Math.min(1,Math.abs(s.speed)/2.5)*.85+.15;       /* a hover craft turns a little even on the spot */
+  const dir=s.speed<-.05?-1:1;                             /* in reverse the wheel is flipped: left goes right */
+  s.yawRate+=(s.str*ECL.turn*sp*dir-s.yawRate)*Math.min(1,dt*4);
+  s.yaw=crwWrap(s.yaw+s.yawRate*dt);
+  const fx=Math.sin(s.yaw),fz=Math.cos(s.yaw);
+  s.pos.x+=fx*s.speed*dt;s.pos.z+=fz*s.speed*dt;
+  s.bobT+=dt;
+  const want=groundAt(s.pos.x,s.pos.z)+s.hoverH+Math.sin(s.bobT*1.4)*.05;
+  s.pos.y+=(want-s.pos.y)*Math.min(1,dt*5);
+  s.y=s.pos.y;s.x=s.pos.x;s.z=s.pos.z;s.rot=s.yaw;
+}
+function eclVisual(s,dt){
+  const t=now();
+  if(s.cCore)s.cCore.scale.setScalar(1+Math.sin(t*2.1)*.06);
+  if(s.cLamps){const on=s.lm===1||(s.lm!==2&&isNight());for(const l of s.cLamps)l.material=on?MAT.eLight:MAT.eLightOff}
+  if(s.cLights){
+    const on=s.lm===1||(s.lm!==2&&isNight()),target=on?(isNight()?26:12):0,k=Math.min(1,dt*4);
+    for(const L of s.cLights)L.intensity=lerp(L.intensity,target,k);
+  }
+  if(s.form==='ship'){
+    s.mesh.position.copy(s.pos);
+    s.mesh.rotation.set(-.02*clamp(s.speed/ECL.vmax,-1,1),s.yaw,(s.speed<-.05?-1:1)*clamp(-s.yawRate*.22,-.12,.12)+Math.sin(t*1.3)*.012,'YXZ');
+  }
+  s.mesh.updateMatrixWorld(true);
+}
+function eclStep(dt){
+  for(const s of G.struct){
+    if(s.type!=='ecliptix')continue;
+    if(s.form==='ship'){eclAutoStep(s,dt);eclSim(s,dt)}
+    eclVisual(s,dt);
+  }
+}
+/* ── the helm: the captain's chair ── */
+function eclDriveTick(s,dt){
+  const bl=uiBlocking();
+  const thr=bl?0:((Keys.KeyW||Keys.ArrowUp?1:0)-(Keys.KeyS||Keys.ArrowDown?1:0)+TOUCH.z);
+  const stg=bl?0:-((Keys.KeyD||Keys.ArrowRight?1:0)-(Keys.KeyA||Keys.ArrowLeft?1:0)+TOUCH.x);
+  const lift=bl?0:((Keys.ShiftLeft||Keys.ShiftRight?1:0)-(Keys.KeyQ?1:0));
+  if(s.auto&&(Math.abs(thr)>.05||Math.abs(stg)>.05||Math.abs(lift)>.05)){
+    eclSetAuto(s,null,'autopilot off — you have the controls');
+  }
+  if(Math.abs(thr)>.05)s.thr=clamp(s.thr+clamp(thr,-1,1)*.6*dt,-.4,1);
+  if(Math.abs(stg)>.05)s.str=clamp(s.str+clamp(stg,-1,1)*1.6*dt,-1,1);
+  else s.str*=Math.pow(.02,dt);                             /* the wheel recentres when you let go */
+  if(Math.abs(lift)>.05){
+    const before=s.hoverH;
+    s.hoverH=clamp(s.hoverH+lift*ECL.climb*dt,ECL.hoverMin,ECL.hoverMax);
+    if(Math.abs(s.hoverH-before)>1e-6&&now()-s.msgT>1.2){s.msgT=now();log('height '+s.hoverH.toFixed(1)+' m above the ground','gold',1)}
+  }
+  const seat=s.mesh.localToWorld(new THREE.Vector3(ECL.SEAT.x,ECL.ECD+.32,ECL.SEAT.z));
+  P.x=seat.x;P.y=seat.y;P.z=seat.z;P.vx=P.vz=0;P.vy=0;P.ground=true;
+  P.lx=ECL.SEAT.x;P.lz=ECL.SEAT.z;P.hy=.32;
+  P.yaw=s.yaw+Math.PI+s.look.yaw;P.pitch=s.look.pitch;
+  if(SET.buggyView==='chase'){
+    const L=s.look,vy=s.yaw+Math.PI+L.yaw,cp=Math.cos(L.pitch),D=15;
+    let cx=s.pos.x+Math.sin(vy)*cp*D,cz=s.pos.z+Math.cos(vy)*cp*D,cy=s.pos.y+6.2+Math.sin(L.pitch)*D*.7;
+    const gy=heightAt(cx,cz)+1;if(cy<gy)cy=gy;
+    s.camPos=new THREE.Vector3(cx,cy,cz);
+  }else s.camPos=s.mesh.localToWorld(new THREE.Vector3(ECL.SEAT.x,ECL.ECD+1.4,ECL.SEAT.z-.25));
+}
+/* ── autopilot, as the crawler's: L cycles through the pinned mark and WP1–WP3. She flies straight at the mark (she is
+   half-slipped, so there is nothing to route round), eases off as she closes in, and arrives within ECL.arrive. ── */
+function eclSetAuto(s,t,msg){
+  if(!t){
+    s.auto=null;s.autoIdx=-1;s.thr=0;s.str=0;
+    if(msg){log(msg,'gold');SFX('click')}
+    return;
+  }
+  s.auto={x:t.x,z:t.z,name:t.name};
+  const d=Math.hypot(t.x-s.pos.x,t.z-s.pos.z);
+  log('autopilot → '+t.name+' · '+d.toFixed(0)+' m. you can walk about the ship.','gold');SFX('chirp');
+}
+function eclCycleAuto(s){
+  const ts=crawlerTargets();
+  if(!ts.length){log('no marks to steer for — save WP1–WP3 or pin a mark first','bad');SFX('bad');return}
+  s.autoIdx++;
+  if(s.autoIdx>=ts.length){s.autoIdx=-1;eclSetAuto(s,null,'autopilot off — she holds her position');return}
+  eclSetAuto(s,ts[s.autoIdx]);
+}
+function eclAutoStep(s,dt){
+  if(!s.auto)return;
+  const dx=s.auto.x-s.pos.x,dz=s.auto.z-s.pos.z,d=Math.hypot(dx,dz);
+  if(d<ECL.arrive){
+    log('arrived at '+s.auto.name,'good');SFX('coin');
+    s.auto=null;s.thr=0;s.str=0;                   /* autoIdx is kept: the next L goes on to the next mark */
+    return;
+  }
+  const err=crwWrap(Math.atan2(dx,dz)-s.yaw);             /* heading error: + is to the pilot's left */
+  s.str=clamp(err*1.6,-1,1);
+  const vStop=Math.sqrt(2*ECL.dec*Math.max(0,d-ECL.arrive*.5));   /* the speed she can still stop from, here */
+  s.thr=Math.max(0,Math.cos(err))*Math.min(1,vStop/ECL.vmax);   /* brake on the distance left, so she stops at the mark */
+}
+/* Space at the helm: between floating near the ground and floating up to 40 m */
+function eclToggleAlt(s){
+  const high=s.hoverH>10;
+  s.hoverH=high?ECL.lowH:ECL.cruise;
+  log(high?'floating near the ground':'floating up to 40 m above the ground','gold');SFX('click');
+}
+/* O: the cabin lights, as on the train and the crawler: auto (on when it gets dark), always on, or off */
+function eclLightMode(s){
+  s.lm=((s.lm|0)+1)%3;
+  log('cabin lights: '+ECL_LM[s.lm],'gold');SFX('click');
+}
+/* Z: all stop. Autopilot off, lever to zero, and she holds where she is at her height */
+function eclAllStop(s){
+  s.auto=null;s.autoIdx=-1;s.thr=0;s.str=0;s.speed=0;
+  log('all stop — she hangs in the air at '+s.hoverH.toFixed(1)+' m','gold');SFX('place');
+}
+function enterECLHelm(s){
+  eLock=true;closePanel();G.drive=s;s.look={yaw:0,pitch:0};s.seatI=null;
+  P.aboard=s;P.hy=.32;P.vy=0;P.yaw=s.yaw+Math.PI;P.pitch=0;
+  if(viewModel)viewModel.visible=SET.buggyView!=='chase';
+  log('helm: W/S throttle · A/D wheel · Shift up · Q down · Space near ground / 40 m · L autopilot · Z all stop · E leave','gold');SFX('click');
+}
+function leaveECLHelm(s,silent){
+  if(G.drive!==s)return;
+  eLock=true;
+  const cd=new THREE.Vector3();camera.getWorldDirection(cd);
+  P.yaw=Math.atan2(-cd.x,-cd.z);P.pitch=clamp(Math.asin(clamp(cd.y,-1,1)),-1.4,1.4);
+  G.drive=null;s.pyaw=s.yaw;
+  const w=s.mesh.localToWorld(new THREE.Vector3(0,ECL.ECD,1.3));   /* step back out of the chair */
+  P.lx=0;P.lz=1.3;P.hy=0;P.vy=0;P.ground=true;P.x=w.x;P.y=w.y;P.z=w.z;
+  if(viewModel)viewModel.visible=true;
+  if(!silent){log('left the helm — she keeps her throttle and course','gold',1);SFX('place')}
+}
+/* ── boarding, the cabin, and getting out ── */
+function eclBoard(s){
+  eLock=true;closePanel();P.aboard=s;s.seatI=null;
+  P.lx=ECL.BOARD.x;P.lz=ECL.BOARD.z;P.hy=0;P.vy=0;P.ground=true;
+  P.yaw=s.yaw+Math.PI;P.pitch=-.05;s.pyaw=s.yaw;
+  log('aboard the hovership — the sofas and the captain\'s chair are yours. the bed waits for night','gold');SFX('clunk');
+}
+function eclLeave(s,silent){
+  if(G.drive===s)leaveECLHelm(s,true);
+  s.seatI=null;
+  s.auto=null;s.autoIdx=-1;s.thr=0;s.str=0;s.speed=0;
+  s.hoverH=ECL.hoverMin+.05;                 /* unmanned, she stops and settles low, close to the ground */
+  if(P.aboard===s){
+    const w=s.mesh.localToWorld(new THREE.Vector3(0,0,-4.8));
+    P.x=w.x;P.z=w.z;P.y=heightAt(P.x,P.z);P.vx=P.vz=P.vy=0;P.hy=0;P.ground=true;
+    P.aboard=null;
+  }
+  if(!silent){eLock=true;log('stepped out onto the sand — the hovership keeps her station','gold');SFX('clunk')}
+}
+function eclSit(s,q){
+  eLock=true;s.seatI=q;
+  P.lx=q.x;P.lz=q.z;P.hy=ECL.SOFA_Y-ECL.ECD;P.vy=0;P.vx=P.vz=0;P.ground=true;
+  P.yaw=s.yaw+q.ly;P.pitch=-.04;s.pyaw=s.yaw;
+  log('seated · the view turns with the ship — look out of the windows hands free · hold E to stand','gold');SFX('click');
+}
+function eclStand(s){
+  if(!s.seatI)return;
+  const q=s.seatI;s.seatI=null;eLock=true;
+  P.lx=q.x>0?.1:-.1;P.lz=-.5;P.hy=0;P.vy=0;P.ground=true;   /* the aisle beside the table, clear of every fitting */
+  log('stood up','gold');SFX('place');
+}
+/* the cabin floor: walk it the way you walk the crawler's deck. The ship turning turns the view with it */
+function eclWalk(s,dt){
+  if(s.pyaw==null)s.pyaw=s.yaw;
+  P.yaw+=crwWrap(s.yaw-s.pyaw);s.pyaw=s.yaw;
+  if(!isFinite(P.lx))P.lx=ECL.BOARD.x;if(!isFinite(P.lz))P.lz=ECL.BOARD.z;
+  if(!isFinite(P.hy))P.hy=0;if(!isFinite(P.vy))P.vy=0;
+  if(s.seatI){P.vx=P.vz=0;P.vy=0}                           /* seated: the body stays put */
+  else{
+    const c=Math.cos(s.yaw),n=Math.sin(s.yaw);
+    const lvx=P.vx*c-P.vz*n,lvz=P.vx*n+P.vz*c;
+    const hit=(x,z)=>{
+      if(x<-1.25||x>1.25||z<-3.3||z>3.3)return true;
+      for(const b of ECL_BOX)if(x>b[0]-.28&&x<b[1]+.28&&z>b[2]-.28&&z<b[3]+.28)return true;
+      return false;
+    };
+    const nx=P.lx+lvx*dt,nz=P.lz+lvz*dt;
+    if(!hit(nx,P.lz))P.lx=nx;
+    if(!hit(P.lx,nz))P.lz=nz;
+    P.vy-=23*dt;P.hy+=P.vy*dt;
+    if(P.hy<=0){P.hy=0;P.vy=0;if(!P.ground)Drifter.dispatch('land');P.ground=true}
+    else{P.ground=false;Drifter.dispatch('air')}
+  }
+  const w=s.mesh.localToWorld(new THREE.Vector3(P.lx,ECL.ECD+P.hy,P.lz));
+  P.x=w.x;P.y=w.y;P.z=w.z;
+}
+function eclSleep(s){
+  eLock=true;
+  Day.ctx.day++;respawnScrap();G.epochDay=Day.ctx.day-1;Day.ctx.t=.02;
+  log('you sleep in the hovership\'s bed while she holds her station in the air. the day turns over.','good');SFX('craft');saveGame();
+}
+/* ── stations: the things to hold E on, in the ship's frame ── */
+/* stations are cached while the situation holds: hold-E tracks the same station object from frame to frame */
+function eclStations(s){
+  const key=s.form+(P.aboard===s?'b':'-')+(G.drive===s?'h':'-');
+  if(s.stnC&&s.stnC.k===key)return s.stnC.L;
+  const L=eclBuildStations(s);
+  s.stnC={k:key,L};
+  return L;
+}
+function eclBuildStations(s){
+  if(s.form!=='ship'){
+    return[{id:'core',ext:1,lx:0,lz:0,r:1.6,act(){
+      return{label:'ecliptix core cube',sub:'hold E — unfold it into an a-grav hovership · needs about eight metres of clear ground',time:2.0,run(){eclUnfold(s)}};
+    }}];
+  }
+  const onBoard=P.aboard===s,L=[];
+  L.push({id:'hatch',ext:1,lx:0,lz:-4.3,r:2.2,act(){
+    if(G.drive===s)return{label:'rear hatch',sub:'leave the helm first (E)',time:0,run(){}};
+    if(P.aboard===s)return{label:'rear hatch',sub:'hold E — step out onto the sand',time:.6,run(){eclLeave(s)}};
+    return{label:'a-grav hovership',sub:'hold E — climb aboard by the gangway',time:.6,run(){eclBoard(s)}};
+  }});
+  L.push({id:'fold',ext:1,lx:2.4,lz:0,r:2.0,act(){
+    const still=Math.abs(s.speed)<.2&&!G.drive&&P.aboard!==s;
+    if(!still)return{label:'a-grav hovership',sub:'stop her and climb out before you fold her back',time:0,run(){}};
+    return{label:'a-grav hovership',sub:'hold E — fold her back into the core cube · hold X to recover her',time:2.4,run(){eclFold(s)}};
+  }});
+  if(onBoard){
+    L.push({id:'chair',lx:ECL.SEAT.x,lz:ECL.SEAT.z,r:1.3,deck:1,act(){
+      return{label:'captain\'s chair',sub:'hold E — take the helm · W/S throttle, A/D steer, Shift up, Q down, Space height, L autopilot',time:.4,run(){enterECLHelm(s)}};
+    }});
+    ECL_SEATS.forEach((q,i)=>L.push({id:'lounge'+i,lx:q.x,lz:q.z,r:1.0,deck:1,act(){
+      return{label:'lounge seat',sub:'hold E · sit · the view turns with the ship, so you can look out hands free',time:.35,run(){eclSit(s,q)}};
+    }}));
+    L.push({id:'door',lx:0,lz:-2.9,r:1.2,deck:1,act(){
+      return{label:'rear door',sub:'hold E — step out through the rear hatch onto the sand',time:.6,run(){eclLeave(s)}};
+    }});
+    L.push({id:'food',lx:.9,lz:-2.3,r:1.3,deck:1,act(){
+      return{label:'food dispenser',sub:'free · hold E for a hot stew · the ship\'s stores never run out',time:.6,run(){
+        invAdd('stew',1);log('the dispenser hands you a hot stew, still warm','good');SFX('pick');
+      }};
+    }});
+    L.push({id:'water',lx:.9,lz:-1.6,r:1.3,deck:1,act(){
+      return{label:'water dispenser',sub:'free · hold E for clean water · the ship\'s stores never run out',time:.6,run(){
+        invAdd('water',1);log('the dispenser fills a flask with clean water','good');SFX('pick');
+      }};
+    }});
+    L.push({id:'bed',lx:-.88,lz:-2.1,r:1.5,deck:1,act(){
+      if(!isNight())return{label:'bed',sub:'sleep when night falls — she holds her station meanwhile',time:0,run(){}};
+      return{label:'sleep until first light',sub:'hold E · the hovership hangs in the air while you sleep',time:3.2,run(){eclSleep(s)}};
+    }});
+  }
+  return L;
+}
+function eclPick(){
+  let best=null,score=-1;
+  for(const s of G.struct){
+    if(s.type!=='ecliptix')continue;
+    if(P.aboard===s&&s.seatI){                                  /* seated: the only thing to do is stand */
+      if(!s.standStn)s.standStn={id:'stand',r:99,deck:1,act(){return{label:'lounge seat',sub:'hold E · stand up · the view stays with the ship',time:.3,run(){eclStand(s)}}}};
+      return{kind:'station',ref:s.standStn,s,d:0};
+    }
+    const aboard=P.aboard===s;
+    if(!aboard&&Math.hypot(s.x-P.x,s.z-P.z)>11)continue;
+    for(const st of eclStations(s)){
+      if(st.deck&&!aboard)continue;
+      const w=s.mesh.localToWorld(_sv.set(st.lx,st.deck?ECL.ECD+.2:.2,st.lz));
+      _cw.x=w.x;_cw.z=w.z;
+      const d=Math.hypot(_cw.x-P.x,_cw.z-P.z);
+      if(d>st.r)continue;
+      const dot=frontDot(_cw.x,_cw.z);
+      if(dot<.2&&d>.9)continue;
+      const sc=dot*2.2-d*.25+.6;
+      if(sc>score){score=sc;best={kind:'station',ref:st,s,d}}
+    }
+  }
+  return best;
+}
+/* ── persistence: the form, and the position is already on the structure ── */
+function eclLoad(s,d){
+  if(!d)return;
+  if(d.lm===1||d.lm===2)s.lm=d.lm;
+  if(Number.isFinite(d.h))s.hoverH=clamp(d.h,ECL.hoverMin,ECL.hoverMax);
+  if(d.f!=='ship')return;
+  s.form='ship';eclRebuild(s);
+}
+
 function structureMesh(s){
   const K=asmKit(),fn=ASMFN[s.type];
   if(fn)fn(K,s);
@@ -7356,6 +7840,7 @@ function playerTick(dt){
     P.ground=true;}
   else{P.ground=false;Drifter.dispatch('air')}
   }else if(P.aboard.type==='train')trainWalk(P.aboard,dt);
+  else if(P.aboard.type==='ecliptix'){if(G.drive!==P.aboard)eclWalk(P.aboard,dt)}
   else if(G.drive!==P.aboard)crawlerWalk(P.aboard,dt);
   if(G.drive)driveTick(dt);
   const spd=Math.hypot(P.vx,P.vz);
@@ -7388,7 +7873,7 @@ function playerTick(dt){
   const bobX=Math.cos(Drifter.ctx.bobT)*0.028*clamp(spd/4,0,1.6);
   camera.position.set(P.x+bobX*0.4,P.y+eye+bobY,P.z);
   if(G.drive&&G.drive.camPos)camera.position.copy(G.drive.camPos);
-  const inBuggy=(G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'));
+  const inBuggy=(G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'||G.drive.type==='ecliptix'));
   const viewYaw=inBuggy?G.drive.yaw+Math.PI+G.drive.look.yaw:P.yaw;
   const viewPitch=inBuggy?G.drive.look.pitch:P.pitch;
   camera.rotation.set(viewPitch,viewYaw,Math.sin(Drifter.ctx.bobT)*0.004*clamp(spd/4,0,1.4),'YXZ');
@@ -7470,7 +7955,7 @@ function crawlerObstacles(s,x,z,rad,hard){
   for(const o of G.struct){
     if(o===s)continue;
     if(Math.abs(o.x-x)>rad||Math.abs(o.z-z)>rad)continue;
-    if(vehDriveable(o))continue;const d=WORKS[o.type];out.push({x:o.x,z:o.z,R:Math.max(d.size[0],d.size[2])*.5,n:d.n});
+    if(vehDriveable(o))continue;const d=WORKS[o.type];const hov=o.type==='ecliptix'&&o.form==='ship';out.push({x:o.x,z:o.z,R:hov?3.6:Math.max(d.size[0],d.size[2])*.5,n:hov?'hovership':d.n});
   }
   return out;
 }
@@ -7667,6 +8152,7 @@ function boardCrawler(s){
   log('aboard the desert crawler — E at the helm to drive · L autopilot · Z halt','gold');SFX('clunk');
 }
 function leaveCrawler(s,silent){
+  if(s.type==='ecliptix')return eclLeave(s,silent);
   if(s.type==='train')return trainLeave(s,silent,s.pc,0,true);
   if(!silent)eLock=true;
   if(G.drive===s)leaveHelm(s,true);
@@ -10987,6 +11473,7 @@ function exitBuggy(){
   const s=G.drive;if(!s)return;
   if(s.type==='plane'||s.type==='heli')return exitPlane();
   if(s.type==='crawler')return leaveHelm(s);
+  if(s.type==='ecliptix')return leaveECLHelm(s);
   const cd=new THREE.Vector3();
   camera.getWorldDirection(cd);
   P.yaw=Math.atan2(-cd.x,-cd.z);
@@ -11004,7 +11491,7 @@ function exitBuggy(){
 }
 function toggleView(){
   if(isPlane()){G.drive.view=G.drive.view==='chase'?'cockpit':'chase';G.drive.look.y=G.drive.look.p=0;log(G.drive.view+' view');return}
-  if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'))){
+  if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'||G.drive.type==='ecliptix'))){
     SET.buggyView=SET.buggyView==='chase'?'cockpit':'chase';saveSettings();
     if(viewModel)viewModel.visible=SET.buggyView!=='chase';
     log('buggy: '+(SET.buggyView==='chase'?'third-person':'first-person')+' view');
@@ -11144,6 +11631,7 @@ function driveTick(dt){
   if(G.drive.type==='heli')return heliTick(G.drive,dt);
   if(G.drive.type==='plane')return planeTick(G.drive,dt);
   if(G.drive.type==='crawler')return crawlerDriveTick(G.drive,dt);
+  if(G.drive.type==='ecliptix')return eclDriveTick(G.drive,dt);
   const s=G.drive,V=WORKS[s.type].veh,bl=uiBlocking();
   const thr=bl?0:((Keys['KeyW']||Keys['ArrowUp']?1:0)-(Keys['KeyS']||Keys['ArrowDown']?1:0)+TOUCH.z);
   const stg=bl?0:((Keys['KeyD']||Keys['ArrowRight']?1:0)-(Keys['KeyA']||Keys['ArrowLeft']?1:0)+TOUCH.x);
@@ -11246,11 +11734,11 @@ function pickTarget(){
     const s=dot*2-d*0.25;
     if(s>score){score=s;best={kind:'feature',ref:f,d}}
   }
-  const cp=crawlerPick()||trainPick();
+  const cp=crawlerPick()||trainPick()||eclPick();
   if(cp){score=3.4;best=cp}
   {const lp=liqPick();if(lp){score=4;best=lp}}
   for(const s of G.struct){
-    if(s.type==='crawler'||WORKS[s.type].bp)continue;
+    if(s.type==='crawler'||s.type==='ecliptix'||WORKS[s.type].bp)continue;
     const dx=s.x-P.x,dz=s.z-P.z,d=Math.hypot(dx,dz);
     if(d>3.0)continue;
     const dot=frontDot(s.x,s.z);
@@ -12344,7 +12832,7 @@ const Hands=machine('hands',{
       if(!a){m.ctx.alt=null;setPrompt(t.ref.d.n+' — landmark',t.ref.d.mark?'too solid to take anything from it':'nothing to salvage here',0);m.ctx.a=null;return}
       m.ctx.a=a;
       setPrompt(a.label,a.sub,0);
-      m.ctx.alt=t.kind==='struct'?recoverAction(t.ref):t.kind==='liq'?(LQ.held?null:recoverAction(t.ref.s)):(t.kind==='station'&&t.ref.id==='ladder'&&P.aboard!==t.s?recoverAction(t.s):null);
+      m.ctx.alt=t.kind==='struct'?recoverAction(t.ref):t.kind==='liq'?(LQ.held?null:recoverAction(t.ref.s)):(t.kind==='station'&&(t.ref.id==='ladder'||t.ref.ext)&&P.aboard!==t.s?recoverAction(t.s):null);
       if(m.ctx.alt&&!TOUCH.on)setPrompt(a.label,a.sub+'  ·  hold X to recover',0);
       if(!Keys['KeyE'])eLock=false;
       if(Keys['KeyE']&&!eLock&&!uiBlocking()&&!(Bino.on||Drone.on))m.dispatch('hold');
@@ -13619,7 +14107,7 @@ function gameSaveData(){
     spents:[...G.spents],stats:G.stats,wp:G.waypoints,rail:railSave(),hz:liqSave(),
     book:G.bookPages,st:G.struct.map(s=>({t:s.type,x:+s.x.toFixed(2),z:+s.z.toFixed(2),r:+s.rot.toFixed(3),
       pow:+s.pow.toFixed(1),dew:+s.dew.toFixed(2),water:+s.water.toFixed(2),
-      fluid:+s.fluid.toFixed(2),grow:+s.grow.toFixed(3),seeded:!!s.seeded,ripe:!!s.ripe,...(s.type==='crawler'?{cr:crawlerSave(s)}:{}),...(s.type==='signboard'?{sg:{t:s.text||'',a:s.arrow||'n'}}:{}),...(s.type==='stockshack'?{sk:{r:s.rules||{},ad:!!s.autoDrop}}:{}),...(s.liq?{lq:liqSaveOne(s)}:{}),...(WORKS[s.type].bp?bpSaveExtra(s):{}),...(deckSave(s)||{}),...((s.type==='bridge'||s.type==='ramp')?{bl:+s.bridgeL.toFixed(2),y:+s.y.toFixed(3),pt:+(s.pitch||0).toFixed(4)}:{})})),
+      fluid:+s.fluid.toFixed(2),grow:+s.grow.toFixed(3),seeded:!!s.seeded,ripe:!!s.ripe,...(s.type==='crawler'?{cr:crawlerSave(s)}:{}),...(s.type==='ecliptix'?{ec:{f:s.form==='ship'?'ship':'cube',h:+(s.hoverH||1.25).toFixed(2),lm:s.lm|0}}:{}),...(s.type==='signboard'?{sg:{t:s.text||'',a:s.arrow||'n'}}:{}),...(s.type==='stockshack'?{sk:{r:s.rules||{},ad:!!s.autoDrop}}:{}),...(s.liq?{lq:liqSaveOne(s)}:{}),...(WORKS[s.type].bp?bpSaveExtra(s):{}),...(deckSave(s)||{}),...((s.type==='bridge'||s.type==='ramp')?{bl:+s.bridgeL.toFixed(2),y:+s.y.toFixed(3),pt:+(s.pitch||0).toFixed(4)}:{})})),
     tr:G.traders.map(t=>({x:t.x,z:t.z,name:t.name,title:t.title,stay:t.stayLeft||0})),
     q:G.quest||null};
 }
@@ -13702,6 +14190,7 @@ function applySave(d){
     o.pow=s.pow||0;o.dew=s.dew||0;o.water=s.water||0;o.fluid=s.fluid||0;
     o.grow=s.grow||0;o.seeded=!!s.seeded;o.ripe=!!s.ripe;
     if(o.type==='crawler')crawlerLoad(o,s.cr);
+    if(o.type==='ecliptix')eclLoad(o,s.ec);
     if(o.type==='signboard'&&s.sg)signSet(o,{t:s.sg.t,a:s.sg.a});
     if(o.type==='stockshack'&&s.sk)stockLoad(o,s.sk);
     if(o.liq&&s.lq)liqLoadOne(o,s.lq);
@@ -13860,7 +14349,8 @@ const CHEATS={
   noclip:{d:'the quadcopter can fly through the ground and walls (Shift to sink): look at what is underneath',run(){Drone.noclip=true;return 'drone noclip ON — launch the drone, hold Shift to descend through the terrain'}},
   clip:{d:'the quadcopter collides with the ground and walls again',run(){Drone.noclip=false;return 'drone noclip OFF'}},
   horizon_off:{d:'hide the under/far terrain mesh (to compare frame rate; the far horizon vanishes too)',run(){World.horizonOff=true;if(World.horizon)World.horizon.visible=false;return 'horizon mesh hidden'}},
-  horizon_on:{d:'show the under/far terrain mesh again',run(){World.horizonOff=false;if(World.horizon)World.horizon.visible=true;return 'horizon mesh shown'}}
+  horizon_on:{d:'show the under/far terrain mesh again',run(){World.horizonOff=false;if(World.horizon)World.horizon.visible=true;return 'horizon mesh shown'}},
+  ecliptix:{d:'put an ecliptix core cube in the satchel: set it down, recover it, or hold E on it to unfold the a-grav hovership',run(){invAdd('k_ecliptix',1);return 'an ecliptix core cube is in the satchel'}}
 };
 function cheatScan(text){
   let used=false;
@@ -14748,6 +15238,7 @@ addEventListener('keydown',e=>{
       break;
     case 'KeyR': if(Build.on)buildTurn(1); break;
     case 'Space':
+      if(G.drive&&G.drive.type==='ecliptix'&&!e.repeat&&!uiBlocking())eclToggleAlt(G.drive);
       if(!uiBlocking()&&P.ground&&!P.dead&&!G.drive&&!trainSeated()&&!(Bino.on||Drone.on)){P.vy=7.1;P.ground=false;Drifter.dispatch('air');SFX('step')}
       e.preventDefault();break;
     case 'KeyK': toggleKite(); break;
@@ -14761,12 +15252,12 @@ addEventListener('keydown',e=>{
       break;
     }
     case 'KeyE': if(G.drive&&!e.repeat){eLock=true;exitBuggy()} break;
-    case 'KeyL': if(!e.repeat){if(trainOf())trainToggleAuto();else crawlerCycleAuto()} break;
-    case 'KeyO': if(!e.repeat){if(trainOf())trainLightMode();else crawlerLightMode()} break;
+    case 'KeyL': if(!e.repeat){if(trainOf())trainToggleAuto();else if(P.aboard&&P.aboard.type==='ecliptix')eclCycleAuto(P.aboard);else crawlerCycleAuto()} break;
+    case 'KeyO': if(!e.repeat){if(trainOf())trainLightMode();else if(P.aboard&&P.aboard.type==='ecliptix')eclLightMode(P.aboard);else crawlerLightMode()} break;
     case 'KeyU': if(!e.repeat)toggleShot(); break;
     case 'KeyJ': if(!e.repeat)toggleFull(); break;
     case 'KeyY': if(!e.repeat)toggleBino(); break;
-    case 'KeyZ': if(!e.repeat)crawlerHalt(); break;
+    case 'KeyZ': if(!e.repeat){if(P.aboard&&P.aboard.type==='ecliptix')eclAllStop(P.aboard);else crawlerHalt()} break;
     case 'KeyQ': if(!G.drive&&G.tool!=='hands'){G.tool='hands';refreshViewModel();log('stowed the tool')} break;
     case 'Digit1': keyPanelShortcut=true;setTimeout(()=>{keyPanelShortcut=false},0);selectedPanel='fab';refreshPanel();break;
     case 'Digit2': keyPanelShortcut=true;setTimeout(()=>{keyPanelShortcut=false},0);selectedPanel='build';refreshPanel();break;
@@ -14796,7 +15287,7 @@ addEventListener('mousemove',e=>{
   const dx=e.movementX||0,dy=e.movementY||0;
   if(isPlane()){planeLook(dx,dy);return}
   if(trainSeatLook(dx,dy))return;
-  if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'))){
+  if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'||G.drive.type==='ecliptix'))){
     const look=G.drive.look,turn=dx*0.0021*SET.sens;
     look.yaw=((look.yaw-turn+Math.PI)%TAU+TAU)%TAU-Math.PI;
     look.pitch=clamp(look.pitch-dy*0.0021*SET.sens,-1.2,1.2);
@@ -15267,7 +15758,7 @@ let touchSync=()=>{};
       const dx=(t.clientX-look.x)*2.5,dy=(t.clientY-look.y)*2.5;
       if(isPlane())planeLook(dx,dy);
       else if(trainSeatLook(dx,dy)){}
-      else if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'))){
+      else if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'||G.drive.type==='ecliptix'))){
         const view=G.drive.look,turn=dx*0.0021*SET.sens;
         view.yaw=((view.yaw-turn+Math.PI)%TAU+TAU)%TAU-Math.PI;
         view.pitch=clamp(view.pitch-dy*0.0021*SET.sens,-1.2,1.2);
@@ -15438,6 +15929,7 @@ function step(dt){
   if(Day.ctx.t>0.95&&G.epochDay!==Day.ctx.day)respawnScrap();
   Weather.update(dt);
   crawlerStep(dt);
+  eclStep(dt);
   trainStep(dt);
   scrappyStep(dt);
   liqStep(dt);
