@@ -6049,29 +6049,33 @@ function gridTick(dt){
    ─────────────────────────────────────────────────────────────────────── */
 const ECL={vmax:100/3.6,vrev:3,acc:2.2,dec:3.0,turn:.66,hover:1.25,hoverMin:.6,hoverMax:40,climb:4,lowH:1.25,cruise:40,arrive:9,rad:2.9,
   ECD:.3,                                             /* the cabin floor, above the hull's origin */
-  SEAT:{x:0,y:.62,z:2.1},                             /* the captain's chair: cushion top, and where you sit */
-  SOFA_Y:.58,                                         /* sofa cushion top */
+  SEAT:{x:0,z:1.85},                                  /* the captain's chair: where you sit */
+  CHAIR_H:.5,                                         /* chair cushion top, above the floor */
+  SEAT_H:.46,                                         /* sofa cushion top, above the floor */
+  EYE_SIT:.78,                                        /* eye above the cushion when seated. Standing eye is the game's 1.68, so a seated view is always lower */
   BOARD:{x:.3,z:-1.9}};                                /* where you stand when you come aboard */
-/* lounge seats: hold E to sit. ly is the look direction in the ship's frame, so the view faces across the table */
+/* lounge seats: hold E to sit. ly is the look direction in the ship's frame, so the view faces across the aisle */
 const ECL_LM=['auto — on at night','always on','off'];
 const ECL_SEATS=[
-  {x:-.9,z:-.2,ly:-Math.PI/2},{x:-.9,z:.75,ly:-Math.PI/2},
-  {x: .9,z:-.2,ly: Math.PI/2},{x: .9,z:.75,ly: Math.PI/2}];
-/* walk-obstacles inside the cabin, local [x0,x1,z0,z1] */
+  {x:-.84,z:-.17,ly:-Math.PI/2},{x:-.84,z:.77,ly:-Math.PI/2},
+  {x: .84,z:-.17,ly: Math.PI/2},{x: .84,z:.77,ly: Math.PI/2}];
+/* walk-obstacles inside the cabin, local [x0,x1,z0,z1]. The cabin's own walls are the hull plan, see eclHalfW */
 const ECL_BOX=[
-  [-.5,.5,1.7,2.5],                                   /* captain's chair and pedestal */
-  [-1.2,1.2,2.6,3.2],                                 /* helm console */
-  [-1.3,-.6,-.6,1.2],[.6,1.3,-.6,1.2],                /* the two sofas */
-  [-1.33,-.42,-3.3,-1.2],                             /* bed */
-  [.88,1.3,-2.6,-2.0],[.88,1.3,-1.9,-1.3]             /* food and water dispensers, on the right wall */
+  [-.42,.42,1.42,2.3],                                /* captain's chair and pedestal */
+  [-.95,.95,2.42,3.3],                                /* the crescent helm console */
+  [-1.4,-.5,-.75,1.35],[.5,1.4,-.75,1.35],            /* the two sofas */
+  [-1.4,-.34,-3.15,-1.15],                            /* bed */
+  [.84,1.4,-2.65,-2.0],[.84,1.4,-1.95,-1.3]           /* food and water dispensers, on the right wall */
 ];
+/* the hull's plan: half-width and z, nose to tail. A smooth curve through these is the line every wall, slab and rail follows */
+const ECL_PLAN=[[.60,3.45],[.80,3.15],[1.10,2.6],[1.38,1.9],[1.48,1.0],[1.50,0],[1.50,-1.5],[1.46,-2.6],[1.30,-3.1],[.95,-3.42],[.62,-3.52]];
 /* flat materials: glass and the lights, which must read as glass and light rather than as painted surfaces */
 const ECL_MAT_SPEC={
-  eGlass: {color:0xa9dcea,roughness:.06,metalness:.2,transparent:true,opacity:.42,depthWrite:false},
-  eLight: {color:0xfff1d0,emissive:0xffd28a,emissiveIntensity:1.4,roughness:.4},
-  eLightOff: {color:0x4a443c,roughness:.5},
-  eGlow:  {color:0x9fe6ff,emissive:0x52c8ff,emissiveIntensity:1.6,roughness:.3},
-  eCore:  {color:0xfff0c8,emissive:0xffb347,emissiveIntensity:2.6,roughness:.3}
+  eGlass: {color:0xa9dcea,roughness:.06,metalness:.2,transparent:true,opacity:.34,depthWrite:false},
+  eLight: {color:0xfff1d0,emissive:0xffd28a,emissiveIntensity:1.2,roughness:.4},
+  eLightOff: {color:0xd8cfbb,roughness:.5},
+  eGlow:  {color:0x9fe6ff,emissive:0x52c8ff,emissiveIntensity:1.2,roughness:.3},
+  eCore:  {color:0xfff0c8,emissive:0xffb347,emissiveIntensity:2.2,roughness:.3}
 };
 /* ── painted surfaces for the cabin. Each is periodic (integer frequencies, wrapped noise) so it tiles without a seam,
    and each is chosen for what the object is in the canon: pearl enamel hull, polished gold fittings, midnight navy
@@ -6125,6 +6129,78 @@ const eclLinenFn=(u,v,q)=>{
   BL(q,[236,233,226],thread*.35);
   q.h=.5+thread*.04;q.ro=.9;q.me=0;
 };
+/* ── shape kit. A soft superellipse is the profile of every cushion; a path with its profile brought smaller towards each end
+   is the bevel. The hull plan is one smooth curve that walls, slabs and rails all follow. ── */
+const eclSE=(w,h,p,n)=>{const o=[];n=n||28;for(let i=0;i<n;i++){const a=i/n*TAU,c=Math.cos(a),s=Math.sin(a);o.push([Math.sign(c)*Math.pow(Math.abs(c),2/p)*w/2,Math.sign(s)*Math.pow(Math.abs(s),2/p)*h/2])}return{pts:o,closed:true,hard:false}};
+const _eclPC={};
+function eclPlanPts(inset,n){
+  const k=inset+'|'+n;if(_eclPC[k])return _eclPC[k];
+  const P=ECL_PLAN.map((p,i)=>new THREE.Vector3(Math.max(.05,p[0]-inset),0,p[1]+(i===0?-inset:i===ECL_PLAN.length-1?inset:0)));
+  const o=new THREE.CatmullRomCurve3(P,false,'centripetal').getPoints(n||70).map(v=>[v.x,v.z]);
+  _eclPC[k]=o;return o;
+}
+/* half the hull's width at z (outer skin), 0 beyond the nose and tail */
+function eclHalfW(z){const o=eclPlanPts(0,70);for(let i=1;i<o.length;i++){const a=o[i-1],b=o[i];if(z<=a[1]&&z>=b[1])return a[0]+(b[0]-a[0])*((a[1]-z)/((a[1]-b[1])||1e-9))}return 0}
+const eclWallPath=(side,y,inset)=>eclPlanPts(inset||0,70).map(p=>V3(side*p[0],y,p[1]));
+/* planar-by-normal UVs in metres, so a custom shape tiles at the same scale as the boxes do */
+function eclUV(g,m){
+  const tile=MAT[m].userData.tile||1,P=g.attributes.position,N=g.attributes.normal,U=g.attributes.uv;
+  for(let i=0;i<P.count;i++){
+    const ax=Math.abs(N.getX(i)),ay=Math.abs(N.getY(i)),az=Math.abs(N.getZ(i));let a,b;
+    if(ay>=ax&&ay>=az){a=P.getX(i);b=P.getZ(i)}else if(ax>=az){a=P.getZ(i);b=P.getY(i)}else{a=P.getX(i);b=P.getY(i)}
+    U.setXY(i,a/tile,b/tile);
+  }
+  return g;
+}
+/* sweep a profile along a path with its ends brought in: the profile shrinks to `shr` over a quarter-circle of length `bev`.
+   Rings are placed on the bevel itself so the roundness is real, not a straight chamfer. */
+function eclSweep(K,m,prof,path,o){
+  o=o||{};const L0=pathLen(path),bev=Math.min(o.bev||0,L0/2-.002),shr=o.shr===undefined?1:o.shr,N=5;
+  let ss=[0];
+  if(bev>0){
+    for(let i=1;i<=N;i++)ss.push(bev*(1-Math.cos(i/N*Math.PI/2)));
+    for(let s=bev+.12;s<L0-bev-.06;s+=o.step||.12)ss.push(s);
+    for(let i=N;i>=0;i--)ss.push(L0-bev*(1-Math.cos(i/N*Math.PI/2)));
+  }else{for(let s=0;s<L0;s+=o.step||.1)ss.push(s);ss.push(L0)}
+  const pts=ss.map(s=>pathAt(path,Math.min(s,L0-1e-6)).p);
+  const sc=bev>0?(t)=>{const d=Math.min(t*L0,(1-t)*L0);if(d>=bev)return 1;const q=1-d/bev;return shr+(1-shr)*Math.sqrt(Math.max(0,1-q*q))}:null;
+  const e=ownMesh(extrude(prof,pts,{tile:o.tile||MAT[m].userData.tile||1,sc:sc,up:o.up,roll:o.roll}),MAT[m],o.cast!==false);
+  (o.par||K.g).add(e);return e;
+}
+/* a cushion: soft block with rounded ends. w is across the path's S (x for z/y paths, z for x paths), h up (z for y paths), d the length */
+function eclPillow(K,m,x,y,z,w,h,d,o){
+  o=o||{};const ax=o.ax||'z',h2=d/2;
+  const path=ax==='z'?[V3(0,0,-h2),V3(0,0,h2)]:ax==='x'?[V3(-h2,0,0),V3(h2,0,0)]:[V3(0,-h2,0),V3(0,h2,0)];
+  const e=eclSweep(K,m,eclSE(w,h,o.p||4,o.n||28),path,{bev:o.bev===undefined?Math.min(.07,d/2-.003):o.bev,shr:o.shr===undefined?.7:o.shr,cast:o.cast});
+  e.position.set(x,y,z);e.rotation.set(o.rx||0,o.ry||0,o.rz||0);return e;
+}
+/* a plan-shaped slab with bevelled edges: the extrusion's own bevel brings the profile in on every edge */
+function eclSlab(K,m,y0,h,inset,bev){
+  const pts=eclPlanPts(inset+bev,70),sh=new THREE.Shape();
+  pts.forEach((p,i)=>{i?sh.lineTo(-p[0],-p[1]):sh.moveTo(-p[0],-p[1])});
+  for(let i=pts.length-1;i>=0;i--)sh.lineTo(pts[i][0],-pts[i][1]);
+  const g=new THREE.ExtrudeGeometry(sh,{depth:h-2*bev,bevelEnabled:true,bevelThickness:bev,bevelSize:bev,bevelSegments:4,curveSegments:1,steps:1});
+  g.rotateX(-Math.PI/2);g.translate(0,y0+bev,0);eclUV(g,m);
+  const o=ownMesh(g,MAT[m]);K.g.add(o);return o;
+}
+/* the penumbra mark: a crescent of gold on a navy occluding disc. Faces +z; protrudes d from z=0 */
+function eclCrescent(K,x,y,z,ry,R,d,par){
+  const r2=R*.86,dx=R*.42,xs=(dx*dx+R*R-r2*r2)/(2*dx),ys=Math.sqrt(R*R-xs*xs),t1=Math.atan2(ys,xs),b=Math.atan2(ys,xs-dx);
+  const sh=new THREE.Shape();sh.absarc(0,0,R,t1,TAU-t1,false);sh.absarc(dx,0,r2,TAU-b,b,true);
+  const g=new THREE.ExtrudeGeometry(sh,{depth:d,bevelEnabled:true,bevelThickness:d*.35,bevelSize:d*.3,bevelSegments:2,curveSegments:20});
+  g.translate(R*.1,0,0);eclUV(g,'eGold');
+  const grp=new THREE.Group();grp.position.set(x,y,z);grp.rotation.y=ry;(par||K.g).add(grp);
+  const disc=ownMesh(new THREE.CylinderGeometry(R*1.1,R*1.1,.02,28),MAT.eNavy);disc.rotation.x=Math.PI/2;disc.position.z=.01;grp.add(disc);
+  const c=ownMesh(g,MAT.eGold);c.position.z=.02;grp.add(c);
+  return grp;
+}
+/* an arch: a rectangle with a round head, for the rear door */
+function eclArchShape(w,h){const s=new THREE.Shape(),r=w/2;s.moveTo(-r,0);s.lineTo(r,0);s.lineTo(r,h-r);s.absarc(0,h-r,r,0,Math.PI,false);s.lineTo(-r,0);return s}
+function eclArch(K,m,x,y,z,w,h,d,bev){
+  const g=new THREE.ExtrudeGeometry(eclArchShape(w-2*bev,h-2*bev),{depth:d-2*bev,bevelEnabled:true,bevelThickness:bev,bevelSize:bev,bevelSegments:3,curveSegments:14});
+  g.translate(0,bev,bev);eclUV(g,m);
+  const o=ownMesh(g,MAT[m]);o.position.set(x,y,z);K.g.add(o);return o;
+}
 function eclMats(){
   if(MAT.eHull)return;
   asmMat('eHull',256,1.6,eclPearlFn,{bump:1.6,grain:'panel'});
@@ -6136,75 +6212,126 @@ function eclMats(){
   for(const k in ECL_MAT_SPEC){const m=new THREE.MeshStandardMaterial(ECL_MAT_SPEC[k]);m.userData.tile=1;MAT[k]=m}
 }
 function asmEcliptixCube(K,s){
-  K.box('eGold',0,.03,0,1.04,.06,1.04);                                   /* plinth */
-  K.box('eHull',0,.55,0,.96,.96,.96);                                     /* shell: pearl enamel */
-  for(const sx of [-1,1])for(const sz of [-1,1])K.box('eGold',sx*.485,.55,sz*.485,.03,.98,.03);   /* gold corner posts */
-  K.box('eGlass',0,.55,.482,.62,.6,.01);                                  /* a window of glass on the front and back */
-  K.box('eGlass',0,.55,-.482,.62,.6,.01);
-  const core=K.sphere('eCore',.2,0,.55,0);K.dyn(core);s.cCore=core;     /* the warm core, breathing */
-  K.mesh(new THREE.TorusGeometry(.3,.012,6,28),'eGold',0,.55,0,Math.PI/2,0,0);   /* a gold ring round it */
+  const P=eclPillow;
+  P(K,'eGold',0,.035,0,1.06,.07,1.06,{ax:'y',p:6,bev:.03,shr:.9});                            /* plinth */
+  P(K,'eHull',0,.55,0,.97,.97,.97,{ax:'z',p:6,bev:.15,shr:.8});                                 /* shell: pearl enamel, every edge softened */
+  for(const [ax,x,y,z] of [['z',0,.55,0],['x',0,.55,0],['y',0,.55,0]])                          /* three gold bands: the cube's own axes */
+    P(K,'eGold',x,y,z,.985,.985,.05,{ax:ax,p:6,bev:.018,shr:.97});
+  for(const sg of [-1,1]){
+    P(K,'eGlass',0,.55,sg*.488,.56,.56,.012,{ax:'z',p:3,bev:.004,shr:.9,cast:false});          /* a window front and back, onto the core */
+    for(const sx of [-1,1])P(K,'eGold',sx*.485,.18,sg*.485,.07,.2,.07,{ax:'y',p:3,bev:.02,shr:.7});   /* hard-corner mount points */
+    eclCrescent(K,sg*.4905,.55,0,sg*Math.PI/2,.17,.012);                                       /* the penumbra mark on both flanks */
+  }
+  for(const sg of [-1,1])K.tube('eGold',profCircle(.018,8),filletPath([V3(sg*.49,.74,-.2),V3(sg*.56,.74,-.2),V3(sg*.56,.74,.2),V3(sg*.49,.74,.2)],.05,5),{tile:.5});   /* the two handles */
+  const core=K.sphere('eCore',.17,0,.55,0);K.dyn(core);s.cCore=core;                            /* the warm core, breathing */
+  K.mesh(new THREE.TorusGeometry(.26,.012,6,32),'eGold',0,.55,0,Math.PI/2,0,0);                /* a gold ring round it */
 }
 function asmEcliptixShip(K,s){
-  const E=ECL.ECD;
-  /* hover pods and their blue underglow */
-  for(const sx of [-1,1]){K.box('eNavy',sx*1.15,-.32,0,.6,.4,6.2);K.box('eGlow',sx*1.15,-.575,0,.36,.03,5.6)}
-  K.box('eHull',0,-.05,0,2.8,.2,7.0);                                     /* underside slab */
-  K.box('eMarble',0,.22,0,2.7,.16,6.8);                                   /* cabin floor */
-  for(const sx of [-1,1]){                                                /* side walls: enamel, a band of glass, and a crown */
-    K.box('eHull',sx*1.42,.75,0,.14,.9,6.9);
-    K.box('eGlass',sx*1.42,1.75,0,.12,1.1,6.6);
-    K.box('eHull',sx*1.42,2.4,0,.14,.2,6.9);
-    K.box('eGold',sx*1.5,1.2,0,.03,.06,6.8);
-  }
-  K.box('eHull',0,2.6,0,2.9,.2,6.9);                                      /* roof */
-  K.box('eGold',0,2.72,0,.5,.03,6.6);
-  s.cLamps=[];s.cLights=[];
-  for(const sx of [-1,1])s.cLamps.push(K.dyn(K.box('eLight',sx*.8,2.46,0,.12,.02,5.4)));   /* ceiling light strips */
-  /* the light they throw: a point light under each strip, as the train's cabin room light. Off until switched on */
-  for(const sx of [-1,1]){const L=new THREE.PointLight(0xffd9a6,0,11,1.4);L.position.set(sx*.8,2.3,0);K.g.add(L);s.cLights.push(L)}
-  /* front: a windscreen of glass over an enamel plate */
-  K.box('eHull',0,.8,3.42,2.96,1.0,.16);
-  K.box('eGlass',0,1.9,3.42,2.96,1.2,.1);
-  K.box('eGold',0,.8,3.52,.5,.08,.02);
-  /* rear: enamel bulkhead, and the gold hatch door on the outside */
-  K.box('eHull',0,.8,-3.42,2.8,1.0,.16);
-  K.box('eHull',0,1.9,-3.42,2.8,1.2,.16);
-  K.box('eGold',0,1.25,-3.52,1.3,1.9,.06);
-  K.tube('eGold',profRect(.5,.06),[V3(0,.2,-3.6),V3(0,-.6,-4.5)],{tile:1});   /* telescopic gangway to the sand */
-  /* captain's chair: gold pedestal, leather seat and back, gold arms, helm console in front */
-  K.mesh(new THREE.CylinderGeometry(.12,.18,.24,16),'eGold',0,E+.12,2.1);
-  K.box('eLeather',0,.54,2.1,.72,.16,.7);
-  K.box('eLeather',0,1.1,1.8,.74,.9,.14);
-  for(const sx of [-1,1])K.box('eGold',sx*.42,.8,2.1,.08,.08,.6);
-  K.box('eNavy',0,.7,2.9,2.3,.7,.5);
-  K.box('eGlow',0,1.08,2.92,1.8,.04,.3);
-  /* lounge: two sofas facing across the aisle. the aisle is kept clear: nothing stands between them */
+  const P=eclPillow,E=ECL.ECD,hw=eclHalfW;
+  eclMats();
+  /* ── under the cabin: keel slab, hover pods, their glow and the exhausts ── */
+  eclSlab(K,'eHull',-.2,.46,0,.07);
+  eclSlab(K,'eGold',-.215,.03,.03,.012);
   for(const sx of [-1,1]){
-    K.box('eLeather',sx*.98,.44,.3,.72,.28,1.8);
-    K.box('eLeather',sx*1.25,.85,.3,.18,.6,1.8);
+    P(K,'eNavy',sx*1.12,-.36,-.1,.62,.46,5.5,{ax:'z',p:3.4,bev:.6,shr:.4});
+    P(K,'eGlow',sx*1.12,-.6,-.1,.3,.05,4.2,{ax:'z',p:3,bev:.4,shr:.5,cast:false});
+    for(const z of [-1.5,1.5])P(K,'eGold',sx*1.12,-.36,z,.66,.5,.05,{ax:'z',p:3.4,bev:.015,shr:.96});
+    K.disc('eGold',.2,.05,sx*1.12,-.36,-2.82,'z');K.disc('eGlow',.16,.03,sx*1.12,-.36,-2.85,'z');
   }
-  /* bed at the rear, left: navy platform, linen, gold throw, pillows, leather headboard */
-  K.box('eNavy',-.88,.36,-2.25,.94,.12,2.0);
-  K.box('eLinen',-.88,.5,-2.25,.9,.16,1.9);
-  K.box('eGold',-.88,.6,-1.85,.92,.04,.55);
-  K.box('eLinen',-.88,.64,-3.0,.6,.14,.3);
-  K.box('eLeather',-.88,.9,-3.27,.94,.9,.1);
-  /* the rear door, on the inside of the rear wall: a leaf set into the wall, a gold frame, a handle, a porthole and a lit
-     hatch sign, so it reads as a door from inside and is a station you can leave by */
-  K.box('eHull',0,1.24,-3.31,.72,1.84,.04);
-  K.box('eGold',-.38,1.24,-3.3,.04,1.92,.06);
-  K.box('eGold',.38,1.24,-3.3,.04,1.92,.06);
-  K.box('eGold',0,2.18,-3.3,.8,.04,.06);
-  K.sphere('eGold',.035,.26,1.2,-3.27);
-  K.box('eGlass',0,1.6,-3.27,.26,.3,.01);
-  K.box('eGlow',0,2.02,-3.27,.22,.04,.02);
-  /* food and water dispensers, on the right wall, with glass fronts */
-  K.box('eHull',1.12,1.15,-2.3,.4,1.7,.5);
-  K.box('eGlass',.9,1.2,-2.3,.02,1.2,.42);
-  K.box('eGold',.9,1.92,-2.3,.02,.08,.3);
-  K.box('eHull',1.12,1.15,-1.6,.4,1.7,.5);
-  K.box('eGlow',.9,1.2,-1.6,.02,1.2,.42);
-  K.box('eGold',.9,1.92,-1.6,.02,.08,.3);
+  /* ── the cabin floor ── */
+  eclSlab(K,'eMarble',.18,.12,.16,.02);
+  P(K,'eNavy',0,E+.014,0,.82,.03,5.1,{ax:'z',p:4,bev:.12,shr:.8,cast:false});               /* aisle runner */
+  for(const sx of [-1,1])K.tube('eGold',profCircle(.009,6),[V3(sx*.41,E+.03,-2.5),V3(sx*.41,E+.03,2.5)],{tile:.5});
+  K.mesh(new THREE.TorusGeometry(.36,.011,6,40),'eGold',0,E+.034,.3,Math.PI/2,0,0);            /* the eclipse ring, set in the floor */
+  K.disc('eNavy',.34,.008,0,E+.03,.3,'y');
+  /* ── skin: lower wall, gold belt, glazing, mullions, header, roof ── */
+  for(const sx of [-1,1]){
+    eclSweep(K,'eHull',eclSE(.16,.9,6,18),eclWallPath(sx,E+.45,.08),{tile:1.6});             /* wall band, floor to belt */
+    K.tube('eGold',profCircle(.032,8),eclWallPath(sx,E+.9,0),{tile:.6});                      /* the gold belt */
+    K.tube('eGold',profCircle(.02,8),eclWallPath(sx,.0,0),{tile:.6});
+    K.tube('eGlass',profRect(.04,1.1),eclWallPath(sx,1.75,.09),{tile:1,cap:false});            /* glazing */
+    eclSweep(K,'eHull',eclSE(.2,.26,5,18),eclWallPath(sx,2.42,.08),{tile:1.6});              /* header */
+    for(const z of [2.55,1.5,.45,-.6,-1.65,-2.7]){                                           /* pearl mullions, set square to the skin */
+      const hx=hw(z)-.08,q=eclPlanPts(.08,70);let k=1;while(k<q.length-1&&q[k][1]>z)k++;
+      const ang=Math.atan2(q[k][0]-q[k-1][0],q[k][1]-q[k-1][1]);
+      P(K,'eHull',sx*hx,1.8,z,.1,.15,1.18,{ax:'y',p:4,bev:.04,shr:.7,ry:sx*ang});
+    }
+  }
+  eclSlab(K,'eHull',2.45,.22,-.05,.07);                                                       /* roof */
+  eclSlab(K,'eLinen',2.425,.03,.1,.012);                                                      /* a pale ceiling panel, so the cabin has a lit lid */
+  P(K,'eHull',0,2.8,-.1,1.0,.28,5.2,{ax:'z',p:3.4,bev:.7,shr:.35});                           /* dorsal spine */
+  P(K,'eGold',0,2.94,-.1,.16,.05,4.2,{ax:'z',p:3,bev:.4,shr:.5});
+  /* the nose: pearl plate below, a pane of glass above, a gold-bound header */
+  P(K,'eHull',0,E+.45,3.46,1.3,.9,.14,{ax:'z',p:5,bev:.05,shr:.85});
+  K.box('eGlass',0,1.75,3.45,1.2,1.1,.04);
+  P(K,'eGold',0,2.3,3.46,1.3,.08,.12,{ax:'z',p:3,bev:.03,shr:.8});
+  eclCrescent(K,0,E+.45,3.54,0,.26,.014);
+  for(const sx of [-1,1])eclCrescent(K,sx*(hw(.3)+.002),E+.45,.3,sx*Math.PI/2,.4,.018);   /* the mark on each flank */
+  /* ── the rear: bulkhead, arched door, gangway ── */
+  P(K,'eHull',0,1.4,-3.56,1.34,2.14,.16,{ax:'z',p:5,bev:.05,shr:.9});
+  eclArch(K,'eNavy',0,E,-3.47,.8,2.0,.03,.01);
+  eclArch(K,'eHull',0,E,-3.45,.68,1.94,.04,.012);
+  {const pr=[];pr.push(V3(-.37,E,-3.44),V3(-.37,E+1.6,-3.44));for(let i=1;i<14;i++){const a=Math.PI-i/14*Math.PI;pr.push(V3(Math.cos(a)*.37,E+1.6+Math.sin(a)*.37,-3.44))}pr.push(V3(.37,E+1.6,-3.44),V3(.37,E,-3.44));
+   K.tube('eGold',profCircle(.022,8),pr,{tile:.6});}
+  P(K,'eGold',.22,1.15,-3.4,.045,.045,.26,{ax:'y',p:3,bev:.02,shr:.7});                      /* handle */
+  K.mesh(new THREE.TorusGeometry(.12,.016,8,22),'eGold',0,1.65,-3.41,0,0,0);                  /* porthole */
+  K.disc('eGlass',.105,.01,0,1.65,-3.42,'z');
+  P(K,'eGlow',0,2.36,-3.42,.3,.045,.02,{ax:'z',p:3,bev:.006,shr:.8,cast:false});
+  eclSweep(K,'eHull',eclSE(1.0,.07,4,16),[V3(0,.2,-3.62),V3(0,-.55,-4.55)],{bev:.05,shr:.8,tile:1.6});   /* the gangway */
+  for(const sx of [-1,1])K.tube('eGold',profCircle(.018,8),[V3(sx*.52,.26,-3.62),V3(sx*.52,-.5,-4.55)],{tile:.6});
+  /* ── cabin lights: rounded strips in gold bezels, one each side of the roof ── */
+  s.cLamps=[];s.cLights=[];
+  for(const sx of [-1,1]){
+    P(K,'eGold',sx*.72,2.435,-.1,.3,.03,4.7,{ax:'z',p:3,bev:.1,shr:.7});
+    s.cLamps.push(K.dyn(P(K,'eLight',sx*.72,2.41,-.1,.2,.05,4.5,{ax:'z',p:3,bev:.1,shr:.7,cast:false})));
+    const L=new THREE.PointLight(0xffd9a6,0,11,1.4);L.position.set(sx*.7,2.25,.2);K.g.add(L);s.cLights.push(L);
+  }
+  /* ── the captain's chair ── */
+  const cz=ECL.SEAT.z,fy=E;
+  K.lathe('eGold',[[0,0],[.22,0],[.22,.03],[.12,.08],[.07,.12],[.07,.3],[.13,.34],[0,.34]],0,fy,cz,22);
+  P(K,'eLeather',0,fy+.42,cz,.66,.16,.66,{ax:'z',p:3.4,bev:.12,shr:.78});
+  P(K,'eLeather',0,fy+.92,cz-.34,.62,.8,.17,{ax:'z',p:3.4,bev:.07,shr:.8,rx:-.12});
+  P(K,'eLeather',0,fy+1.45,cz-.4,.36,.22,.12,{ax:'z',p:3,bev:.04,shr:.8,rx:-.12});
+  for(const sx of [-1,1]){
+    P(K,'eLeather',sx*.4,fy+.74,cz,.1,.09,.5,{ax:'z',p:3,bev:.04,shr:.7});
+    K.tube('eGold',profCircle(.014,8),[V3(sx*.4,fy+.5,cz-.18),V3(sx*.4,fy+.7,cz-.18)],{tile:.5});
+  }
+  /* ── the crescent helm console: one sweep round the chair, and the glowing edge along its inside ── */
+  const arc=(r,a0,a1,y,n)=>{const o=[];for(let i=0;i<=n;i++){const a=a0+(a1-a0)*i/n;o.push(V3(Math.sin(a)*r,y,cz-.1+Math.cos(a)*r))}return o};
+  const R=1.0,A=Math.PI*.33;
+  eclSweep(K,'eNavy',eclSE(.42,.82,4.4,28),arc(R,-A,A,fy+.41,26),{bev:.2,shr:.55,tile:1.2});
+  K.tube('eGold',profCircle(.014,8),arc(R+.14,-A*.97,A*.97,fy+.8,26),{tile:.5});
+  eclSweep(K,'eGlow',profRect(.05,.02),arc(R-.15,-A*.9,A*.9,fy+.835,26),{tile:1,cap:false});
+  /* the heart: a gimballed core on the console, the cube's own light */
+  K.mesh(new THREE.TorusGeometry(.13,.011,6,26),'eGold',0,fy+1.03,cz-.1+R,0,0,0);
+  K.mesh(new THREE.TorusGeometry(.1,.009,6,22),'eGold',0,fy+1.03,cz-.1+R,0,Math.PI/2,0);
+  P(K,'eGold',0,fy+.86,cz-.1+R,.18,.05,.18,{ax:'y',p:3,bev:.02,shr:.6});
+  const heart=K.sphere('eCore',.055,0,fy+1.03,cz-.1+R);K.dyn(heart);s.cCore=heart;
+  /* ── the lounge: two sofas facing across the aisle. Plinth, loose seat cushions, leaning backs, rolled arms ── */
+  for(const sx of [-1,1]){
+    const zc=.3;
+    P(K,'eNavy',sx*.88,fy+.14,zc,.72,.26,1.9,{ax:'z',p:4,bev:.06,shr:.9});
+    for(const dz of [-.47,.47])P(K,'eLeather',sx*.84,fy+.36,zc+dz,.62,.2,.88,{ax:'z',p:3.2,bev:.16,shr:.78});
+    for(const dz of [-.47,.47])P(K,'eLeather',sx*1.22,fy+.72,zc+dz,.22,.58,.86,{ax:'z',p:3.2,bev:.12,shr:.78,rz:-sx*.12});
+    for(const dz of [-1,1])P(K,'eLeather',sx*.88,fy+.52,zc+dz*1.0,.2,.34,.7,{ax:'x',p:3,bev:.1,shr:.75});
+    P(K,'eGold',sx*.7,fy+.27,zc,.02,.02,1.84,{ax:'z',p:3,bev:.01,shr:.9});
+  }
+  /* ── the bed: navy plinth, linen, a gold throw, two pillows and a headboard ── */
+  P(K,'eNavy',-.78,fy+.13,-2.12,.88,.24,2.0,{ax:'z',p:4,bev:.07,shr:.9});
+  P(K,'eLinen',-.78,fy+.33,-2.12,.84,.2,1.92,{ax:'z',p:3.2,bev:.14,shr:.82});
+  P(K,'eGold',-.78,fy+.43,-1.76,.86,.05,.62,{ax:'z',p:3,bev:.06,shr:.85});
+  for(const dx of [-.2,.2])P(K,'eLinen',-.78+dx,fy+.47,-2.85,.36,.13,.3,{ax:'z',p:2.6,bev:.1,shr:.6});
+  P(K,'eLeather',-.78,fy+.82,-3.08,.9,.82,.12,{ax:'z',p:3.4,bev:.05,shr:.88});
+  /* ── food and water, set into the right wall ── */
+  for(const [z,glow] of [[-2.3,0],[-1.6,1]]){
+    P(K,'eHull',1.08,fy+.88,z,.46,1.76,.56,{ax:'y',p:4.4,bev:.1,shr:.82});
+    K.box('eGlass',.845,fy+1.1,z,.02,.8,.38);
+    K.box('eNavy',.842,fy+1.1,z,.012,.84,.42);
+    P(K,'eGlow',.838,fy+1.6,z,.02,.05,.3,{ax:'x',p:3,bev:.008,shr:.8,cast:false});
+    P(K,'eGold',.76,fy+.62,z,.26,.03,.3,{ax:'y',p:3,bev:.012,shr:.8});
+    K.tube('eGold',profCircle(.016,8),filletPath([V3(.85,fy+.9,z),V3(.78,fy+.9,z),V3(.78,fy+.76,z)],.04,4),{tile:.5});
+    P(K,'eGold',.85,fy+1.78,z,.02,.04,.4,{ax:'z',p:3,bev:.01,shr:.9});
+  }
 }
 ASMFN.ecliptix=(K,s)=>{eclMats();if(s.form==='ship')asmEcliptixShip(K,s);else asmEcliptixCube(K,s)};
 /* ── lifecycle ── */
@@ -6260,9 +6387,11 @@ function eclSim(s,dt){
 function eclVisual(s,dt){
   const t=now();
   if(s.cCore)s.cCore.scale.setScalar(1+Math.sin(t*2.1)*.06);
-  if(s.cLamps){const on=s.lm===1||(s.lm!==2&&isNight());for(const l of s.cLamps)l.material=on?MAT.eLight:MAT.eLightOff}
+  const nt=isNight();
+  if(MAT.eLight){MAT.eLight.emissiveIntensity=nt?.35:1.2;MAT.eGlow.emissiveIntensity=nt?.6:1.2}   /* the strips glow softly at night, they do not flare */
+  if(s.cLamps){const on=s.lm===1||(s.lm!==2&&nt);for(const l of s.cLamps)l.material=on?MAT.eLight:MAT.eLightOff}
   if(s.cLights){
-    const on=s.lm===1||(s.lm!==2&&isNight()),target=on?(isNight()?26:12):0,k=Math.min(1,dt*4);
+    const on=s.lm===1||(s.lm!==2&&nt),target=on?(nt?4:12):0,k=Math.min(1,dt*4);
     for(const L of s.cLights)L.intensity=lerp(L.intensity,target,k);
   }
   if(s.form==='ship'){
@@ -6295,16 +6424,16 @@ function eclDriveTick(s,dt){
     s.hoverH=clamp(s.hoverH+lift*ECL.climb*dt,ECL.hoverMin,ECL.hoverMax);
     if(Math.abs(s.hoverH-before)>1e-6&&now()-s.msgT>1.2){s.msgT=now();log('height '+s.hoverH.toFixed(1)+' m above the ground','gold',1)}
   }
-  const seat=s.mesh.localToWorld(new THREE.Vector3(ECL.SEAT.x,ECL.ECD+.32,ECL.SEAT.z));
+  const seat=s.mesh.localToWorld(new THREE.Vector3(ECL.SEAT.x,ECL.ECD+ECL.CHAIR_H,ECL.SEAT.z));
   P.x=seat.x;P.y=seat.y;P.z=seat.z;P.vx=P.vz=0;P.vy=0;P.ground=true;
-  P.lx=ECL.SEAT.x;P.lz=ECL.SEAT.z;P.hy=.32;
+  P.lx=ECL.SEAT.x;P.lz=ECL.SEAT.z;P.hy=ECL.CHAIR_H;
   P.yaw=s.yaw+Math.PI+s.look.yaw;P.pitch=s.look.pitch;
   if(SET.buggyView==='chase'){
     const L=s.look,vy=s.yaw+Math.PI+L.yaw,cp=Math.cos(L.pitch),D=15;
     let cx=s.pos.x+Math.sin(vy)*cp*D,cz=s.pos.z+Math.cos(vy)*cp*D,cy=s.pos.y+6.2+Math.sin(L.pitch)*D*.7;
     const gy=heightAt(cx,cz)+1;if(cy<gy)cy=gy;
     s.camPos=new THREE.Vector3(cx,cy,cz);
-  }else s.camPos=s.mesh.localToWorld(new THREE.Vector3(ECL.SEAT.x,ECL.ECD+1.4,ECL.SEAT.z-.25));
+  }else s.camPos=s.mesh.localToWorld(new THREE.Vector3(ECL.SEAT.x,ECL.ECD+ECL.CHAIR_H+ECL.EYE_SIT,ECL.SEAT.z-.1));   /* seated eye: cushion plus EYE_SIT, always below a standing eye */
 }
 /* ── autopilot, as the crawler's: L cycles through the pinned mark and WP1–WP3. She flies straight at the mark (she is
    half-slipped, so there is nothing to route round), eases off as she closes in, and arrives within ECL.arrive. ── */
@@ -6356,7 +6485,7 @@ function eclAllStop(s){
 }
 function enterECLHelm(s){
   eLock=true;closePanel();G.drive=s;s.look={yaw:0,pitch:0};s.seatI=null;
-  P.aboard=s;P.hy=.32;P.vy=0;P.yaw=s.yaw+Math.PI;P.pitch=0;
+  P.aboard=s;P.hy=ECL.CHAIR_H;P.vy=0;P.yaw=s.yaw+Math.PI;P.pitch=0;
   if(viewModel)viewModel.visible=SET.buggyView!=='chase';
   log('helm: W/S throttle · A/D wheel · Shift up · Q down · Space near ground / 40 m · L autopilot · Z all stop · E leave','gold');SFX('click');
 }
@@ -6366,8 +6495,8 @@ function leaveECLHelm(s,silent){
   const cd=new THREE.Vector3();camera.getWorldDirection(cd);
   P.yaw=Math.atan2(-cd.x,-cd.z);P.pitch=clamp(Math.asin(clamp(cd.y,-1,1)),-1.4,1.4);
   G.drive=null;s.pyaw=s.yaw;
-  const w=s.mesh.localToWorld(new THREE.Vector3(0,ECL.ECD,1.3));   /* step back out of the chair */
-  P.lx=0;P.lz=1.3;P.hy=0;P.vy=0;P.ground=true;P.x=w.x;P.y=w.y;P.z=w.z;
+  const w=s.mesh.localToWorld(new THREE.Vector3(0,ECL.ECD,1.0));   /* step back out of the chair */
+  P.lx=0;P.lz=1.0;P.hy=0;P.vy=0;P.ground=true;P.x=w.x;P.y=w.y;P.z=w.z;
   if(viewModel)viewModel.visible=true;
   if(!silent){log('left the helm — she keeps her throttle and course','gold',1);SFX('place')}
 }
@@ -6392,7 +6521,7 @@ function eclLeave(s,silent){
 }
 function eclSit(s,q){
   eLock=true;s.seatI=q;
-  P.lx=q.x;P.lz=q.z;P.hy=ECL.SOFA_Y-ECL.ECD;P.vy=0;P.vx=P.vz=0;P.ground=true;
+  P.lx=q.x;P.lz=q.z;P.hy=ECL.SEAT_H;P.vy=0;P.vx=P.vz=0;P.ground=true;
   P.yaw=s.yaw+q.ly;P.pitch=-.04;s.pyaw=s.yaw;
   log('seated · the view turns with the ship — look out of the windows hands free · hold E to stand','gold');SFX('click');
 }
@@ -6413,7 +6542,7 @@ function eclWalk(s,dt){
     const c=Math.cos(s.yaw),n=Math.sin(s.yaw);
     const lvx=P.vx*c-P.vz*n,lvz=P.vx*n+P.vz*c;
     const hit=(x,z)=>{
-      if(x<-1.25||x>1.25||z<-3.3||z>3.3)return true;
+      if(z<-3.28||z>3.0||Math.abs(x)>eclHalfW(z)-.3)return true;      /* the walls are the hull's own plan */
       for(const b of ECL_BOX)if(x>b[0]-.28&&x<b[1]+.28&&z>b[2]-.28&&z<b[3]+.28)return true;
       return false;
     };
@@ -6478,7 +6607,7 @@ function eclBuildStations(s){
         invAdd('water',1);log('the dispenser fills a flask with clean water','good');SFX('pick');
       }};
     }});
-    L.push({id:'bed',lx:-.88,lz:-2.1,r:1.5,deck:1,act(){
+    L.push({id:'bed',lx:-.78,lz:-2.1,r:1.5,deck:1,act(){
       if(!isNight())return{label:'bed',sub:'sleep when night falls — she holds her station meanwhile',time:0,run(){}};
       return{label:'sleep until first light',sub:'hold E · the hovership hangs in the air while you sleep',time:3.2,run(){eclSleep(s)}};
     }});
@@ -7868,7 +7997,7 @@ function playerTick(dt){
   P.hp=clamp(P.hp,0,1);
   if(P.hp<=0){if(P.aboard)leaveCrawler(P.aboard,true);Drifter.dispatch('die');P.hp=0.45;P.hyd=Math.max(P.hyd,0.45);P.nut=Math.max(P.nut,0.35);P.x=7;P.z=7;P.vx=P.vz=0;P.y=heightAt(7,7);Drifter.dispatch('revive');SFX('bad');log('you black out and wake at the old camp, parched.','bad')}
   /* hand */
-  const eye=1.68-0.62*Drifter.ctx.crouch-(G.drive?0.5:0)-((P.aboard&&P.aboard.seatK)?P.aboard.seatK*.56:0);
+  const eye=1.68-0.62*Drifter.ctx.crouch-(G.drive?0.5:0)-((P.aboard&&P.aboard.seatK)?P.aboard.seatK*.56:0)-((P.aboard&&P.aboard.type==='ecliptix'&&P.aboard.seatI)?1.68-ECL.EYE_SIT:0);
   const bobY=Math.sin(Drifter.ctx.bobT*2)*0.035*clamp(spd/4,0,1.6);
   const bobX=Math.cos(Drifter.ctx.bobT)*0.028*clamp(spd/4,0,1.6);
   camera.position.set(P.x+bobX*0.4,P.y+eye+bobY,P.z);
