@@ -6075,6 +6075,7 @@ const ECL_MAT_SPEC={
   eLight: {color:0xfff1d0,emissive:0xffd28a,emissiveIntensity:1.2,roughness:.4},
   eLightOff: {color:0xd8cfbb,roughness:.5},
   eGlow:  {color:0x9fe6ff,emissive:0x52c8ff,emissiveIntensity:1.2,roughness:.3},
+  eLED:   {color:0xeaf6ff,emissive:0xbfe3ff,emissiveIntensity:.9,roughness:.4},
   eCore:  {color:0xfff0c8,emissive:0xffb347,emissiveIntensity:2.2,roughness:.3}
 };
 /* ── painted surfaces for the cabin. Each is periodic (integer frequencies, wrapped noise) so it tiles without a seam,
@@ -6094,7 +6095,7 @@ const eclGoldFn=(u,v,q)=>{
   BL(q,[236,204,134],sm_(.45,.85,br)*.7);
   BL(q,[160,120,60],sm_(.6,.9,sp)*.25);
   q.h=.5+(br-.5)*.04;
-  q.ro=lerp(.16,.34,br);q.me=.96;
+  q.ro=lerp(.2,.38,br);q.me=.8;
 };
 const eclNavyFn=(u,v,q)=>{
   const weave=pfb(u,v,96,96,421,1),blot=pfb(u,v,5,5,423,4),cr=sm_(.55,.8,pfb(u,v,24,24,425,2));
@@ -6171,7 +6172,7 @@ function eclSweep(K,m,prof,path,o){
 function eclPillow(K,m,x,y,z,w,h,d,o){
   o=o||{};const ax=o.ax||'z',h2=d/2;
   const path=ax==='z'?[V3(0,0,-h2),V3(0,0,h2)]:ax==='x'?[V3(-h2,0,0),V3(h2,0,0)]:[V3(0,-h2,0),V3(0,h2,0)];
-  const e=eclSweep(K,m,eclSE(w,h,o.p||4,o.n||28),path,{bev:o.bev===undefined?Math.min(.07,d/2-.003):o.bev,shr:o.shr===undefined?.7:o.shr,cast:o.cast});
+  const e=eclSweep(K,m,eclSE(w,h,o.p||4,o.n||28),path,{bev:o.bev===undefined?Math.min(.07,d/2-.003):o.bev,shr:o.shr===undefined?.7:o.shr,cast:o.cast,par:o.par});
   e.position.set(x,y,z);e.rotation.set(o.rx||0,o.ry||0,o.rz||0);return e;
 }
 /* a plan-shaped slab with bevelled edges: the extrusion's own bevel brings the profile in on every edge */
@@ -6210,6 +6211,7 @@ function eclMats(){
   asmMat('eMarble',512,2.4,eclMarbleFn,{bump:1.2});
   asmMat('eLinen',256,.9,eclLinenFn,{bump:.8});
   for(const k in ECL_MAT_SPEC){const m=new THREE.MeshStandardMaterial(ECL_MAT_SPEC[k]);m.userData.tile=1;MAT[k]=m}
+  eclKioskMats();
 }
 function asmEcliptixCube(K,s){
   const P=eclPillow;
@@ -6322,16 +6324,227 @@ function asmEcliptixShip(K,s){
   P(K,'eGold',-.78,fy+.43,-1.76,.86,.05,.62,{ax:'z',p:3,bev:.06,shr:.85});
   for(const dx of [-.2,.2])P(K,'eLinen',-.78+dx,fy+.47,-2.85,.36,.13,.3,{ax:'z',p:2.6,bev:.1,shr:.6});
   P(K,'eLeather',-.78,fy+.82,-3.08,.9,.82,.12,{ax:'z',p:3.4,bev:.05,shr:.88});
-  /* ── food and water, set into the right wall ── */
-  for(const [z,glow] of [[-2.3,0],[-1.6,1]]){
-    P(K,'eHull',1.08,fy+.88,z,.46,1.76,.56,{ax:'y',p:4.4,bev:.1,shr:.82});
-    K.box('eGlass',.845,fy+1.1,z,.02,.8,.38);
-    K.box('eNavy',.842,fy+1.1,z,.012,.84,.42);
-    P(K,'eGlow',.838,fy+1.6,z,.02,.05,.3,{ax:'x',p:3,bev:.008,shr:.8,cast:false});
-    P(K,'eGold',.76,fy+.62,z,.26,.03,.3,{ax:'y',p:3,bev:.012,shr:.8});
-    K.tube('eGold',profCircle(.016,8),filletPath([V3(.85,fy+.9,z),V3(.78,fy+.9,z),V3(.78,fy+.76,z)],.04,4),{tile:.5});
-    P(K,'eGold',.85,fy+1.78,z,.02,.04,.4,{ax:'z',p:3,bev:.01,shr:.9});
+  /* ── food and water: two fridge kiosks against the right wall ── */
+  s.kiosk={};
+  eclKiosk(K,s,'food',-2.3);
+  eclKiosk(K,s,'water',-1.6);
+}
+
+/* ═══ THE KIOSKS: a stew fridge and a water fridge, built from the same carcass. Every surface has its own generated texture. ═══ */
+const eclWrap=(d)=>d-Math.floor(d+.5);
+const eclCov=(sd,w)=>1-sm_(-w,w,sd);
+const eclHash=(i,j)=>{const x=Math.sin(i*127.1+j*311.7)*43758.5453;return x-Math.floor(x)};
+/* two logos as signed distances in a ±.5 box, y up: a teardrop for water, a steaming bowl for stew */
+const eclDropSD=(x,y)=>{const c=Math.hypot(x,y+.1)-.22,k=Math.max((Math.abs(x)-(.38-y)*.516)*.86,-y,y-.38);return Math.min(c,k)};
+const eclBowlSD=(x,y)=>{
+  let sd=Math.max(Math.hypot(x,y+.02)-.28,y+.02);
+  sd=Math.min(sd,Math.max(Math.abs(x)-.33,Math.abs(y+.01)-.028));
+  for(const c of [-.13,0,.13]){const xc=c+.025*Math.sin(y*20+c*25);sd=Math.min(sd,Math.max(Math.abs(x-xc)-.016,Math.abs(y-.2)-.14))}
+  return sd;
+};
+/* brushed champagne metal for the fridge casing and door frames */
+const eclFridgeFn=(u,v,q)=>{
+  const br=pfb(u,v,90,3,501,2),br2=pfb(u,v,24,2,503,2),wm=pfb(u,v,4,4,505,3),sp=pfb(u,v,140,140,507,1);
+  ST(q,[226,221,209]);
+  BL(q,[244,241,232],sm_(.4,.8,br)*.6);
+  BL(q,[196,188,174],sm_(.5,.9,br2)*.35);
+  BL(q,[190,178,152],sm_(.55,.85,wm)*.2);               /* a warm champagne cast */
+  const g=(sp-.5)*10;q.r+=g;q.g+=g;q.b+=g;
+  q.h=.5+(br-.5)*.06;q.ro=lerp(.3,.5,br2);q.me=.2;
+};
+/* the liner inside: white enamel pressed with a grid of shallow square dimples */
+const eclFridgeInFn=(u,v,q)=>{
+  const fu=u*24,fv=v*24,cx=fu-Math.floor(fu)-.5,cy=fv-Math.floor(fv)-.5,r=Math.max(Math.abs(cx),Math.abs(cy));
+  const dim=1-sm_(.33,.45,r),sp=pfb(u,v,120,120,511,1);
+  ST(q,[234,240,242]);BL(q,[206,218,226],dim*.45);
+  const g=(sp-.5)*8;q.r+=g;q.g+=g;q.b+=g;
+  q.h=.5-dim*.09;q.ro=lerp(.5,.36,dim);q.me=.05;
+};
+/* perforated steel shelving: a grid of punched holes with raised rims, brushed between them */
+const eclShelfFn=(u,v,q)=>{
+  const fu=u*10,fv=v*10,cx=fu-Math.floor(fu)-.5,cy=fv-Math.floor(fv)-.5,d=Math.hypot(cx,cy);
+  const hole=1-sm_(.27,.31,d),rim=sm_(.3,.35,d)*(1-sm_(.35,.44,d)),br=pfb(u,v,100,4,521,2);
+  ST(q,[194,198,202]);BL(q,[220,224,228],sm_(.4,.8,br)*.5);BL(q,[38,44,50],hole);
+  q.h=.5-hole*.3+rim*.12+(br-.5)*.03;q.ro=lerp(.35,.85,hole);q.me=.4;
+};
+/* black rubber: gaskets, grille and plinth */
+const eclSealFn=(u,v,q)=>{const f=vor(u,v,40,531,[]),pb=1-sm_(0,.5,f[0]);ST(q,[28,28,30]);BL(q,[46,46,50],pb*.4);q.h=.5+pb*.1;q.ro=.82;q.me=0};
+/* the stew cup: kraft cardboard with cream and terracotta stripes, navy pinstripes, a cream rolled rim and a badge with the bowl logo. UV is the whole cup, 0..1 */
+const eclCupFn=(u,v,q)=>{
+  const vv=1-v,grain=pfb(u,v,60,60,541,2),fib=pfb(u,v,200,18,543,1);
+  const si=Math.floor(u*28),sx=u*28-si;
+  ST(q,(si&1)?[200,86,52]:[244,234,212]);
+  if(sx<.07||sx>.93)BL(q,[30,46,68],.5);
+  if(vv>.885){ST(q,[244,234,212]);if(vv<.915)BL(q,[30,46,68],.7)}
+  if(vv<.05)BL(q,[190,150,104],.9);
+  if(u<.004||u>.996)BL(q,[110,80,50],.3);                       /* the paper seam */
+  const X=eclWrap(u-.25)*.277,Y=(vv-.43)*.0856,d=Math.hypot(X,Y)-.027;
+  BL(q,[28,42,64],eclCov(d,.0012));
+  BL(q,[226,190,110],eclCov(Math.abs(d+.0035)-.0013,.0008)*(d<0?1:0));
+  const gl=eclCov(eclBowlSD(X/.046,Y/.046)*.046,.0011)*(d<-.006?1:0);
+  BL(q,[246,226,170],gl);
+  const g=(grain-.5)*12;q.r+=g;q.g+=g;q.b+=g;
+  q.h=.5+(grain-.5)*.05+(fib-.5)*.03+gl*.03;q.ro=.78;q.me=0;
+};
+/* travel lids: matte plastic with fine concentric ribbing. One colour per soup */
+const eclLidFn=(col)=>(u,v,q)=>{
+  const rb=.5+.5*Math.sin(TAU*v*24),gr=pfb(u,v,80,80,551,2);
+  ST(q,col);BL(q,[255,255,255],rb*.08);const g=(gr-.5)*10;q.r+=g;q.g+=g;q.b+=g;
+  q.h=.5+rb*.07+(gr-.5)*.03;q.ro=.58;q.me=0;
+};
+/* PET plastic: pale and see-through, petaloid ribs at the foot, ribbed shoulder and neck, a glossy streak */
+const eclBottleFn=(u,v,q)=>{
+  const rf=(1-sm_(.08,.12,v))*(.5+.5*Math.sin(TAU*u*5)),rs=sm_(.55,.6,v)*(1-sm_(.78,.8,v))*(.5+.5*Math.sin(TAU*v*14)),gr=pfb(u,v,60,60,561,2);
+  ST(q,[200,228,240]);BL(q,[255,255,255],Math.max(0,1-Math.abs(eclWrap(u-.12))*14)*.7);   /* the highlight streak */
+  const g=(gr-.5)*6;q.r+=g;q.g+=g;q.b+=g;
+  q.h=.5+rf*.1+rs*.07;q.ro=.1+rf*.15;q.me=0;
+};
+/* the water itself, with a little caustic web */
+const eclFillFn=(u,v,q)=>{
+  const f=vor(u,v,7,571,[]),web=1-sm_(.02,.12,f[1]-f[0]);
+  ST(q,[150,200,232]);BL(q,[220,242,252],web*.5);q.h=.5+web*.03;q.ro=.12;q.me=0;
+};
+/* knurled caps, one colour per product */
+const eclCapFn=(col)=>(u,v,q)=>{
+  const k=.5+.5*Math.sin(TAU*u*30),top=sm_(.88,.92,v);
+  ST(q,col);BL(q,[255,255,255],k*.1*(1-top));BL(q,[0,0,0],k*.1*(1-top));
+  q.h=.5+k*.1*(1-top);q.ro=.38;q.me=0;
+};
+/* the brand label strap on a bottle: accent bands, gold hairlines, ripples, a drop badge in front and a barcode behind. UV is the whole strap */
+const eclLabelFn=(acc,kind)=>(u,v,q)=>{
+  const vv=1-v,X=eclWrap(u-.25)*.2,Y=(vv-.5)*.07;
+  ST(q,[247,245,238]);
+  if(vv<.14||vv>.86)ST(q,acc);
+  if(Math.abs(vv-.15)<.012||Math.abs(vv-.85)<.012)BL(q,[232,198,120],.95);
+  if(vv>.2&&vv<.44){const w=Math.abs(Math.sin(TAU*u*9+vv*10));if(w<.1)BL(q,acc,.55)}                 /* ripples */
+  if(kind==='spark'){const f=vor(u,v,22,581,[]);if(f[0]<.1&&vv>.5&&vv<.82)BL(q,acc,.5)}             /* bubbles */
+  if(kind==='min'&&vv>.5&&vv<.82){const z=Math.abs(((u*14)%1)-.5)*2;if(Math.abs((vv-.5)*3-z*.5-.1)<.06)BL(q,acc,.6)}   /* zigzag of hills */
+  const d=Math.hypot(X,Y)-.0255;
+  BL(q,acc,eclCov(d,.0008));BL(q,[255,255,255],eclCov(d+.0035,.0008));
+  const gl=eclCov(eclDropSD(X/.034,(Y+.001)/.034)*.034,.0008)*(d<-.004?1:0);BL(q,acc,gl);
+  if(u>.7&&u<.84&&vv>.2&&vv<.42){BL(q,[255,255,255],.9);const b=Math.floor(u*90);if(eclHash(b,3)>.45)BL(q,[20,20,22],.9)}   /* barcode */
+  q.h=.5+gl*.03;q.ro=.42;q.me=0;
+};
+/* the illuminated sign above each kiosk's door: navy with a gold keyline, the logo and a wordmark of gold blocks */
+const eclSignFn=(kind)=>(u,v,q)=>{
+  const vv=1-v,X=(u-.5)*.42,Y=(vv-.5)*.085;
+  ST(q,[22,36,58]);BL(q,[34,52,80],sm_(.3,.8,pfb(u,v,3,2,591,2))*.5);
+  const edge=Math.max(Math.abs(X)-.205,Math.abs(Y)-.0405);
+  if(edge>-.0035&&edge<-.0018)BL(q,[226,190,110],.95);
+  const sd=(kind==='food'?eclBowlSD:eclDropSD)((X+.145)/.075,Y/.075)*.075;
+  BL(q,[244,226,170],eclCov(sd,.0012));
+  let wm=1;for(let i=0;i<7;i++){const cx=-.06+i*.034,h=.026+eclHash(i,kind==='food'?1:2)*.018;wm=Math.min(wm,Math.max(Math.abs(X-cx)-.011,Math.abs(Y-.004)-h/2))}
+  BL(q,[244,226,170],eclCov(wm,.0012));
+  BL(q,[226,190,110],eclCov(Math.max(Math.abs(X-.06)-.1,Math.abs(Y+.026)-.003),.001));
+  q.h=.5;q.ro=.4;q.me=.1;
+};
+/* a lathe with its UV spanning the whole object (0..1), so a label or a logo is drawn once, with no tiling or seam */
+function eclLatheUV(pr,seg){
+  const g=new THREE.LatheGeometry(pr.map(p=>new THREE.Vector2(p[0],p[1])),seg),uv=g.attributes.uv,n=pr.length,acc=[0];
+  for(let j=1;j<n;j++)acc.push(acc[j-1]+Math.hypot(pr[j][0]-pr[j-1][0],pr[j][1]-pr[j-1][1]));
+  for(let i=0;i<=seg;i++)for(let j=0;j<n;j++)uv.setXY(i*n+j,i/seg,acc[j]/acc[n-1]);
+  return g;
+}
+const ECL_CUP=[[.036,0],[.0525,.0735],[.0548,.0765],[.0548,.0805],[.0525,.0808]];
+const ECL_LID=[[.0540,.0725],[.0575,.0732],[.0580,.0815],[.0560,.0835],[.0420,.0850],[.0400,.0880],[.0120,.0910],[0,.0915]];
+const ECL_BOT=[[.0215,0],[.0295,.004],[.031,.02],[.031,.12],[.0298,.145],[.0225,.168],[.0158,.185],[.0128,.2],[.0128,.213],[.0148,.2135],[.0148,.2175],[.0128,.2175]];
+const ECL_FILL=[[.0195,.004],[.0285,.008],[.0297,.02],[.0297,.12],[.0286,.145],[.0215,.168],[.0155,.183],[0,.183]];
+const ECL_CAP=[[.0152,.2115],[.0158,.2122],[.0158,.2365],[.0145,.2385],[0,.2388]];
+function eclKioskMats(){
+  asmMat('eFridge',256,.6,eclFridgeFn,{bump:1.4});
+  asmMat('eFridgeIn',256,.6,eclFridgeInFn,{bump:2});
+  asmMat('eShelf',256,.3,eclShelfFn,{bump:3});
+  asmMat('eSeal',128,.2,eclSealFn,{bump:3});
+  asmMat('eCup',256,1,eclCupFn,{bump:1.5});
+  [['eLidA',[200,92,60]],['eLidB',[104,132,92]],['eLidC',[214,168,60]],['eLidD',[70,92,128]]].forEach(a=>asmMat(a[0],128,.1,eclLidFn(a[1]),{bump:2}));
+  asmMat('eBottle',128,.25,eclBottleFn,{bump:2.5,opacity:.38}).depthWrite=false;
+  asmMat('eWaterFill',128,.25,eclFillFn,{bump:1.5});
+  [['Still',[38,110,190],'still'],['Spark',[24,150,110],'spark'],['Min',[226,120,36],'min']].forEach(a=>{
+    asmMat('eCap'+a[0],128,.1,eclCapFn(a[1]),{bump:2.5});
+    asmMat('eLabel'+a[0],256,.2,eclLabelFn(a[1],a[2]),{bump:1,side:THREE.DoubleSide});
+  });
+  asmMat('eSignFood',256,.4,eclSignFn('food'),{bump:1});
+  asmMat('eSignWater',256,.4,eclSignFn('water'),{bump:1});
+}
+const eclEase=(x)=>x*x*(3-2*x);
+/* the glass doors swing open on their side hinges, hold, and swing shut */
+function eclKioskOpen(s,kind){const k=s.kiosk&&s.kiosk[kind];if(!k)return;k.t=k.t<0?0:Math.min(k.t,.5)}
+function eclKioskTick(s,dt){
+  if(!s.kiosk)return;
+  for(const kind in s.kiosk){
+    const k=s.kiosk[kind],tO=.55,tH=2.6,tC=.9;let a=0;
+    if(k.t>=0){k.t+=dt;const T=k.t;a=T<tO?eclEase(T/tO):T<tH?1:T<tH+tC?1-eclEase((T-tH)/tC):0;if(T>=tH+tC)k.t=-1}
+    k.L.rotation.y=-a*1.5;k.R.rotation.y=a*1.5;
   }
+}
+/* one kiosk against the right wall, facing the aisle. Local frame: x across, y up, z out from the wall. The lower third is the closed casing;
+   above it sits the box with its glass doors, shelves and stock. */
+function eclKiosk(K,s,kind,zc){
+  const E=ECL.ECD,food=kind==='food',x0=eclHalfW(zc)-.165;
+  const kg=new THREE.Group();kg.position.set(x0,E,zc);kg.rotation.y=-Math.PI/2;K.g.add(kg);
+  const P=(m,x,y,z,w,h,d,o)=>eclPillow(K,m,x,y,z,w,h,d,Object.assign({par:kg},o||{}));
+  const B=(m,x,y,z,w,h,d)=>K.box(m,x,y,z,w,h,d,0,0,0,kg);
+  /* lower third: plinth, casing, grille, status light, gold kick plate */
+  B('eSeal',0,.02,.25,.56,.04,.46);
+  P('eFridge',0,.32,.25,.62,.56,.5,{ax:'z',p:9,bev:.03,shr:.95});
+  B('eShelf',0,.2,.503,.44,.22,.008);                                                    /* vent grille: punched steel */
+  for(const yy of [.1,.31])P('eFridge',0,yy,.51,.016,.016,.46,{ax:'x',p:3,bev:.005,shr:.8});   /* a frame bar above and below it */
+  for(const sx of [-1,1])P('eFridge',sx*.225,.205,.51,.016,.016,.24,{ax:'y',p:3,bev:.005,shr:.8});
+  const led=K.sphere('eLED',.009,.24,.48,.508,1,1,.5,kg);
+  P('eGold',0,.065,.508,.5,.02,.012,{ax:'z',p:3,bev:.004,shr:.8});
+  P('eFridge',0,.61,.25,.64,.024,.52,{ax:'z',p:6,bev:.01,shr:.9});
+  P('eGold',0,.626,.508,.58,.008,.01,{ax:'z',p:3,bev:.003,shr:.8});
+  /* the box: sides, header, back and side liners, top liner, front gasket */
+  for(const sx of [-1,1])P('eFridge',sx*.2825,1.19,.25,.035,1.14,.5,{ax:'z',p:4.5,bev:.03,shr:.8});
+  P('eFridge',0,1.83,.25,.62,.14,.5,{ax:'z',p:5,bev:.045,shr:.88});
+  P('eGold',0,1.758,.508,.56,.014,.012,{ax:'z',p:3,bev:.004,shr:.8});
+  const sg=ownMesh(new THREE.PlaneGeometry(.42,.085),MAT[food?'eSignFood':'eSignWater']);sg.position.set(0,1.83,.503);kg.add(sg);
+  B('eFridgeIn',0,1.21,.015,.53,1.1,.02);
+  for(const sx of [-1,1])B('eFridgeIn',sx*.262,1.21,.25,.01,1.1,.46);
+  B('eFridgeIn',0,1.755,.25,.53,.01,.46);
+  B('eSeal',0,1.752,.497,.54,.012,.008);
+  for(const sx of [-1,1])B('eSeal',sx*.265,1.21,.497,.012,1.09,.008);
+  P('eLED',0,1.742,.44,.03,.012,.44,{ax:'x',p:3,bev:.01,shr:.6,cast:false});
+  for(const sx of [-1,1])P('eLED',sx*.248,1.21,.46,.012,.02,1.0,{ax:'y',p:3,bev:.01,shr:.6,cast:false});   /* light strips down each inside front corner */
+  /* shelves: perforated steel on rails, with a front lip. Stock sits on each */
+  const levels=food?[.66,.94,1.22,1.50]:[.66,1.02,1.38];
+  const cupG=eclLatheUV(ECL_CUP,14),lidG=eclLatheUV(ECL_LID,14),botG=eclLatheUV(ECL_BOT,12),fillG=eclLatheUV(ECL_FILL,10),capG=eclLatheUV(ECL_CAP,12),labG=new THREE.CylinderGeometry(.0322,.0322,.07,16,1,true);
+  const labM=['Still','Spark','Min'];
+  levels.forEach((y,li)=>{
+    P('eShelf',0,y-.0075,.26,.51,.015,.46,{ax:'z',p:6,bev:.01,shr:.9});
+    P('eShelf',0,y+.012,.492,.51,.03,.012,{ax:'z',p:4,bev:.004,shr:.85});
+    if(li>0)for(const sx of [-1,1])P('eShelf',sx*.252,y-.025,.26,.016,.02,.46,{ax:'z',p:3,bev:.005,shr:.8});
+    if(food){
+      for(let ix=0;ix<4;ix++)for(let iz=0;iz<3;iz++){
+        const x=-.195+ix*.13,z=.16+iz*.12,ry=-Math.PI/2+(eclHash(ix+li*7,iz)-.5)*.5;
+        const c=ownMesh(cupG,MAT.eCup);c.position.set(x,y,z);c.rotation.y=ry;kg.add(c);
+        const l=ownMesh(lidG,MAT['eLid'+'ABCD'[li]]);l.position.set(x,y,z);l.rotation.y=ry;kg.add(l);
+        const t=ownMesh(new THREE.SphereGeometry(.0085,8,6),MAT['eLid'+'ABCD'[li]]);t.scale.set(1.7,.5,1);t.position.set(x+Math.sin(ry)*-.0,y+.0905,z+.036);kg.add(t);
+      }
+    }else{
+      const tm=labM[li];
+      for(let ix=0;ix<6;ix++)for(let iz=0;iz<3;iz++){
+        const x=-.2125+ix*.085,z=.14+iz*.12,ry=-Math.PI/2+(eclHash(ix+li*5,iz+2)-.5)*.4;
+        const mk=(g,m,yy)=>{const o=ownMesh(g,MAT[m],m!=='eBottle');o.position.set(x,y+(yy||0),z);o.rotation.y=ry;kg.add(o);return o};
+        mk(fillG,'eWaterFill');mk(botG,'eBottle');mk(capG,'eCap'+tm);mk(labG,'eLabel'+tm,.083);
+      }
+    }
+  });
+  /* double glass doors on their side hinges; each leaf is a group that swings */
+  const piv={};
+  for(const sx of [-1,1]){
+    const pv=new THREE.Group();pv.position.set(sx*.285,1.21,.512);kg.add(pv);K.dyn(pv);piv[sx]=pv;
+    const gl=K.box('eGlass',-sx*.14,0,0,.25,1.02,.012,0,0,0,pv);gl.castShadow=false;
+    const F=(x,y,z,w,h,d,o)=>eclPillow(K,'eFridge',x,y,z,w,h,d,Object.assign({par:pv},o));
+    F(-sx*.0125,0,0,.025,.03,1.09,{ax:'y',p:4,bev:.01,shr:.8});
+    F(-sx*.2675,0,0,.025,.03,1.09,{ax:'y',p:4,bev:.01,shr:.8});
+    F(-sx*.14,.5325,0,.03,.025,.28,{ax:'x',p:4,bev:.01,shr:.8});
+    F(-sx*.14,-.5325,0,.03,.025,.28,{ax:'x',p:4,bev:.01,shr:.8});
+    eclPillow(K,'eGold',-sx*.245,.05,.034,.02,.02,.4,{ax:'y',p:3,bev:.008,shr:.8,par:pv});
+    for(const yy of [-.12,.22])K.box('eGold',-sx*.245,yy,.017,.012,.012,.034,0,0,0,pv);
+    for(const hy of [-.42,0,.42])K.disc('eGold',.012,.05,0,hy,0,'y',pv);
+  }
+  s.kiosk[kind]={L:piv[-1],R:piv[1],t:-1};
 }
 ASMFN.ecliptix=(K,s)=>{eclMats();if(s.form==='ship')asmEcliptixShip(K,s);else asmEcliptixCube(K,s)};
 /* ── lifecycle ── */
@@ -6385,7 +6598,7 @@ function eclSim(s,dt){
   s.y=s.pos.y;s.x=s.pos.x;s.z=s.pos.z;s.rot=s.yaw;
 }
 function eclVisual(s,dt){
-  const t=now();
+  const t=now();eclKioskTick(s,dt);
   if(s.cCore)s.cCore.scale.setScalar(1+Math.sin(t*2.1)*.06);
   const nt=isNight();
   if(MAT.eLight){MAT.eLight.emissiveIntensity=nt?.35:1.2;MAT.eGlow.emissiveIntensity=nt?.6:1.2}   /* the strips glow softly at night, they do not flare */
@@ -6598,13 +6811,13 @@ function eclBuildStations(s){
       return{label:'rear door',sub:'hold E — step out through the rear hatch onto the sand',time:.6,run(){eclLeave(s)}};
     }});
     L.push({id:'food',lx:.9,lz:-2.3,r:1.3,deck:1,act(){
-      return{label:'food dispenser',sub:'free · hold E for a hot stew · the ship\'s stores never run out',time:.6,run(){
-        invAdd('stew',1);log('the dispenser hands you a hot stew, still warm','good');SFX('pick');
+      return{label:'stew kiosk',sub:'free · hold E for a hot stew · the ship\'s stores never run out',time:.6,run(){
+        eclKioskOpen(s,'food');invAdd('stew',1);log('the kiosk door swings open and you take a hot stew, still warm','good');SFX('pick');
       }};
     }});
     L.push({id:'water',lx:.9,lz:-1.6,r:1.3,deck:1,act(){
-      return{label:'water dispenser',sub:'free · hold E for clean water · the ship\'s stores never run out',time:.6,run(){
-        invAdd('water',1);log('the dispenser fills a flask with clean water','good');SFX('pick');
+      return{label:'water fridge',sub:'free · hold E for clean water · the ship\'s stores never run out',time:.6,run(){
+        eclKioskOpen(s,'water');invAdd('water',1);log('the fridge door swings open and you take a cold bottle of water','good');SFX('pick');
       }};
     }});
     L.push({id:'bed',lx:-.78,lz:-2.1,r:1.5,deck:1,act(){
