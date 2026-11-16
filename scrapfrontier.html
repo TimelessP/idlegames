@@ -6673,8 +6673,10 @@ function vkBlock(p){
     const n=b.clone().sub(a).cross(d.clone().sub(a)),m=a.clone().add(b).add(d).multiplyScalar(1/3).sub(c);
     if(n.dot(m)<0){P.setXYZ(i+1,d.x,d.y,d.z);P.setXYZ(i+2,b.x,b.y,b.z)}
   }
-  g.computeVertexNormals();return g.toNonIndexed();
+  g.computeVertexNormals();return g;
 }
+/* a box centred at (x,y,z), turned about its own vertical axis by ry */
+function vkBoxRY(x,y,z,w,h,d,ry){const g=new THREE.BoxGeometry(w,h,d);g.rotateY(ry);g.translate(x,y,z);return g.toNonIndexed()}
 /* a box centred at (x,y,z) as a block, rotated about X by rx (a sloped panel) */
 function vkBox(x,y,z,w,h,d,rx){
   const g=new THREE.BoxGeometry(w,h,d);if(rx)g.rotateX(rx);g.translate(x,y,z);return g.toNonIndexed();
@@ -6994,7 +6996,7 @@ function vkFacetSweep(K,m,prof,pts,o,par){
   o=o||{};const out=[];
   for(let i=0;i<pts.length-1;i++){
     const a=pts[i],b=pts[i+1],d=b.clone().sub(a).normalize(),e=(o.over===undefined?.012:o.over);
-    out.push(ownMesh(extrude(prof,[a.clone().addScaledVector(d,-e),b.clone().addScaledVector(d,e)],{tile:o.tile||MAT[m].userData.tile||1,up:o.up,cap:true}),MAT[m]));
+    out.push(ownMesh(extrude(prof,[a.clone().addScaledVector(d,-e),b.clone().addScaledVector(d,e)],{tile:o.tile||MAT[m].userData.tile||1,up:o.upFn?o.upFn(a,b):o.up,cap:true}),MAT[m]));
     (par||K.g).add(out[out.length-1]);
   }
   return out;
@@ -7002,14 +7004,31 @@ function vkFacetSweep(K,m,prof,pts,o,par){
 const vkArc=(cx,cy,cz,r,a0,a1,n,sideX)=>{const o=[];for(let i=0;i<=n;i++){const a=a0+(a1-a0)*i/n;o.push(V3(cx,cy+Math.sin(a)*r,cz+Math.cos(a)*r))}return o};
 /* a fender flare over one wheel: an inverted channel swept round the tyre in flat facets, with a dark liner inside */
 function vkFender(K,cfg,x,z,o){
-  o=o||{};const R=cfg.R,rp=R+.115,w=cfg.W+.06,n=o.n||9,sg=Math.sign(x);
+  o=o||{};const R=cfg.R,rp=R+.115,w=cfg.W+.06,n=o.n||9,c=V3(x,R,z);
   const pts=vkArc(x,R,z,rp,-.18,Math.PI+.18,n);
-  const lo=-.14,li=-.045;     /* the outer lip hangs lower than the inner one, which stops short so the spring shows */
-  const U=[[-w/2,0],[w/2,0],[w/2,sg>0?lo:li],[w/2-.03,sg>0?lo:li],[w/2-.03,-.035],[-w/2+.03,-.035],[-w/2+.03,sg>0?li:lo],[-w/2,sg>0?li:lo]];
-  const prof={pts:U.map(p=>[p[0],p[1]]),closed:true,hard:true};
-  vkFacetSweep(K,o.mat||'vPaintY',prof,pts,{up:V3(0,0,1)});
+  const upFn=(p,q)=>p.clone().add(q).multiplyScalar(.5).sub(c).normalize();        /* outward from the wheel: the profile's own up, facet by facet */
+  /* with that frame the profile's +x is world -x on every facet, so the OUTER lip (the long one) goes at oS*w/2 */
+  const oS=x>0?-1:1,lo=-.14,li=-.045,lipAt=(sgn)=>sgn*oS>0?lo:li;
+  const U=[[-w/2,0],[w/2,0],[w/2,lipAt(1)],[w/2-.03,lipAt(1)],[w/2-.03,-.035],[-w/2+.03,-.035],[-w/2+.03,lipAt(-1)],[-w/2,lipAt(-1)]];
+  vkFacetSweep(K,o.mat||'vPaintY',{pts:U,closed:true,hard:true},pts,{upFn});
   const liner=vkArc(x,R,z,rp-.038,-.18,Math.PI+.18,n);
-  vkFacetSweep(K,'vWell',{pts:[[-w/2+.03,-.003],[w/2-.03,-.003],[w/2-.03,.003],[-w/2+.03,.003]],closed:true,hard:true},liner,{up:V3(0,0,1)});
+  vkFacetSweep(K,'vWell',{pts:[[-w/2+.03,-.003],[w/2-.03,-.003],[w/2-.03,.003],[-w/2+.03,.003]],closed:true,hard:true},liner,{upFn});
+}
+/* a rounded rectangle profile (w across, h tall, corner radius r), counter-clockwise */
+function vkRRProf(w,h,r,n){
+  n=n||5;const pts=[],cs=[[w/2-r,h/2-r,0],[-w/2+r,h/2-r,Math.PI/2],[-w/2+r,-h/2+r,Math.PI],[w/2-r,-h/2+r,Math.PI*1.5]];
+  for(const [cx,cy,a0] of cs)for(let i=0;i<=n;i++){const a=a0+(Math.PI/2)*i/n;pts.push([cx+Math.cos(a)*r,cy+Math.sin(a)*r])}
+  return{pts,closed:true,hard:false};
+}
+/* a bumper: one extrusion along a path that runs across the front and wraps back round each end */
+function vkBumper(K,m,pts,w,h,r,bend){
+  const path=filletPath(pts.map(p=>V3(p[0],p[1],p[2])),bend,6);
+  return ownMesh(extrude(vkRRProf(w,h,r),path,{tile:MAT[m].userData.tile||1,cap:true}),MAT[m]);
+}
+/* a lamp lens with a material of its own, so one vehicle's lights can glow without lighting every vehicle's */
+function vkLamp(K,s,pts8,kind){
+  const m=ownMesh(vkBlock(pts8),MAT[kind==='tail'?'vTail':'vLens'].clone());m.castShadow=false;K.g.add(m);K.dyn(m);
+  (kind==='tail'?(s.vkTail||(s.vkTail=[])):(s.vkHead||(s.vkHead=[]))).push(m);return m;
 }
 /* a coupling for a liquid port on a body panel: copper nozzle, steel flange, a hinged flap (the painted outline is on the livery) */
 function vkPortFitting(K,x,y,z,dir){
@@ -7048,12 +7067,14 @@ function asmBuggy2(K,s){
   P(K,vkBlock([[-.70,.80,2.0],[.70,.80,2.0],[.54,.62,2.42],[-.54,.62,2.42],[-.60,.95,2.0],[.60,.95,2.0],[.52,.92,2.42],[-.52,.92,2.42]]),L);
   P(K,vkBlock([[-.70,.95,.55],[.70,.95,.55],[.70,.95,.80],[-.70,.95,.80],[-.70,1.12,.55],[.70,1.12,.55],[.70,1.12,.80],[-.70,1.12,.80]]),L);
   P(K,vkSlab([[-.70,.60],[.70,.60],[.70,.99],[-.70,.99]],'z',-2.09,-2.05),L);                               /* tail panel */
-  /* lamps: angular lenses set into the nose and the tail */
-  vkMats();
+  /* lamps: angular lenses set into the nose and the tail; each vehicle's own material, so its lights can come on alone */
   for(const sx of sx2){
-    K.mesh(vkBlock([[sx*.30,.70,2.40],[sx*.54,.70,2.40],[sx*.50,.70,2.46],[sx*.32,.70,2.46],[sx*.30,.86,2.40],[sx*.54,.86,2.40],[sx*.50,.84,2.46],[sx*.32,.84,2.46]]),'vLens',0,0,0);
-    K.mesh(vkBlock([[sx*.50,.74,-2.09],[sx*.70,.74,-2.09],[sx*.70,.74,-2.13],[sx*.50,.74,-2.13],[sx*.50,.90,-2.09],[sx*.70,.90,-2.09],[sx*.70,.88,-2.13],[sx*.50,.88,-2.13]]),'vTail',0,0,0);
+    vkLamp(K,s,[[sx*.30,.70,2.40],[sx*.54,.70,2.40],[sx*.50,.70,2.46],[sx*.32,.70,2.46],[sx*.30,.86,2.40],[sx*.54,.86,2.40],[sx*.50,.84,2.46],[sx*.32,.84,2.46]],'head');
+    vkLamp(K,s,[[sx*.50,.74,-2.09],[sx*.70,.74,-2.09],[sx*.70,.74,-2.13],[sx*.50,.74,-2.13],[sx*.50,.90,-2.09],[sx*.70,.90,-2.09],[sx*.70,.88,-2.13],[sx*.50,.88,-2.13]],'tail');
   }
+  /* bumpers: a tall rounded bar, one piece, wrapping round at each end */
+  K.g.add(vkBumper(K,'vSteel',[[-.62,.70,2.04],[-.62,.70,2.50],[.62,.70,2.50],[.62,.70,2.04]],.12,.2,.045,.18));
+  K.g.add(vkBumper(K,'vSteel',[[-.64,.78,-1.80],[-.64,.78,-2.18],[.64,.78,-2.18],[.64,.78,-1.80]],.12,.2,.045,.18));
   /* ── fenders over all four wheels, then the stays that hold them ── */
   const corners=[];
   for(const ax of cfg.axles)for(const sx of sx2){
@@ -7121,8 +7142,6 @@ function vkPose(s){
 }
 ASMFN.buggy=asmBuggy2;
 
-/* pre-make the vehicle surfaces while the game idles, so the first spawn does not hitch */
-setTimeout(()=>{try{if(typeof requestIdleCallback==='function')requestIdleCallback(()=>{try{vkMatsLorry()}catch(e){}},{timeout:6000});}catch(e){}},12000);
 
 /* ═══════════════════════════════════════════════════════════════════════════════════════════════
    GROUND VEHICLE PHYSICS, per-vehicle config. The rigid-body contact model the buggy had, generalised: any number of wheels,
@@ -7410,20 +7429,53 @@ function vhDriveTick(dt){
   P.x=s.x;P.z=s.z;P.y=s.y;P.vy=0;P.vx=P.vz=0;
 }
 
-/* the diesel's note: a low, lumpy rumble that rises with the throttle, only while the engine is running */
-function vhDieselSound(s,off){
+/* the diesel's note: a low, lumpy rumble that rises with the throttle, only while the engine is running.
+   The lump is an LFO on an inner gain stage (centred on .65), and the master gain is a separate stage: with the master at 0 it is silent. */
+function vhDieselSound(s,off,snap){
   if(!SET.audio||!A.ctx)return;
   try{
     const c=A.ctx;let D=FL.dieselEng;
-    if(!D){D=FL.dieselEng={o:c.createOscillator(),o2:c.createOscillator(),g:c.createGain(),f:c.createBiquadFilter(),l:c.createOscillator(),lg:c.createGain()};
-      D.o.type='sawtooth';D.o2.type='triangle';D.f.type='lowpass';D.f.frequency.value=170;D.g.gain.value=0;
-      D.l.frequency.value=9;D.lg.gain.value=.5;D.l.connect(D.lg);D.lg.connect(D.g.gain);                      /* the cylinders' lump */
-      D.o.connect(D.f);D.o2.connect(D.f);D.f.connect(D.g);D.g.connect(c.destination);D.o.start();D.o2.start();D.l.start()}
-    const t=c.currentTime,eng=(!off&&s.hy)?s.hy.eng:0,w=Math.abs(s.throttle||0);
-    D.g.gain.setTargetAtTime(eng*(.018+.012*w),t,.15);
-    D.o.frequency.setTargetAtTime(30+w*22,t,.2);D.o2.frequency.setTargetAtTime(60+w*40,t,.2);D.l.frequency.setTargetAtTime(7+w*8,t,.3);
+    if(!D){D=FL.dieselEng={o:c.createOscillator(),o2:c.createOscillator(),lump:c.createGain(),g:c.createGain(),f:c.createBiquadFilter(),l:c.createOscillator(),lg:c.createGain()};
+      D.o.type='sawtooth';D.o2.type='triangle';D.f.type='lowpass';D.f.frequency.value=170;D.g.gain.value=0;D.lump.gain.value=.65;
+      D.l.frequency.value=7;D.lg.gain.value=.3;D.l.connect(D.lg);D.lg.connect(D.lump.gain);
+      D.o.connect(D.f);D.o2.connect(D.f);D.f.connect(D.lump);D.lump.connect(D.g);D.g.connect(c.destination);D.o.start();D.o2.start();D.l.start()}
+    const t=c.currentTime,eng=(!off&&s.hy)?s.hy.eng:0,w=off?0:Math.abs(s.throttle||0),set=(prm,v,tc)=>{if(snap){prm.cancelScheduledValues(t);prm.setValueAtTime(v,t)}else prm.setTargetAtTime(v,t,tc)};
+    set(D.g.gain,eng*(.018+.012*w),.15);set(D.o.frequency,30+w*22,.2);set(D.o2.frequency,60+w*40,.2);set(D.l.frequency,7+w*8,.3);
   }catch(e){}
 }
+/* a clean start and a clean stop: put the engine voices at idle at once, with no glide from wherever they last were */
+function vhEngineIdle(s){
+  if(!SET.audio||!A.ctx)return;
+  try{
+    const E=FL.buggyEng,t=A.ctx.currentTime;
+    if(E){for(const [prm,v] of [[E.g.gain,0],[E.o.frequency,42],[E.o2.frequency,84],[E.f.frequency,200]]){prm.cancelScheduledValues(t);prm.setValueAtTime(v,t)}}
+    vhDieselSound(s,true,true);
+  }catch(e){}
+}
+
+/* ── headlamps: auto (on at night), on, off, like the train's, but gentler. One spot light is shared; it rides on the driven vehicle. ── */
+let VL=null;
+const VH_LM=['auto','on','off'];
+function vhHeadMode(){
+  const s=G.drive;if(!s||!VPW[s.type])return;
+  s.hm=((s.hm||0)+1)%3;
+  log('headlamps: '+VH_LM[s.hm]+(s.hm===0?' — on when it gets dark':s.hm===1?' — always lit':' — dark'),'gold');SFX('click');
+}
+function vhLightsTick(dt){
+  if(!VL){VL={head:new THREE.SpotLight(0xfff1d0,0,70,.55,.6,1.1),tgt:new THREE.Object3D()};VL.head.target=VL.tgt;scene.add(VL.head,VL.tgt)}
+  const s=G.drive,veh=(s&&VPW[s.type])?s:null,night=isNight(),k=Math.min(1,dt*6);
+  let on=false;if(veh){const m=veh.hm||0;on=m===1||(m===0&&night)}
+  if(veh&&on){
+    const W=VPW[veh.type].head;veh.mesh.updateMatrixWorld();
+    veh.mesh.localToWorld(VL.head.position.set(W.pos[0],W.pos[1],W.pos[2]));veh.mesh.localToWorld(VL.tgt.position.set(W.aim[0],W.aim[1],W.aim[2]));
+    VL.head.intensity+=((night?110:35)-VL.head.intensity)*k;
+  }else VL.head.intensity+=(0-VL.head.intensity)*k;
+  for(const o of G.struct){
+    if(!o.vkHead)continue;const want=(o===veh&&on)?1.1:.1;
+    for(const m of o.vkHead)m.material.emissiveIntensity+=(want-m.material.emissiveIntensity)*k;
+  }
+}
+VPW.buggy.head={pos:[0,.88,2.5],aim:[0,.1,55]};
 
 /* ═══════════════════════════════════════════════════════════════════════════════════════════════
    THE LORRY: the buggy's design language scaled up. Cab-over at the front on a single steering axle, a banded tank on a flatbed behind it,
@@ -7443,7 +7495,7 @@ VPH.lorry=vhConfig(VKC.lorry,{
   comZ:-.6,cgh:1.15,I:9,avDamp:2.6,aDrive:8.5,vMax:12,vRev:4,steerMax:.5,steerSens:10,k:13.5,cDamp:1.8,cReb:2.6,kBump:300,mu:1,muL:.9,roll:1.6,
   body:[{n:'bumpF',x:0,y:-.30,z:4.15},{n:'bumpR',x:0,y:-.30,z:-4.45},{n:'roof',x:0,y:2.05,z:2.6},{n:'roofB',x:0,y:1.95,z:-1.5},{n:'sideL',x:1.75,y:-.25,z:0},{n:'sideR',x:-1.75,y:-.25,z:0}]
 });
-VPW.lorry={max:160,drain:.045,idle:.08,lowFrac:.10,alt:1.8,burn:.0107,idleBurn:.005,solar:.25,solarWhen:'always',fuelC:1,thrScale:1,eye:[.5,2.82,2.55],chase:[11,3.8],name:'lorry'};
+VPW.lorry={head:{pos:[0,1.62,3.95],aim:[0,.9,62]},max:160,drain:.045,idle:.08,lowFrac:.10,alt:1.8,burn:.0107,idleBurn:.005,solar:.25,solarWhen:'always',fuelC:1,thrScale:1,eye:[.5,2.82,2.55],chase:[11,3.8],name:'lorry'};
 const VK_LOR={paint:[222,104,26],fade:[240,140,58],prime:[116,62,44]};
 function vkLiveryLorry(){
   const side=(z,y)=>{
@@ -7481,7 +7533,7 @@ function vkLiveryLorry(){
 }
 /* hazard stripes: diagonal yellow and black bars, scuffed and flaked */
 const vkHazardFn=(u,v,q)=>{
-  const d=((u+v)*8)%1,on=d<.5;
+  const d=((u+v)*3)%1,on=d<.5;
   const wear=pfb(u,v,3,3,701,3),chip=pfb(u,v,14,14,703,3),f=pfb(u,v,80,80,705,1);
   ST(q,on?[238,188,16]:[30,30,32]);
   if(sm_(.64,.8,chip)>0){BL(q,[120,70,44],sm_(.64,.8,chip)*.8);}
@@ -7497,6 +7549,18 @@ const vkGrilleFn=(u,v,q)=>{
   const frame=Math.max(Math.abs(X)-.96,Math.abs(Y)-.37);if(frame>-.03&&frame<0)BL(q,[238,188,16],.9);
   const g=(f-.5)*10;q.r+=g;q.g+=g;q.b+=g;q.h=.5+(slat?.08:0);q.ro=.6;q.me=.5;
 };
+/* the cab front, painted: orange, a black grille with slats and a keyline, and dark bezels round the lamps */
+function vkFrontLivery(){
+  const side=(x,y)=>{
+    let pal=VK_LOR,dark=0,lines=0,hi=0;
+    const g=vkRR(x,y,0,1.58,.46,.26,.03);
+    if(g<0){dark=vkCov(g+.015,.004);const k=(y-1.32)/.034,sl=Math.abs(k-Math.round(k));hi=vkCov(g+.04,.004)*(sl<.14?.5:0)}
+    lines=Math.max(lines,vkCov(Math.abs(g)-.01,.004));
+    for(const sx of [-1,1]){const lb=vkRR(x,y,sx*.78,1.55,.2,.19,.03);dark=Math.max(dark,vkCov(lb,.004));lines=Math.max(lines,vkCov(Math.abs(lb+.01)-.007,.004))}
+    return{pal,dark,lines,hi};
+  };
+  return{z0:-1.1,z1:1.1,y0:1.25,y1:1.9,x0:-1,x1:1,pal:VK_LOR,seed:41,wear:1,side,top:()=>({pal:VK_LOR}),mats:['vLorFront','vLorFront']};
+}
 function vkMatsLorry(){
   if(MAT.vLorS)return;
   vkMats();
@@ -7505,11 +7569,11 @@ function vkMatsLorry(){
   asmMat('vLorT',256,1,vkLiveryFn(VKL.lorry,'top'),{bump:1.6});
   asmMat('vPaintO',256,1.4,(u,v,q)=>{const fq=f=>[Math.max(1,Math.round(1.4*f)),Math.max(1,Math.round(1.4*f))];vkWear(q,VK_LOR,u,v,29,.5,Math.max(0,1-Math.min(u,1-u,v,1-v)*3)*.12,fq)},{bump:1.6});
   asmMat('vHazard',256,.5,vkHazardFn,{bump:1.4});
-  asmMat('vGrille',256,2,vkGrilleFn,{bump:1.8});
+  asmMat('vLorFront',512,1,vkLiveryFn(vkFrontLivery(),'side'),{bump:1.6});
 }
 /* the pump stations, carried over from the old lorry: a coupling, a pump panel with its lever, button and lamp, and a sight glass with its gauge */
 function vkPumpStations(K,s,pz){
-  s.sLamps=[];s.sLev=[];s.sLevAxis='x';s.sGauges=[];s.sGaugeH=1.3;
+  s.sLamps=[];s.sLev=[];s.sLevAxis='x';s.sGauges=[];s.sGaugeH=1.2;
   for(const sg of [-1,1]){
     K.box('aPlate',sg*.8,.9,pz,.4,.07,.3);K.box('aBare',sg*.66,.94,pz,.1,.16,.2);
     K.pipe('aRust',.04,[V3(sg*.35,.97,pz),V3(sg*.62,.93,pz),V3(sg*.94,.95,pz)],.1,{tile:.5});
@@ -7520,10 +7584,11 @@ function vkPumpStations(K,s,pz){
     const lev=new THREE.Mesh(new THREE.BoxGeometry(.03,.16,.03),new THREE.MeshStandardMaterial({color:0xd8d0b0}));lev.position.set(sg*1.075,1.38,pz-.15);K.g.add(lev);K.dyn(lev);s.sLev[pi]=lev;
     K.box('aBare',sg*1.062,1.38,pz-.15,.012,.1,.1);K.box('aBare',sg*1.062,1.38,pz+.15,.012,.13,.13);K.box('aOchre',sg*1.07,1.38,pz+.15,.012,.09,.09);
     const lamp=new THREE.Mesh(new THREE.SphereGeometry(.04,10,8),new THREE.MeshBasicMaterial({color:0x402020}));lamp.position.set(sg*1.06,1.52,pz);K.g.add(lamp);K.dyn(lamp);s.sLamps[pi]=lamp;
-    const gz=pz+.62;                                                                       /* the sight glass and its gauge, on the flatbed's side behind the pumps */
-    K.box('aPlate',sg*1.0,2.25,gz,.04,1.62,.14);K.tube('aGlass',profCircle(.02,8),[V3(sg*1.04,1.45,gz),V3(sg*1.04,3.05,gz)],{tile:.5});
+    const gz=pz-.65;                                                                       /* the sight glass, on the flatbed's edge under the tank's straight run, bolted at the foot and to the tank's side */
+    K.box('aPlate',sg*1.0,1.9,gz,.04,1.3,.14);K.tube('aGlass',profCircle(.02,8),[V3(sg*1.04,1.3,gz),V3(sg*1.04,2.5,gz)],{tile:.5});
+    K.box('vSteel',sg*.99,1.22,gz,.16,.07,.2);K.box('vSteel',sg*.96,2.17,gz,.16,.05,.06);K.box('vSteel',sg*1.04,1.28,gz,.07,.06,.07);K.box('vSteel',sg*1.04,2.5,gz,.07,.05,.07);
     const g=new THREE.BoxGeometry(1,1,1);g.translate(0,.5,0);const gm=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:0xc98a2a}));
-    gm.scale.set(.028,.001,.028);gm.position.set(sg*1.045,1.5,gz);gm.userData.ci=0;K.g.add(gm);K.dyn(gm);s.sGauges.push(gm);
+    gm.scale.set(.028,.001,.028);gm.position.set(sg*1.045,1.3,gz);gm.userData.ci=0;K.g.add(gm);K.dyn(gm);s.sGauges.push(gm);
   }
 }
 function asmLorry2(K,s){
@@ -7537,7 +7602,7 @@ function asmLorry2(K,s){
   const skirt=[[-4.3,.72],[-4.3,1.12],[1.7,1.12],[1.7,.72],[-.75,.72],[-.75,1.08],[-3.85,1.08],[-3.85,.72]];
   P(K,vkSlab(skirt,'x',.91,.95),L);P(K,vkSlab(skirt,'x',-.95,-.91),L);
   vkMesh(K,vkSlab([[-1.0,.72],[1.0,.72],[1.0,1.2],[-1.0,1.2]],'z',-4.36,-4.3),'vHazard');
-  vkMesh(K,vkBlock([[-1.08,.62,-4.36],[1.08,.62,-4.36],[1.08,.62,-4.62],[-1.08,.62,-4.62],[-1.08,.9,-4.36],[1.08,.9,-4.36],[1.08,.9,-4.5],[-1.08,.9,-4.5]]),'vHazard');   /* rear bumper */
+  K.g.add(vkBumper(K,'vHazard',[[-1.16,.76,-4.00],[-1.16,.76,-4.66],[1.16,.76,-4.66],[1.16,.76,-4.00]],.22,.36,.07,.24));            /* rear bumper: one bar wrapping round both ends */
   for(const sx of sx2){K.mesh(vkBlock([[sx*.6,.98,-4.36],[sx*.9,.98,-4.36],[sx*.9,.98,-4.42],[sx*.6,.98,-4.42],[sx*.6,1.14,-4.36],[sx*.9,1.14,-4.36],[sx*.9,1.1,-4.42],[sx*.6,1.1,-4.42]]),'vTail',0,0,0)}
   /* ── the tank: the original galvanised barrel, scaled up, on saddles, with its bands and hatch ── */
   const tz=-1.55,ty=2.17;
@@ -7545,17 +7610,16 @@ function asmLorry2(K,s){
   for(const dz of [-2.05,-1.0,0,1.0,2.05])K.mesh(latheGeo([[.875,-.05],[.905,-.04],[.905,.04],[.875,.05]],28,.4),'aBare',0,ty,tz+dz,Math.PI/2,0,0);
   for(const z of [-3.3,-1.55,.2]){K.box('aRust',0,1.4,z,1.5,.4,.26);K.box('aBare',0,1.62,z,1.3,.04,.3)}
   K.lathe('aGalv',[[0,0],[.28,0],[.30,.06],[.25,.14],[.1,.18],[0,.18]],0,ty+.86,tz,16);
-  K.pipe('aGalv',.04,[V3(.4,ty+.87,tz+.5),V3(.4,ty+1.12,tz+.5),V3(.48,ty+1.2,tz+.5),V3(.58,ty+1.12,tz+.5)],.06);
+  K.pipe('aGalv',.04,[V3(.4,ty+.68,tz+.5),V3(.4,ty+1.12,tz+.5),V3(.48,ty+1.2,tz+.5),V3(.58,ty+1.12,tz+.5)],.06);
   /* a ladder and a handrail at the tail, in hazard-banded steel */
-  for(const sx of sx2)K.pipe('vSteel',.026,[V3(sx*.38,1.2,-4.4),V3(sx*.38,2.6,-4.4),V3(sx*.3,3.05,-4.05)],.12,{tile:.4});
-  for(let i=0;i<6;i++)K.box('vSteel',0,1.5+i*.26,-4.4,.76,.03,.03);
+  for(const sx of sx2)K.pipe('vSteel',.026,[V3(sx*.38,1.22,-4.12),V3(sx*.38,2.6,-4.12),V3(sx*.3,2.97,-3.80)],.12,{tile:.4});
+  for(let i=0;i<6;i++)K.box('vSteel',0,1.5+i*.26,-4.12,.76,.03,.03);
   /* ── the cab: sides on the livery with a wheel arch and a window cut out, glazing, lower fascia, roof, floor and rear wall ── */
   const sideC=[[1.75,1.25],[2.05,1.25],[2.05,1.65],[3.45,1.65],[3.45,1.25],[3.78,1.25],[3.78,1.85],[3.68,2.15],[3.36,3.22],[3.22,3.30],[2.00,3.30],[1.75,3.12]];
   const win=[[2.20,2.30],[3.34,2.30],[3.22,3.18],[2.20,3.18]];
   P(K,vkSlab(sideC,'x',cw-.05,cw,[win]),L);P(K,vkSlab(sideC,'x',-cw,-cw+.05,[win]),L);
   for(const sg of [-1,1]){const g=ownMesh(vkSlab(win,'x',sg*(cw-.03)-.005,sg*(cw-.03)+.005),MAT.vGlass,false);K.g.add(g)}
-  P(K,vkBlock([[-cw,1.25,3.45],[cw,1.25,3.45],[cw,1.25,3.78],[-cw,1.25,3.78],[-cw,1.9,3.45],[cw,1.9,3.45],[cw,1.9,3.69],[-cw,1.9,3.69]]),L);
-  const gr=ownMesh(new THREE.PlaneGeometry(2.0,.8),MAT.vGrille);gr.position.set(0,1.56,3.795);K.g.add(gr);
+  vkPlanarXY(K,vkBlock([[-cw,1.25,3.45],[cw,1.25,3.45],[cw,1.25,3.78],[-cw,1.25,3.78],[-cw,1.9,3.45],[cw,1.9,3.45],[cw,1.9,3.69],[-cw,1.9,3.69]]),'vLorFront',-cw,cw,1.25,1.9);
   P(K,vkBlock([[-cw,3.28,1.78],[cw,3.28,1.78],[cw,3.28,3.30],[-cw,3.28,3.30],[-cw,3.36,1.78],[cw,3.36,1.78],[cw,3.36,3.22],[-cw,3.36,3.22]]),L);
   const ws=new THREE.BufferGeometry(),wv=[-1.06,1.92,3.685, 1.06,1.92,3.685, 1.06,3.24,3.30, -1.06,3.24,3.30];
   ws.setAttribute('position',new THREE.Float32BufferAttribute(wv,3));ws.setIndex([0,1,2,0,2,3,0,2,1,0,3,2]);ws.setAttribute('uv',new THREE.Float32BufferAttribute([0,0,1,0,1,1,0,1],2));ws.computeVertexNormals();
@@ -7563,12 +7627,13 @@ function asmLorry2(K,s){
   vkMesh(K,vkSlab([[-cw,1.75],[cw,1.75],[cw,3.5],[-cw,3.5]],'y',E-.05,E),'vSteel');
   P(K,vkSlab([[-cw,1.25],[cw,1.25],[cw,3.12],[-cw,3.12]],'z',1.75,1.80,[[[-.8,2.3],[.8,2.3],[.8,3.0],[-.8,3.0]]]),L);
   /* bumper, steps and grab handles: hazard-striped */
-  vkMesh(K,vkBlock([[-1.12,.95,3.78],[1.12,.95,3.78],[1.12,.95,4.12],[-1.12,.95,4.12],[-1.12,1.3,3.78],[1.12,1.3,3.78],[1.12,1.3,4.0],[-1.12,1.3,4.0]]),'vHazard');
+  K.g.add(vkBumper(K,'vHazard',[[-1.18,1.12,3.62],[-1.18,1.12,4.0],[1.18,1.12,4.0],[1.18,1.12,3.62]],.22,.38,.07,.26));              /* front bumper: one bar wrapping round both ends */
   for(const sx of sx2){
     vkMesh(K,vkBlock([[sx*cw,1.12,2.1],[sx*(cw+.3),1.12,2.1],[sx*(cw+.3),1.12,3.3],[sx*cw,1.12,3.3],[sx*cw,1.2,2.1],[sx*(cw+.3),1.2,2.1],[sx*(cw+.3),1.2,3.3],[sx*cw,1.2,3.3]]),'vHazard');
     K.pipe('vSteel',.022,[V3(sx*(cw+.06),1.8,2.15),V3(sx*(cw+.1),2.2,2.15),V3(sx*(cw+.1),2.9,2.15)],.08,{tile:.4});
-    K.mesh(vkBlock([[sx*.5,1.55,3.72],[sx*.9,1.55,3.72],[sx*.9,1.55,3.8],[sx*.5,1.55,3.8],[sx*.5,1.72,3.72],[sx*.9,1.72,3.72],[sx*.9,1.72,3.76],[sx*.5,1.72,3.76]]),'vLens',0,0,0);    /* headlamps */
-    K.pipe('vSteel',.018,[V3(sx*(cw+.02),2.8,3.2),V3(sx*(cw+.34),2.9,3.28),V3(sx*(cw+.34),3.18,3.28)],.07,{tile:.4});K.box('vSteel',sx*(cw+.34),3.18,3.28,.06,.3,.2);          /* wing mirrors */
+    vkLamp(K,s,[[sx*.62,1.40,3.74],[sx*.94,1.40,3.74],[sx*.94,1.40,3.82],[sx*.62,1.40,3.82],[sx*.62,1.70,3.70],[sx*.94,1.70,3.70],[sx*.94,1.70,3.78],[sx*.62,1.70,3.78]],'head');
+    K.pipe('vSteel',.018,[V3(sx*(cw+.02),2.55,3.36),V3(sx*(cw+.30),2.62,3.40)],.07,{tile:.4});K.pipe('vSteel',.016,[V3(sx*(cw+.02),2.95,3.30),V3(sx*(cw+.30),2.78,3.40)],.07,{tile:.4});
+    vkMesh(K,vkBoxRY(sx*(cw+.34),2.70,3.40,.2,.34,.05,sx*.3),'vSteel');                 /* a mirror: flat plate facing aft, turned in to the driver */
   }
   /* a light bar and a beacon on the roof, the solar panel, the exhaust stack behind the cab, hybrid battery boxes between the rails */
   K.box('vSteel',0,3.44,3.1,1.5,.06,.1);for(let i=-3;i<=3;i++)K.mesh(vkBlock([[i*.2-.07,3.44,3.15],[i*.2+.07,3.44,3.15],[i*.2+.07,3.44,3.2],[i*.2-.07,3.44,3.2],[i*.2-.07,3.5,3.15],[i*.2+.07,3.5,3.15],[i*.2+.07,3.5,3.19],[i*.2-.07,3.5,3.19]]),'vLens',0,0,0);
@@ -7597,10 +7662,19 @@ function asmLorry2(K,s){
   const fz=cfg.axles[0].z+cfg.steer.rackZ;
   K.mesh(vkGeo('rackh2',()=>{const g=new THREE.CylinderGeometry(.05,.05,.7,10);g.rotateZ(Math.PI/2);return g}),'vSteel',0,cfg.steer.rackY,fz);
   s.vkRack=K.dyn(ownMesh(vkGeo('rackr2',()=>{const g=new THREE.CylinderGeometry(.02,.02,1.2,8);g.rotateZ(Math.PI/2);return g}),MAT.vShock));s.vkRack.position.set(0,cfg.steer.rackY,fz);K.g.add(s.vkRack);
+  K.box('vSteel',0,.82,fz,1.12,.08,.14);for(const sx of sx2){K.box('vSteel',sx*.3,.78,fz,.07,.14,.16);K.box('vSteel',sx*.52,.84,fz,.1,.12,.18)}      /* the rack hangs from a cross-member between the rails */
   s.vkCfg=cfg;vkPose(s);
   return K;
 }
 ASMFN.lorry=asmLorry2;
+
+/* map a block's faces onto a single front-on texture (x across, y up) */
+function vkPlanarXY(K,geo,m,x0,x1,y0,y1){
+  const g=geo.index?geo.toNonIndexed():geo,P=g.attributes.position,uv=new Float32Array(P.count*2);
+  for(let i=0;i<P.count;i++){uv[i*2]=(P.getX(i)-x0)/(x1-x0);uv[i*2+1]=(P.getY(i)-y0)/(y1-y0)}
+  g.setAttribute('uv',new THREE.BufferAttribute(uv,2));g.computeVertexNormals();
+  const o=ownMesh(g,MAT[m]);K.g.add(o);return o;
+}
 ASMFN.ecliptix=(K,s)=>{eclMats();if(s.form==='ship')asmEcliptixShip(K,s);else asmEcliptixCube(K,s)};
 /* ── lifecycle ── */
 function eclInit(s){
@@ -7922,7 +7996,7 @@ function structureMesh(s){
 }
 /* per-frame cosmetics driven by the machines' verdicts */
 function animateStructures(dt){
-  const w=Day.ctx.wind;
+  const w=Day.ctx.wind;vhLightsTick(dt);
   for(const s of G.struct){
     s.age+=dt;if(s.type==='buggy'||s.type==='lorry')vhIdle(s,dt);
     const f=s.fsm;
@@ -12856,8 +12930,8 @@ function enterBuggy(s){
   s.throttle = 0;
   s.isGrounded = true;
   s.yaw = s.rot;
-  s.look = {yaw:0,pitch:0};
-  buggyPark(s);
+  s.look = {yaw:0,pitch:0};s.steer=0;s.throttleHeld=0;
+  buggyPark(s);vhEngineIdle(s);
   P.yaw = s.yaw + Math.PI;
   P.pitch = 0;
   log((s.type==='lorry'?'lorry':'buggy')+': W/S throttle · A/D steer · Space brake · V view · E step out','gold');
@@ -12879,7 +12953,7 @@ function exitBuggy(){
   P.z=s.z+Math.sin(s.rot)*(s.type==='lorry'?3.4:2.9);
   P.y=heightAt(P.x,P.z);
   P.vx=P.vz=0;
-  buggyEngine(s, true);
+  s.throttle=0;s.steer=0;s.throttleHeld=0;buggyEngine(s, true);vhEngineIdle(s);
   if(viewModel)viewModel.visible=true;
   log('stepped out — the buggy is parked');
   SFX('place');
@@ -15905,6 +15979,13 @@ function refreshPanel(){
   $('#dr-title').textContent=tab[1];
   $('#dr-sub').textContent=tab[2]+' · one file';
   const rail=$('#tabs');
+  if(!rail._drag){                                      /* mouse drag scrolls the tab bar, as touch always did; the wheel still works */
+    rail._drag=1;let dr=null;rail.style.cursor='grab';
+    rail.addEventListener('pointerdown',e=>{if(e.pointerType==='mouse'&&e.button===0)dr={x:e.clientX,sl:rail.scrollLeft,moved:false}});
+    window.addEventListener('pointermove',e=>{if(!dr)return;const dx=e.clientX-dr.x;if(Math.abs(dx)>4)dr.moved=true;if(dr.moved){rail.scrollLeft=dr.sl-dx;e.preventDefault()}});
+    window.addEventListener('pointerup',()=>{if(dr&&dr.moved){rail._swallow=true;setTimeout(()=>{rail._swallow=false},0)}dr=null});
+    rail.addEventListener('click',e=>{if(rail._swallow){e.stopPropagation();e.preventDefault()}},true);
+  }
   if(rail.childElementCount!==TABS.length){
     rail.innerHTML='';
     for(const t of TABS){
@@ -16641,7 +16722,8 @@ addEventListener('keydown',e=>{
     case 'KeyK': toggleKite(); break;
     case 'KeyV': toggleView(); break;
     case 'KeyF': toggleFinder(); break;
-    case 'KeyN': if(!e.repeat&&trainOf()){trainHeadMode();break}
+    case 'KeyN': if(!e.repeat&&G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry')){vhHeadMode();break}
+      if(!e.repeat&&trainOf()){trainHeadMode();break}
       if(isPlane()){SET.invert=!SET.invert;saveSettings();log('pitch '+(SET.invert?'inverted — W pulls up':'normal — W noses down'))} break;
     case 'KeyG':{ // eat the best thing in the bag
       const f=['stew','jerky','pear','root','bean'].find(k=>G.inv[k]>0);
@@ -17232,6 +17314,7 @@ async function boot(){
   streamWorld(P.x,P.z);World.wi=0;World.want=null;
   say('streaming desert cells around the drifter','plain');
   buildCompass();
+  try{vkMatsLorry()}catch(e){console.warn('vehicle paint',e)}     /* mix the vehicle paint while the boot dialog is up, not mid-game */
   ready=true;
   say('ready — the desert is where you left it','good');
   $('#bootgo').disabled=false;
