@@ -630,6 +630,7 @@ function genWorld(seed, salt = 0) {
   buildGround();
   for (const ch of W.chapters) genPuzzles(ch);
   fillDecor();
+  fixPlacement();
   placeScenery();
   W.specById = new Map(W.specs.map(s => [s.id, s]));
   nameItems();
@@ -841,6 +842,29 @@ function genPuzzles(ch) {
 }
 function insideAny(x) { for (const b of W.buildings) if (x > b.x - 30 && x < b.x + b.w + 30) return true; for (const s of W.specs) if (s.kind === 'barrier' && Math.abs(x - s.x) < (s.w || 0) / 2 + 40) return true; return false; }
 
+/* ---------- physical gate positions: where a barrier actually stops the player ---------- */
+function barBlockX(b) { return b.sub === 'door' ? b.x : ({ bridge: b.x - b.w / 2 + 26, drawbridge: b.x - b.w / 2 + 30, fallen: b.x - 46, gate: b.x - 6, drift: b.x - 58, keeper: b.x + 10 })[b.sub]; }
+/* the segment a spec physically sits in, judged by its x against the chapter's gates */
+function physSeg(sp) {
+  let seg = 0;
+  for (const b of W.specs) if (b.kind === 'barrier' && b.c === sp.c && sp.x > barBlockX(b) - 14) seg = Math.max(seg, b.seg + 1);
+  return seg;
+}
+/* anything that holds a puzzle item must stand on the near side of every gate it is meant to help open */
+function fixPlacement() {
+  const occupied = x => W.specs.some(o => !o.b && Math.abs(o.x - x) < 46) || insideAny(x);
+  for (const sp of W.specs) {
+    if (!sp.puzzle || sp.kind === 'barrier' || sp.kind === 'easel' || sp.b) continue;
+    if (physSeg(sp) <= sp.seg) continue;
+    const ch = W.chapters[sp.c], seg = ch.segs[sp.seg];
+    const gate = W.specs.find(b => b.kind === 'barrier' && b.c === sp.c && b.seg === sp.seg);
+    const gb = gate && gate.sub === 'door' ? W.buildings.find(q => q.id === gate.b) : null;
+    let start = gb ? gb.x - 100 : barBlockX(gate) - 70, x = null;
+    for (let cx = start; cx > seg.x0 + 30; cx -= 30) if (!occupied(cx)) { x = Math.round(cx); break; }
+    if (x == null) x = Math.round(seg.x0 + 30);
+    sp.x = x; if (sp.kind === 'npc') sp.z = LANE_BACK + 6;
+  }
+}
 /* ---------- decorate unused slots: food, empty cupboards, ambient devices, lore NPCs ---------- */
 function fillDecor() {
   for (const sl of W.slots) {
@@ -966,8 +990,10 @@ function solveWorld() {
     }
   }
   const easels = W.specs.filter(s => s.kind === 'easel');
-  const ok = easels.every(e => done.has(e.id)) && peak <= 7;
-  return { ok, peak, steps, chapters: easels.filter(e => done.has(e.id)).length, puzzles: puzzles.length };
+  /* geometry proof: every puzzle object must be physically reachable in the segment the logic assumes */
+  const misplaced = puzzles.filter(sp => sp.kind !== 'barrier' && !sp.b && physSeg(sp) > sp.seg).length;
+  const ok = easels.every(e => done.has(e.id)) && peak <= 7 && misplaced === 0;
+  return { ok, peak, steps, misplaced, chapters: easels.filter(e => done.has(e.id)).length, puzzles: puzzles.length };
 }
 function generateVerified(seed) {
   for (let salt = 0; salt < 40; salt++) {
