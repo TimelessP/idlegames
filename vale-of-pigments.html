@@ -4037,6 +4037,40 @@ function currentGoal() {
   }
   return null;
 }
+/* ==========================================================================
+   NAV: the OS / browser Back button closes the top in-game layer (modal,
+   menu page, conversation) instead of leaving the game. Every open layer
+   owns one history entry; closing a layer in-game removes its entry again.
+   ========================================================================== */
+const Nav = {
+  depth: 0, ignore: 0,
+  layers() { let n = 0; if (UI.menuOpen) n += Math.max(1, UI.panels.length); if (UI.modal) n++; if (Dialog.active) n++; return n; },
+  init() {
+    /* a reload while layers were open leaves stale entries ahead of us: step back over them silently */
+    const st = history.state;
+    if (st && st.vop > 0) { this.ignore++; history.go(-st.vop); }
+    window.addEventListener('popstate', e => this.onPop(e));
+  },
+  onPop(e) {
+    const to = (e.state && e.state.vop) || 0;
+    if (this.ignore > 0) { this.ignore--; this.depth = to; return; }
+    if (to < this.depth) { const n = this.depth - to; this.depth = to; for (let i = 0; i < n; i++) this.closeTop(); }
+    else this.depth = to; /* Forward: nothing reopens; sync trims it away */
+  },
+  closeTop() {
+    Audio.sfx('ui');
+    if (UI.modal) UI.closeModal();
+    else if (UI.menuOpen) UI.back();
+    else if (Dialog.active) Dialog.close();
+  },
+  /* called every frame: keep history depth equal to the number of open layers */
+  sync() {
+    if (this.ignore > 0) return;
+    const want = this.layers();
+    while (this.depth < want) { this.depth++; try { history.pushState({ vop: this.depth }, ''); } catch (e) { } }
+    if (this.depth > want) { const n = this.depth - want; this.depth = want; this.ignore++; history.go(-n); }
+  },
+};
 const UI = {
   fade: 0, fadeT: 0, fadeTo: 0, toasts: [], markerT: 0, panels: [], menuOpen: false, modal: null, hover: null,
   build() {
@@ -4150,6 +4184,7 @@ const UI = {
   },
   fadeOut(d) { this.fadeTo = 1; this.fadeSp = 1 / d; }, fadeIn(d) { this.fadeTo = 0; this.fadeSp = 1 / d; },
   update(dt) {
+    Nav.sync();
     this.markerT = Math.max(0, this.markerT - dt * 1.4);
     if (this.fade !== this.fadeTo) this.fade = this.fadeTo > this.fade ? Math.min(this.fadeTo, this.fade + dt * (this.fadeSp || 1)) : Math.max(this.fadeTo, this.fade - dt * (this.fadeSp || 1));
     if (Settings.v.controls.hints && G.player) {
@@ -4211,7 +4246,7 @@ const UI = {
   },
   /* ---------- flat, borderless game menu ---------- */
   openMenu() { if (this.menuOpen) return; this.menuOpen = true; Game.pause(true); this.menu.classList.remove('hidden'); this.panels = []; this.panel('main'); Audio.sfx('ui'); },
-  closeMenu() { this.menuOpen = false; this.menu.classList.add('hidden'); if (!this.modal) Game.pause(false); Input.focusList = []; },
+  closeMenu() { this.menuOpen = false; this.panels = []; this.menu.classList.add('hidden'); if (!this.modal) Game.pause(false); Input.focusList = []; },
   back() { if (this.modal) return this.closeModal(); this.panels.pop(); if (!this.panels.length) return this.closeMenu(); this.render(this.panels[this.panels.length - 1]); },
   panel(name) { this.panels.push(name); this.render(name); },
   render(name) {
@@ -4423,7 +4458,7 @@ const Input = {
 const Game = {
   started: false, paused: false, saveT: 0, lastRender: 0,
   boot() {
-    Settings.load(); UI.build(); Render.init(); Input.init();
+    Settings.load(); UI.build(); Render.init(); Input.init(); Nav.init();
     window.addEventListener('resize', () => { Render.resize(); });
     document.addEventListener('visibilitychange', () => { if (document.hidden) { if (G.player) G.save(); Audio.suspend(); } else if (!this.paused && this.started) Audio.resume(); });
     window.addEventListener('pagehide', () => { if (G.player) G.save(); });
