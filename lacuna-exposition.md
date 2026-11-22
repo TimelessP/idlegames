@@ -2,7 +2,7 @@
 
 ### An exposition of a game designed for a mind that finds gaps, lives in many dimensions, and returns
 
-*Companion paper to `lacuna.html`, version 2 · November 2026*
+*Companion paper to `lacuna.html`, version 2 (build 2.1) · November 2026*
 
 ---
 
@@ -253,7 +253,15 @@ $$
 \theta_D \leftarrow \theta_D + K_p\,e, \qquad b_g \leftarrow b_g - K_i\,e
 $$
 
-with step sizes that shrink as evidence accumulates: *K_p* = max(0.12, 0.6/√(1 + n_D/3)) and *K_i* = max(0.06, 0.4/√(1 + n_g/3)). Neighbouring dimensions move by a quarter of the step, since skill in 4D and 5D is related. A newly opened dimension inherits the skill of the one below it, less 0.1.
+with step sizes set by **how established each rating is**. Each side has an uncertainty, *u_p* = 1/√(1 + n_D/3) for the player in that dimension and *u_i* = 1/√(1 + n_g/3) for the family, and the surprise is shared in proportion to their squares:
+
+$$
+\sigma_p = \frac{u_p^2}{u_p^2+u_i^2}, \qquad K_p = \max(0.06,\ 1.2\,u_p\,\sigma_p)\,w, \qquad K_i = \min\!\big(0.9,\ \max(0.06,\ 1.2\,u_i\,(1-\sigma_p))\big)\,w
+$$
+
+So when an experienced player meets an unfamiliar shape, the shape absorbs most of the surprise, as in Glicko-style rating systems. The weight *w* handles **repeated attempts**: retries of the same memory that each begin within five minutes of the last form one run of evidence, and the *k*-th attempt in a run counts 1/*k*. Neighbouring dimensions move by a quarter of the player's step, since skill in 4D and 5D is related. A newly opened dimension inherits the skill of the one below it, less 0.1.
+
+*Why this matters, from real play (build 2.0 → 2.1):* in one 25-minute session a player met the 24-cell as a peak, dissolved it, and returned to its echo five times before solving it in 1.4 seconds. Under build 2.0's even split with no repeat weighting, their 4D skill fell from 1.94 to 1.08 during that run. Replaying the same history under build 2.1's rules, the dip is from 1.69 to 1.39, and 4D skill ends the session higher (1.79 versus 1.65). That's closer to the truth: it was one hard shape, retried, not a collapse in 4D ability.
 
 The consequences are exactly the fixes needed: a family that keeps defeating players becomes *recognised* as hard, so it stops pulling θ down; revisits update both ways; surprise is what moves the numbers, so an expected failure costs little and an unexpected success counts a lot; and nothing is clamped.
 
@@ -267,9 +275,13 @@ The game targets *p* ≈ 0.70. For the chosen dimension and family it searches e
 
 Drift speed rises gently with skill: 0.8 + 0.2·clamp(θ_D − 1, 0, 2.5).
 
+**Jitter never moves the answer.** Jitter displaces the *visible* points to blur perfect symmetry, but the hidden targets stay at their true positions. Otherwise a correctly reasoned touch at the symmetric spot could miss through pure noise. (In the same session, about half of all misses landed within two touch-radii of a gap, some on jittered shapes. Build 2.1 removed that source of unfairness.)
+
 ### 6.3 A fair centre
 
-Every constellation now shows a faint cross at the true centre of the complete structure, missing points included. For centrally symmetric shapes this turns guesswork into reasoning: an orthoplex's missing vertex is the mirror of its opposite vertex through the centre, and a simplex's missing apex lies on the side of the visible face that faces the centre.
+Every constellation now shows a faint cross at the true centre of the complete structure, missing points included. For centrally symmetric shapes this turns guesswork into reasoning. A simplex's missing apex lies on the side of the visible face that faces the centre.
+
+**The twin tip.** The game tests each structure's true geometry for **central symmetry**: does every point *p* have a twin at −*p*? This holds for hypercubes, orthoplexes, the 24-cell, even polygons, lattices and the 6-demicube. It fails for simplices, 5-demicubes, spheres and knots, and depends on the counts for tori and Hopf bundles. When such a shape has a missing light and has defeated the player before (two dissolves in its family, or a dissolve of this very memory), a tip appears: *every light has a twin directly opposite through the centre cross, and a light without a twin is pointing at the gap.* That is teaching rather than easing. The puzzle stays the same, but the player gains a strategy for that whole class of shapes.
 
 ### 6.4 Progression
 
@@ -304,7 +316,7 @@ Every constellation writes a record: when it started and ended, its session, mod
 
 **Miss quality** separates three things that a raw miss count conflates: a touch *near a gap* (within two hit-radii of a true anomaly: perception slightly off), a touch *on a light* (a visible point mistaken for the answer: the pattern misread), and a touch *into the void* (nowhere near either: a guess).
 
-**Sessions** are recorded on every arrival, including resuming the app from the background after five minutes or more. (Version 1 only noticed a long absence when the page reloaded, so an overnight return to a backgrounded app went unrecorded.)
+**Sessions** are recorded on every arrival, including resuming the app from the background after five minutes or more. An arrival within a minute of the last activity continues the same session. (Version 1 only noticed a long absence when the page reloaded, so an overnight return to a backgrounded app went unrecorded.)
 
 ### 7.2 Reference constellations
 
@@ -328,7 +340,7 @@ Insights is designed to feel like the game rather than a report. Each panel is d
 | **Reference constellations** | Time on each identical reference, attempt by attempt, per dimension. |
 | **Your loops in time** | Thirty days of beads sized by time in play, gold rings on days you returned after six hours or more, and the typical and longest time away. |
 
-The full history exports as CSV (one row per constellation, 35 columns) for analysis elsewhere, alongside the JSON backup. Nothing leaves the device.
+The full history exports as CSV (one row per constellation, 36 columns, including each record's evidence weight) for analysis elsewhere, alongside the JSON backup. Nothing leaves the device.
 
 ### 7.4 Versioning
 
@@ -433,8 +445,10 @@ A strange loop, in Hofstadter's sense, is a system that climbs through levels an
 | Clarity | 3 pips (4 at D ≥ 5) |
 | Streak multiplier | 1 + 0.1·min(streak, 20) |
 | Target chance of success | 0.70 (breathers 0.86, peaks 0.50, new depth 0.80) |
-| Skill step *K_p* | max(0.12, 0.6/√(1 + n_D/3)); neighbours ×0.25 |
-| Family step *K_i* | max(0.06, 0.4/√(1 + n_g/3)) |
+| Uncertainties | *u_p* = 1/√(1 + n_D/3), *u_i* = 1/√(1 + n_g/3) |
+| Skill step *K_p* | max(0.06, 1.2·u_p·σ_p)·w, σ_p = u_p²/(u_p² + u_i²); neighbours ×0.25 |
+| Family step *K_i* | min(0.9, max(0.06, 1.2·u_i·(1 − σ_p)))·w |
+| Repeat weight *w* | 1/k for the k-th attempt in a back-to-back run (each started within 5 min of the last) |
 | Item cost | +0.3 per dimension above 2, +0.45 per extra anomaly, +0.35 per intruder, +0.5 per dissonant light, +20 × jitter |
 | Reference constellations | ≤ 1 per dimension per 20 h, ≥ 6 journey constellations apart |
 | History cap | 2,000 constellations; sessions 1,000 |

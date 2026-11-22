@@ -304,7 +304,7 @@ const AX=['x','y','z','w','v','u','t'];
 const ORD=['','','','third','fourth','fifth','sixth','seventh'];
 
 /* ---------------- persistence ---------------- */
-const SAVE_V=2,BUILD='2.0',KEY='lacuna.save.v2',OLD_KEYS=['lacuna.save.v1'];
+const SAVE_V=2,BUILD='2.1',KEY='lacuna.save.v2',OLD_KEYS=['lacuna.save.v1'];
 function defRate(){return{th:{},thn:{},b:{},bn:{}};}
 function defSave(){return{v:SAVE_V,build:BUILD,insight:0,completed:0,found:0,maxD:2,best:0,codex:[],memories:[],tips:{},
   settings:{sound:true,volume:0.7,gentle:false,speed:1,reduced:false,scale:1,drone:true},lastSeen:Date.now(),first:Date.now(),seq:1,recent:[],
@@ -406,13 +406,16 @@ class Cons{
     const N=G0.N;
     const mk=(x,i,kind)=>({x,i,kind,st:'on',th:r()*TAU,om:TAU*(1+.07*gauss(r)),coupled:true,gold:0,born:1,fade:1,dying:false,sx:0,sy:0,ss:1,hue:0,pulse:0,adj:[]});
     const nodes=this.nodes=G0.pts.map((x,i)=>mk(Float64Array.from(x),i,'real'));
+    const ideal=o.jitter>0?nodes.map(n=>Float64Array.from(n.x)):null;
     if(o.jitter>0)nodes.forEach(n=>{for(let i=0;i<D;i++)n.x[i]+=gauss(r)*o.jitter;});
     this.edges=G0.edges.map(([a,b])=>[a,b]);
     const adj0=Array.from({length:N},()=>[]);G0.edges.forEach(([a,b])=>{adj0[a].push(b);adj0[b].push(a);});
     this.anoms=[];
     const kmax=Math.max(1,Math.floor(N/4)),k=Math.min(o.k|0,kmax),miss=new Set();let tries=0;
     while(miss.size<k&&tries++<900){const i=Math.floor(r()*N);if(miss.has(i)||!adj0[i].length)continue;if(adj0[i].some(j=>miss.has(j)))continue;miss.add(i);}
-    miss.forEach(i=>{nodes[i].kind='missing';nodes[i].st='hidden';this.anoms.push({type:'missing',n:nodes[i],done:false});});
+    miss.forEach(i=>{nodes[i].kind='missing';nodes[i].st='hidden';if(ideal)nodes[i].x=ideal[i];this.anoms.push({type:'missing',n:nodes[i],done:false});});
+    // central symmetry, measured on the true geometry: does every point have a twin at −p?
+    this.centSym=G0.pts.length>2&&G0.pts.every(p=>G0.pts.some(q=>{let d=0;for(let i=0;i<D;i++){const v=p[i]+q[i];d+=v*v;}return d<1e-6;}));
     if(o.dis){const cand=nodes.filter(n=>n.kind==='real'&&adj0[n.i].length&&!adj0[n.i].some(j=>miss.has(j)));
       if(cand.length){const n=pick(r,cand);n.kind='dis';n.coupled=false;n.om=TAU*(1.55+.12*r());this.anoms.push({type:'dis',n,done:false});}}
     for(let q=0;q<(o.intr|0);q++){
@@ -619,6 +622,7 @@ const TIPS={
  freeze:'F freezes the drift, if you need stillness to be sure.',
  probe:ic('probe')+' A reference constellation: identical every time it returns, so Insights can compare you with yourself.',
  centre:'The faint cross at the centre is the true heart of the complete shape — missing lights included.',
+ twin:'This shape is centrally symmetric: every light has a twin directly opposite, through the centre cross. A light without a twin is pointing at the gap.',
  garden:'A memory is calling from the Loop Garden '+ic('garden')+'. Spaced returns strengthen it most.'
 };
 
@@ -689,6 +693,7 @@ function dawn(away){
 }
 function beginSession(){
   const now=Date.now(),prev=S.sess[S.sess.length-1],away=prev?now-(prev.e||prev.s):0;
+  if(prev&&away<60e3){prev.e=now;return;}
   S.sess.push({s:now,e:now,away});if(S.sess.length>1000)S.sess.splice(0,S.sess.length-1000);
   if(prev&&away>6*3600e3&&S.hist.some(h=>h.out==='c')){unlock('sleep');setTimeout(()=>dawn(away),60);}
 }
@@ -710,13 +715,17 @@ function thD(D){const v=S.rate.th[D];return Number.isFinite(v)?v:1;}
 function itemDiff(D,gen,c){const n=c.k+c.intr+c.dis;return famB(gen)+.3*(D-2)+.45*(n-1)+.35*c.intr+.5*c.dis+20*(c.jitter||0);}
 function predict(D,gen,c){return sig(thD(D)-itemDiff(D,gen,c));}
 function scoreOf(done,misses,perA,listened,clar){if(!done)return 0;let s=1-.12*misses;if(perA>40)s-=.1;if(listened)s-=.05;if(misses>=clar)s=Math.min(s,.3);return clamp(s,.3,1);}
-function rateUpdate(D,gen,p,s){
+// Blame for a surprise is shared by uncertainty: whichever rating is less established (you in this depth, or this
+// family of shapes) moves more. Repeated attempts at the same memory within an hour are not independent evidence,
+// so the k-th attempt in a back-to-back run counts 1/k.
+function rateUpdate(D,gen,p,s,w=1){
   const r=S.rate,n=r.thn[D]||0,nb=r.bn[gen]||0,e=s-p,before=thD(D);
-  const Kp=Math.max(.12,.6/Math.sqrt(1+n/3)),Ki=Math.max(.06,.4/Math.sqrt(1+nb/3));
-  r.th[D]=before+Kp*e;r.thn[D]=n+1;
+  const up=1/Math.sqrt(1+n/3),ui=1/Math.sqrt(1+nb/3),sp=up*up/(up*up+ui*ui);
+  const Kp=Math.max(.06,.6*up*2*sp)*w,Ki=Math.min(.9,Math.max(.06,.6*ui*2*(1-sp)))*w;
+  r.th[D]=before+Kp*e;r.thn[D]=n+w;
   for(const d of[D-1,D+1])if(d>=2&&d<=7)r.th[d]=thD(d)+.25*Kp*e;     // neighbouring depths move a little too
-  r.b[gen]=famB(gen)-Ki*e;r.bn[gen]=nb+1;
-  return{before,after:r.th[D]};
+  r.b[gen]=famB(gen)-Ki*e;r.bn[gen]=nb+w;
+  return{before,after:r.th[D],w};
 }
 function speedFor(D){return .8+.2*clamp(thD(D)-1,0,2.5);}
 // search gap counts / intruders / dissonance / jitter for the configuration closest to the target chance of success
@@ -786,6 +795,10 @@ function startCons(o,mem){
   if(o.probe){S.sinceProbe=0;}
   buildAxes();updateHUD();setMode('play');
   if(o.probe&&!S.tips.probe)setTimeout(()=>tip('probe'),900);
+  if(G.cons.centSym&&G.cons.anoms.some(a=>a.type==='missing')){
+    const fails=S.hist.filter(h=>h.gen===o.gen&&h.out==='d').length,sameFail=S.hist.some(h=>h!==G.rec&&h.mid===G.rec.mid&&h.out==='d');
+    if(fails>=2||sameFail){setTimeout(()=>tip('twin',true),1100);G.rec.tw=1;}
+  }
   const c=S.completed;
   if(o.note){center(`The ${ORD[o.note]} dimension opens`,`its axis is ${AX[o.note-1]}`,4200);}
   if(!mem){
@@ -891,7 +904,10 @@ function finishRec(done){
   const h=G.rec,c=G.cons;if(!h||h.out!=='p')return null;
   h.out=done?'c':'d';h.t1=Date.now();h.dur=+(G.now-G.t0).toFixed(1);
   const clar=3+(c.D>=5?1:0),sc=scoreOf(done,G.misses,h.dur/Math.max(1,c.anoms.length),G.listenUsed,clar);
-  const u=rateUpdate(c.D,c.o.gen,h.p,sc);h.s=+sc.toFixed(3);h.th1=+u.after.toFixed(3);
+  // back-to-back retries of the same memory (each begun within 5 minutes of the last) are one run of evidence, not many
+  let prior=0,t=h.t0;for(let j=S.hist.length-1;j>=0;j--){const q=S.hist[j];if(q===h||q.mid!==h.mid||(q.out!=='c'&&q.out!=='d'))continue;if(t-q.t1<300e3){prior++;t=q.t0;}else break;}
+  const w=1/(1+prior);
+  const u=rateUpdate(c.D,c.o.gen,h.p,sc,w);h.s=+sc.toFixed(3);h.th1=+u.after.toFixed(3);h.w=+w.toFixed(3);
   if(c.o.probe)S.probeAt[c.D]=Date.now();else S.sinceProbe++;
   const recent=S.hist.filter(q=>(q.out==='c'||q.out==='d')&&!q.tut).slice(-10);
   if(recent.length>=8&&recent.filter(q=>q.p>=.55&&q.p<=.85).length>=7)unlock('flow');
@@ -981,12 +997,12 @@ function download(name,text,type){
 function exportCSV(){
   const cols=['index','mode','kind','tutorial','start','end','session','family','dimension','points','missing','intruders','out_of_time','jitter','speed',
     'outcome','active_s','finds','misses','misses_near','misses_on_light','misses_void','first_find_s','listen_s','freeze_s','rotation_rad','hint_shown',
-    'retention_at_start','target','predicted','score','skill_before','skill_after','gentle','scale'];
+    'retention_at_start','target','predicted','score','evidence_weight','skill_before','skill_after','gentle','scale'];
   const MODE={j:'journey',r:'revisit',e:'echo',p:'reference'},OUT={c:'complete',d:'dissolved',a:'abandoned',p:'in_progress'};
   const iso=t=>t?new Date(t).toISOString():'',q=v=>v==null?'':(typeof v==='string'&&/[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v);
   const rows=S.hist.map(h=>[h.i,MODE[h.mode],h.kind,h.tut?1:0,iso(h.t0),iso(h.t1),h.ses,h.gen,h.D,h.N,h.m,h.x,h.o,h.jit,h.spd,OUT[h.out],h.dur,h.f.length,h.ms.length,
     h.ms.filter(m=>m[1]<2).length,h.ms.filter(m=>m[1]>=2&&m[2]).length,h.ms.filter(m=>m[1]>=2&&!m[2]).length,h.f.length?h.f[0][0]:'',h.ls,h.fz,h.rot,h.hint,
-    h.R,h.T,h.p,h.s,h.th0,h.th1,h.gentle,h.sc].map(q).join(','));
+    h.R,h.T,h.p,h.s,h.w,h.th0,h.th1,h.gentle,h.sc].map(q).join(','));
   download(`lacuna-history_${stamp()}.csv`,cols.join(',')+'\n'+rows.join('\n'),'text/csv');
   toast(ic('export')+' history exported as CSV',true);
 }
@@ -1001,7 +1017,7 @@ function cleanHist(h){
     N:Math.floor(num(h.N)),m:Math.floor(num(h.m)),x:Math.floor(num(h.x)),o:Math.floor(num(h.o)),jit:num(h.jit),spd:num(h.spd,1),p:nn(h.p),T:nn(h.T),
     mid:num(h.mid),R:nn(h.R),gentle:h.gentle?1:0,sc:num(h.sc,1),out:h.out==='p'?'a':h.out,dur:num(h.dur),
     f:arr(h.f,3).map(([t,ty,l])=>[num(t),['m','i','d'].includes(ty)?ty:'m',l?1:0]),ms:arr(h.ms,3).map(([t,dq,on])=>[num(t),num(dq,99),on?1:0]),
-    ls:num(h.ls),fz:num(h.fz),rot:num(h.rot),hint:h.hint?1:0,s:nn(h.s),th0:nn(h.th0),th1:nn(h.th1)};
+    tw:h.tw?1:0,ls:num(h.ls),fz:num(h.fz),rot:num(h.rot),hint:h.hint?1:0,s:nn(h.s),th0:nn(h.th0),th1:nn(h.th1),w:nn(h.w)};
 }
 function sanitize(o){
   if(o&&o.app==='lacuna'&&o.save&&typeof o.save==='object')o=o.save;
@@ -1129,7 +1145,7 @@ function renderHelp(){
   <li><b>${ic('intr')} An intruder.</b> A light that doesn’t belong to the pattern. Touch it to release it.</li>
   <li><b>${ic('dis')} A light out of time.</b> The lights are oscillators that pull each other into rhythm. One refuses. Find it, and touch it.</li></ul>
   <h3>Turning through dimensions</h3>
-  <p>The faint cross at the centre marks the true heart of the complete shape, missing lights included. For symmetric shapes such as simplices and orthoplexes it is the key: a missing vertex mirrors its opposite through the centre.</p>
+  <p>The faint cross at the centre marks the true heart of the complete shape, missing lights included. For centrally symmetric shapes (hypercubes, orthoplexes, the 24-cell and others) it is the key: every light has a twin directly opposite through the centre, so a light without a twin is pointing at the gap. The game offers this tip when such a shape has defeated you before.</p>
   <p>Drag to rotate. Dragging turns the screen’s x and y toward the hidden axis chosen bottom-left (z, w, v, u, t). Colour shows depth: in 3D, hue follows z; from 4D on, hue wheels as points pass through w. Near points are larger. <kbd>Q</kbd>/<kbd>E</kbd> or the mouse wheel change axis; <kbd>F</kbd> freezes the drift.</p>
   <h3>Clues</h3>
   <p><b>Names never lie:</b> the number in a constellation’s name counts every light it should hold (not counting intruders). Hold <kbd>Space</kbd> or the ear to <b>listen</b>: each absence sings, with height as pitch and left/right as stereo. Listening halves the insight of your next find but never costs clarity. Wait long enough and intuition may flicker.</p>
@@ -1757,7 +1773,7 @@ setTimeout(()=>{Snd.harmonics(Math.min(3,resonance()/6));},100);
 showTitle();
 persist();
 requestAnimationFrame(frame);
-window.__lacuna={G,S:()=>S,Garden,startCons,nextJourney,Snd,Insights,predict,thD,famB,beginSession};
+window.__lacuna={G,S:()=>S,Garden,startCons,nextJourney,Snd,Insights,predict,thD,famB,beginSession,Cons,buildGeometry,rateUpdate,revisit};
 })();
 </script>
 <script src="parental.js"></script>
