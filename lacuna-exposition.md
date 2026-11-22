@@ -2,7 +2,7 @@
 
 ### An exposition of a game designed for a mind that finds gaps, lives in many dimensions, and returns
 
-*Companion paper to `lacuna.html`, version 2 (build 2.2) · November 2026*
+*Companion paper to `lacuna.html`, version 2 (build 2.3) · November 2026*
 
 ---
 
@@ -281,7 +281,9 @@ Drift speed rises gently with skill: 0.8 + 0.2·clamp(θ_D − 1, 0, 2.5).
 
 Every constellation now shows a faint cross at the true centre of the complete structure, missing points included. For centrally symmetric shapes this turns guesswork into reasoning. A simplex's missing apex lies on the side of the visible face that faces the centre.
 
-**The twin tip.** The game tests each structure's true geometry for **central symmetry**: does every point *p* have a twin at −*p*? This holds for hypercubes, orthoplexes, the 24-cell, even polygons, lattices and the 6-demicube. It fails for simplices, 5-demicubes, spheres and knots, and depends on the counts for tori and Hopf bundles. The first time such a shape has a missing light after defeating the player (two dissolves in its family, or a dissolve of this very memory), a tip appears. After that it stays quiet for that family until the family causes another dissolve: *every light has a twin directly opposite through the centre cross, and a light without a twin is pointing at the gap.* That is teaching rather than easing. The puzzle stays the same, but the player gains a strategy for that whole class of shapes.
+**The twin tip.** The game tests each structure's true geometry for **central symmetry**: does every point *p* have a twin at −*p*? This holds for hypercubes, orthoplexes, the 24-cell, even polygons, lattices and the 6-demicube. It fails for simplices, 5-demicubes, spheres and knots, and depends on the counts for tori and Hopf bundles. The first time such a shape has a missing light after defeating the player (two dissolves in its family, or a dissolve of this very memory), and hints are on, a tip teaches the strategy. It then stays quiet for that family until the family causes another dissolve.
+
+*A correction from play (build 2.2 → 2.3).* The first version of the tip said the missing light sits "directly opposite its twin through the centre". That is true of the shape itself but **not of its perspective shadow**. Nested perspective scales a point at depth *z* by *f(z)* and its twin at −*z* by *f(−z)*, so the two project onto the same line through the centre but at distances in the ratio *f(z)/f(−z)*. Real play exposed this: misses on twin shapes clustered 1–3 touch-zones from the gap. Simulating 300 puzzles on the player's own memories, the literal mirror landed in the touch zone only 25% (octahedron), 37% (24-cell), 40% (tesseract) and 25% (cube) of the time, with median errors of 1.2–1.9 zone widths, matching the observed misses. Scaling the mirrored distance by the twin's apparent size (≈ 1/*f*²) landed 100% of the time. The tip now says so: *same line through the centre, on the far side; nearer the centre if the twin looks large and bright, farther out if it looks small and dim.*
 
 ### 6.4 Grace: measuring seeing, not aiming
 
@@ -306,7 +308,18 @@ A touch that misses by less than one further σ is an **almost**. It costs half 
 
 In practice (build 2.1 → 2.2): the accepting radius is about 33 px for a mouse on a 1280 × 800 screen (unchanged from before). For a fingertip on a 390 px-wide phone it is 36 px, up from 23, and it no longer grows or shrinks with the Scale setting. On jittered 4D shapes it widens to 40–45 px. The faint ring around the cursor shows the actual zone.
 
-### 6.5 Progression
+### 6.5 Hints, and keeping them honest
+
+After a long search without progress, intuition nudges each kind of absence in its own visual language:
+- a **missing light**: faint dashed threads reach part-way from its neighbours toward the empty place;
+- an **intruder**: a single ring shimmers outward from it, a ring that does not belong;
+- a **light out of time**: a faint ring pulses *in its own rhythm*, so the wrong tempo becomes visible.
+
+Hints are a setting: **off**, **patient** (after about 70 seconds, repeating every 11; the default) or **prompt** (about 30 seconds, every 8). The twin tip follows the same setting. First-time instructions always appear.
+
+Because hints change what is being measured, the game keeps them honest. Every record stores the hint level in force and whether a hint (or the twin tip) actually appeared. A constellation completed after a hint scores 0.08 lower, so a hinted success raises the rating a little less than an unaided one.
+
+### 6.6 Progression
 
 | Dimension | Unlocked after |
 |---|---|
@@ -319,13 +332,13 @@ In practice (build 2.1 → 2.2): the accepting radius is about 33 px for a mouse
 
 Intruders appear from the 5th constellation, dissonant lights from the 10th. Each newly opened dimension is introduced with its signature object: the tesseract for 4D, the 5-demicube for 5D, the 3-torus for 6D, the 7-orthoplex for 7D. Play then draws from the newest dimension and the two below it.
 
-### 6.6 Clarity, streaks and gentleness
+### 6.7 Clarity, streaks and gentleness
 
 - **Clarity** (● ● ●, or four pips at 5D and above) is lost on a miss: a whole pip for a miss, half a pip for an almost. At zero, the constellation dissolves into an echo. There is no game over, only an open loop.
 - **Streaks** of consecutive finds without a miss raise the insight multiplier: 1 + 0.1·min(streak, 20), up to ×3.
 - **Insight** per find is 10·D·multiplier, so higher dimensions are worth proportionally more. Completion adds 25·D, doubled for a flawless run.
 - **Gentle mode** removes clarity entirely. Misses are still recorded and rated, but nothing dissolves.
-- **Intuition**: after 70 seconds without progress, faint dashed threads periodically reach partway from a missing point's neighbours toward the empty place. It is a hint that arrives the way insight does, unbidden, after the mind has been allowed to wander. (Forty-five seconds without any input unlocks the Codex entry on the **default mode network**, the brain system active during mind-wandering.)
+- **Intuition**: see 6.5. Hints arrive the way insight does, unbidden, after the mind has been allowed to wander. (Forty-five seconds without any input unlocks the Codex entry on the **default mode network**, the brain system active during mind-wandering.)
 
 Misses themselves are framed as information rather than failure. The first one unlocks the Codex entry on **prediction error**: in predictive-processing models of the brain, learning happens most where expectation and reality disagree.
 
@@ -363,7 +376,7 @@ Insights is designed to feel like the game rather than a report. Each panel is d
 | **Reference constellations** | Time on each identical reference, attempt by attempt, per dimension. |
 | **Your loops in time** | Thirty days of beads sized by time in play, gold rings on days you returned after six hours or more, and the typical and longest time away. |
 
-The full history exports as CSV (one row per constellation, 40 columns, including each record's evidence weight, almosts, pointer kind and tolerance) for analysis elsewhere, alongside the JSON backup. Nothing leaves the device.
+The full history exports as CSV (one row per constellation, 41 columns, including each record's evidence weight, almosts, pointer kind, tolerance, twin tip and hint level) for analysis elsewhere, alongside the JSON backup. Nothing leaves the device.
 
 ### 7.4 Versioning
 
@@ -475,6 +488,7 @@ A strange loop, in Hofstadter's sense, is a system that climbs through levels an
 | Touch tolerance σ | √(motor² + content² + jitter²); motor 2.0 mm touch / 1.3 mm mouse / 1.0 mm pen (scale-independent); content 5% of shape radius; jitter = j·√D·radius |
 | Acceptance | 2.5σ (≈ 96%), against the target's positions over the last 300 ms |
 | Almost | miss within R + σ and not on a light: ½ pip, −0.04 score |
+| Hints | off · patient (70 s, every 11 s) · prompt (30 s, every 8 s); hinted completion −0.08 score |
 | Item cost | +0.3 per dimension above 2, +0.45 per extra anomaly, +0.35 per intruder, +0.5 per dissonant light, +20 × jitter |
 | Reference constellations | ≤ 1 per dimension per 20 h, ≥ 6 journey constellations apart |
 | History cap | 2,000 constellations; sessions 1,000 |
