@@ -2,7 +2,7 @@
 
 ### An exposition of a game designed for a mind that finds gaps, lives in many dimensions, and returns
 
-*Companion paper to `lacuna.html`, version 2 (build 2.3) · November 2026*
+*Companion paper to `lacuna.html`, version 2 (build 2.4) · November 2026*
 
 ---
 
@@ -201,7 +201,15 @@ If a player's clarity runs out, the constellation dissolves and is planted as an
 
 This borrows from the **Zeigarnik effect**: Bluma Zeigarnik's 1927 report that interrupted tasks are remembered better than completed ones. The evidence here is honestly *mixed*; replications have been inconsistent, and the in-game Codex labels it **contested**. But the felt pull of an unfinished thing is familiar, and the game uses it gently rather than coercively. Echoes wait without nagging, decaying, or expiring.
 
-### 5.5 The shape of the garden
+### 5.5 Leeches: when a memory keeps winning
+
+Spaced-repetition software calls an item a **leech** when it is forgotten again and again. Anki flags one after eight lapses by default. Pure spacing handles leeches badly. In Lacuna, each failure halves a memory's stability down to the 20-minute floor, so a memory that keeps defeating the player calls every six minutes, forever. The remedy that works in practice is not more repetition but **a better way in**.
+
+A memory with **three failures since its last success** becomes *stubborn*. Its next attempt is a **study round**: intuition appears after about 4 seconds instead of 70, and the twin tip appears if the shape is centrally symmetric. A study round is scored as a hinted attempt. If a stubborn memory fails again, it **rests**: its stability is raised to at least 7 hours, so it next calls in about two hours. One success clears the state. With hints off, study rounds are not offered, but resting still applies.
+
+*Why teaching first (build 2.3 → 2.4):* in play, the player's 24-cell memory failed 11 of 12 attempts under the old twin-tip wording. Two attempts after the corrected tip, it was solved twice in a row (84 s, then a clean 34 s). The wall fell to a better strategy, not to more repetition. The same session produced the next leech: a 5-demicube that failed 6 of 7 attempts, with 34 of 35 misses in 5D landing more than two touch-zones from any gap. That meant no foothold at all, and the shape has no twins for the tip to use. The study round's early threads, which converge on the gap from all its neighbours, give exactly the foothold that was missing.
+
+### 5.6 The shape of the garden
 
 The garden is drawn as an orbital system around a glowing core (the self), whose size grows with total *resonance*:
 
@@ -356,7 +364,7 @@ Every constellation writes a record: when it started and ended, its session, mod
 
 ### 7.2 Reference constellations
 
-About once a day per unlocked dimension, and never more than once per six journey constellations, the game offers a **reference constellation**: the same structure, the same gaps and the same starting rotation every time. Because the item is identical, change in time or misses on it is change in the player, the logic of **test–retest** measurement. The obvious confound, remembering the answer, is reduced by the day-long spacing, and is stated openly. Reference constellations are rated but leave no memory and no echo.
+About once a day per unlocked dimension, never more than once per six journey constellations, only after at least three rated constellations in that dimension, and never straight after the player has met its own family, the game offers a **reference constellation**: the same structure, the same gaps and the same starting rotation every time. Because the item is identical, change in time or misses on it is change in the player, the logic of **test–retest** measurement. The obvious confound, remembering the answer, is reduced by the day-long spacing, and is stated openly. Reference constellations are rated but leave no memory and no echo. (Build 2.4 added the three-constellation wait after real play showed the 5D reference, itself a 5-demicube, arriving straight after five demicubes at the moment 5D unlocked. That measured a baseline at first contact rather than a fair one.)
 
 ### 7.3 Insights: the feedback loop made visible
 
@@ -376,7 +384,7 @@ Insights is designed to feel like the game rather than a report. Each panel is d
 | **Reference constellations** | Time on each identical reference, attempt by attempt, per dimension. |
 | **Your loops in time** | Thirty days of beads sized by time in play, gold rings on days you returned after six hours or more, and the typical and longest time away. |
 
-The full history exports as CSV (one row per constellation, 41 columns, including each record's evidence weight, almosts, pointer kind, tolerance, twin tip and hint level) for analysis elsewhere, alongside the JSON backup. Nothing leaves the device.
+The full history exports as CSV (one row per constellation, 42 columns, including each record's evidence weight, almosts, pointer kind, tolerance, twin tip, hint level and study round) for analysis elsewhere, alongside the JSON backup. Nothing leaves the device.
 
 ### 7.4 Versioning
 
@@ -408,7 +416,7 @@ All tones are generated live with the Web Audio API. Nothing is sampled.
 
 ## 9. The Codex: honest about its sources
 
-Forty fragments are found during play, each triggered by a meaningful event: the first gap closed, the first 4D object, the first intruder, two finds within 1.5 seconds (*synchronicity*), a ten-find streak (*Hebb's rule*), a return after sleep, the fiftieth constellation (*Ouroboros*), the first look at Insights (*metacognition*), ten rated constellations (*Elo ratings*), a second attempt at the same reference (*test–retest*), and the first almost (*Fitts's law*).
+Forty-one fragments are found during play, each triggered by a meaningful event: the first gap closed, the first 4D object, the first intruder, two finds within 1.5 seconds (*synchronicity*), a ten-find streak (*Hebb's rule*), a return after sleep, the fiftieth constellation (*Ouroboros*), the first look at Insights (*metacognition*), ten rated constellations (*Elo ratings*), a second attempt at the same reference (*test–retest*), the first almost (*Fitts's law*), and the first study round (*leeches*).
 
 Each fragment is **labelled for what it is**:
 
@@ -490,7 +498,8 @@ A strange loop, in Hofstadter's sense, is a system that climbs through levels an
 | Almost | miss within R + σ and not on a light: ½ pip, −0.04 score |
 | Hints | off · patient (70 s, every 11 s) · prompt (30 s, every 8 s); hinted completion −0.08 score |
 | Item cost | +0.3 per dimension above 2, +0.45 per extra anomaly, +0.35 per intruder, +0.5 per dissonant light, +20 × jitter |
-| Reference constellations | ≤ 1 per dimension per 20 h, ≥ 6 journey constellations apart |
+| Reference constellations | ≤ 1 per dimension per 20 h, ≥ 6 journey constellations apart, ≥ 3 rated in that dimension, not after its own family |
+| Leeches | stubborn after 3 failures since last success → study round (intuition at ~4 s); a further failure rests it (S ≥ 7 h) |
 | History cap | 2,000 constellations; sessions 1,000 |
 | Save version | 2 (key `lacuna.save.v2`) |
 | Memory cap | 320 (weakest pruned first) |
