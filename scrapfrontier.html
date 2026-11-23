@@ -3205,13 +3205,14 @@ function asmWindmill(K,s){
   }
   K.lathe('aRust',[[0,0],[.19,0],[.2,.05],[.15,.1],[0,.1]],0,H,0,18);
   K.lathe('aBare',[[0,0],[.17,0],[.19,.04],[.17,.2],[0,.22]],0,H+.08,0,18,null,.6);
-  /* nacelle + tail boom + vane */
-  K.mesh(latheGeo([[0,-.3],[.14,-.25],[.2,-.1],[.2,.25],[.15,.34],[0,.36]],18,.8),'aRust',0,H+.32,0,Math.PI/2,0,0);
-  K.tube('aGalv',profCircle(.032,8),[V3(0,H+.32,-.3),V3(0,H+.4,-1.6)],{tile:.5});
-  K.box('aOchre',0,H+.74,-1.5,.025,.62,.8,0,0,0);K.box('aPlate',.0,H+.38,-1.55,.7,.02,.5);
+  /* nacelle + tail boom + vane: one head on the yaw bearing, turned into the wind by its vane (animateStructures) */
+  const head=new THREE.Group();K.g.add(head);
+  K.mesh(latheGeo([[0,-.3],[.14,-.25],[.2,-.1],[.2,.25],[.15,.34],[0,.36]],18,.8),'aRust',0,H+.32,0,Math.PI/2,0,0,head);
+  K.tube('aGalv',profCircle(.032,8),[V3(0,H+.32,-.3),V3(0,H+.4,-1.6)],{tile:.5},head);
+  K.box('aOchre',0,H+.74,-1.5,.025,.62,.8,0,0,0,head);K.box('aPlate',.0,H+.38,-1.55,.7,.02,.5,0,0,0,head);
   K.tube('aRubber',profCircle(.01,6),[V3(.1,H+.1,.0),V3(.1,2.4,.12),V3(.06,.3,.3),V3(.4,.05,.6)],{tile:.3});
   /* rotor — the animator spins s.blades about z */
-  const hub=new THREE.Group();hub.position.set(0,H+.32,.5);K.g.add(hub);
+  const hub=new THREE.Group();hub.position.set(0,H+.32,.5);head.add(hub);
   K.lathe('aBare',[[0,0],[.11,0],[.15,.05],[.1,.16],[0,.2]],0,0,0,14,hub);
   hub.children[hub.children.length-1].rotation.x=Math.PI/2;
   for(let i=0;i<3;i++){
@@ -3219,7 +3220,7 @@ function asmWindmill(K,s){
     b.rotation.z=a-Math.PI/2+Math.PI/2;b.rotation.x=0;
     const bm=b;bm.rotation.set(0,0,a-Math.PI/2);
   }
-  K.dyn(hub);s.blades=hub;
+  K.dyn(head);s.blades=hub;s.wHead=head;
   return K;
 }
 function asmStove(K,s){
@@ -5745,24 +5746,77 @@ function horizonPatch(x0,z0,x1,z1,near){const g=horizonPatchGen(x0,z0,x1,z1,near
    §07  CHRONOMETER — 20 min per revolution, night is the short quarter
    ─────────────────────────────────────────────────────────────────────── */
 const Day=machine('chronometer',{
-  ctx:{t:0.28,day:1,wind:5,windDir:0.6},
+  ctx:{t:0.28,day:1,wind:5,windDir:0.6,gust:1,storm:0},         /* wind / windDir / gust / storm: the wind field (§07b) where you stand */
   initial:'day',
   states:{
     day:{ update(m,dt){
         m.ctx.t+=dt/CFG.dayLen; if(m.ctx.t>=1){m.ctx.t-=1;m.ctx.day++}
         if(m.ctx.t>=0.75)m.set('night');
-        const w=0.5+0.5*Math.sin(m.ctx.t*13.1)+0.28*Math.sin(m.ctx.t*31.7+1.3);
-        m.ctx.wind=3+Math.max(0,w)*9;
       }},
     night:{ update(m,dt){
         m.ctx.t+=dt/CFG.dayLen; if(m.ctx.t>=1){m.ctx.t-=1;m.ctx.day++}
         if(m.ctx.t<0.75)m.set('day');
-        const w=0.5+0.5*Math.sin(m.ctx.t*9.3+2.0);
-        m.ctx.wind=5+Math.max(0,w)*13;
       }}
   }
 });
 Day.ctx.t=0.30;Day.start();
+/* ───────────────────────────────────────────────────────────────────────
+   §07b  THE WIND FIELD — one formula for the wind anywhere, at any time
+   windAt(x, z, T) gives the wind at a place (metres) and a game time (T = seconds since day 1 began, windGameT()). It is seeded by the
+   world SEED, so every world has its own weather and the same place at the same time always has the same wind — nothing is saved.
+   Built from slow 3D Perlin noise (x, z, time):
+     dir    the way the air MOVES (radians, x = east, z = south), veering about a prevailing direction (WN.th0) over hours and kilometres
+     sus    the sustained speed (knots): 4..14 from slow noise, a little stronger at night (a smooth cosine over the clock, no step at
+            dawn or dusk), plus up to +24 in a storm
+     storm  0..1: storm cells are a third noise field carried across the map along the prevailing wind, so a storm walks in from upwind;
+            smoothstep on it eases a storm in and out over two or three minutes. About one storm every three or four game days (~10% of the time).
+     gust   a fast, small-scale multiplier (around 1, bigger in a storm), carried downwind
+     kn     sus × gust;  vx / vz the air's velocity in m/s
+   Readers: the sky's dust motes, wind audio, the wind turbine (yaw + power), the kite, the microlight and helicopter (they fly in
+   the moving air), the weather machine (WINDMUL, messages). Day.ctx.wind / windDir / gust / storm hold the values where you stand.
+   ─────────────────────────────────────────────────────────────────────── */
+const WN={seed:null,p:null,th0:0},KN=.5144;
+function wnInit(){
+  if(WN.seed===SEED)return;WN.seed=SEED;
+  let q=(SEED^0x9E3779B9)>>>0;const r=()=>{q=(q+0x6D2B79F5)>>>0;let t=q;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return((t^(t>>>14))>>>0)/4294967296};
+  const p=new Uint8Array(256);for(let i=0;i<256;i++)p[i]=i;for(let i=255;i>0;i--){const j=(r()*(i+1))|0,k=p[i];p[i]=p[j];p[j]=k}
+  WN.p=new Uint8Array(512);for(let i=0;i<512;i++)WN.p[i]=p[i&255];
+  WN.th0=r()*TAU;
+}
+const _wf=t=>t*t*t*(t*(t*6-15)+10),_wl=(a,b,t)=>a+(b-a)*t;
+function _wg(h,x,y,z){const u=h<8?x:y,v=h<4?y:(h===12||h===14)?x:z;return((h&1)?-u:u)+((h&2)?-v:v)}
+function wNoise(x,y,z){                                          /* improved Perlin noise, roughly -1..1 */
+  const p=WN.p,X=Math.floor(x),Y=Math.floor(y),Z=Math.floor(z);x-=X;y-=Y;z-=Z;
+  const xi=X&255,yi=Y&255,zi=Z&255,u=_wf(x),v=_wf(y),w=_wf(z);
+  const A=p[xi]+yi,AA=p[A]+zi,AB=p[A+1]+zi,B=p[xi+1]+yi,BA=p[B]+zi,BB=p[B+1]+zi;
+  return _wl(_wl(_wl(_wg(p[AA]&15,x,y,z),_wg(p[BA]&15,x-1,y,z),u),_wl(_wg(p[AB]&15,x,y-1,z),_wg(p[BB]&15,x-1,y-1,z),u),v),
+             _wl(_wl(_wg(p[AA+1]&15,x,y,z-1),_wg(p[BA+1]&15,x-1,y,z-1),u),_wl(_wg(p[AB+1]&15,x,y-1,z-1),_wg(p[BB+1]&15,x-1,y-1,z-1),u),v),w);
+}
+const wFbm=(x,y,z)=>wNoise(x,y,z)*.68+wNoise(x*2.03+5.2,y*2.03+1.3,z*2.03+7.7)*.32;
+const windGameT=()=>((Day.ctx.day-1)+Day.ctx.t)*CFG.dayLen;
+function windAt(x,z,T,o){
+  wnInit();o=o||{};
+  const th0=WN.th0,ux=Math.cos(th0)*6,uz=Math.sin(th0)*6;                       /* storm cells drift with the prevailing wind, 6 m/s */
+  const dir=th0+2.8*wFbm(x/5200,z/5200,T/2600+3.1);
+  const tod=((T/CFG.dayLen)%1+1)%1,diu=1.8*Math.cos(TAU*(tod-.875));            /* a touch windier at night: smooth, no step anywhere */
+  const base=4+10*clamp(.5+1.3*wFbm(x/3200,z/3200,T/1100+11.7),0,1)+diu;
+  const S=smooth(.18,.34,wFbm((x-ux*T)/7000,(z-uz*T)/7000,T/1800+41.9));
+  const dx=Math.cos(dir),dz=Math.sin(dir);
+  const gust=1+(.13+.22*S)*wNoise((x-dx*T*4)/80,(z-dz*T*4)/80,T/5)+(.06+.1*S)*wNoise(x/40,z/40,T/1.7+60);
+  const sus=Math.max(.5,base+S*24);
+  o.dir=dir;o.sus=sus;o.storm=S;o.gust=gust;o.kn=sus*gust;o.vx=dx*o.kn*KN;o.vz=dz*o.kn*KN;
+  return o;
+}
+/* where the wind comes FROM, as a compass point (north = -z, east = +x) */
+const windFromName=dir=>{const b=((Math.atan2(-Math.cos(dir),Math.sin(dir))*180/Math.PI)+360)%360;return['north','north-east','east','south-east','south','south-west','west','north-west'][Math.round(b/45)%8]};
+const windBody=()=>{const s=G.drive;return s?(s.pos||s):P};                    /* where you are: on foot, or in what you drive (the drone has no say) */
+const _wb={};
+function windTick(){
+  const b=windBody(),w=windAt(b.x,b.z,windGameT(),_wb);
+  Day.ctx.wind=w.sus;Day.ctx.windDir=w.dir;Day.ctx.gust=w.gust;Day.ctx.storm=w.storm;
+  /* the old weather scale, now continuous: calm .85 · breeze 1 · gale ~1.35 · full dust storm ~2.35 (fog density, lamps at > 1.8) */
+  WINDMUL.value=.85+.5*clamp((w.sus-4)/14,0,1)*(1-w.storm)+1.5*w.storm;
+}
 const isNight=()=>Day.state==='night';
 function cyclePosition(t){
   const day=t<0.75;
@@ -5829,20 +5883,22 @@ function updateSky(dt,px,pz){
   renderer.toneMappingExposure=1.04;
   const d=window.__dust;
   if(d){
-    const p=d.geometry.attributes.position.array,b=d.userData.base;
-    const w=Day.ctx.wind,dx=Math.cos(Day.ctx.windDir)*w*0.05,dz=Math.sin(Day.ctx.windDir)*w*0.05;
-    for(let i=0;i<d.userData.N;i++){
-      p[i*3]=b[i*3]+dx*d.userData.N*0.006+i*0;
-      let y=p[i*3+1];
-      y+=dt*(0.05+w*0.012);
-      if(y>23)y-=23;
-      p[i*3+1]=y;
-      p[i*3+2]=b[i*3+2]+dz*d.userData.N*0.006;
+    /* the motes ride the wind: each drifts downwind at the wind's speed (a little slower low down, where the ground drags the air),
+       wobbling in the gusts; they stay put in the world as you walk (the box follows you, the motes do not), wrapping round its edges */
+    const p=d.geometry.attributes.position.array,U=d.userData,N=U.N,w=Day.ctx.wind*Day.ctx.gust*KN,dr=Day.ctx.windDir,st=Day.ctx.storm||0;
+    const ox=U.px===undefined?0:px-U.px,oz=U.pz===undefined?0:pz-U.pz;U.px=px;U.pz=pz;
+    const jump=Math.abs(ox)>30||Math.abs(oz)>30;                                     /* a teleport or a respawn: no smear */
+    const vx=Math.cos(dr)*w,vz=Math.sin(dr)*w,tt=now();
+    for(let i=0;i<N;i++){
+      const y=p[i*3+1],k=.45+.55*Math.min(1,y/12),wb=Math.sin(tt*1.3+i*1.7)*.35;
+      p[i*3]+=(vx*k+wb*vz*.1)*dt-(jump?0:ox);p[i*3+2]+=(vz*k-wb*vx*.1)*dt-(jump?0:oz);
+      let yy=y+dt*(.05+w*.025*(.3+st)+Math.sin(tt*.9+i)*.12*w*.05);
+      if(yy>23)yy-=23;p[i*3+1]=yy;
       if(p[i*3]>35)p[i*3]-=70;if(p[i*3]<-35)p[i*3]+=70;
       if(p[i*3+2]>35)p[i*3+2]-=70;if(p[i*3+2]<-35)p[i*3+2]+=70;
     }
     d.geometry.attributes.position.needsUpdate=true;
-    d.material.opacity=0.16+(isN?0.10:0.30);
+    d.material.opacity=Math.min(.85,0.16+(isN?0.10:0.30)+.35*st);d.material.size=.22+.1*st;
     d.material.color.copy(P.sun).lerp(new THREE.Color(0xffffff),0.25);
     d.position.set(px,0,pz);
   }
@@ -6000,6 +6056,7 @@ function netGroups(){
   for(let i=0;i<n.length;i++){const k=find(i);(groups[k]=groups[k]||[]).push(n[i])}
   return Object.values(groups);
 }
+const _wgrid={};
 function gridTick(dt){
   const night=isNight(),wind=Day.ctx.wind,up=!night;
   const sunUp=night?0:clamp(sunDir.y*1.4,0,1);
@@ -6016,7 +6073,7 @@ function gridTick(dt){
           if(s.run&&c&&c.amt>.01){c.amt=Math.max(0,c.amt-(d.burn||.3)*dt);if(c.amt<=.01){c.amt=0;s.run=false;log('the generator has run out of diesel','bad')}}
           else v=0;
         }
-        if(d.gen.wind)v=Math.max(0,(wind-3)/16)*v;
+        if(d.gen.wind){const wl=windAt(s.x,s.z,windGameT(),_wgrid);v=Math.min(1.25,Math.max(0,(wl.kn-3)/16))*v}      /* its own wind (§07b), gusts and all; a storm overdrives it a little */
         if(d.gen.at==='day')v*=sunUp;
         s.gen=Math.max(0,v);gen+=s.gen;
       }
@@ -8081,7 +8138,12 @@ function animateStructures(dt){
     s.age+=dt;if(s.type==='buggy'||s.type==='lorry')vhIdle(s,dt);
     const f=s.fsm;
     if(s.fan)s.fan.rotation.y+=dt*(f.state==='working'?5.5:0.2);
-    if(s.blades)s.blades.rotation.z+=dt*(0.6+w*0.16)*(f.state==='working'?1:0.12);
+    if(s.wHead){                                                     /* the vane swings the head round to face where the wind comes from */
+      const wl=s._w||(s._w=windAt(s.x,s.z,windGameT(),{}));if(!s._wt||now()-s._wt>.5){s._wt=now();windAt(s.x,s.z,windGameT(),wl)}
+      const want=Math.atan2(-Math.cos(wl.dir),-Math.sin(wl.dir))-(s.rot||0);let d=want-s.wHead.rotation.y;d=Math.atan2(Math.sin(d),Math.cos(d));
+      s.wHead.rotation.y+=d*Math.min(1,dt*.6);
+      if(s.blades)s.blades.rotation.z+=dt*(0.6+wl.kn*0.16)*(f.state==='working'?1:0.12);
+    }else if(s.blades)s.blades.rotation.z+=dt*(0.6+w*0.16)*(f.state==='working'?1:0.12);
     if(s.bulb){
       const on=f.state==='working';
       s.bulb.material=on?MAT.lampOn:MAT.glow;
@@ -8288,7 +8350,17 @@ function terrN(x,z,out){
   const e=1.0,hx=heightAt(x+e,z)-heightAt(x-e,z),hz=heightAt(x,z+e)-heightAt(x,z-e);
   return out.set(-hx/(2*e),1,-hz/(2*e)).normalize();
 }
-const planeWind=()=>{try{return Day.ctx.wind||0}catch(e){return 0}};
+const planeWind=()=>{try{return Day.ctx.wind*(Day.ctx.gust||1)||0}catch(e){return 0}};
+/* the air an aircraft flies in moves with the wind (§07b): its aerodynamics see the velocity RELATIVE to the air, and it is carried over
+   the ground with it. The wind dies away toward the ground (a boundary layer: none on the ground, half by 12 m, full from 25 m), so a
+   take-off or a landing is not blown about; s.wa holds the air's velocity this step. */
+const _wAir={};
+function airIn(s){
+  const w=windAt(s.pos.x,s.pos.z,windGameT(),_wAir),k=s.gnd?0:smooth(.4,25,s.pos.y-heightAt(s.pos.x,s.pos.z));
+  const wa=s.wa||(s.wa={x:0,z:0});wa.x=w.vx*k;wa.z=w.vz*k;
+  s.vel.x-=wa.x;s.vel.z-=wa.z;
+}
+function airOut(s){const wa=s.wa;if(wa){s.vel.x+=wa.x;s.vel.z+=wa.z}}
 
 function planeInit(s){
   s.pos=new THREE.Vector3(s.x,0,s.z);s.q=new THREE.Quaternion();s.vel=new THREE.Vector3();s.av=new THREE.Vector3();
@@ -8400,6 +8472,7 @@ function groundSolve(s,iters,v){
 }
 /* one physics substep.  inp = {brake:bool}.  events are reported through planeEvent(s,kind,data) */
 function flightStep(s,h,inp){
+  airIn(s);                                            /* from here to the move, v is the velocity through the air */
   const q=s.q,v=s.vel;
   _F.set(0,0,1).applyQuaternion(q);_U.set(0,1,0).applyQuaternion(q);_L.set(1,0,0).applyQuaternion(q);
   const spd=v.length(),va=v.dot(_F),vu=v.dot(_U),vl=v.dot(_L),vv=Math.max(va,0);
@@ -8449,6 +8522,7 @@ function flightStep(s,h,inp){
   s.av.multiplyScalar(Math.exp(-PL.avDamp*h));
   q.normalize();
   /* ── translate, then clear any residual depth ── */
+  airOut(s);                                           /* back to the velocity over the ground: the air carries it */
   s.pos.addScaledVector(v,h);
   const wasG=s.gnd;
   const c=high?(s.contact||(s.contact={wheels:0,hard:null,impact:0,any:false,nose:false})):groundSolve(s,6,null);
@@ -9013,6 +9087,7 @@ function heliGround(s,iters,v){
 }
 /* one physics substep.  inp = {hold:bool}  (hold = stabilise: damps drift and levels the airframe) */
 function heliStep(s,h,inp){
+  airIn(s);                                            /* from here to the move, v is the velocity through the air */
   const q=s.q,v=s.vel,ctl=s.ctl,R=s.rate;
   _F.set(0,0,1).applyQuaternion(q);_U.set(0,1,0).applyQuaternion(q);_L.set(1,0,0).applyQuaternion(q);
   const gh=heightAt(s.pos.x,s.pos.z),alt=s.pos.y-gh-HL.cgh,dens=1-0.4*smooth(180,650,alt);
@@ -9036,7 +9111,11 @@ function heliStep(s,h,inp){
   const Tu=Tm-vu*(vu<0?2.0:0.9)*rr;                                // the disc is a parachute on the way down
   const dF=vF*(0.06+0.0042*Math.abs(vF)),dL=vL*(0.10+0.009*Math.abs(vL));
   v.x+=(_U.x*Tu-_F.x*dF-_L.x*dL)*h;v.y+=(_U.y*Tu-_F.y*dF-_L.y*dL-HL.g)*h;v.z+=(_U.z*Tu-_F.z*dF-_L.z*dL)*h;
-  if(inp.hold&&alt>0.4){const k=Math.exp(-0.9*h);v.x*=k;v.z*=k}
+  if(inp.hold&&alt>0.4){                               /* hold: it keeps its place over the GROUND — damped, and drawn back to where hold began, so a steady wind cannot walk it away */
+    const k=Math.exp(-0.9*h),wa=s.wa||{x:0,z:0};
+    if(!s.holdP||Math.hypot(s.holdP.x-s.pos.x,s.holdP.z-s.pos.z)>25)s.holdP={x:s.pos.x,z:s.pos.z};
+    v.x=(v.x+wa.x)*k+(s.holdP.x-s.pos.x)*.3*h-wa.x;v.z=(v.z+wa.z)*k+(s.holdP.z-s.pos.z)*.3*h-wa.z;
+  }else s.holdP=null;
   if(v.lengthSq()>2025)v.setLength(45);
   /* ── commanded body rates (lagged): x = pitch-down, y = yaw-left, z = roll-right ── */
   const auth=0.35+0.65*smooth(0.25,0.9,s.rpm),tt=now();
@@ -9062,6 +9141,7 @@ function heliStep(s,h,inp){
   const avm=s.av.length();
   if(avm>1e-7){_yq.setFromAxisAngle(_P.copy(s.av).multiplyScalar(1/avm),avm*h);q.premultiply(_yq)}
   s.av.multiplyScalar(Math.exp(-HL.avDamp*h));q.normalize();
+  airOut(s);                                           /* back to the velocity over the ground: the air carries it */
   s.pos.addScaledVector(v,h);
   const wasG=s.gnd;
   const cn=high?(s.contact||(s.contact={wheels:0,hard:null,impact:0,any:false})):heliGround(s,6,null);
@@ -12193,7 +12273,7 @@ function jnThrow(J){
   const b=jnBusy(J);if(b){log('the points will not move — a '+b+'’s wheels are on them','bad');SFX('bad');return}
   J.set=J.set?0:1;J.thrT=now();
   SFX('clunk');
-  if(A.ctx&&Aud.built&&SET.audio){audClank(.22,160,360,.4);setTimeout(()=>audClank(.12,900,1600,.25),260);setTimeout(()=>audClank(.16,240,520,.3),620)}
+  if(A.ctx&&Aud.built&&SET.audio){const at={x:J.x,y:J.y+.3,z:J.z,r:60},lv={x:J.lx,y:J.ly,z:J.lz,r:40};audClank(.22,160,360,.4,lv);setTimeout(()=>audClank(.12,900,1600,.25,at),260);setTimeout(()=>audClank(.16,240,520,.3,at),620)}     /* the lever, then the blades */
   log('points thrown — set for the '+(J.set?'branch':'main line'),'gold');saveGame();
 }
 function jnStation(J){
@@ -13717,8 +13797,8 @@ function trainCouple(T,ob,md){
   trainMeta(T);netIndex();
   const w=netAt(trainLeadAx(T,md).p,_ta);
   if(!T.silent){
-    const d=P.aboard===T?0:Math.hypot(w.x-P.x,w.z-P.z),vol=P.aboard===T?1:audVol(d,60);
-    if(A.ctx&&Aud.built&&SET.audio){audClank(.32*vol,180,420,.35);setTimeout(()=>audClank(.18*vol,500,900,.18),90)}
+    const at={x:w.x,y:w.y+1,z:w.z,r:60};
+    if(A.ctx&&Aud.built&&SET.audio){audClank(.32,180,420,.35,at);setTimeout(()=>audClank(.18,500,900,.18,at),90)}
     log('coupled: '+nU+' '+(nU>1?'cars':TC_NAME[uc[0].kind])+' on · '+T.cars.length+' in the consist','good',1);
   }
   return true;
@@ -13730,7 +13810,7 @@ function trainUncouple(T,i){
   T.auto=false;T.thr=T.thrT=0;
   if(P.aboard===T&&T.pc>i){P.aboard=U;U.pc=T.pc-i-1;U.lever=T.lever;T.lever=false;if(T.seat){U.seat=Object.assign({},T.seat,{ci:T.seat.ci-i-1});T.seat=null}U.ry=T.ry}
   trainMeta(T);trainMeta(U);netIndex();
-  SFX('clunk');if(A.ctx&&Aud.built&&SET.audio)audClank(.2,300,700,.22);
+  SFX('clunk');if(A.ctx&&Aud.built&&SET.audio){const a=T.cars[i],b=U.cars[0];audClank(.2,300,700,.22,{x:(a.x+b.x)/2,y:(a.g?a.g.position.y:0)+1,z:(a.z+b.z)/2,r:40})}
   log('uncoupled — the consist is parted into '+T.cars.length+' and '+U.cars.length+' car'+(U.cars.length>1?'s':''),'gold');
 }
 
@@ -13851,7 +13931,7 @@ function trainSim(T,dt){
     trainMove(T,md*Math.max(0,gap));
     if(ob.kind==='car'&&ob.own){T.v=0;if(now()-(T.ownT||0)>20&&!T.silent){T.ownT=now();log('the train has come round to its own tail — a consist cannot be coupled to itself','gold')}}
     else if(ob.kind==='car'&&closing>=TC_CPLV&&!T.auto&&gap>-.05){netIndex();trainCouple(T,ob,md)}
-    else{T.v=0;if(closing>.5&&!T.silent&&A.ctx&&Aud.built&&SET.audio)audClank(.25*clamp(closing,0,2),150,380,.3)}
+    else{T.v=0;if(closing>.5&&!T.silent&&A.ctx&&Aud.built&&SET.audio){const w=netAt(trainLeadAx(T,md).p,_ta);audClank(.25*clamp(closing,0,2),150,380,.3,{x:w.x,y:w.y+1,z:w.z,r:60})}}
   }else trainMove(T,ds);
   T.spd=Math.abs(T.v);
   if(T.dz){
@@ -13863,7 +13943,7 @@ function trainSim(T,dt){
     if(off){if(!idle||(!T.auto&&Math.abs(ctl-T.offCtl)>.05)){off=false;T.idleT=0}}       /* the timetable retrying a blocked line does not count: only moving */
     else if(T.idleT>(T.auto?Math.max(TC_ENGOFF,TC.waitEnd+15):TC_ENGOFF)){off=true;T.offCtl=ctl}     /* in service, a train idles through its dwell at the end of the line; stuck, it stops */
     if(off!==!!T.engOff){T.engOff=off;if(!T.silent&&P.aboard===T)log(off?'the diesel has stood two minutes — its engine shuts down. it starts again when it moves or you work the controller':'the diesel engine turns over and catches','gold',1);
-      if(!off&&!T.silent&&A.ctx&&Aud.built&&SET.audio&&T.near<60){const v=P.aboard===T?1:audVol(Math.max(0,T.near),60);[0,140,280,430].forEach((t,i)=>setTimeout(()=>audClank(.12*v,90+i*30,260,.22),t))}}
+      if(!off&&!T.silent&&A.ctx&&Aud.built&&SET.audio&&T.near<60){const L=T.locos.find(c=>c.kind==='shunter')||T.cars[0],at={x:L.x,y:(L.g?L.g.position.y:0)+1.5,z:L.z,r:60};[0,140,280,430].forEach((t,i)=>setTimeout(()=>audClank(.12,90+i*30,260,.22,at),t))}}
     trainFuelUse(T,dt);return}
   const sl=T.locos.filter(c=>c.kind==='loco');
   const use=T.spd/T.vmax*TC.drain+(T.lampsOn?TC.lamp*T.cars.length*.7:0)+(T.headOn?TC.lamp*T.cars.length*.3:0);
@@ -14121,16 +14201,17 @@ function trainSeatLook(dx,dy){
 }
 function trainHorn(T){
   if(T.silent||!A.ctx||!SET.audio)return;
-  const c=T.cars[0],d=P.aboard===T?0:Math.hypot(c.x-P.x,c.z-P.z),vol=P.aboard===T?1:audVol(d,TC.hornR);
-  if(vol<.02)return;
+  const c=T.cars[0],hy=(c.g?c.g.position.y:0)+3;if(Aud.built)earsTick();
+  const d=spaDist(c.x,hy,c.z),vol=audVol(d,TC.hornR);
+  if(vol<.02||!Aud.built)return;
   try{
-    const ctx=A.ctx,t=ctx.currentTime,g=ctx.createGain(),f=ctx.createBiquadFilter();
+    const ctx=A.ctx,t=ctx.currentTime,g=ctx.createGain(),f=ctx.createBiquadFilter(),pan=spaPanner();spaPlace(pan,c.x,hy,c.z,true);
     f.type='lowpass';f.frequency.value=1100;f.Q.value=.7;
     g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.22*vol,t+.07);g.gain.setValueAtTime(.22*vol,t+1.15);g.gain.exponentialRampToValueAtTime(.0008,t+1.7);
     for(const [hz,ty] of [[247,'sawtooth'],[311,'square'],[370,'triangle']]){
       const o=ctx.createOscillator();o.type=ty;o.frequency.setValueAtTime(hz*.97,t);o.frequency.linearRampToValueAtTime(hz,t+.12);o.connect(f);o.start(t);o.stop(t+1.75);
     }
-    f.connect(g);g.connect(Aud.out||ctx.destination);
+    f.connect(g);g.connect(pan);setTimeout(()=>{try{g.disconnect();pan.disconnect()}catch(e){}},2000);
   }catch(e){}
 }
 function trainStations(T,ci){
@@ -14238,44 +14319,66 @@ function trainHud(el,T){
 }
 
 /* ── sound: a soft rolling rumble and a gentle clack at the joints. no squeal on the curves: there are many, and it would wear. ── */
-let TAUD=null,_taAcc=0;
+/* trains, heard where they are (§04c): each moving train's wheels and rail joints from the car nearest you (the nearest three
+   trains), each running diesel's engine from its loco (the nearest three engines) */
+const _tap={};
+function trainNearCar(T){                 /* the car of T nearest your ears, and where it is */
+  let best=null,bd=1e9;for(const c of T.cars){const d=spaDist(c.x,(c.g?c.g.position.y:0)+1,c.z);if(d<bd){bd=d;best=c}}
+  return{c:best,d:bd,x:best.x,y:(best.g?best.g.position.y:0)+.6,z:best.z};
+}
 function trainAud(dt){
   if(!A.ctx||!Aud.built||!SET.audio){return}
-  if(!TAUD){const c=A.ctx;TAUD={rum:audLayer(c,'lowpass',150,.8),mid:audLayer(c,'bandpass',380,.9)};
-    /* a diesel's engine: a low firing note through a lowpass, gated by a slow tremolo (the beat of the cylinders), and a little turbo hiss over it */
-    const o1=c.createOscillator(),o2=c.createOscillator(),fl=c.createBiquadFilter(),g=c.createGain(),am=c.createGain(),lfo=c.createOscillator(),lg=c.createGain();
+  earsTick();
+  const c=A.ctx,t=c.currentTime;
+  if(!SPA.tr)SPA.tr=spaPool(3,()=>{
+    const g=c.createGain(),pan=spaPanner();g.gain.value=0;
+    const lay=(type,f,q)=>{const L=audLayer(c,type,f,q);L.g.disconnect();L.g.connect(g);return L};
+    return{g,pan,rum:lay('lowpass',150,.8),mid:lay('bandpass',380,.9),acc:0};
+  });
+  /* a diesel's engine: a low firing note through a lowpass, gated by a slow tremolo (the beat of the cylinders), and a little turbo hiss */
+  if(!SPA.de)SPA.de=spaPool(3,()=>{
+    const g=c.createGain(),pan=spaPanner();g.gain.value=0;
+    const o1=c.createOscillator(),o2=c.createOscillator(),fl=c.createBiquadFilter(),eg=c.createGain(),am=c.createGain(),lfo=c.createOscillator(),lg=c.createGain();
     o1.type='sawtooth';o2.type='square';o1.frequency.value=32;o2.frequency.value=48.5;fl.type='lowpass';fl.frequency.value=220;fl.Q.value=1.4;
     am.gain.value=.65;lfo.type='sine';lfo.frequency.value=7.5;lg.gain.value=.35;lfo.connect(lg);lg.connect(am.gain);
-    g.gain.value=0;o1.connect(fl);o2.connect(fl);fl.connect(am);am.connect(g);g.connect(Aud.out);o1.start();o2.start();lfo.start();
-    TAUD.eng={o1,o2,fl,g,lfo};TAUD.hiss=audLayer(c,'bandpass',2600,3)}
-  let near=null,nd=1e9;
-  for(const T of TR.list){const d=P.aboard===T?0:T.near;if(d<nd){nd=d;near=T}}
-  const t=A.ctx.currentTime;
-  let vol=0,sp=0;
-  if(near&&nd<TC.hornR){vol=P.aboard===near?1:audVol(Math.max(0,nd),TC.hornR);sp=clamp(near.spd/near.vmax,0,1)}
-  TAUD.rum.g.gain.setTargetAtTime(vol*.38*Math.pow(sp,.8),t,.45);TAUD.rum.fl.frequency.setTargetAtTime(105+sp*150,t,.4);
-  TAUD.mid.g.gain.setTargetAtTime(vol*.1*Math.pow(sp,1.3),t,.45);TAUD.mid.fl.frequency.setTargetAtTime(280+sp*300,t,.4);
-  /* the nearest diesel engine that has fuel: idles standing, climbs with the controller */
-  let en=null,ed=1e9;for(const T of TR.list){if(!T.dz||T.pow<=.5||T.engOff)continue;const d=P.aboard===T?0:T.near;if(d<ed){ed=d;en=T}}
-  const ev=en&&ed<70?(P.aboard===en?.8:audVol(Math.max(0,ed),70)):0,ld=en?clamp(Math.abs(en.thr)*.7+en.spd/en.vmax*.5,0,1):0;
-  TAUD.eng.g.gain.setTargetAtTime(ev*(.07+.13*ld),t,.35);
-  TAUD.eng.o1.frequency.setTargetAtTime(30+ld*26,t,.6);TAUD.eng.o2.frequency.setTargetAtTime(45+ld*39,t,.6);TAUD.eng.lfo.frequency.setTargetAtTime(7+ld*9,t,.6);
-  TAUD.eng.fl.frequency.setTargetAtTime(190+ld*420,t,.5);TAUD.hiss.g.gain.setTargetAtTime(ev*.018*ld,t,.5);
-  if(near&&vol>0&&near.spd>.4){
-    _taAcc+=near.spd*dt;
-    if(_taAcc>3.4){_taAcc-=3.4;audClank(vol*.05*(.4+.6*sp),170,420,.15)}
-    if(_taAcc>7)_taAcc=0;
+    eg.gain.value=0;o1.connect(fl);o2.connect(fl);fl.connect(am);am.connect(eg);eg.connect(g);o1.start();o2.start();lfo.start();
+    const hiss=audLayer(c,'bandpass',2600,3);hiss.g.disconnect();hiss.g.connect(g);
+    return{g,pan,o1,o2,fl,eg,lfo,hiss};
+  });
+  const rc=[],ec=[];
+  for(const T of TR.list){
+    if(!T.cars.length)continue;
+    if(T.spd>.05){const n=trainNearCar(T);if(n.d<TC.hornR)rc.push({key:T,d:n.d,T,n})}
+    if(T.dz&&T.pow>.5&&!T.engOff){
+      let best=null,bd=1e9;for(const L of T.locos){if(L.kind!=='shunter')continue;const y=(L.g?L.g.position.y:0)+2;const d=spaDist(L.x,y,L.z);if(d<bd){bd=d;best={x:L.x,y,z:L.z}}}
+      if(best&&bd<70)ec.push({key:T,d:bd,T,p:best});
+    }
+  }
+  for(const [V,cd] of SPA.tr.assign(rc)){
+    const T=cd.T,n=cd.n,vol=audVol(cd.d,TC.hornR),sp=clamp(T.spd/T.vmax,0,1);
+    spaPlace(V.pan,n.x,n.y,n.z,V.fresh);V.g.gain.setTargetAtTime(1,t,.15);
+    V.rum.g.gain.setTargetAtTime(vol*.38*Math.pow(sp,.8),t,.45);V.rum.fl.frequency.setTargetAtTime(105+sp*150,t,.4);
+    V.mid.g.gain.setTargetAtTime(vol*.1*Math.pow(sp,1.3),t,.45);V.mid.fl.frequency.setTargetAtTime(280+sp*300,t,.4);
+    if(T.spd>.4){V.acc+=T.spd*dt;if(V.acc>3.4){V.acc-=3.4;audClank(.05*(.4+.6*sp),170,420,.15,{x:n.x,y:n.y-.5,z:n.z,r:TC.hornR})}if(V.acc>7)V.acc=0}
+  }
+  for(const [V,cd] of SPA.de.assign(ec)){
+    const T=cd.T,ev=audVol(cd.d,70)*.8,ld=clamp(Math.abs(T.thr)*.7+T.spd/T.vmax*.5,0,1);
+    spaPlace(V.pan,cd.p.x,cd.p.y,cd.p.z,V.fresh);V.g.gain.setTargetAtTime(1,t,.15);
+    V.eg.gain.setTargetAtTime(ev*(.07+.13*ld),t,.35);
+    V.o1.frequency.setTargetAtTime(30+ld*26,t,.6);V.o2.frequency.setTargetAtTime(45+ld*39,t,.6);V.lfo.frequency.setTargetAtTime(7+ld*9,t,.6);
+    V.fl.frequency.setTargetAtTime(190+ld*420,t,.5);V.hiss.g.gain.setTargetAtTime(ev*.018*ld,t,.5);
   }
 }
 
 /* ───────────────────────────────────────────────────────────────────────
    §04b  PROCEDURAL AUDIO LAYER  —  continuous sounds, no audio files
    One shared AudioContext (A.ctx, also used by SFX). Everything here is filtered noise or a couple of
-   oscillators, steered every frame:  wind (follows Day.ctx.wind, gusts, dust storms), the crawler (motor,
-   track rumble, scrub, clanks) and the scrappy droid (servo whine, clanks).
+   oscillators, steered every frame:  wind (the wind field where you stand, §07b: gusts, storms, and from which side it comes),
+   crawlers (motor, track rumble, scrub, clanks), scrappy droids and androids (servo whine, clanks), the quadcopter (props, wash,
+   Doppler), and the trains (trainAud). Everything out in the world is placed in 3D (§04c).
    ─────────────────────────────────────────────────────────────────────── */
 let SHELTERED=false;                                              /* set each frame by the survival tick; the wind reads it */
-const Aud={built:false,out:null,noise:null,wind:null,cr:null,sc:null,gt:0,acc:0,accS:0,sh:0};
+const Aud={built:false,out:null,noise:null,wind:null,gt:0,sh:0};
 function audUnlock(){
   if(!SET.audio)return;
   try{
@@ -14302,22 +14405,94 @@ function audBuild(){
   Aud.out=c.createGain();Aud.out.gain.value=0;Aud.out.connect(c.destination);
   Aud.noise=audNoise(c);
   Aud.wind={low:audLayer(c,'lowpass',240,.7),mid:audLayer(c,'bandpass',700,1.3),hi:audLayer(c,'highpass',2400,.6)};
-  const motor=(f0,type1,type2)=>{
-    const o1=c.createOscillator(),o2=c.createOscillator(),mf=c.createBiquadFilter(),mg=c.createGain();
-    o1.type=type1;o2.type=type2;o1.frequency.value=f0;o2.frequency.value=f0*1.5;mf.type='lowpass';mf.frequency.value=500;mg.gain.value=0;
-    o1.connect(mf);o2.connect(mf);mf.connect(mg);mg.connect(Aud.out);o1.start();o2.start();
-    return{o1,o2,mf,mg};
-  };
-  Aud.cr={...motor(40,'sawtooth','triangle'),rum:audLayer(c,'bandpass',190,1),scr:audLayer(c,'bandpass',1500,2.2)};
-  Aud.sc={...motor(190,'triangle','sine'),rum:audLayer(c,'bandpass',420,1.4)};
+  /* the wind comes from somewhere: each layer through its own stereo panner (the highs pan hardest, as a head shadows them most) */
+  for(const k of ['low','mid','hi']){const L=Aud.wind[k];L.g.disconnect();L.sp=c.createStereoPanner?c.createStereoPanner():null;if(L.sp){L.g.connect(L.sp);L.sp.connect(Aud.out)}else L.g.connect(Aud.out)}
   Aud.built=true;
 }
-function audClank(vol,lo,hi,len){
-  const c=A.ctx;if(!c||vol<.004)return;
+/* ───────────────────────────────────────────────────────────────────────
+   §04c  SPATIAL AUDIO — every sound out in the world comes from where it is
+   EARS: where you hear from — always your BODY (the quadcopter has no microphone: flying it, you still hear from where you stand,
+   facing the way you stood). On foot or aboard a train that is the camera (your head); driving in the chase view, your seat.
+   A.ctx.listener is put there each frame. Every in-world emitter goes source → its gain → a PannerNode at its world position →
+   Aud.out. The panners do no distance fall-off of their own (rolloff 0): ONE curve for everything, audVol(d, range), applied in
+   the gain, so a train, a crawler, a droid, a clank and the drone all fade the same way, each over its own range.
+   Continuous emitters are HRTF voices in small pools (spaPool): the nearest few of each kind sound together; a voice sticks to its
+   owner, and is faded out when it loses it. One-shot clanks get a cheap equal-power panner of their own (audClank(…, pos)).
+   A source inside ~2 m (your own crawler's motor, the train you ride) is drawn in toward below you, so it does not whip round
+   your head as you look about.
+   The vehicle you drive (buggy, lorry, microlight, helicopter) is where your ears are, so its engine is not panned.
+   ─────────────────────────────────────────────────────────────────────── */
+const EARS={x:0,y:0,z:0,fx:0,fy:0,fz:-1};
+const _ev3=new THREE.Vector3();
+function earsTick(){
+  if(!A.ctx)return;
+  let x,y,z,fx,fy,fz;
+  if(Drone.on){x=P.x;y=P.y+1.6;z=P.z;fx=-Math.sin(P.yaw);fy=0;fz=-Math.cos(P.yaw)}
+  else{
+    camera.getWorldDirection(_ev3);fx=_ev3.x;fy=_ev3.y;fz=_ev3.z;
+    const s=G.drive;
+    if(s&&SET.buggyView==='chase'){const q=s.pos||s;x=q.x;y=(q.y||heightAt(q.x,q.z))+1.4;z=q.z}
+    else{x=camera.position.x;y=camera.position.y;z=camera.position.z}
+  }
+  EARS.x=x;EARS.y=y;EARS.z=z;EARS.fx=fx;EARS.fy=fy;EARS.fz=fz;
+  const L=A.ctx.listener,t=A.ctx.currentTime;
+  try{
+    if(L.positionX){L.positionX.setValueAtTime(x,t);L.positionY.setValueAtTime(y,t);L.positionZ.setValueAtTime(z,t);
+      L.forwardX.setValueAtTime(fx,t);L.forwardY.setValueAtTime(fy,t);L.forwardZ.setValueAtTime(fz,t);L.upX.setValueAtTime(0,t);L.upY.setValueAtTime(1,t);L.upZ.setValueAtTime(0,t)}
+    else{L.setPosition(x,y,z);L.setOrientation(fx,fy,fz,0,1,0)}
+  }catch(e){}
+}
+const spaDist=(x,y,z)=>Math.hypot(x-EARS.x,y-EARS.y,z-EARS.z);
+function spaPanner(model){
+  const p=A.ctx.createPanner();p.panningModel=model||'HRTF';p.distanceModel='linear';p.refDistance=1;p.maxDistance=1e5;p.rolloffFactor=0;
+  p.coneInnerAngle=360;p.coneOuterAngle=360;p.connect(Aud.out);return p;
+}
+/* put a panner at a world point (seen from EARS); snap: no glide (a new owner, a one-shot). returns the distance */
+function spaPlace(p,x,y,z,snap){
+  let dx=x-EARS.x,dy=y-EARS.y,dz=z-EARS.z;const d=Math.hypot(dx,dy,dz);
+  if(d<2){const b=1-d/2,k=d>1e-3?(1-b)/d:0;dx=dx*k;dy=dy*k-b;dz=dz*k;const l=Math.hypot(dx,dy,dz)||1;dx=dx/l*2;dy=dy/l*2;dz=dz/l*2}
+  const X=EARS.x+dx,Y=EARS.y+dy,Z=EARS.z+dz,t=A.ctx.currentTime;p._at=[X,Y,Z];          /* (_at: where it was last put, for a look in the console) */
+  try{
+    if(p.positionX){if(snap){p.positionX.setValueAtTime(X,t);p.positionY.setValueAtTime(Y,t);p.positionZ.setValueAtTime(Z,t)}
+      else{p.positionX.setTargetAtTime(X,t,.03);p.positionY.setTargetAtTime(Y,t,.03);p.positionZ.setTargetAtTime(Z,t,.03)}}
+    else p.setPosition(X,Y,Z);
+  }catch(e){}
+  return d;
+}
+/* a pool of voices of one kind. make() builds a voice {pan, g (its output gain, into pan), …}. assign(cands) gives the nearest
+   cands (each {key, d, …}, any order) a voice, keeping each owner on the voice it already had; returns [[voice, cand], …] */
+function spaPool(max,make){
+  const P0={max,voices:[]};
+  P0.assign=cands=>{
+    cands.sort((a,b)=>a.d-b.d);const ch=cands.slice(0,max),out=[],t=A.ctx.currentTime;
+    for(const v of P0.voices)v.used=false;
+    for(const c of ch){let v=P0.voices.find(v=>v.key===c.key);if(v){v.used=true;v.fresh=false;out.push([v,c])}}
+    for(const c of ch){
+      if(out.some(o=>o[1]===c))continue;
+      let v=P0.voices.find(v=>!v.used);
+      if(!v&&P0.voices.length<max){v=make();v.g.connect(v.pan);P0.voices.push(v)}
+      if(!v)continue;
+      v.used=true;v.fresh=v.key!==c.key;v.key=c.key;out.push([v,c]);
+      if(v.fresh){v.g.gain.cancelScheduledValues(t);v.g.gain.setValueAtTime(0,t)}     /* a new owner fades in from silence, never jumps across */
+    }
+    for(const v of P0.voices)if(!v.used){v.key=null;v.g.gain.setTargetAtTime(0,t,.15);if(v.idle)v.idle(t)}
+    return out;
+  };
+  return P0;
+}
+const SPA={};
+/* a short metallic knock. pos {x, y, z, r}: it happens THERE (panned, and faded by audVol over range r, 60 m if not given);
+   without pos it is right at your ears */
+function audClank(vol,lo,hi,len,pos){
+  const c=A.ctx;if(!c||!Aud.built)return;
+  let pan=null;
+  if(pos){earsTick();const d=spaDist(pos.x,pos.y,pos.z);vol*=audVol(d,pos.r||60);if(vol>=.004){pan=spaPanner('equalpower');spaPlace(pan,pos.x,pos.y,pos.z,true)}}
+  if(vol<.004)return;
   const t=c.currentTime,s=c.createBufferSource(),f=c.createBiquadFilter(),g=c.createGain();
   s.buffer=Aud.noise;f.type='bandpass';f.frequency.value=lo+Math.random()*(hi-lo);f.Q.value=3.2;
   g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(.0001,t+len);
-  s.connect(f);f.connect(g);g.connect(Aud.out);s.start(t,Math.random()*3,len+.03);
+  s.connect(f);f.connect(g);g.connect(pan||Aud.out);s.start(t,Math.random()*3,len+.03);
+  if(pan)s.onended=()=>{try{g.disconnect();pan.disconnect()}catch(e){}};
 }
 const audVol=(d,r)=>Math.pow(clamp(1-d/r,0,1),1.6);
 function audTick(dt){
@@ -14326,54 +14501,94 @@ function audTick(dt){
   if(!Aud.built)audBuild();
   const c=A.ctx,t=c.currentTime;
   Aud.out.gain.setTargetAtTime(1,t,.25);
-  /* ── wind: level follows Day.ctx.wind (3..18 kn), gusts ride on top, a dust storm adds howl ── */
-  const w=Day.ctx.wind,storm=WINDMUL.value>1.8,lvl=clamp((w-2)/16,0,1);
+  earsTick();
+  /* ── wind: level follows the wind where you stand (§07b) with its gusts; a storm adds howl. It comes from somewhere: facing into it
+     it is loudest, the ear turned to it hears more of it, and with your back to it the highs fall away (your head is in the way). ── */
+  const w=Day.ctx.wind,S=Day.ctx.storm||0,lvl=clamp((w-2)/16,0,1);
   Aud.gt+=dt;
-  const gust=.62+.2*Math.sin(Aud.gt*.31)+.12*Math.sin(Aud.gt*.83+1.7)+.08*Math.sin(Aud.gt*2.1+.4),
-        base=Math.pow(lvl,1.25)*gust*(storm?1.45:1),W=Aud.wind;
+  const gust=clamp((Day.ctx.gust||1)*(.86+.08*Math.sin(Aud.gt*.83+1.7)+.06*Math.sin(Aud.gt*2.1+.4)),.3,1.8),
+        base=Math.pow(lvl,1.25)*gust*(1+.45*S),W=Aud.wind;
   /* under a roof or in a cab the wind is a low, muffled push: the highs go first, the mids fall and darken, only a rumble of the lows is left */
   Aud.sh+=(((SHELTERED&&!Drone.on)?1:0)-Aud.sh)*(1-Math.exp(-dt*2.2));
   const sh=Aud.sh;
-  W.low.g.gain.setTargetAtTime(.55*base*(1-.4*sh),t,.3);
+  const wfx=-Math.cos(Day.ctx.windDir),wfz=-Math.sin(Day.ctx.windDir),hl=Math.hypot(EARS.fx,EARS.fz)||1,hx=EARS.fx/hl,hz=EARS.fz/hl;
+  const front=wfx*hx+wfz*hz,side=wfx*(-hz)+wfz*hx,dirk=1-.75*sh;                  /* front: +1 facing into it · side: +1 from your right */
+  const fl=1+(.12*front)*dirk,fm=1+(.25*front)*dirk,fh=1+(.42*front-.08)*dirk;
+  W.low.g.gain.setTargetAtTime(.55*base*(1-.4*sh)*fl,t,.3);
   W.low.fl.frequency.setTargetAtTime(240-95*sh,t,.4);
-  W.mid.g.gain.setTargetAtTime(.34*base*(1-.8*sh),t,.35);
-  W.mid.fl.frequency.setTargetAtTime((380+lvl*850*gust*(storm?1.3:1))*(1-.5*sh),t,.35);
-  W.hi.g.gain.setTargetAtTime((storm?.2:.07)*base*base*(1-.96*sh),t,.35);
-  /* ── crawler: nearest one within earshot ── */
-  let near=null,nd=1e9;
-  for(const s of G.struct){if(s.type!=='crawler')continue;const d=Math.hypot(s.x-P.x,s.z-P.z);if(d<nd){nd=d;near=s}}
-  const C=Aud.cr;let vol=0,sp=0,yr=0,load=0;
-  if(near&&nd<95){
-    const inside=P.aboard===near;
-    vol=inside?1:audVol(nd,95);
-    sp=Math.min(1,Math.abs(near.speed)/CR.vmax);yr=Math.min(1,Math.abs(near.yawRate)*2.4);
-    const on=!near.dead&&near.pow>.5&&(Math.abs(near.speed)>.03||Math.abs(near.thr)>.02||yr>.02);
-    load=on?clamp(sp+yr*.6,0,1):0;
+  W.mid.g.gain.setTargetAtTime(.34*base*(1-.8*sh)*fm,t,.35);
+  W.mid.fl.frequency.setTargetAtTime((380+lvl*850*gust*(1+.3*S))*(1-.5*sh)*(1+.12*front*dirk),t,.35);
+  W.hi.g.gain.setTargetAtTime((.07+.13*S)*base*base*(1-.96*sh)*fh,t,.35);
+  if(W.low.sp){W.low.sp.pan.setTargetAtTime(clamp(side*.28*dirk,-1,1),t,.3);W.mid.sp.pan.setTargetAtTime(clamp(side*.55*dirk,-1,1),t,.3);W.hi.sp.pan.setTargetAtTime(clamp(side*.75*dirk,-1,1),t,.3)}
+  /* ── crawlers: the nearest two within earshot, each where it is ── */
+  if(!SPA.cr)SPA.cr=spaPool(2,()=>{
+    const o1=c.createOscillator(),o2=c.createOscillator(),mf=c.createBiquadFilter(),mg=c.createGain(),g=c.createGain(),pan=spaPanner();
+    o1.type='sawtooth';o2.type='triangle';o1.frequency.value=40;o2.frequency.value=60;mf.type='lowpass';mf.frequency.value=500;mg.gain.value=0;g.gain.value=0;
+    o1.connect(mf);o2.connect(mf);mf.connect(mg);mg.connect(g);o1.start();o2.start();
+    const lay=(type,f,q)=>{const L=audLayer(c,type,f,q);L.g.disconnect();L.g.connect(g);return L};
+    return{o1,o2,mf,mg,g,pan,rum:lay('bandpass',190,1),scr:lay('bandpass',1500,2.2),acc:0};
+  });
+  const crc=[];
+  for(const s of G.struct){if(s.type!=='crawler')continue;const y=(s.pos?s.pos.y:s.y)||heightAt(s.x,s.z);const d=spaDist(s.x,y+1.2,s.z);if(d<95)crc.push({key:s,d,s,y:y+1.2})}
+  for(const [V,cd] of SPA.cr.assign(crc)){
+    const near=cd.s,vol=audVol(cd.d,95);spaPlace(V.pan,near.x,cd.y,near.z,V.fresh);V.g.gain.setTargetAtTime(1,t,.1);
+    const sp=Math.min(1,Math.abs(near.speed||0)/CR.vmax),yr=Math.min(1,Math.abs(near.yawRate||0)*2.4);
+    const on=!near.dead&&near.pow>.5&&(Math.abs(near.speed||0)>.03||Math.abs(near.thr||0)>.02||yr>.02),load=on?clamp(sp+yr*.6,0,1):0;
+    V.mg.gain.setTargetAtTime(load>0?vol*.05*(.3+.7*load):0,t,.15);
+    V.o1.frequency.setTargetAtTime(34+sp*40+yr*18,t,.2);V.o2.frequency.setTargetAtTime((34+sp*40+yr*18)*1.5,t,.2);
+    V.mf.frequency.setTargetAtTime(240+sp*520,t,.25);
+    V.rum.g.gain.setTargetAtTime(vol*.5*Math.pow(sp,.7),t,.2);V.rum.fl.frequency.setTargetAtTime(130+sp*230,t,.25);
+    V.scr.g.gain.setTargetAtTime(vol*.28*yr*(.3+.7*sp+.25),t,.2);
+    V.acc+=Math.abs(near.speed||0)*dt;
+    if(V.acc>.75){V.acc-=.75;audClank(.085*(.5+.5*sp),500,1300,.075,{x:near.x,y:cd.y-.8,z:near.z,r:95})}
+    if(V.acc>3)V.acc=0;
   }
-  C.mg.gain.setTargetAtTime(load>0?vol*.05*(.3+.7*load):0,t,.15);
-  C.o1.frequency.setTargetAtTime(34+sp*40+yr*18,t,.2);C.o2.frequency.setTargetAtTime((34+sp*40+yr*18)*1.5,t,.2);
-  C.mf.frequency.setTargetAtTime(240+sp*520,t,.25);
-  C.rum.g.gain.setTargetAtTime(vol*.5*Math.pow(sp,.7),t,.2);C.rum.fl.frequency.setTargetAtTime(130+sp*230,t,.25);
-  C.scr.g.gain.setTargetAtTime(vol*.28*yr*(.3+.7*sp+.25),t,.2);
-  Aud.acc+=Math.abs(near?near.speed:0)*dt;
-  if(near&&vol>0&&Aud.acc>.75){Aud.acc-=.75;audClank(vol*.085*(.5+.5*sp),500,1300,.075)}
-  if(Aud.acc>3)Aud.acc=0;
-  /* ── scrappy droids ── */
-  let sn=null,sd=1e9;
-  for(const s of G.struct){if(!isDroid(s))continue;const d=Math.hypot(s.x-P.x,s.z-P.z);if(d<sd){sd=d;sn=s}}
-  const S=Aud.sc;let sv=0,sa=0;
-  if(sn&&sd<45){
-    sv=audVol(sd,45);
-    const mov=Math.min(1,Math.abs(sn.speed)/SC.speed),wk=(sn.st==='work'||(sn.st==='fab'&&sn.cur))?1:0,chg=sn.st==='dock'&&sn.pow>.5&&sn.pad&&sn.pad.charging?.5:0;
-    sa=clamp(mov+wk*.7+chg*.4,0,1);
-    S.mg.gain.setTargetAtTime(sv*.018*sa,t,.12);
-    S.o1.frequency.setTargetAtTime(150+mov*90+wk*60*(.5+.5*Math.sin(Aud.gt*9)),t,.08);S.o2.frequency.setTargetAtTime(150+mov*90,t,.1);
-    S.mf.frequency.setTargetAtTime(500+mov*700,t,.2);
-    S.rum.g.gain.setTargetAtTime(sv*.16*Math.pow(mov,.8),t,.2);
-    Aud.accS+=Math.abs(sn.speed)*dt;
-    if(Aud.accS>.4){Aud.accS-=.4;audClank(sv*.05,700,1700,.05)}
-    if(sn.clack){sn.clack=false;audClank(sv*.12,1500,2600,.05)}
-  }else{S.mg.gain.setTargetAtTime(0,t,.15);S.rum.g.gain.setTargetAtTime(0,t,.2)}
+  /* ── scrappy droids and androids: the nearest three ── */
+  if(!SPA.sc)SPA.sc=spaPool(3,()=>{
+    const o1=c.createOscillator(),o2=c.createOscillator(),mf=c.createBiquadFilter(),mg=c.createGain(),g=c.createGain(),pan=spaPanner();
+    o1.type='triangle';o2.type='sine';o1.frequency.value=190;o2.frequency.value=285;mf.type='lowpass';mf.frequency.value=500;mg.gain.value=0;g.gain.value=0;
+    o1.connect(mf);o2.connect(mf);mf.connect(mg);mg.connect(g);o1.start();o2.start();
+    const rum=audLayer(c,'bandpass',420,1.4);rum.g.disconnect();rum.g.connect(g);
+    return{o1,o2,mf,mg,g,pan,rum,acc:0};
+  });
+  const scc=[];
+  for(const s of G.struct){if(!isDroid(s))continue;const y=(s.y||heightAt(s.x,s.z))+.5;const d=spaDist(s.x,y,s.z);if(d<45)scc.push({key:s,d,s,y})}
+  for(const [V,cd] of SPA.sc.assign(scc)){
+    const sn=cd.s,sv=audVol(cd.d,45);spaPlace(V.pan,sn.x,cd.y,sn.z,V.fresh);V.g.gain.setTargetAtTime(1,t,.1);
+    const mov=Math.min(1,Math.abs(sn.speed||0)/SC.speed),wk=(sn.st==='work'||(sn.st==='fab'&&sn.cur))?1:0,chg=sn.st==='dock'&&sn.pow>.5&&sn.pad&&sn.pad.charging?.5:0;
+    const sa=clamp(mov+wk*.7+chg*.4,0,1);
+    V.mg.gain.setTargetAtTime(sv*.018*sa,t,.12);
+    V.o1.frequency.setTargetAtTime(150+mov*90+wk*60*(.5+.5*Math.sin(Aud.gt*9)),t,.08);V.o2.frequency.setTargetAtTime(150+mov*90,t,.1);
+    V.mf.frequency.setTargetAtTime(500+mov*700,t,.2);
+    V.rum.g.gain.setTargetAtTime(sv*.16*Math.pow(mov,.8),t,.2);
+    V.acc+=Math.abs(sn.speed||0)*dt;
+    if(V.acc>.4){V.acc-=.4;audClank(.05,700,1700,.05,{x:sn.x,y:cd.y-.4,z:sn.z,r:45})}
+    if(sn.clack){sn.clack=false;audClank(.12,1500,2600,.05,{x:sn.x,y:cd.y,z:sn.z,r:45})}
+  }
+  droneAud(dt,t);
+}
+/* ── the quadcopter: four props, a little out of tune with each other, a wash of air; louder and higher as it works. Heard from
+   your body, so it buzzes off into the distance and comes back past you; the pitch bends as it passes (Doppler) ── */
+const DRN={prev:null};
+function droneAud(dt,t){
+  const c=A.ctx;
+  if(!SPA.dr){
+    const g=c.createGain(),pan=spaPanner(),fl=c.createBiquadFilter(),os=[];g.gain.value=0;fl.type='lowpass';fl.frequency.value=2600;fl.Q.value=.6;
+    for(const [f,ty] of [[176,'sawtooth'],[183,'sawtooth'],[191,'square'],[198,'sawtooth']]){const o=c.createOscillator();o.type=ty;o.frequency.value=f;const og=c.createGain();og.gain.value=.25;o.connect(og);og.connect(fl);o.start();os.push(o)}
+    fl.connect(g);const wash=audLayer(c,'bandpass',900,.8);wash.g.disconnect();wash.g.connect(g);g.connect(pan);
+    SPA.dr={g,pan,fl,os,wash,base:[176,183,191,198]};
+  }
+  const V=SPA.dr;
+  if(!Drone.on){if(DRN.on){V.g.gain.setTargetAtTime(0,t,.25);V.wash.g.gain.setTargetAtTime(0,t,.25);DRN.on=false}DRN.prev=null;return}
+  const d=spaPlace(V.pan,Drone.x,Drone.y,Drone.z,!DRN.on);
+  if(!DRN.on){V.g.gain.cancelScheduledValues(t);V.g.gain.setValueAtTime(0,t);DRN.on=true}
+  const sp=Math.hypot(Drone.vx,Drone.vy,Drone.vz),work=clamp(sp/13+Math.max(0,Drone.vy)/8,0,1.3);
+  /* Doppler: how fast it closes on you (from its velocity along the line to your ears) */
+  const ux=(EARS.x-Drone.x)/(d||1),uy=(EARS.y-Drone.y)/(d||1),uz=(EARS.z-Drone.z)/(d||1),vr=Drone.vx*ux+Drone.vy*uy+Drone.vz*uz,dop=clamp(343/(343-vr),.9,1.1);
+  const vol=audVol(d,140);
+  V.g.gain.setTargetAtTime(vol*.06*(.75+.4*work),t,.08);V.wash.g.gain.setTargetAtTime(vol*.05*(.5+.6*work),t,.1);
+  V.os.forEach((o,i)=>o.frequency.setTargetAtTime(V.base[i]*(1+.22*work+.03*Math.sin(Aud.gt*(3+i)))*dop,t,.06));
+  V.fl.frequency.setTargetAtTime(1600+1800*work,t,.1);
 }
 /* screenshot mode: hide every piece of interface, keep the world */
 let shotTimer=0;
@@ -16762,12 +16977,14 @@ function kiteTick(dt){
   if(!kiteMesh)return;
   kiteMesh.visible=G.kiteFly;
   if(!G.kiteFly)return;
-  const w=Day.ctx.wind/18;
+  const w=Day.ctx.wind*Day.ctx.gust/18;
   const sway=Math.sin(now()*1.6)*0.5*w;
-  kiteMesh.position.set(P.x-fwd.x*0.4+Math.cos(P.yaw)*1.6+sway*2,
+  /* it flies downwind of you, its face to the wind, higher and further out the harder it blows (§07b) */
+  const dx=Math.cos(Day.ctx.windDir),dz=Math.sin(Day.ctx.windDir),out=1.4+clamp(w,0,1.6)*1.4,ky=Math.atan2(-dx,-dz);
+  kiteMesh.position.set(P.x+dx*out-dz*sway*1.6,
     P.y+3.4+Math.sin(now()*1.1)*0.35+w*1.2,
-    P.z-fwd.z*0.4-Math.sin(P.yaw)*1.6);
-  kiteMesh.rotation.set(-1.1+sway*0.25,P.yaw+sway*0.5,sway*0.3);
+    P.z+dz*out+dx*sway*1.6);
+  kiteMesh.rotation.set(-1.1+sway*0.25,ky+sway*0.5,sway*0.3);
   const p=kiteLine.geometry.attributes.position;
   p.setXYZ(1,0,-kiteMesh.position.y+P.y+1.4,-0.0);
   p.needsUpdate=true;
@@ -17165,7 +17382,7 @@ function detailHtml(kind){
     <div class="kv"><span class="big">${clockStr()}</span><span class="lbl">${phaseName()}</span></div>
     <div class="rule"></div>
     <div class="kv"><span class="lbl">day</span><span class="num">${String(Day.ctx.day).padStart(3,'0')}</span></div>
-    <div class="kv"><span class="lbl">wind</span><span class="num">${Day.ctx.wind.toFixed(0)} kn${WINDMUL.value>1.8?' · dust storm':''}</span></div>`;
+    <div class="kv"><span class="lbl">wind</span><span class="num">${(Day.ctx.wind*Day.ctx.gust).toFixed(0)} kn from the ${windFromName(Day.ctx.windDir)}${Day.ctx.storm>.5?' · dust storm':Day.ctx.storm>.1?' · a storm is building':''}</span></div>`;
   }
   const mt=(l,v,c)=>`<div class="meter"><div class="row"><span class="lbl">${l}</span><span class="num">${Math.round(v*100)}%</span></div><div class="bar ${c}"><i style="width:${(v*100).toFixed(1)}%"></i></div></div>`;
   const tool=G.drive?(isPlane()?(G.drive.type==='heli'?'helicopter '+Math.round(G.drive.pow/HL.max*100)+'%':'microlite '+Math.round(G.drive.pow/PL.max*100)+'%'):(G.drive.type==='crawler'?'crawler '+Math.round(G.drive.pow/CR.B*100)+'%':(G.drive.type==='lorry'?'lorry ':'buggy ')+Math.round(G.drive.pow/WORKS[G.drive.type].veh.max*100)+'%')):(G.tool==='hands'?'bare hands':itemName(G.tool));
@@ -18091,6 +18308,8 @@ RENDER.help=()=>`<div class="help">
     <li><b>Trade.</b> Fly a kite and a trader walks in. They buy and sell everything, they favour some things and refuse others, and they leave after one day.</li>
   </ol>
   <div class="grp-h"><b>survival</b></div>
+  <p><b>Wind.</b> The wind has a direction and a strength that drift slowly over the hours and differ from place to place; the clock panel says how hard it blows and where from. Every few days a dust storm builds up and walks across the flats from upwind, then eases off again. You can hear where the wind comes from: louder facing into it, in the ear turned toward it, softer with your back to it. The dust in the air drifts with it, wind turbines turn to face it (and make more power in a strong one), the kite flies downwind of you, and the microlight and helicopter are carried by it once they are off the ground (hold, in the helicopter, keeps you in place over the ground).</p>
+  <p><b>Sound.</b> Everything out in the world is heard from where it is: trains, crawlers, droids, the quadcopter going by. Flying the quadcopter you still hear from where you stand: it has no microphone.</p>
   <p>Hydration and nutrition drain slowly and faster at night. A lit shelter keeps the cold off you and lets you sleep to first light. Dew is drinkable but thin; clean water is not.</p>
   <div class="grp-h"><b>this file</b></div>
   <p>One <code>Scrap Frontier</code>. Terrain, features, textures, sound and the entire state machine kernel are generated in the browser at load. Your camp is written to <code>localStorage</code> every few seconds — <b>⚙</b> in the corner reopens this, and it will also offer to show the guide again on the next page load.</p>
@@ -18396,13 +18615,27 @@ function trade(_t,id,n,sell){
 /* ───────────────────────────────────────────────────────────────────────
    §13c  WEATHER  (a machine, like everything else)
    ─────────────────────────────────────────────────────────────────────── */
-const Weather=machine('weather',{initial:'breeze',ctx:{t:0},states:{
-  calm  :{enter(m){WINDMUL.value=0.82;log('the wind drops. dust settles.')},update(m,dt){if(m.time>150)m.set('breeze')}},
-  breeze:{enter(m){WINDMUL.value=1.0},update(m,dt){if(m.time>190)m.set(m.ctx.to||'gale')}},
-  gale  :{enter(m){WINDMUL.value=1.35;log('wind picks up out of the north-west','gold')},update(m,dt){if(m.time>120)m.set('dust')}},
-  dust  :{enter(m){WINDMUL.value=2.35;log('a wall of dust walks across the flats. visibility drops.','bad')},update(m,dt){if(m.time>90)m.set('calm')}},
-  clear :{enter(m){WINDMUL.value=0.9},update(m,dt){if(m.time>170)m.set('breeze')}}
-},trans:[{event:'next',from:'*',to:m=>m.ctx.to||'breeze'}]});
+/* the weather is read from the wind field (§07b) where you stand: these states only name it and say so when it changes.
+   Thresholds have a little hysteresis so a wind hovering at a boundary does not chatter. */
+function weatherWant(m){
+  const w=Day.ctx.wind,S=Day.ctx.storm,st=m.state;
+  if(S>(st==='dust'?.4:.55))return 'dust';
+  if(w>(st==='gale'?14:17))return 'gale';
+  if(w<(st==='calm'?6.5:5))return 'calm';
+  return 'breeze';
+}
+const Weather=machine('weather',{initial:'breeze',ctx:{t:0,quiet:3},states:{
+  calm  :{enter(m){if(!m.ctx.quiet)log('the wind drops. dust settles.')},update(m,dt){weatherStep(m,dt)}},
+  breeze:{enter(m){if(!m.ctx.quiet&&m.ctx.was==='dust')log('the dust storm passes. the air clears.','good')},update(m,dt){weatherStep(m,dt)}},
+  gale  :{enter(m){if(!m.ctx.quiet)log('the wind picks up out of the '+windFromName(Day.ctx.windDir),'gold')},update(m,dt){weatherStep(m,dt)}},
+  dust  :{enter(m){if(!m.ctx.quiet)log('a wall of dust walks across the flats from the '+windFromName(Day.ctx.windDir)+'. visibility drops.','bad')},update(m,dt){weatherStep(m,dt)}}
+},trans:[]});
+function weatherStep(m,dt){
+  windTick();
+  if(m.ctx.quiet>0){m.ctx.quiet-=dt;if(m.ctx.quiet<=0)m.ctx.quiet=0}
+  const want=weatherWant(m);
+  if(want!==m.state&&m.time>4){m.ctx.was=m.state;m.set(want)}
+}
 
 /* ───────────────────────────────────────────────────────────────────────
    §14  THE STARTING CAMP
