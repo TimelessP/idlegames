@@ -347,6 +347,12 @@ input[type=range]::-moz-range-thumb{width:18px;height:18px;background:linear-gra
 .book-controls input{width:76px;min-height:var(--ui-target);background:var(--surf-dark);box-shadow:inset 0 2px 5px rgba(0,0,0,.7);color:var(--bone);border:0;padding:7px;font:inherit;text-align:center;border-radius:2px}
 .book-page{position:relative;width:min(100%,680px);height:clamp(340px,58vh,620px);margin:auto;background:#e9dfc8;box-shadow:inset 0 0 26px #85765d55,0 8px 20px #0007;overflow:hidden;border-radius:2px}
 .book-page::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.22;background:repeating-linear-gradient(0deg,transparent 0 27px,#8b806c55 28px,#8b806c55 29px)}
+/* selected text: amber with dark ink on the dark interface (filters, the seed field, signs), and dark ink with paper on the light
+   journal page — the browser's own highlight is too faint against both */
+::selection{background:var(--amber);color:#140f0a}
+::-moz-selection{background:var(--amber);color:#140f0a}
+.book-page textarea::selection,.book-page ::selection{background:#3b2f22;color:#f6ecd6}
+.book-page textarea::-moz-selection,.book-page ::-moz-selection{background:#3b2f22;color:#f6ecd6}
 .book-page textarea{position:absolute;z-index:1;inset:22px 24px;width:calc(100% - 48px);height:calc(100% - 44px);resize:none;border:0;outline:0;background:transparent;color:#30291f;font:16px/28px Georgia,serif;padding:0;white-space:pre-wrap}
 .book-page canvas{position:absolute;z-index:2;inset:0;width:100%;height:100%;touch-action:none;pointer-events:none}
 .book-page.is-drawing canvas{pointer-events:auto;cursor:crosshair}
@@ -667,6 +673,13 @@ MATERIALS  (all generated at boot in forgeAsm; nothing is a loaded asset)
       aGlassT  train windows: clear glass with per-texel alpha, so only the hard grime (streaks, caked patches) is opaque
   • Each sheet carries colour + height → normal map + a packed rough/metal map.
     Metal is where the paint is chipped through, never on clean paint.
+  • BUMP FLARE (seen before, more than once): a sharp ONE-texel height step — a crack, seam, rivet rim, paint-chip edge — makes a
+    near-sideways normal that catches a low sun at full strength: white streaks along wood grain and white crescents on rivets.
+    asmSurf now measures the slope over a wider footprint and caps the tilt (o.tilt, default .7 ≈ 35°), but write height fields to
+    help it: give steps a few texels of ramp (smoothstep, not a threshold), keep cracks and seams SHALLOW (−.2, not −.4), and draw
+    fine linework (checks, splits) as continuous lines — a dotted threshold becomes a chain of sparkles. Check new sheets in a
+    low-sun render (Day.ctx.t ≈ .2) with the sun across the face, not only head-on.
+  • Rails, beading and racks that run along a side (outside OR inside) stop at doorways — split the run at each door, cap the ends.
   • UVs are in METRES (tiledGeo / extrude tile) so a 3 m sheet and a 3 cm rail wear
     at the same scale. Use grain:'long' for things that must grain along their length.
   • Emissive lamp/ember materials (MAT.lampOn / MAT.glow) are the only coloured ones.
@@ -1501,7 +1514,7 @@ const CATNAME={part:'ferrous salvage',mat:'material',water:'water',food:'provisi
 /* ── structures: what a kit becomes when you set it down ── */
 const WORKS={
   shelter:{n:'lean-to shelter',kit:'k_shelter',d:'Blocks night cold, lets you sleep to dawn.',size:[3.2,2.2,2.8],warm:1,refund:['k_shelter',1]},
-  wall:{n:'wall panel',kit:'k_wall',d:'Stops the wind, stops the light.',size:[2.4,1.6,0.3],block:1,refund:['k_wall',1]},
+  wall:{n:'wall panel',kit:'k_wall',d:'Breaks the wind, and keeps scrap from settling within 15 m.',size:[2.4,1.6,0.3],block:1,refund:['k_wall',1]},
   workbench:{n:'workbench',kit:'k_bench',d:'Nearby: unlocks advanced fabricator recipes.',size:[1.8,1.0,1.0],r:7,flag:'bench',draw:2,refund:['k_bench',1]},
   pulp_mill:{n:'hand pulp mill',kit:'k_pulpmill',d:'Nearby: beats plant fibre into pulp and presses it into paper. Hand-powered.',size:[2.8,1.7,1.9],r:7,flag:'mill',refund:['k_pulpmill',1]},
   harvester:{n:'dew harvester',kit:'k_harvest',d:'Condenses dew from the air: full rate at night, a third by day.',size:[1.6,2.4,1.6],r:6,gen:{fluid:0.9,at:'night'},draw:4,refund:['k_harvest',1]},
@@ -1865,12 +1878,20 @@ function tcutInCut(x,z){
   for(let i=0;i<l.length;i++){const k=l[i];if(k.tun||k.hole)continue;const ex=x-k.x,ez=z-k.z,u=ex*k.tx+ez*k.tz;if(u<-k.hL||u>k.hL)continue;if(Math.abs(-ex*k.tz+ez*k.tx)<=k.rw)return true}
   return false;
 }
+/* WALL PANELS shelter what is round them (15 m): no scrap settles there when the flats refresh (featureRailFilter), and the wind is
+   broken there (windShelter, §07b) — most of all in the lee. A ring of them makes a compound worth having. */
+const WALL_R=15,WALLS={arr:null,n:-1,list:[]};
+const SCRAP_T=new Set(['wreck','pod','tank','ruin','plateheap','pipeheap','gearpile','canheap','wirecoil','crate','barrel']);
+function wallsList(){if(WALLS.arr!==G.struct||WALLS.n!==G.struct.length){WALLS.arr=G.struct;WALLS.n=G.struct.length;WALLS.list=G.struct.filter(s=>s.type==='wall')}return WALLS.list}
+function wallNear(x,z,r){for(const w of wallsList())if((w.x-x)**2+(w.z-z)**2<r*r)return w;return null}
 function featureRailFilter(out){
   let routes=false;try{routes=RW.routes.length>0}catch(e){}
-  if(!routes&&!TCUT.size)return out;
+  let walls=false;try{walls=wallsList().length>0}catch(e){}
+  if(!routes&&!TCUT.size&&!walls)return out;
   const res=[];
   for(const f of out){
     if(routes&&rwNearTrack(f.x,f.z,6.5))continue;
+    if(walls&&SCRAP_T.has(f.t)&&wallNear(f.x,f.z,WALL_R))continue;           /* a wall panel keeps scrap from settling round it */
     if(TCUT.size){
       if(tcutInCut(f.x,f.z))continue;
       if(TCUT.get(tcutKey(f.x,f.z))){_noDeck=true;_noCut=true;terrainSample(f.x,f.z,0,_hs);const raw=_hs.h;_noCut=false;terrainSample(f.x,f.z,0,_hs);_noDeck=false;f.y+=_hs.h-raw}
@@ -2036,10 +2057,16 @@ function asmSurf(n,fn,o){
     orm[k]=255;orm[k+1]=clamp(q.ro,0,1)*255;orm[k+2]=clamp(q.me,0,1)*255;orm[k+3]=255;
     H[j*n+i]=q.h;
   }
-  const nrm=new Uint8ClampedArray(n*n*4),st=(o.bump||3)*n/256;
+  /* the normal map. A one-pixel height step (a crack, a seam, a rivet rim, a paint chip) would turn the normal nearly sideways, and a
+     wall the sun only grazes would then catch it full on: white streaks along the grain and round the rivets. So the slope is taken
+     over a slightly wider footprint (the ±1 and ±2 texel differences blended), and the tilt is capped at ~35°: relief still reads,
+     nothing flares. */
+  const nrm=new Uint8ClampedArray(n*n*4),st=(o.bump||3)*n/256,TMAX=o.tilt||.7;
+  const Hh=(i,j)=>H[((j+n)%n)*n+((i+n)%n)];
   for(let j=0;j<n;j++)for(let i=0;i<n;i++){
-    const hx=H[j*n+(i+1)%n]-H[j*n+(i-1+n)%n],hy=H[((j+1)%n)*n+i]-H[((j-1+n)%n)*n+i];
-    const dx=hx*st,dy=hy*st,l=Math.hypot(dx,dy,1),k=(j*n+i)*4;
+    const hx=.6*(Hh(i+1,j)-Hh(i-1,j))+.2*(Hh(i+2,j)-Hh(i-2,j)),hy=.6*(Hh(i,j+1)-Hh(i,j-1))+.2*(Hh(i,j+2)-Hh(i,j-2));
+    let dx=hx*st,dy=hy*st;const m=Math.hypot(dx,dy);if(m>TMAX){dx*=TMAX/m;dy*=TMAX/m}
+    const l=Math.hypot(dx,dy,1),k=(j*n+i)*4;
     nrm[k]=127.5*(-dx/l+1);nrm[k+1]=127.5*(dy/l+1);nrm[k+2]=127.5*(1/l+1);nrm[k+3]=255;
   }
   const mk=(arr)=>{const c=cvs(n),x=c.getContext('2d'),im=x.createImageData(n,n);im.data.set(arr);x.putImageData(im,0,0);return c};
@@ -2142,9 +2169,9 @@ const woodFn=(u,v,q)=>{
   ST(q,[134,116,94]);BL(q,[96,80,64],band*.7);BL(q,[84,68,54],sm_(.45,.8,gr)*.55);
   BL(q,[172,156,132],sm_(.5,.9,pfb(u,v,5,3,129,3))*.45);                            // sun bleach
   BL(q,[166,160,150],sm_(.55,.9,gr2)*.18);
-  const ck=sm_(.985,.996,pridge(u+warp*3,v,16,2,131,2));BL(q,[52,42,36],ck*.7);
+  const ck=sm_(.972,.992,pridge(u+warp*3,v,16,2,131,2));BL(q,[52,42,36],ck*.6);           /* checks: thin dark splits, continuous (not dotted), and shallow */
   for(const [kx,ky,kr] of [[.3,.4,.035],[.74,.82,.028]]){const kd=Math.hypot(u-kx,(v-ky)*.6);if(kd<kr){BL(q,[54,40,32],(1-kd/kr)*.85)}else if(kd<kr*1.7)BL(q,[80,62,48],.35)}
-  q.h=.5+gr*.14-ck*.4+gr2*.05;q.ro=.94;q.me=0;
+  q.h=.5+gr*.14-ck*.2+gr2*.05;q.ro=.94;q.me=0;
 };
 function canvasFn(pal,sd){
   return (u,v,q,i,j)=>{
@@ -2274,6 +2301,18 @@ const twigFn=(u,v,q)=>{
   ST(q,[104,86,66]);BL(q,[64,50,40],fb*.8);BL(q,[162,146,122],sm_(.55,.9,bl)*.5);BL(q,[40,32,26],sm_(.7,.9,nd)*.5);
   BL(q,[188,176,152],sm_(.6,.9,fb2)*.18);
   q.h=.4+fb*.4+fb2*.1;q.ro=.95;q.me=0;
+};
+/* woven wire netting for luggage racks: galvanised wire on a 2.5 cm square (10 × 10 per 0.25 m sheet), the holes cut out with alpha,
+   the wires rising and dipping over each other, a little rust and dust where they cross */
+const netFn=(u,v,q)=>{
+  const N=10,fu=u*N-Math.floor(u*N),fv=v*N-Math.floor(v*N),du=Math.min(fu,1-fu),dv=Math.min(fv,1-fv),W=.11;
+  const onU=du<W,onV=dv<W;
+  if(!onU&&!onV){q.a=0;q.r=q.g=q.b=90;q.h=.3;q.ro=.9;return}
+  const cu=Math.floor(u*N),cv=Math.floor(v*N),over=((cu+cv)&1)?onU:onV,rd=onU&&onV,k=onU&&!onV?1-du/W:!onU&&onV?1-dv/W:1;
+  ST(q,[150,152,146]);BL(q,[186,186,178],pfb(u,v,24,24,1701,2)*.5);
+  const rs=sm_(.56,.76,pfb(u,v,6,6,1703,3));BL(q,[118,70,40],rs*.75);BL(q,[170,146,110],sm_(.5,.85,pfb(u,v,4,4,1705,3))*.3);
+  if(rd)BL(q,[96,70,52],.25);
+  q.a=255;q.h=.45+.25*Math.sqrt(Math.max(0,k))+(rd&&over?.15:0);q.ro=lerp(.5,.9,rs);q.me=lerp(.65,.15,rs);
 };
 const leafFn=(u,v,q)=>{                         // sparse dry scrub leaves cut out with alpha; 6×6 cells, one leaf each
   const N=6,cx=Math.floor(u*N),cy=Math.floor(v*N);let best=9,bi=0,lx=0,ly=0;
@@ -2445,6 +2484,7 @@ async function forgeAsm(say_){
   asmMat('aCactus',512,1,cactusFn,{bump:3.4,grain:'long'});
   asmMat('aTwig',256,.5,twigFn,{bump:2.6,grain:'long'});
   asmMat('aLeaf',256,1,leafFn,{bump:1.2,side:D,alphaTest:.5});
+  asmMat('aNet',256,.25,netFn,{bump:1.2,side:D,alphaTest:.5});
   asmMat('aSalt',512,1,saltFn,{bump:4.2});
   await step('tanning leather, dyeing cloth, planting fibre');
   asmMat('aLeather',256,.3,leatherFn,{bump:2.8});
@@ -5771,6 +5811,7 @@ Day.ctx.t=0.30;Day.start();
      storm  0..1: storm cells are a third noise field carried across the map along the prevailing wind, so a storm walks in from upwind;
             smoothstep on it eases a storm in and out over two or three minutes. About one storm every three or four game days (~10% of the time).
      gust   a fast, small-scale multiplier (around 1, bigger in a storm), carried downwind
+     open   the sustained speed before shelter; shelter: the share that gets past nearby wall panels (windShelter) — sus is after it
      kn     sus × gust;  vx / vz the air's velocity in m/s
    Readers: the sky's dust motes, wind audio, the wind turbine (yaw + power), the kite, the microlight and helicopter (they fly in
    the moving air), the weather machine (WINDMUL, messages). Day.ctx.wind / windDir / gust / storm hold the values where you stand.
@@ -5803,9 +5844,20 @@ function windAt(x,z,T,o){
   const S=smooth(.18,.34,wFbm((x-ux*T)/7000,(z-uz*T)/7000,T/1800+41.9));
   const dx=Math.cos(dir),dz=Math.sin(dir);
   const gust=1+(.13+.22*S)*wNoise((x-dx*T*4)/80,(z-dz*T*4)/80,T/5)+(.06+.1*S)*wNoise(x/40,z/40,T/1.7+60);
-  const sus=Math.max(.5,base+S*24);
-  o.dir=dir;o.sus=sus;o.storm=S;o.gust=gust;o.kn=sus*gust;o.vx=dx*o.kn*KN;o.vz=dz*o.kn*KN;
+  const open=Math.max(.5,base+S*24),sh=windShelter(x,z,dx,dz),sus=Math.max(.3,open*sh);
+  o.dir=dir;o.open=open;o.shelter=sh;o.sus=sus;o.storm=S;o.gust=1+(gust-1)*sh;o.kn=sus*o.gust;o.vx=dx*o.kn*KN;o.vz=dz*o.kn*KN;
   return o;
+}
+/* how much of the wind gets through at (x, z): 1 in the open; near a wall panel less, most of all on its lee side (downwind of it).
+   Each wall within WALL_R takes its share; several together shelter more, never below a quarter. */
+function windShelter(x,z,dx,dz){
+  let f=1;
+  try{for(const w of wallsList()){
+    const ex=x-w.x,ez=z-w.z,d2=ex*ex+ez*ez;if(d2>=WALL_R*WALL_R)continue;
+    const d=Math.sqrt(d2),near=1-d/WALL_R,lee=d>.01?clamp((ex*dx+ez*dz)/d,0,1):1;
+    f*=1-near*(.35+.4*lee);
+  }}catch(e){}
+  return Math.max(.25,f);
 }
 /* where the wind comes FROM, as a compass point (north = -z, east = +x) */
 const windFromName=dir=>{const b=((Math.atan2(-Math.cos(dir),Math.sin(dir))*180/Math.PI)+360)%360;return['north','north-east','east','south-east','south','south-west','west','north-west'][Math.round(b/45)%8]};
@@ -5813,9 +5865,9 @@ const windBody=()=>{const s=G.drive;return s?(s.pos||s):P};                    /
 const _wb={};
 function windTick(){
   const b=windBody(),w=windAt(b.x,b.z,windGameT(),_wb);
-  Day.ctx.wind=w.sus;Day.ctx.windDir=w.dir;Day.ctx.gust=w.gust;Day.ctx.storm=w.storm;
+  Day.ctx.wind=w.sus;Day.ctx.windOpen=w.open;Day.ctx.shelter=w.shelter;Day.ctx.windDir=w.dir;Day.ctx.gust=w.gust;Day.ctx.storm=w.storm;
   /* the old weather scale, now continuous: calm .85 · breeze 1 · gale ~1.35 · full dust storm ~2.35 (fog density, lamps at > 1.8) */
-  WINDMUL.value=.85+.5*clamp((w.sus-4)/14,0,1)*(1-w.storm)+1.5*w.storm;
+  WINDMUL.value=.85+.5*clamp((w.open-4)/14,0,1)*(1-w.storm)+1.5*w.storm;
 }
 const isNight=()=>Day.state==='night';
 function cyclePosition(t){
@@ -5995,6 +6047,7 @@ function makeStructure(type,x,z,rot,y,o){
   if(type==='plane')planeInit(s);
   if(type==='heli')heliInit(s);
   G.struct.push(s);
+  if(type==='wall')_fc.clear();
   if(type==='crawler')crawlerInit(s);
   if(type==='ecliptix')eclInit(s);
   if(type==='scrappy')scrInit(s);
@@ -6020,6 +6073,7 @@ function removeStructure(s,refund){
   if(s.faceMat)s.faceMat.dispose();
   s.mesh.traverse(o=>{if(o.isMesh&&o.userData.own)o.geometry.dispose()});
   G.struct.splice(G.struct.indexOf(s),1);
+  if(s.type==='wall')_fc.clear();
   if(refund)invAdd(refund,1);
 }
 function findStructureNear(x,z,r){
@@ -13095,7 +13149,30 @@ function trainBodyPassenger(K0,ctx){
   K.lathe('aCopper',[[0,0],[.04,0],[.045,.08],[.035,.1],[0,.1]],.82,F+.74,-.86,10);
   K.mesh(bevBox(.4,.32,.4,.04,.02),'aWood',-.4,F+.16,-3.4,0,.2,0);
   /* luggage racks overhead, a switch plate by the door */
-  for(const sx of [-1,1])for(const dy of [0,.06])K.tube('aGalv',profCircle(.014,6),[V3(sx*1.08-sx*dy,F+1.95-dy*.3,-3.8),V3(sx*1.08-sx*dy,F+1.95-dy*.3,3.0)],{tile:.3});
+  /* luggage racks along both walls, one each side of the doorway: a round-tube frame swept round a rounded rectangle, a sheet of woven
+     wire netting set inside it (a touch smaller and thinner, so nothing shares a plane), hung from the ceiling on rods along its aisle
+     edge and propped from the wall by a bracket at each end. A suitcase rides on one. */
+  const RY=F+1.95,xo=1.165,xi=.84,ceil=x=>F+TC.H+.34*(1-(x/1.36)**2)-.05;
+  for(const sx of [-1,1])for(const [za,zb] of [[-3.8,-.7],[.7,2.8]]){                     /* (the far ends stop short of the fridges) */
+    const X0=sx*xo,X1=sx*xi,zm=(za+zb)/2;
+    K.tube('aGalv',profCircle(.014,8),filletPath([V3(X0,RY,zm),V3(X0,RY,za),V3(X1,RY,za),V3(X1,RY,zb),V3(X0,RY,zb),V3(X0,RY,zm)],.06,5),{tile:.3});
+    K.box('aNet',(X0+X1)/2,RY-.002,zm,Math.abs(X0-X1)-.022,.004,zb-za-.022);
+    const n=Math.max(2,Math.round((zb-za)/1.0)+1);
+    for(let i=0;i<n;i++){
+      const z=za+.12+(zb-za-.24)*i/(n-1),top=ceil(Math.abs(X1));
+      K.tube('aGalv',profCircle(.009,6),[V3(X1,RY+.012,z),V3(X1,top,z)],{tile:.3});
+      K.lathe('aBare',[[0,0],[.028,0],[.028,.008],[.012,.016],[0,.018]],X1,top-.016,z,10);            /* a little rose where it meets the ceiling */
+    }
+    for(const z of [za+.1,zb-.1])K.pipe('aGalv',.01,[V3(sx*(TC.hw-.01),RY-.3,z),V3(sx*(xo+.01),RY-.3,z),V3(sx*(xi+.06),RY-.012,z)],.04);   /* wall brackets */
+  }
+  { /* a battered leather suitcase lying on the right-hand rack, two straps, brass corners, a handle on the aisle side */
+    const cx=(xo+xi)/2,cz=1.85,ch=.17,cy=RY+.004+ch/2,cw=.27,cl=.54;
+    K.mesh(bevBox(cw,ch,cl,.03,.02,2),'eLeather',cx,cy,cz,0,.05,0);
+    for(const dz of [-.15,.15])K.mesh(bevBox(cw+.01,ch+.008,.04,.006,.004,1),'aRubber',cx,cy,cz+dz,0,.05,0);
+    for(const sxc of [-1,1])for(const szc of [-1,1])K.mesh(bevBox(.04,ch+.006,.04,.01,.006,1),'aCopper',cx+sxc*(cw/2-.012),cy,cz+szc*(cl/2-.012),0,.05,0);
+    K.pipe('aRubber',.012,[V3(xi+.005,cy-.01,cz-.08),V3(xi-.03,cy+.02,cz-.06),V3(xi-.03,cy+.02,cz+.06),V3(xi+.005,cy-.01,cz+.08)],.03);
+    for(const dz of [-.12,.12])K.box('aCopper',xi+.004,cy+.03,cz+dz,.008,.025,.04);
+  }
   K.box('aBare',1.17,F+1.25,.8,.02,.16,.1);K.box('aRust',1.16,F+1.25,.8,.015,.08,.03);
 }
 /* ── the goods van: tarred planks on a steel frame, a sliding door each side parked half open, a load stacked along the walls ── */
@@ -13148,7 +13225,7 @@ function trainBodyGoods(K,ctx){       /* K is reassigned to the interior kit for
   crate(.82,-3.3,.9,1.0,1.1,0,'aPlate');crate(.85,-2.1,.7,.7,.8,0,'aWood',.2);crate(.85,2.4,.8,1.0,.8,0,'aOchre');crate(.82,3.35,.8,.7,.9,0,'aRust');
   barrel(.86,1.3,'aBlue');barrel(-.86,1.3,'aRust');barrel(-.86,.97+1.0,'aOchre');
   sack(.85,-.95,0);sack(.85,-1.3,0);sack(.85,-1.12,.42);
-  K.tube('aRope',profCircle(.012,6),sagPath(V3(-1.12,F+1.6,-3.9),V3(-1.12,F+1.5,0),.3,10),{tile:.2});
+  K.tube('aRope',profCircle(.012,6),sagPath(V3(-1.12,F+1.6,-3.9),V3(-1.12,F+1.5,-.72),.3,10),{tile:.2});                  /* tied off at the door post, clear of the doorway */
   for(const sx of [-1,1])K.box('aWood',sx*1.12,F+.05,0,.06,.1,TC.len-.4);
 }
 /* ── the solar loco: olive, a cab across the front with a wide windscreen, battery cabinets aft of it, six panels on a frame on the roof ── */
@@ -17382,7 +17459,7 @@ function detailHtml(kind){
     <div class="kv"><span class="big">${clockStr()}</span><span class="lbl">${phaseName()}</span></div>
     <div class="rule"></div>
     <div class="kv"><span class="lbl">day</span><span class="num">${String(Day.ctx.day).padStart(3,'0')}</span></div>
-    <div class="kv"><span class="lbl">wind</span><span class="num">${(Day.ctx.wind*Day.ctx.gust).toFixed(0)} kn from the ${windFromName(Day.ctx.windDir)}${Day.ctx.storm>.5?' · dust storm':Day.ctx.storm>.1?' · a storm is building':''}</span></div>`;
+    <div class="kv"><span class="lbl">wind</span><span class="num">${(Day.ctx.wind*Day.ctx.gust).toFixed(0)} kn from the ${windFromName(Day.ctx.windDir)}${(Day.ctx.shelter||1)<.9?' · sheltered (open: '+(Day.ctx.windOpen||0).toFixed(0)+' kn)':''}${Day.ctx.storm>.5?' · dust storm':Day.ctx.storm>.1?' · a storm is building':''}</span></div>`;
   }
   const mt=(l,v,c)=>`<div class="meter"><div class="row"><span class="lbl">${l}</span><span class="num">${Math.round(v*100)}%</span></div><div class="bar ${c}"><i style="width:${(v*100).toFixed(1)}%"></i></div></div>`;
   const tool=G.drive?(isPlane()?(G.drive.type==='heli'?'helicopter '+Math.round(G.drive.pow/HL.max*100)+'%':'microlite '+Math.round(G.drive.pow/PL.max*100)+'%'):(G.drive.type==='crawler'?'crawler '+Math.round(G.drive.pow/CR.B*100)+'%':(G.drive.type==='lorry'?'lorry ':'buggy ')+Math.round(G.drive.pow/WORKS[G.drive.type].veh.max*100)+'%')):(G.tool==='hands'?'bare hands':itemName(G.tool));
@@ -17801,7 +17878,7 @@ function keepFocus(root,fn){
 }
 
 /* ── thumbnails: an assembly is rendered for real and turned; everything else has no model, so it gets a spinning tinted plate ── */
-const THUMB={r:null,scene:null,cam:null,cache:new Map(),cur:null,el:null,raf:0,last:0,failed:false};
+const THUMB={r:null,scene:null,cam:null,cache:new Map(),cur:null,el:null,raf:0,last:0,failed:false,slots:new Map()};
 const plaque=it=>{const g=escH(it?it.g:'·'),t=it?it.t:'#888';
   return `<div class="spin" style="color:${t};animation-delay:-${(now()%9).toFixed(2)}s"><span class="f">${g}</span><span class="f b">${g}</span></div>`};
 function thumbHTML(id){
@@ -17834,32 +17911,48 @@ function thumbModel(type){
   const root=new THREE.Group();root.add(g);
   m={root,rad:Math.max(.4,sz.length()/2)};THUMB.cache.set(type,m);return m;
 }
-function thumbRender(){if(THUMB.r&&THUMB.cur)try{THUMB.r.render(THUMB.scene,THUMB.cam)}catch(e){THUMB.failed=true}}
+/* every card with a model on screen (the Buy and Sell carousels side by side, say) has a slot: its own small 2D canvas. The one shared
+   WebGL renderer draws each slot's model in turn, off screen, and the picture is copied into that slot's canvas */
+function thumbDraw(sl){
+  const m=sl.m,cam=THUMB.cam,d=m.rad/Math.sin(cam.fov*Math.PI/360)*1.08;
+  if(THUMB.cur!==m){if(THUMB.cur&&THUMB.cur.root.parent===THUMB.scene)THUMB.scene.remove(THUMB.cur.root);THUMB.cur=m;THUMB.scene.add(m.root)}
+  cam.position.set(0,d*.36,d*.93);cam.near=d*.05;cam.far=d*4;cam.lookAt(0,0,0);cam.updateProjectionMatrix();
+  THUMB.r.render(THUMB.scene,cam);
+  sl.ctx.clearRect(0,0,192,192);sl.ctx.drawImage(THUMB.r.domElement,0,0);
+}
+function thumbRender(){
+  if(!THUMB.r)return;
+  try{for(const sl of THUMB.slots.values())if(sl.el.isConnected)thumbDraw(sl)}catch(e){THUMB.failed=true}
+}
 function thumbLoop(t){
-  THUMB.raf=0;
-  if(THUMB.failed||!THUMB.el||!THUMB.el.isConnected||!THUMB.el.closest('#drawer.on,#modal.on'))return;
+  THUMB.raf=0;if(THUMB.failed)return;
+  for(const [el,sl] of THUMB.slots)if(!el.isConnected||!sl.cv.isConnected||el.dataset.t3!==sl.type)THUMB.slots.delete(el);
+  const live=[...THUMB.slots.values()].filter(sl=>sl.el.closest('#drawer.on,#modal.on'));
+  if(!live.length)return;
   const dt=Math.min(.1,(t-THUMB.last)/1000||0);THUMB.last=t;
-  THUMB.cur.root.rotation.y+=dt*.7;thumbRender();
+  const seen=new Set();for(const sl of live)if(!seen.has(sl.m)){seen.add(sl.m);sl.m.root.rotation.y+=dt*.7}
+  try{for(const sl of live)thumbDraw(sl)}catch(e){THUMB.failed=true;return}
   THUMB.raf=requestAnimationFrame(thumbLoop);
 }
 function thumbMount(root){
-  const el=root.querySelector('[data-t3]');if(!el||THUMB.failed||!thumbInit())return;
-  const type=el.dataset.t3;if(THUMB.bad&&THUMB.bad.has(type))return;
-  const go=()=>{
-    if(!el.isConnected||THUMB.failed)return;
-    let m;
-    try{m=thumbModel(type)}catch(err){console.error('thumbnail '+type,err);THUMB.bad=THUMB.bad||new Set();THUMB.bad.add(type);return}   /* one bad model: no picture for it, the rest still draw */
-    try{
-      if(THUMB.cur&&THUMB.cur.root.parent===THUMB.scene)THUMB.scene.remove(THUMB.cur.root);
-      THUMB.cur=m;THUMB.scene.add(m.root);
-      const cam=THUMB.cam,d=m.rad/Math.sin(cam.fov*Math.PI/360)*1.08;
-      cam.position.set(0,d*.36,d*.93);cam.near=d*.05;cam.far=d*4;cam.lookAt(0,0,0);cam.updateProjectionMatrix();
-      el.textContent='';el.appendChild(THUMB.r.domElement);THUMB.el=el;
-      thumbRender();
-      if(!THUMB.raf&&!REDUCED){THUMB.last=performance.now();THUMB.raf=requestAnimationFrame(thumbLoop)}
-    }catch(err){console.error('thumbnail',err);THUMB.failed=true}
-  };
-  if(THUMB.cache.has(type))go();else setTimeout(go,0);
+  if(THUMB.failed||!root||!thumbInit())return;
+  for(const el of root.querySelectorAll('[data-t3]')){
+    const type=el.dataset.t3;if(THUMB.bad&&THUMB.bad.has(type))continue;
+    const sl0=THUMB.slots.get(el);if(sl0&&sl0.type===type&&sl0.cv.isConnected&&el.contains(sl0.cv))continue;     /* already live */
+    const go=()=>{
+      if(!el.isConnected||THUMB.failed)return;
+      let m;
+      try{m=thumbModel(type)}catch(err){console.error('thumbnail '+type,err);THUMB.bad=THUMB.bad||new Set();THUMB.bad.add(type);return}   /* one bad model: no picture for it, the rest still draw */
+      try{
+        const cv=document.createElement('canvas');cv.width=cv.height=192;cv.className='t3c';cv.setAttribute('aria-hidden','true');
+        const sl={el,type,m,cv,ctx:cv.getContext('2d')};THUMB.slots.set(el,sl);
+        el.textContent='';el.appendChild(cv);THUMB.el=el;
+        thumbDraw(sl);
+        if(!THUMB.raf&&!REDUCED){THUMB.last=performance.now();THUMB.raf=requestAnimationFrame(thumbLoop)}
+      }catch(err){console.error('thumbnail',err);THUMB.failed=true}
+    };
+    if(THUMB.cache.has(type))go();else setTimeout(go,0);
+  }
 }
 
 /* ── signboard dialog ── */
@@ -18308,7 +18401,7 @@ RENDER.help=()=>`<div class="help">
     <li><b>Trade.</b> Fly a kite and a trader walks in. They buy and sell everything, they favour some things and refuse others, and they leave after one day.</li>
   </ol>
   <div class="grp-h"><b>survival</b></div>
-  <p><b>Wind.</b> The wind has a direction and a strength that drift slowly over the hours and differ from place to place; the clock panel says how hard it blows and where from. Every few days a dust storm builds up and walks across the flats from upwind, then eases off again. You can hear where the wind comes from: louder facing into it, in the ear turned toward it, softer with your back to it. The dust in the air drifts with it, wind turbines turn to face it (and make more power in a strong one), the kite flies downwind of you, and the microlight and helicopter are carried by it once they are off the ground (hold, in the helicopter, keeps you in place over the ground).</p>
+  <p><b>Wind.</b> The wind has a direction and a strength that drift slowly over the hours and differ from place to place; the clock panel says how hard it blows and where from. Every few days a dust storm builds up and walks across the flats from upwind, then eases off again. You can hear where the wind comes from: louder facing into it, in the ear turned toward it, softer with your back to it. The dust in the air drifts with it, wind turbines turn to face it (and make more power in a strong one), the kite flies downwind of you, and the microlight and helicopter are carried by it once they are off the ground (hold, in the helicopter, keeps you in place over the ground). Wall panels break it within 15 m, most of all on their downwind side, and no scrap settles that close to one — a ring of them makes a sheltered, tidy compound.</p>
   <p><b>Sound.</b> Everything out in the world is heard from where it is: trains, crawlers, droids, the quadcopter going by. Flying the quadcopter you still hear from where you stand: it has no microphone.</p>
   <p>Hydration and nutrition drain slowly and faster at night. A lit shelter keeps the cold off you and lets you sleep to first light. Dew is drinkable but thin; clean water is not.</p>
   <div class="grp-h"><b>this file</b></div>
@@ -18618,7 +18711,7 @@ function trade(_t,id,n,sell){
 /* the weather is read from the wind field (§07b) where you stand: these states only name it and say so when it changes.
    Thresholds have a little hysteresis so a wind hovering at a boundary does not chatter. */
 function weatherWant(m){
-  const w=Day.ctx.wind,S=Day.ctx.storm,st=m.state;
+  const w=Day.ctx.windOpen||Day.ctx.wind,S=Day.ctx.storm,st=m.state;
   if(S>(st==='dust'?.4:.55))return 'dust';
   if(w>(st==='gale'?14:17))return 'gale';
   if(w<(st==='calm'?6.5:5))return 'calm';
