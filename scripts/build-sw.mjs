@@ -258,6 +258,16 @@ async function ensureFonts() {
     outputDirName: 'comic-neue',
     licenseTarget: 'comic-neue-OFL.txt',
   });
+
+  await writeFontFaceSheet({
+    packageName: 'kalam',
+    family: 'Kalam Ink',
+    weights: [700],
+    filePattern: (weight) => `kalam-latin-${weight}-normal.woff2`,
+    cssFileName: 'kalam.css',
+    outputDirName: 'kalam',
+    licenseTarget: 'kalam-OFL.txt',
+  });
 }
 
 await ensureVendorAssets();
