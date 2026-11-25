@@ -719,6 +719,17 @@ GEOMETRY
     s.dish / s.crop / s.wheels / s.pWheels / s.pProp … Keep those names.
   • Keep each assembly roughly inside its WORKS footprint; target ≲ 6k triangles.
 
+PEOPLE (§AVATARS)
+  • Everybody — the drifter, every trader — is ONE rigged skinned mesh (avGeoBuild: lofted sections swept along paths, merged, 30 bones)
+    with ONE atlas material. Do not add separate body-part meshes: add a loft to avGeoBuild, weight it to its bones, and map its UVs
+    into an atlas region (AVR). Props a person carries (hat, pack, tool) hang from a bone as ordinary meshes.
+  • Detail lives in the atlas painters (avPaint*): seams, stitches, pockets, patches, tears, straps, the face, the beard, wear and dust.
+    They paint CLASSES and MASKS once (avBaseBuild); a person's colours are only a palette (AVPAL) applied over them (avColour, ~30 ms).
+    The normal and roughness maps are shared by everyone, so a new person costs one colour map. The bump-flare rule applies here too.
+  • Poses are target Euler angles per bone (avPose*), eased in by avPoseApply; a hand that must hold something is placed by avReach
+    (two-bone reach to a grip point and axis). Tools are built with their grip at the origin (vmToolMesh) and their grip axis in VM_GRIP,
+    so the same tool fits the first-person arm and a third-person hand.
+
 LIQUIDS & OIL (§09g)
   • A liquid container is any structure whose WORKS entry has liq:{cs:[{cap,fixed}],ports:[{x,z,c,pump,auto,n}]} (or liq:{cap,ports} for one
     container). liqInit adds s.cs[] (s.liq = the first), s.ports[] and s.hots[] (the hold-E hotspots). The asm mesh sets s.sGauges[] (one
@@ -879,6 +890,8 @@ ADDING A NEW ASSEMBLY
    §09 player + interaction + microlite      §10 fabrication + assembly
    §11 kite, traders, barter     §12 persistence + settings
    §13 ui + panels               §14 boot sequence
+   §AVATARS people: one rigged mesh + atlas for the drifter and every trader (before §TRADERS);
+            THE DRIFTER'S OWN BODY (pavTick, tpCamera: V on foot, seats in vehicles) before §10
    ═══════════════════════════════════════════════════════════════════════ */
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const clamp=(v,a,b)=>v<a?a:v>b?b:v;
@@ -4426,31 +4439,40 @@ function featStack(K,r,f){
    Each pose is built in a rig that cancels the game's -0.3 rad rest pitch, so "forward" is -Z and "up" is +Y here.
    Grip point = origin. The sleeve comes in from the lower right; the camera sits at +Z. */
 let vmPoses=null,vmLens=null,vmFlame=null,vmBtn=null;
-function vmFist(K,fist){
-  /* a gloved fist closed round an axis along Z: knuckles upper right, fingers sweeping under, thumb across the top */
-  const Rl=.0275,fr=.0108;
-  for(let i=0;i<4;i++){
-    const z=-.014-i*.0215,pts=[];
-    for(let a=52;a>=-170;a-=22){const t=a*Math.PI/180,rr=Rl*(i===3?.96:1);pts.push(V3(Math.cos(t)*rr,Math.sin(t)*rr,z))}
-    K.tube('aLeather',profCircle(fr*(i===3?.88:1),6),pts,{tile:.3,sc:k=>Math.min(rndTip(k,.86),rndTip(1-k,.86))},fist);
-  }
-  const ell=(rx,ry)=>{const p=[];for(let i=0;i<12;i++){const a=i/12*TAU;p.push([Math.cos(a)*rx,Math.sin(a)*ry])}return{pts:p,closed:true,hard:false}};
-  K.tube('aLeather',ell(.04,.03),[V3(.024,.016,.092),V3(.024,.018,.03),V3(.024,.02,-.004)],{tile:.3,sc:k=>k>.8?1-(k-.8)*1.2:1},fist);
-  K.tube('aLeather',profCircle(.0118,6),[V3(.006,.034,.05),V3(-.004,.036,-.01),V3(-.012,.03,-.07)],{tile:.3,sc:k=>Math.min(rndTip(k,.84),rndTip(1-k,.84))},fist);
-  K.mesh(new THREE.TorusGeometry(.04,.0075,5,14),'aCanvas',.024,.016,.098,0,0,0,fist);          // wrist wrap
-  K.mesh(new THREE.TorusGeometry(.042,.006,5,14),'aRope',.024,.016,.114,0,0,0,fist);
+/* where the hand closes on each tool, in the tool's own frame (forward −Z, up +Y; the grip is the origin): z runs from the little
+   finger to the thumb along the handle; the wrist sits on the side toward the shoulder, rolled by `roll` round z. `sh` is the
+   first-person shoulder (pose space), `tp` the hand's place in front of a third-person body, `f` how far the fingers close. */
+const VM_GRIP={
+  none:{z:[-.15,-.35,1],sh:[.17,-.36,.34],tp:[.2,1.02,-.16],f:.62,roll:-.5},
+  crowbar:{z:[0,0,1],sh:[.2,-.37,.36],tp:[.2,1.06,-.3],f:1,roll:0},
+  lantern:{z:[-1,0,0],sh:[.24,-.33,.3],tp:[.3,1.0,-.22],f:1,roll:0},
+  finder:{z:[0,1,0],sh:[.2,-.42,.32],tp:[.2,1.12,-.34],f:1,roll:0},
+  binoculars:{z:[0,1,0],sh:[.2,-.42,.32],tp:[.2,1.12,-.34],f:1,roll:0},
+  drone:{z:[0,1,0],sh:[.2,-.42,.32],tp:[.2,1.12,-.34],f:1,roll:0},
+  remote:{z:[0,1,0],sh:[.2,-.42,.32],tp:[.2,1.14,-.34],f:1,roll:0}
+};
+/* the wrist side of a grip: toward the shoulder, square to the handle, then rolled round it */
+function vmGripX(spec,Z,from){
+  const X=avPerp(from,Z)||avPerp(V3(1,0,0),Z);
+  if(spec.roll)X.applyAxisAngle(Z,spec.roll);
+  return X;
 }
-function vmSleeve(K,pts){
-  const path=densify(filletPath(pts,.12,6),.05),L=pathLen(path);
-  K.tube('aOlive',profCircle(.052,12),path,{tile:.35,sc:k=>1-.28*k,cap:true});
-  for(const f of [.58,.7,.82]){const s=pathAt(path,L*f);if(!s)continue;
-    const m=K.mesh(new THREE.TorusGeometry(.046-f*.02,.0065,5,14),'aCanvas',s.p.x,s.p.y,s.p.z);m.quaternion.setFromUnitVectors(V3(0,0,1),s.t)}
+let vmArm=null;
+/* the first-person arm is the drifter's own (the right arm and hand of the same mesh and atlas), moved into whichever pose shows */
+function vmArmFit(kind){
+  if(!vmPoses)return;
+  const g=vmPoses[kind]||vmPoses.none,spec=VM_GRIP[kind]||VM_GRIP.none;
+  if(!vmArm){vmArm=avMake('drifter',{only:'armR'});vmArm.mesh.frustumCulled=false;vmArm.root.traverse(o=>{if(o.isMesh){o.castShadow=false;o.receiveShadow=false}})}
+  g.add(vmArm.root);
+  const sh=V3(...spec.sh);vmArm.root.position.copy(sh).sub(avBP('armR'));
+  avPoseBegin(vmArm);avFingers(vmArm,'R',spec.f);avPoseApply(vmArm,1);
+  const Z=V3(...spec.z).normalize(),X=vmGripX(spec,Z,sh.clone());
+  avReach(vmArm,'R',vmArm.root.position.clone().negate(),Z,X,1,V3(.8,-.55,.15));     /* the grip (the pose origin) in the arm's own frame */
 }
-function vmPose(kind){
-  const K=asmKit(),fist=new THREE.Group();K.g.add(fist);
+function vmToolMesh(kind){
+  const K=asmKit();let lens=null,flame=null,btn=null;
   let off=[0,.05,0];
   if(kind==='none'||kind==='crowbar'){
-    vmFist(K,fist);vmSleeve(K,[V3(.30,-.40,.66),V3(.18,-.20,.36),V3(.05,-.04,.14),V3(.024,.016,.1)]);
   }
   if(kind==='crowbar'){
     const shaft=filletPath([V3(0,0,.16),V3(0,.001,-.5),V3(0,-.004,-.575),V3(0,-.062,-.612),V3(0,-.108,-.57),V3(0,-.128,-.51)],.045,7);
@@ -4463,8 +4485,6 @@ function vmPose(kind){
     off=[0,.06,-.02];
   }
   if(kind==='lantern'){
-    fist.rotation.y=Math.PI/2;fist.position.set(0,-.004,0);vmFist(K,fist);
-    vmSleeve(K,[V3(.52,-.3,.3),V3(.34,-.14,.08),V3(.19,-.04,.0),V3(.112,-.004,.0)]);
     K.tube('aBare',profCircle(.0036,6),filletPath([V3(-.054,-.088,0),V3(-.05,.0,0),V3(.05,.0,0),V3(.054,-.088,0)],.03,6),{tile:.2});
     K.lathe('aGalv',[[.046,0],[.054,.004],[.046,.02],[.018,.03],[.013,.034],[0,.034]],0,-.112,0,14,null,.5);
     K.mesh(new THREE.TorusGeometry(.0095,.003,5,10),'aBare',0,-.074,0,0,Math.PI/2,0);
@@ -4472,13 +4492,11 @@ function vmPose(kind){
     K.lathe('aGlass',[[.044,0],[.0455,.02],[.042,.075],[.044,.1]],0,-.208,0,16,null,.4);
     for(let i=0;i<4;i++){const a=i/4*TAU+.4;K.pipe('aBare',.0024,[V3(Math.cos(a)*.052,-.208,Math.sin(a)*.052),V3(Math.cos(a)*.047,-.107,Math.sin(a)*.047)],.01,{n:4})}
     K.lathe('aBare',[[0,0],[.016,0],[.016,.012],[0,.012]],0,-.226,0,8,null,.3);
-    vmFlame=K.sphere('lampOn',.0105,0,-.186,0,1,2.4,1);K.dyn(vmFlame);
+    flame=K.sphere('lampOn',.0105,0,-.186,0,1,2.4,1);K.dyn(flame);
     K.mesh(new THREE.TorusGeometry(.052,.0035,4,16),'aBare',0,-.208,0,Math.PI/2,0,0);
     off=[-.02,.3,.04];
   }
   if(kind==='finder'){
-    fist.rotation.x=Math.PI/2;fist.position.set(0,0,0);vmFist(K,fist);
-    vmSleeve(K,[V3(.3,-.5,.4),V3(.14,-.34,.2),V3(.07,-.2,.1),V3(.024,-.1,.02)]);
     K.disc('aWood',.0175,.14,0,-.02,0,'y',null,.25,10);                                         // pistol grip
     for(const y of [-.07,-.03,.01])K.mesh(new THREE.TorusGeometry(.0182,.004,4,10),'aRope',0,y,0,Math.PI/2,0,0);
     K.box('aOchre',0,.07,-.02,.078,.056,.11);K.box('aBare',0,.04,-.02,.084,.012,.116);          // electronics housing
@@ -4492,13 +4510,11 @@ function vmPose(kind){
     K.tube('aBare',profAngle(.012,.012,.0025),[V3(0,.075,-.07),V3(0,.115,-.03)],{tile:.2});
     for(let i=0;i<3;i++){const a=i/3*TAU+.5;K.pipe('aBare',.0026,[V3(Math.cos(a)*.12,.115+Math.sin(a)*.12,-.123),V3(0,.115,-.235)],.01,{n:4})}
     K.disc('aGlass',.014,.032,0,.115,-.25,'z',null,.2,10);
-    vmLens=K.sphere('glow',.011,0,.115,-.26);K.dyn(vmLens);
+    lens=K.sphere('glow',.011,0,.115,-.26);K.dyn(lens);
     K.disc('aBare',.017,.01,0,.115,-.234,'z',null,.2,10);
     off=[0,.2,.02];
   }
   if(kind==='binoculars'){
-    fist.rotation.x=Math.PI/2;fist.position.set(0,0,0);vmFist(K,fist);
-    vmSleeve(K,[V3(.3,-.5,.4),V3(.14,-.34,.2),V3(.07,-.2,.1),V3(.024,-.1,.02)]);
     K.disc('aRubber',.0175,.14,0,-.02,0,'y',null,.25,10);                                       // the hinge post, in the fist
     for(const y of [-.07,-.03,.01])K.mesh(new THREE.TorusGeometry(.0182,.004,4,10),'aRope',0,y,0,Math.PI/2,0,0);
     K.box('aBare',0,.04,-.02,.05,.03,.1);                                                       // bridge plate
@@ -4513,8 +4529,6 @@ function vmPose(kind){
     off=[0,.2,.02];
   }
   if(kind==='drone'){
-    fist.rotation.x=Math.PI/2;fist.position.set(0,0,0);vmFist(K,fist);
-    vmSleeve(K,[V3(.3,-.5,.4),V3(.14,-.34,.2),V3(.07,-.2,.1),V3(.024,-.1,.02)]);
     K.disc('aRubber',.0175,.12,0,-.02,0,'y',null,.25,10);                                       // held by a landing post
     for(const y of [-.06,-.02,.02])K.mesh(new THREE.TorusGeometry(.0182,.004,4,10),'aRope',0,y,0,Math.PI/2,0,0);
     K.box('aOlive',0,.07,-.01,.11,.04,.14);K.box('aBare',0,.095,-.01,.08,.012,.1);               // body, battery cover
@@ -4530,98 +4544,670 @@ function vmPose(kind){
     off=[0,.2,.02];
   }
   if(kind==='remote'){
-    fist.rotation.x=Math.PI/2;fist.position.set(0,0,0);vmFist(K,fist);
-    vmSleeve(K,[V3(.3,-.5,.4),V3(.14,-.34,.2),V3(.07,-.2,.1),V3(.024,-.1,.02)]);
     K.mesh(bevBox(.062,.15,.036,.008,.005,1),'aOchre',0,.03,0,0,0,0);                         // the case, held upright in the fist
     K.mesh(bevBox(.066,.012,.04,.004,.003,1),'aBare',0,.105,0,0,0,0);                         // its cap plate
     K.box('aRubber',0,.05,-.0195,.05,.06,.004);                                                 // the face panel
     const bz=K.disc('aBare',.017,.006,0,.068,-.023,'z',null,.2,14);                             // the button's collar
-    vmBtn=K.disc('lampOn',.013,.01,0,.068,-.027,'z',null,.2,14);vmBtn.material=MAT.aCarRedP||MAT.aRust;K.dyn(vmBtn);   // the big red button
+    btn=K.disc('lampOn',.013,.01,0,.068,-.027,'z',null,.2,14);btn.material=MAT.aCarRedP||MAT.aRust;K.dyn(btn);   // the big red button
     K.disc('lampOn',.004,.004,.02,.035,-.022,'z',null,.2,8);                                    // a little pilot lamp
     K.tube('aBare',profCircle(.0035,6),[V3(.022,.11,.008),V3(.026,.25,.01)],{tile:.2});          // stub aerial
     K.sphere('aRubber',.006,.026,.252,.01,1,1,1);
     for(const y of [-.02,.0])K.box('aRope',0,y,0,.068,.008,.042);                               // tape round the battery lid
     off=[0,.2,.02];
   }
-  const g=K.finish();g.rotation.x=.3;g.position.set(off[0],off[1],off[2]);g.scale.setScalar(kind==='lantern'?.94:1.14);
+  return{g:K.finish(),off,lens,flame,btn};
+}
+/* the first-person pose: the tool where it always was in front of the camera, and the drifter's own right arm reaching for it */
+function vmPose(kind){
+  const t=vmToolMesh(kind),g=new THREE.Group();g.add(t.g);
+  g.rotation.x=.3;g.position.set(t.off[0],t.off[1],t.off[2]);g.scale.setScalar(kind==='lantern'?.94:1.14);
+  if(t.lens)vmLens=t.lens;if(t.flame)vmFlame=t.flame;if(t.btn)vmBtn=t.btn;
   g.userData.kind=kind;g.traverse(o=>{if(o.isMesh){o.castShadow=false;o.receiveShadow=false}});
   return g;
 }
 function vmBuildPoses(){vmLens=null;vmFlame=null;vmBtn=null;const p={};for(const k of ['none','crowbar','lantern','finder','binoculars','drone','remote'])p[k]=vmPose(k);return p}
 
-/* ═══ TRADERS ═══  front is local −Z (the game turns −Z toward the player); feet at y=0; one cached template per coat colour */
-const TRADER_TPL={};
-const ell=(rx,ry,n)=>{const p=[];n=n||14;for(let i=0;i<n;i++){const a=i/n*TAU;p.push([Math.cos(a)*rx,Math.sin(a)*ry])}return{pts:p,closed:true,hard:false}};
-const coatSc=k=>k<.12?lerp(1,1.08,k/.12):k<.45?lerp(1.08,.86,(k-.12)/.33):k<.62?lerp(.86,.95,(k-.45)/.17):lerp(.95,1.5,Math.pow((k-.62)/.38,1.4));
-function traderPart(fn){const K=asmKit();fn(K);return K.finish()}
-function dentedHat(){
-  const crown=latheGeo([[.118,0],[.12,.1],[.106,.17],[.07,.2],[0,.205]],16,.4),P=crown.attributes.position;
-  for(let i=0;i<P.count;i++){const y=P.getY(i),x=P.getX(i),z=P.getZ(i),a=Math.atan2(z,x),k=Math.max(0,(y-.1)/.1);
-    const d=1-.16*k*Math.max(0,Math.cos(a*2+.4));P.setXYZ(i,x*d,y-.04*k*Math.max(0,Math.sin(a*2)),z*(1-.07*k))}
-  crown.computeVertexNormals();return crown;
+/* ═══ AVATARS ═══  one rigged, low-poly body for the drifter and every trader. Detail lives in the generated texture.
+   ONE skinned mesh: torso, head, hair, limbs, hands, boots, belt, pouches, rope and scarf are lofted shapes (rings swept along
+   paths, hand-made sections) merged into a single geometry with one atlas material and 30 bones. A person is told apart only by
+   their colour map (jacket, trousers, skin, hair, beard, scarf); the normal and roughness maps are shared by everybody.
+   Bind pose: standing, feet at y = 0, facing −Z, the right hand on +X, arms hanging a little out from the body.
+   Bone rotations are local Euler angles from the bind pose. Signs on the right side: +x swings a limb forward (and bends the
+   elbow); a knee bends with −x; +z lifts an arm out to the side; fingers close with −z. The left side mirrors y and z.
+   On the bones that point UP (spine, chest, neck, head) +x leans BACK (and tips the face up); −x leans forward.
+   Atlas regions (canvas fractions, y from the top) are AVR; texture painters live in §AVATAR TEXTURE below. */
+const AVB=[['root',null,0,0,0],['hips','root',0,.96,0],['spine','hips',0,1.09,.01],['chest','spine',0,1.27,0],['neck','chest',0,1.49,.01],['head','neck',0,1.6,0]];
+for(const [S,s] of [['R',1],['L',-1]]){
+  AVB.push(['clav'+S,'chest',s*.04,1.44,0],['arm'+S,'clav'+S,s*.185,1.43,.01],['fore'+S,'arm'+S,s*.218,1.13,.03],['hand'+S,'fore'+S,s*.245,.875,.015],
+    ['fa'+S,'hand'+S,s*.25,.788,.004],['fb'+S,'fa'+S,s*.247,.743,.004],['ta'+S,'hand'+S,s*.235,.858,-.016],['tb'+S,'ta'+S,s*.231,.822,-.044],
+    ['thigh'+S,'hips',s*.095,.92,0],['shin'+S,'thigh'+S,s*.1,.51,.01],['foot'+S,'shin'+S,s*.105,.09,.03],['toe'+S,'foot'+S,s*.105,.025,-.095]);
 }
+const AVI={};AVB.forEach((b,i)=>AVI[b[0]]=i);
+const avBP=n=>{const b=AVB[AVI[n]];return new THREE.Vector3(b[2],b[3],b[4])};
+const AVR={JKT:[0,0,.5,.5],LEG:[.5,0,.75,.5],ARM:[.75,0,1,.5],HEAD:[0,.5,.5,.75],HAIR:[.5,.5,.75,.75],HAND:[.75,.5,1,.75],
+  BOOT:[0,.75,.25,1],LTH:[.25,.75,.5,1],ROPE:[.5,.75,.625,1],SCARF:[.625,.75,.75,1],METAL:[.75,.75,.8,1],POUCH:[.8,.75,1,1]};
+const AV={n:1024,geo:null,armGeo:{},base:null,mats:{},nrm:null,orm:null};
+/* torso sections: y, half-width, half-depth, centre z (the chest sits a touch forward, the seat a touch back) */
+const AV_TORSO=[[.83,.07,.06,.0],[.86,.14,.1,.006],[.9,.165,.115,.012],[.96,.172,.118,.012],[.995,.168,.115,.006],[1.0,.168,.115,.005],
+  [1.003,.181,.128,.004],[1.022,.173,.122,.002],[1.08,.158,.112,0],[1.18,.165,.12,-.006],[1.28,.18,.13,-.012],[1.36,.19,.128,-.01],
+  [1.42,.195,.118,0],[1.46,.16,.1,.005],[1.49,.1,.08,.01],[1.515,.065,.062,.01]];
+/* head sections: y, half-width, half-depth, centre z */
+const AV_HEAD=[[1.47,.056,.056,.01],[1.53,.058,.06,.005],[1.555,.066,.074,-.012],[1.575,.072,.088,-.018],[1.6,.077,.097,-.016],[1.625,.08,.1,-.013],
+  [1.66,.083,.103,-.01],[1.7,.085,.104,-.007],[1.74,.082,.1,-.003],[1.775,.07,.085,0],[1.8,.048,.06,0],[1.815,.004,.004,0]];
+const avTab=(T,y)=>{if(y<=T[0][0])return T[0];for(let i=1;i<T.length;i++)if(y<=T[i][0]){const a=T[i-1],b=T[i],k=(y-a[0])/(b[0]-a[0]);return a.map((v,j)=>v+(b[j]-v)*k)}return T[T.length-1]};
+const avSe=(c,e)=>Math.sign(c)*Math.pow(Math.abs(c),2/e);
+/* a point on the body surface at angle th (0 back, π/2 left −X, π front, 3π/2 right +X) and height y */
+function avTorsoPt(th,y,off){const r=avTab(AV_TORSO,y),c=Math.cos(th),s=Math.sin(th),e=2.5;return new THREE.Vector3(-avSe(s,e)*(r[1]+(off||0)),y,r[3]+avSe(c,e)*(r[2]+(off||0)))}
+function avHeadPt(th,y,beard){
+  const r=avTab(AV_HEAD,y),c=Math.cos(th),s=Math.sin(th),e=c<0?2.7:2.1;
+  const p=new THREE.Vector3(-avSe(s,e)*r[1],y,r[3]+avSe(c,e)*r[2]);
+  if(c<0){                                                                 // the face: sockets, brow, cheekbones, beard
+    const fr=-c;
+    for(const ex of [-.032,.032]){const d=Math.hypot(p.x-ex,(y-1.667)*1.3);if(d<.022)p.z+=.0055*Math.pow(1-d/.022,1.5)*fr}
+    p.z-=.0035*Math.exp(-Math.pow((y-1.692)/.008,2))*sm_(.05,0,Math.abs(p.x)-.05)*fr;
+    for(const ex of [-.058,.058]){const d=Math.hypot(p.x-ex,y-1.632);if(d<.025){p.x+=Math.sign(ex)*.003*(1-d/.025);p.z-=.003*(1-d/.025)}}
+    if(beard)p.z-=.0045*sm_(1.625,1.6,y)*sm_(1.535,1.56,y)*fr;
+  }
+  return p;
+}
+function avGeoBuild(only){
+  const pos=[],uv=[],si=[],sw=[],idx=[],grp=[];let G=0;
+  const pad=2/AV.n,B=AVI;
+  const vtx=(p,u,v,reg,w)=>{
+    pos.push(p.x,p.y,p.z);
+    const x0=reg[0]+pad,x1=reg[2]-pad,y0=reg[1]+pad,y1=reg[3]-pad;
+    uv.push(x0+clamp(u,0,1)*(x1-x0),1-(y1-clamp(v,0,1)*(y1-y0)));
+    const ws=w.filter(q=>q[1]>1e-4).sort((a,b)=>b[1]-a[1]).slice(0,4);let tot=0;for(const q of ws)tot+=q[1];
+    for(let k=0;k<4;k++){const q=ws[k];si.push(q?q[0]:0);sw.push(q?q[1]/tot:0)}
+    grp.push(G);
+  };
+  /* rings: [{pts:[V3 × n], v}] → a closed-around, open-ended sheet; u runs round the ring, v is given per ring */
+  const loft=(rings,reg,wf,o)=>{
+    o=o||{};G++;
+    const n=rings[0].pts.length,b0=pos.length/3;
+    for(let j=0;j<rings.length;j++){const R=rings[j];for(let i=0;i<=n;i++){const p=R.pts[i%n];let u=i/n;if(o.flipU)u=1-u;if(o.ur)u=o.ur[0]+u*(o.ur[1]-o.ur[0]);let v=R.v;if(o.vr)v=o.vr[0]+v*(o.vr[1]-o.vr[0]);vtx(p,u,v,reg,wf(p,j,i,R))}}
+    let flip=false;
+    for(let j=1;j<rings.length-1;j++){
+      const R=rings[j],c=new THREE.Vector3();for(const p of R.pts)c.add(p);c.multiplyScalar(1/n);
+      const a=R.pts[0],b=R.pts[1],d=rings[j+1].pts[0],nn=new THREE.Vector3().crossVectors(b.clone().sub(a),d.clone().sub(a));
+      const out=a.clone().sub(c);if(nn.lengthSq()<1e-12||out.lengthSq()<1e-10)continue;flip=nn.dot(out)<0;break;
+    }
+    if(o.inside)flip=!flip;
+    for(let j=0;j<rings.length-1;j++)for(let i=0;i<n;i++){const a=b0+j*(n+1)+i,b=a+1,c=a+n+1,d=c+1;if(flip)idx.push(a,c,b,b,c,d);else idx.push(a,b,c,b,d,c)}
+  };
+  const frame=(c,T,ref,fn,n)=>{
+    const Bk=ref.clone().addScaledVector(T,-ref.dot(T)).normalize(),L=new THREE.Vector3().crossVectors(T,Bk),pts=[];
+    for(let i=0;i<n;i++){const th=i/n*TAU,ab=fn(th);pts.push(c.clone().addScaledVector(Bk,ab[0]).addScaledVector(L,ab[1]))}
+    return pts;
+  };
+  /* sweep a section along a polyline; rad(k,d,th) → [along ref, along T×ref]. Rounded caps add a hemisphere at either end. */
+  const sweep=(path,rad,n,reg,wf,o)=>{
+    o=o||{};const ref=o.ref||V3(0,0,1),step=o.step||.02;
+    const P=densify(path,step),L=pathLen(P),rings=[],r0=rad(0,0,0),r1=rad(1,L,0);
+    const c0=o.cap0?Math.max(r0[0],r0[1])*(o.cap0===true?1:o.cap0):0,c1=o.cap1?Math.max(r1[0],r1[1])*(o.cap1===true?1:o.cap1):0,Lt=L+c0+c1;
+    const tan=i=>P[Math.min(i+1,P.length-1)].clone().sub(P[Math.max(i-1,0)]).normalize();
+    const E=o.e||2,push=(c,T,k,d,sc,sp)=>rings.push({pts:frame(c,T,ref,th=>{const r=rad(k,d,th);return[avSe(Math.cos(th),E)*r[0]*sc,avSe(Math.sin(th),E)*r[1]*sc]},n),v:1-sp/Lt,d,k});
+    if(c0){const T=tan(0);for(let q=0;q<=4;q++){const a=q/4,z=Math.cos(a*Math.PI/2),sc=Math.max(Math.sin(a*Math.PI/2),.0);push(P[0].clone().addScaledVector(T,-z*c0),T,0,-z*c0,q===0?.001:sc,c0*(1-z))}}
+    let acc=0;for(let i=0;i<P.length;i++){if(i)acc+=P[i].distanceTo(P[i-1]);if(c0&&i===0)continue;push(P[i],tan(i),acc/L,acc,1,c0+acc)}
+    if(c1){const T=tan(P.length-1),e=P[P.length-1];for(let q=1;q<=4;q++){const a=q/4,z=Math.sin(a*Math.PI/2),sc=Math.cos(a*Math.PI/2);push(e.clone().addScaledVector(T,z*c1),T,1,L+z*c1,q===4?.001:sc,c0+L+z*c1)}}
+    loft(rings,reg,(p,j,i,R)=>wf(p,R.d,R.k),o);
+    return L;
+  };
+  const W1=b=>[[B[b],1]];
+  const W2=(a,b,t)=>[[B[a],1-clamp(t,0,1)],[B[b],clamp(t,0,1)]];
+  /* only: null = everyone's whole body · 'armR' = the first-person arm · 'fp' = the body seen from inside it (no head, which the
+     camera sits in front of) · 'fp1' = that, less the right arm (the first-person arm and tool are drawn instead) */
+  const body=!only||only==='fp'||only==='fp1',headOn=!only;
+  const want=k=>!only||only===k||only==='fp'||(only==='fp1'&&k==='armL');
+
+  /* ── torso: one sweep of sections from the crotch to the neck; jacket from the hem up, trousers and seat below ── */
+  if(body){
+    const rings=[],N=32,ys=[];for(let y=.83;y<1.515;y+=.02)ys.push(y);for(const t of AV_TORSO)ys.push(t[0]);ys.sort((a,b)=>a-b);
+    const yu=[];for(const y of ys)if(!yu.length||y-yu[yu.length-1]>.0025)yu.push(y);
+    rings.push({pts:Array.from({length:N},()=>V3(0,.815,.004)),v:0});
+    for(const y of yu){const pts=[];for(let i=0;i<N;i++)pts.push(avTorsoPt(i/N*TAU,y));rings.push({pts,v:(y-.815)/.7})}
+    const wt=p=>{
+      const y=p.y;let w;
+      if(y<1.0)w=W1('hips');else if(y<1.12)w=W2('hips','spine',(y-1.0)/.12);else if(y<1.2)w=W1('spine');else if(y<1.3)w=W2('spine','chest',(y-1.2)/.1);else if(y<1.47)w=W1('chest');else w=W2('chest','neck',(y-1.47)/.09);
+      if(y<.93&&Math.abs(p.x)>.03){const k=sm_(.93,.84,y)*.45;w=w.map(q=>[q[0],q[1]*(1-k)]);w.push([B[p.x>0?'thighR':'thighL'],k])}
+      if(y>1.36&&Math.abs(p.x)>.13){const k=sm_(.13,.19,Math.abs(p.x))*sm_(1.36,1.43,y)*.35;w=w.map(q=>[q[0],q[1]*(1-k)]);w.push([B[p.x>0?'clavR':'clavL'],k])}
+      return w;
+    };
+    loft(rings,AVR.JKT,wt);
+    /* neck */
+    sweep([V3(0,1.47,.012),V3(0,1.6,0)],()=>[.056,.054],16,AVR.HEAD,(p)=>p.y<1.53?W1('neck'):W2('neck','head',(p.y-1.53)/.05),{ref:V3(0,0,1),vr:[0,.38],cap1:headOn?0:true});   /* without the head, the neck is closed over */
+  }
+  /* ── head, nose, ears, hair ── */
+  if(headOn){
+    const N=30,rings=[];
+    for(let y=1.47;y<1.816;y+=.013){const yy=Math.min(y,1.815),pts=[];for(let i=0;i<N;i++)pts.push(avHeadPt(i/N*TAU,yy,true));rings.push({pts,v:(yy-1.47)/.345})}
+    rings.push({pts:Array.from({length:N},()=>V3(0,1.817,0)),v:1});
+    loft(rings,AVR.HEAD,p=>p.y<1.56?W2('neck','head',(p.y-1.53)/.05):W1('head'));
+    const nose=[V3(0,1.688,-.104),V3(0,1.662,-.111),V3(0,1.638,-.117),V3(0,1.63,-.118)];
+    sweep(nose,(k)=>[lerp(.005,.012,k),lerp(.0065,.0175,k*k)],10,AVR.HEAD,()=>W1('head'),{ref:V3(0,.3,-1),cap1:.7,step:.008,ur:[.475,.525],vr:[(1.615-1.47)/.345,(1.692-1.47)/.345]});
+    for(const s of [1,-1])sweep([V3(s*.076,1.657,.004),V3(s*.087,1.659,.016)],(k)=>[.024*(1-k*.25),.0075],10,AVR.HEAD,()=>W1('head'),
+      {ref:V3(0,1,0),cap1:.9,step:.006,ur:s>0?[.72,.78]:[.22,.28],vr:[(1.63-1.47)/.345,(1.69-1.47)/.345]});
+    /* hair: a shell over the scalp, ragged at its lower edge, longer at the nape than over the brow */
+    const HN=30,hr=[],K=8;
+    const edge=th=>1.675-.05*Math.cos(th)+(pfb(th/TAU,.5,9,1,811,2)-.5)*.026+(pfb(th/TAU,.5,23,1,815,1)-.5)*.02+(Math.abs(Math.sin(th))>.85?.012:0);
+    for(let k=0;k<=K;k++){const pts=[];for(let i=0;i<HN;i++){const th=i/HN*TAU,lo=edge(th),y=lerp(lo,1.818,Math.pow(k/K,.85));
+      const hp=avHeadPt(th,Math.min(y,1.812),false),ce=V3(0,1.665,-.008),dir=hp.clone().sub(ce).normalize();
+      const th2=.006+.011*sm_(0,.45,k/K)+.012*pfb(th/TAU,k/K,9,3,813,2)*sm_(.9,.3,k/K)+(y>1.812?(y-1.812):0);pts.push(hp.addScaledVector(dir,th2*(k===K?0:1)))}
+      if(k===K)for(const p of pts)p.set(0,1.836,-.004);
+      hr.push({pts,v:k/K})}
+    loft(hr,AVR.HAIR,()=>W1('head'));
+  }
+  /* ── what is worn round the neck and the waist, and carried ── */
+  if(body){
+    /* scarf: a lumpy roll round the neck */
+    if(headOn){                                     /* (seen from inside, the scarf and the rope over the shoulder would sit in front of the eyes) */
+    const sc=[];for(let i=0;i<=28;i++){const a=i/28*TAU;sc.push(V3(-Math.sin(a)*.078,1.497+Math.sin(a*3)*.006-Math.cos(a)*.006,.012+Math.cos(a)*.074))}
+    sweep(sc,(k,d,th)=>{const l=1+.18*Math.sin(k*41+th*2);return[.026*l,.021*l]},8,AVR.SCARF,(p)=>[[B.neck,.4],[B.chest,.6]],{ref:V3(0,1,0)});
+    }
+    /* belt, buckle, pouches */
+    const bl=[];for(let i=0;i<=40;i++){const th=i/40*TAU;bl.push(avTorsoPt(th,.985,.009))}
+    sweep(bl,()=>[.023,.007],8,AVR.LTH,()=>W1('hips'),{ref:V3(0,1,0),ur:[0,.4],e:6});
+    const bk=avTorsoPt(Math.PI,.985,.018);sweep([bk.clone().add(V3(-.024,0,0)),bk.clone().add(V3(.024,0,0))],()=>[.028,.007],8,AVR.METAL,()=>W1('hips'),{ref:V3(0,1,0),e:6});
+    for(const [th,w,h,dp] of [[Math.PI*.62,.09,.11,.05],[Math.PI*1.35,.1,.12,.055],[Math.PI*1.7,.08,.1,.045],[Math.PI*.15,.11,.12,.05]]){
+      const c=avTorsoPt(th,.95,.004),nrm=avTorsoPt(th,.95,.05).sub(c).normalize(),T=nrm.clone();
+      sweep([c.clone(),c.clone().addScaledVector(T,dp)],(k)=>{const s=k>.85?1-(k-.85)*.8:1;return[h/2*s,w/2*s]},12,AVR.POUCH,()=>W1('hips'),{ref:V3(0,1,0),cap0:.08,cap1:.18,step:.025,e:5});
+    }
+    /* a coil of rope over the right shoulder and down across to the left hip, twice round */
+    if(headOn)for(const off of [0,.022]){
+      const rp=[];for(let i=0;i<=48;i++){const th=i/48*TAU,y=1.255+.205*Math.cos(th-Math.PI*1.5)+off*.6;rp.push(avTorsoPt(th,Math.min(y,1.455),.016+off*.5+.03*sm_(1.42,1.47,y)))}
+      sweep(rp,()=>[.0125,.0125],7,AVR.ROPE,(p)=>p.y>1.3?W1('chest'):p.y>1.15?W2('spine','chest',(p.y-1.15)/.15):W2('hips','spine',(p.y-1.0)/.15),{ref:V3(0,1,0),step:.03,ur:[0,1],vr:[off?.5:0,off?1:.5]});
+    }
+  }
+  /* ── arms and hands ── */
+  for(const [S,s] of [['R',1],['L',-1]]){
+    if(!want('arm'+S))continue;
+    const Sh=avBP('arm'+S),E=avBP('fore'+S),Wr=avBP('hand'+S),Lu=Sh.distanceTo(E),Lf=E.distanceTo(Wr);
+    const rad=(k,d)=>{
+      const a=d<Lu?lerp(1,.84,d/Lu):lerp(.84,.62,(d-Lu)/Lf);
+      const cuff=Math.exp(-Math.pow((d-Lu-.105)/.018,2))*.12,sleeve=d<Lu+.12?1:.86;
+      return[.06*(a*sleeve+cuff),.056*(a*sleeve+cuff)];
+    };
+    sweep([Sh,E,Wr.clone().add(V3(0,-.012,0))],rad,14,AVR.ARM,(p,d)=>{
+      if(d<0)return[[B['arm'+S],.75],[B['clav'+S],.25]];
+      if(d<Lu-.045)return W1('arm'+S);if(d<Lu+.045)return W2('arm'+S,'fore'+S,(d-Lu+.045)/.09);
+      if(d<Lu+Lf-.02)return W1('fore'+S);return W2('fore'+S,'hand'+S,(d-Lu-Lf+.02)/.04);
+    },{cap0:.65,flipU:s<0,step:.028});
+    /* palm and back of the hand: a rounded slab from the wrist to the knuckles */
+    const hx=Wr.x;
+    sweep([V3(hx,.888,.016),V3(hx+s*.003,.84,.008),V3(hx+s*.005,.792,.004)],(k)=>[lerp(.029,.041,k),lerp(.016,.014,k)],12,AVR.HAND,(p,d,k)=>k>.8?[[B['hand'+S],.6],[B['fa'+S],.4]]:W1('hand'+S),{cap1:.5,ur:[0,.4],flipU:s<0});
+    /* four fingers, index at the front */
+    for(const [z,len,r] of [[-.026,.083,.0096],[-.0085,.09,.0099],[.0085,.086,.0094],[.025,.068,.0083]]){
+      const x0=hx+s*.005,y0=.8;
+      sweep([V3(x0,y0,z+.004),V3(x0,y0-len,z+.002)],(k)=>[r*(1-.12*k),r*(.92-.1*k)],8,AVR.HAND,(p,d)=>{
+        const j=.788-p.y;if(j<.0)return W2('hand'+S,'fa'+S,.5+j/.02);if(j<.038)return W1('fa'+S);if(j<.052)return W2('fa'+S,'fb'+S,(j-.038)/.014);return W1('fb'+S);
+      },{cap1:true,step:.01,ur:[.42,.82],flipU:s<0});
+    }
+    /* thumb: from the heel of the hand, down and forward */
+    sweep([V3(hx-s*.006,.87,-.006),V3(hx-s*.008,.85,-.022),V3(hx-s*.011,.822,-.042),V3(hx-s*.012,.796,-.054)],(k)=>[lerp(.013,.0095,k),lerp(.012,.0092,k)],8,AVR.HAND,(p,d)=>{
+      if(d<.018)return W2('hand'+S,'ta'+S,d/.018);if(d<.04)return W1('ta'+S);if(d<.05)return W2('ta'+S,'tb'+S,(d-.04)/.01);return W1('tb'+S);
+    },{cap1:true,step:.01,ur:[.84,1],flipU:s<0});
+  }
+  /* ── legs and boots ── */
+  if(body)for(const [S,s] of [['R',1],['L',-1]]){
+    const Hp=avBP('thigh'+S),Kn=avBP('shin'+S),An=avBP('foot'+S),Lt=Hp.distanceTo(Kn);
+    const rad=(k,d)=>{
+      const y=Hp.y-d;
+      let r=y>.51?lerp(.068,.096,sm_(.51,.92,y)):y>.33?lerp(.062,.068,sm_(.33,.48,y)):lerp(.057,.062,sm_(.12,.3,y));
+      r+=.012*Math.exp(-Math.pow((y-.355)/.024,2));                                  // trousers bloused over the boot top
+      r+=.004*Math.exp(-Math.pow((y-.32)/.008,2));                                  // the boot's rolled collar
+      return[r*1.02,r*(y>.6?1.04:1)];
+    };
+    sweep([Hp.clone().add(V3(0,.0,0)),Kn,V3(An.x,.11,An.z)],rad,14,AVR.LEG,(p,d)=>{
+      if(d<0)return[[B.hips,.3],[B['thigh'+S],.7]];
+      if(d<Lt-.05)return W1('thigh'+S);if(d<Lt+.05)return W2('thigh'+S,'shin'+S,(d-Lt+.05)/.1);
+      if(p.y>.15)return W1('shin'+S);return W2('shin'+S,'foot'+S,(.15-p.y)/.06);
+    },{cap0:.9,flipU:s<0,step:.03});
+    /* cargo pocket on the outside of the thigh */
+    {const c=V3(Hp.x+s*.08,.72,.0),T=V3(s,0,0);
+      sweep([c,c.clone().addScaledVector(T,.035)],(k)=>{const q=k>.7?1-(k-.7)*1.1:1;return[.07*q,.06*q]},10,AVR.LEG,()=>W1('thigh'+S),{ref:V3(0,1,0),cap1:.25,step:.02,ur:[.6,.9],vr:[.3,.5],e:4})}
+    /* the boot: sections across the foot from heel to toe, sole flat on the ground */
+    const top=z=>z>0?.13:z>-.06?lerp(.1,.13,(z+.06)/.06):z>-.13?lerp(.07,.1,(z+.13)/.07):lerp(.05,.07,(z+.18)/.05);
+    const half=z=>z>.03?lerp(.046,.05,(.075-z)/.045):z>-.1?lerp(.056,.05,(z+.1)/.13):lerp(.04,.056,(z+.18)/.08);
+    const bot=z=>z<-.15?(-.15-z)*.4:0;
+    const fr=[],zs=[];for(let z=.078;z>=-.182;z-=.013)zs.push(z);
+    const sec=(z,sc)=>{const t=top(z),b=bot(z),hc=(t+b)/2,hh=(t-b)/2*sc,hw=half(z)*sc,pts=[];
+      for(let i=0;i<16;i++){const th=i/16*TAU,c=Math.cos(th),sn=Math.sin(th),e=c<0?5:2.6;pts.push(V3(An.x+s*avSe(sn,e)*hw,hc+avSe(c,e)*hh,z))}return pts};
+    fr.push({pts:sec(.086,.01),v:0});fr.push({pts:sec(.083,.75),v:.02});
+    for(const z of zs)fr.push({pts:sec(z,1),v:(.086-z)/.275});
+    fr.push({pts:sec(-.186,.7),v:.99});fr.push({pts:sec(-.189,.01),v:1});
+    loft(fr,AVR.BOOT,(p)=>p.z>-.07?W1('foot'+S):p.z>-.11?W2('foot'+S,'toe'+S,(-.07-p.z)/.04):W1('toe'+S));
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+  g.setAttribute('skinIndex',new THREE.Uint16BufferAttribute(si,4));
+  g.setAttribute('skinWeight',new THREE.Float32BufferAttribute(sw,4));
+  g.setIndex(idx);g.computeVertexNormals();
+  /* weld normals across every seam (the ring wrap, collapsed poles) inside one part, so nothing creases where it was stitched */
+  const N=g.attributes.normal,acc=new Map(),key=i=>grp[i]+':'+Math.round(pos[i*3]*2e4)+','+Math.round(pos[i*3+1]*2e4)+','+Math.round(pos[i*3+2]*2e4);
+  for(let i=0;i<N.count;i++){const k=key(i);let a=acc.get(k);if(!a){a=[0,0,0];acc.set(k,a)}a[0]+=N.getX(i);a[1]+=N.getY(i);a[2]+=N.getZ(i)}
+  for(let i=0;i<N.count;i++){const a=acc.get(key(i)),l=Math.hypot(a[0],a[1],a[2])||1;N.setXYZ(i,a[0]/l,a[1]/l,a[2]/l)}
+  g.boundingSphere=new THREE.Sphere(V3(0,.9,0),1.3);
+  return g;
+}
+/* ── §AVATAR TEXTURE ── The atlas is painted once into shared layers: a material class per texel (with a second class and a mix
+   for soft edges), masks (dark, light, dirt, grime, beard), a signed grain and a height. A person's colour map is then a cheap
+   pass that looks the classes up in their palette and lays the masks over it, so every trader costs ~30 ms, not a full bake. */
+const AVC={jkt:0,shirt:1,trou:2,strap:3,lth:4,skin:5,hair:6,brow:7,rope:8,wrap:9,patch:10,metal:11,scarf:12,boot:13,sole:14,eye:15,iris:16,lip:17,glove:18,pocket:19};
+const AV_RO=[.92,.9,.93,.85,.62,.6,.7,.75,.95,.95,.93,.4,.95,.66,.9,.3,.25,.55,.7,.93];
+const AV_ME=[0,0,0,0,0,0,0,0,0,0,0,.75,0,0,0,0,0,0,0,0];
+/* palettes: every class's colour, per person */
+const AVPAL_BASE={shirt:[106,98,84],strap:[60,74,54],lth:[96,68,46],rope:[156,134,98],wrap:[196,184,158],metal:[132,128,118],boot:[86,62,44],
+  sole:[42,38,34],eye:[176,168,152],iris:[56,60,54],glove:[70,52,38]};
+const AVPAL={
+  drifter:{jkt:[122,106,80],trou:[96,94,72],skin:[184,138,108],hair:[176,146,96],brow:[132,104,68],beard:1,patch:[90,96,70],scarf:[70,86,60],lip:[150,98,84],pocket:[96,94,72]},
+  t0:{jkt:[112,78,52],trou:[78,70,58],skin:[150,104,76],hair:[52,40,32],brow:[40,30,24],beard:1,patch:[130,98,64],scarf:[150,64,44],lip:[124,78,66],pocket:[78,70,58]},
+  t1:{jkt:[84,76,64],trou:[100,90,72],skin:[110,76,56],hair:[30,26,24],brow:[26,22,20],beard:0,patch:[110,96,74],scarf:[176,150,96],lip:[100,64,56],pocket:[100,90,72]},
+  t2:{jkt:[100,62,60],trou:[66,62,54],skin:[196,152,122],hair:[120,70,44],brow:[96,58,38],beard:1,patch:[124,82,74],scarf:[64,74,96],lip:[160,102,90],pocket:[66,62,54]},
+  t3:{jkt:[68,80,72],trou:[92,80,60],skin:[132,92,66],hair:[150,148,140],brow:[120,118,110],beard:1,patch:[96,108,94],scarf:[184,170,140],lip:[120,80,70],pocket:[92,80,60]},
+  t4:{jkt:[116,88,52],trou:[70,72,62],skin:[168,124,92],hair:[90,62,40],brow:[70,48,32],beard:0,patch:[140,110,70],scarf:[60,90,84],lip:[140,90,78],pocket:[70,72,62]},
+  t5:{jkt:[70,70,80],trou:[96,84,66],skin:[92,64,48],hair:[24,22,22],brow:[20,18,18],beard:1,patch:[98,98,108],scarf:[170,110,50],lip:[90,58,50],pocket:[96,84,66]}
+};
+function avPalOf(k){const p=Object.assign({},AVPAL_BASE,AVPAL[k]||AVPAL.drifter),o=[];for(const c in AVC)o[AVC[c]]=(p[c]||[128,128,128]).map(v=>Math.min(255,v*(c==='skin'||c==='eye'||c==='iris'?1:1.1)));o.beard=!!p.beard;o.hairc=p.hair;return o}
+const avD=(a,b)=>{let d=a-b;d-=Math.round(d);return d};                       // wrapped difference round a ring
+const avSeg=(px,py,ax,ay,bx,by)=>{const vx=bx-ax,vy=by-ay,t=clamp(((px-ax)*vx+(py-ay)*vy)/(vx*vx+vy*vy),0,1);return[Math.hypot(px-ax-vx*t,py-ay-vy*t),t]};
+function avLay(o,c,a){if(a<=0)return;if(a>=1){o.c=c;o.m=0;return}if(a>=.5){o.c2=o.c;o.c=c;o.m=1-a}else if(o.m===0||o.c2===c){o.c2=c;o.m=Math.max(o.m,a)}}
+/* stitch line: distance d from the seam line, position along it a; returns 0..1 */
+const avStitch=(d,a,per)=>(Math.abs(d)<.0018&&((a/per)%1+1)%1<.55)?1:0;
+/* weave relief for cloth at metre coords */
+const avWeave=(x,y,f)=>((Math.sin(x*f)*Math.sin(y*f))*.5+.5);
+function avTear(o,X,Y,cx,cy,r,sd){                 // a small torn hole: dark inside, frayed pale rim
+  const n=pfb((X+3)*.37,(Y+3)*.37,40,40,sd,2),d=Math.hypot((X-cx)/r,(Y-cy)/(r*.7))+(n-.5)*.7;
+  if(d<1){o.dk=Math.max(o.dk,.82);o.h-=.12;o.gm=Math.max(o.gm,.3)}else if(d<1.35){o.lt=Math.max(o.lt,.5*(1.35-d)/.35);o.h+=.05}
+}
+function avPatch(o,X,Y,x0,y0,x1,y1,cls,sd){        // a sewn-on patch with a stitched border
+  if(X<x0||X>x1||Y<y0||Y>y1)return false;
+  const e=Math.min(X-x0,x1-X,Y-y0,y1-Y);avLay(o,cls,1);o.h+=.06;
+  if(e<.004){o.dk=Math.max(o.dk,.35);o.h-=.03}
+  const st=Math.abs(e-.008)<.0016&&((((X+Y)*160)%1)<.55);if(st){o.lt=Math.max(o.lt,.55);o.h+=.03}
+  o.gr+=(pfb(X*.5+.5,Y*.5+.5,60,60,sd,2)-.5)*1.4;return true;
+}
+function avPocket(o,X,Y,x0,y0,x1,y1,flap){         // a patch pocket with a buttoned flap
+  if(X<x0-.006||X>x1+.006||Y<y0-.006||Y>y1+.006)return;
+  const inP=X>=x0&&X<=x1&&Y>=y0&&Y<=y1,e=Math.min(X-x0,x1-X,Y-y0,y1-Y);
+  if(!inP){if(Y<y1)o.dk=Math.max(o.dk,.25*(1-Math.min(1,-e/.006)));return}
+  o.h+=.05;if(e<.003){o.dk=Math.max(o.dk,.3);o.h-=.02}
+  if(Math.abs(e-.007)<.0015&&(((X+Y)*170)%1)<.55){o.lt=Math.max(o.lt,.45)}
+  if(flap){const fy=y1-flap;if(Y>fy){o.h+=.05;if(Y-fy<.004){o.dk=Math.max(o.dk,.55);o.h-=.05}}
+    const bx=(x0+x1)/2,bd=Math.hypot(X-bx,Y-(fy+.012));if(bd<.0065){avLay(o,AVC.metal,1);o.h+=.12*(1-bd/.0065)}}
+}
+/* ── painters, one per atlas region; (s,t) are 0..1 across the region, t = 0 at its bottom ── */
+function avPaintJkt(s,t,o){
+  const y=.815+t*.7,X=avD(s,.5),Xm=X*1.0,ax=Math.abs(Xm),side=s<.5?-1:1;
+  const blot=pfb(s,t,6,4,701,3),dn=pfb(s,t,8,6,703,3),fine=pfb(s,t,140,100,705,1);
+  o.gr=(fine-.5)*1.6;o.h=.5+avWeave(s*1.0,y,1400)*.05;
+  if(y<1.0){                                                    // trousers at the seat and fly
+    avLay(o,AVC.trou,1);o.dt=.25+sm_(.55,.85,dn)*.3;
+    if(ax<.003&&Math.abs(avD(s,.5))<.01){o.dk=.5;o.h-=.05}else if(ax<.016&&y>.9){if(Math.abs(ax-.012)<.0015&&((y*170)%1)<.55)o.lt=.4}
+    for(const lx of [-.16,-.06,.06,.16,.5]){const d=Math.abs(avD(s,.5+lx));if(d<.006&&y>.955){o.h+=.08;o.dk=Math.max(o.dk,d>.0045?.4:0)}}   // belt loops
+    o.dk=Math.max(o.dk,sm_(.99,1.0,y)*.6);
+  }else{
+    avLay(o,AVC.jkt,1);
+    o.lt=sm_(.55,.85,blot)*.3+sm_(1.36,1.5,y)*.28;o.dt=sm_(1.12,1.0,y)*.35+sm_(.62,.85,dn)*.3;
+    if(y<1.03){o.h+=.06;if(y<1.006)o.dk=.45;if(Math.abs(y-1.018)<.0016&&((s*300)%1)<.55)o.lt=.45}          // hem
+    /* front opening: the shirt shows, the collar opens into a V */
+    const ow=y<1.32?.018:lerp(.018,.07,sm_(1.32,1.5,y));
+    if(ax<ow){avLay(o,AVC.shirt,1);o.h=.47+avWeave(s,y,1800)*.04;o.lt=sm_(.55,.85,blot)*.2;o.dk=sm_(ow-.004,ow,ax)*.5;
+      if(ax<.004&&y>1.32&&y<1.47&&((y-1.32)%.045)<.012)avLay(o,AVC.metal,.8);
+      if(y<1.06){const fr=pfb(s*3,0,80,1,709,1);if(y<1.03+fr*.025)o.dk=Math.max(o.dk,.15)}}
+    else if(ax<ow+.022&&y>1.0){o.h+=.06;if(ax<ow+.004)o.dk=Math.max(o.dk,.3);if(Math.abs(ax-ow-.012)<.0016&&((y*180)%1)<.55)o.lt=Math.max(o.lt,.4);
+      if(y>1.4)o.lt=Math.max(o.lt,.12)}
+    /* seams */
+    for(const ss of [.25,.75]){const d=Math.abs(avD(s,ss));if(d<.0025){o.dk=Math.max(o.dk,.4);o.h-=.04}}
+    if(Math.abs(X)>.3&&Math.abs(y-1.38)<.002){o.dk=Math.max(o.dk,.35);o.h-=.04}
+    /* pockets */
+    for(const sx of [-1,1]){avPocket(o,Xm,y,sx*.085-.035,1.25,sx*.085+.035,1.35,.028);avPocket(o,Xm,y,sx*.1-.05,1.04,sx*.1+.05,1.15,.03)}
+    /* patches and tears */
+    const bx=avD(s,0);
+    avPatch(o,bx,y,-.12,1.12,-.04,1.2,AVC.patch,711);avPatch(o,Xm,y,.11,1.17,.16,1.22,AVC.patch,713);avPatch(o,bx,y,.07,1.3,.13,1.36,AVC.patch,715);
+    avTear(o,Xm,y,-.13,1.19,.012,717);avTear(o,bx,y,.05,1.07,.01,719);avTear(o,Xm,y,.15,1.08,.008,721);
+    /* sweat and grime: under the arms, down the back */
+    o.dk=Math.max(o.dk,sm_(.05,0,Math.min(Math.abs(avD(s,.25)),Math.abs(avD(s,.75))))*sm_(1.28,1.4,y)*sm_(1.46,1.4,y)*.25);
+    /* the harness: webbing crossing on the chest and the back, over the shoulders */
+    const strap=(px,py,ax_,ay_,bx_,by_)=>{const r=avSeg(px,py,ax_,ay_,bx_,by_);return r[0]};
+    let sd=1;
+    for(const sx of [-1,1]){
+      sd=Math.min(sd,strap(Xm,y,sx*.115,1.47,-sx*.075,1.02),strap(bx,y,sx*.11,1.47,-sx*.08,1.02));
+      if(y>1.44&&y<1.5){const a=Math.abs(avD(s,sx<0?.25:.75));if(a<.135&&a>.11-.0)sd=Math.min(sd,Math.abs(y-1.475)*.9)}
+    }
+    if(sd<.02){avLay(o,AVC.strap,sm_(.02,.017,sd));o.h=.62+(sd>.016?-.06:0)+avWeave(s,y,2600)*.03;o.lt=Math.max(.1,o.lt*.6);o.dk=sd>.0165?.4:0;
+      if(Math.abs(sd-.0125)<.0014&&(((s+y)*220)%1)<.55)o.lt=.35;o.gm=0}
+    else if(sd<.023)o.dk=Math.max(o.dk,.35*(1-(sd-.02)/.003));
+  }
+  o.dt=Math.max(o.dt,sm_(.95,.82,y)*.4);
+}
+function avPaintLeg(s,t,o){
+  const y=1.0-(1-t)*.89,X=avD(s,.5)*.5,ax=Math.abs(X),lat=avD(s,.75)*.5;
+  const dn=pfb(s,t,6,10,731,3),fine=pfb(s,t,70,180,733,1);
+  o.gr=(fine-.5)*1.6;o.h=.5+avWeave(s*.5,y,1400)*.05;
+  if(y<.322){                                                   // the boot shaft
+    avLay(o,AVC.boot,1);o.h=.52+pfb(s,t,20,40,735,3)*.1;o.gr=(fine-.5)*1.2;o.dt=.3+sm_(.5,.85,dn)*.4;
+    const cr=pridge(s,t,8,30,737,2);o.dk=sm_(.9,.98,cr)*.4;o.lt=sm_(.6,.9,pfb(s,t,5,8,739,3))*.25;
+    if(y>.305){o.h+=.08;o.dk=y>.318?.4:o.dk}
+    if(ax<.022&&y<.3){const ph=((y*55)%1);o.dk=Math.max(o.dk,.35);
+      const lx=Math.abs(X)/(.022),cross=Math.abs(lx-Math.abs(ph*2-1));if(cross<.18){avLay(o,AVC.rope,1);o.h=.7;o.dk=0}
+      if(Math.abs(ax-.017)<.003&&ph<.25){avLay(o,AVC.metal,1);o.h=.75}}
+    return;
+  }
+  avLay(o,AVC.trou,1);
+  o.dt=sm_(.5,.2,y)*.6+sm_(.6,.85,dn)*.25;o.lt=sm_(.6,.88,pfb(s,t,4,6,741,3))*.25;
+  if(y<.375){const f=Math.sin((y-.322)*300+Math.sin(s*TAU*5)*2+pfb(s,t,7,9,748,2)*5);o.h+=f*.06;o.dk=Math.max(o.dk,sm_(.5,1,-f)*.35)}   // bloused folds
+  if(Math.abs(lat)<.002){o.dk=Math.max(o.dk,.4);o.h-=.04}                          // outer seam
+  if(Math.abs(avD(s,.25))<.004){o.dk=Math.max(o.dk,.3);o.h-=.03}
+  /* the knee: a patch, wrinkles behind */
+  if(!avPatch(o,X,y,-.045,.46,.045,.57,AVC.patch,743)){
+    if(Math.abs(avD(s,0))<.18&&Math.abs(y-.5)<.05){const f=Math.sin(y*320+Math.sin(s*30));o.h+=f*.05;o.dk=Math.max(o.dk,sm_(.4,1,-f)*.25)}
+  }
+  o.dt=Math.max(o.dt,Math.exp(-Math.pow((y-.51)/.06,2))*.35*sm_(.12,0,Math.abs(X)));     // kneeling dust
+  avTear(o,X,y,.03,.78,.011,745);
+  if(Math.abs(y-.93)<.03&&Math.abs(X)<.06){const f=Math.sin(X*200+y*40);o.h+=f*.04}                // creases at the hip
+}
+function avPaintArm(s,t,o){
+  const d=(1-t)*.625-.056,X=avD(s,.75)*.33,ax=Math.abs(X),back=avD(s,0)*.33,fine=pfb(s,t,60,180,751,1),dn=pfb(s,t,5,12,753,3);
+  o.gr=(fine-.5)*1.6;o.h=.5+avWeave(s*.33,d,1400)*.05;
+  const cuff=.405;
+  if(d<cuff-.014){
+    avLay(o,AVC.jkt,1);o.lt=sm_(.3,-.05,d)*.3+sm_(.55,.85,pfb(s,t,4,8,755,3))*.25;o.dt=sm_(.6,.85,dn)*.3+sm_(.25,.38,d)*.2;
+    if(Math.abs(X)<.0025&&d>0){o.dk=.35;o.h-=.04}                                // outer seam
+    if(d<0&&d>-.012){o.h-=.03;o.dk=Math.max(o.dk,.3)}                              // shoulder seam
+    avPatch(o,X,d,-.03,.03,.03,.09,AVC.patch,757);                                     // shoulder patch
+    if(Math.abs(d-.16)<.022){avLay(o,AVC.strap,1);o.h=.62+avWeave(s,d,2600)*.03;o.lt=.1;o.dk=Math.abs(d-.16)>.018?.35:0}   // arm band
+    if(Math.abs(back)<.035&&Math.abs(d-.3)<.045){o.dt=Math.max(o.dt,.35);o.lt=Math.max(o.lt,.25);const f=Math.sin(d*260+s*6);o.h+=f*.05}   // the elbow
+    avTear(o,X,d,.02,.24,.008,759);
+  }else if(d<cuff+.014){                                                             // the rolled cuff
+    avLay(o,AVC.jkt,1);const q=(d-cuff+.014)/.028;o.h=.55+Math.sin(q*Math.PI)*.2+Math.sin(q*TAU*2)*.04;o.lt=.35*Math.sin(q*Math.PI);o.dk=(q<.12||q>.88)?.4:0;o.dt=.25;
+  }else{
+    avLay(o,AVC.skin,1);o.h=.5+pfb(s,t,40,80,761,2)*.04;o.gr=(fine-.5)*.8;o.dt=sm_(.55,.85,dn)*.35;o.dk=sm_(.4,.42,d)*0;
+    o.gm=sm_(.6,.85,pfb(s,t,6,10,763,3))*.25;
+    if(Math.abs(back)<.09&&((pfb(s,t,90,30,765,1))>.62))o.dk=Math.max(o.dk,.15);        // forearm hair
+    if(d>.49){const ph=((d*70+s*1.0)%1);avLay(o,AVC.wrap,1);o.h=.55+(ph<.15?-.08:.04);o.dk=ph<.15?.3:0;o.dt=.45+sm_(.5,.8,dn)*.3;o.gm=.15}
+  }
+}
+function avPaintHead(s,t,o){
+  const y=1.47+t*.345,X=avD(s,.5)*.56,ax=Math.abs(X),fr=Math.cos(avD(s,.5)*TAU),fine=pfb(s,t,120,90,771,1),bl=pfb(s,t,8,6,773,3);
+  avLay(o,AVC.skin,1);o.gr=(fine-.5)*.7;o.h=.5+(fine-.5)*.04;
+  o.lt=sm_(.5,.85,bl)*.12;o.dk=0;o.dt=sm_(.55,.85,pfb(s,t,6,5,775,3))*.22;o.gm=sm_(.6,.85,pfb(s,t,7,7,777,3))*.15;
+  if(fr>.2){
+    /* cheeks and nose sun-reddened; under the eyes a little darker */
+    const ch=Math.exp(-Math.pow(ax-.05,2)/.0006-Math.pow(y-1.635,2)/.0005);o.cheek=ch*.5;
+    if(ax<.012&&y>1.615&&y<1.69)o.cheek=Math.max(o.cheek,.35);
+    for(const ex of [-.032,.032]){
+      const dx=X-ex,dy=y-1.667,ey=dy/.0068,exx=dx/.0135,r=Math.hypot(exx,ey);
+      if(r<1){avLay(o,AVC.eye,sm_(1,.8,r));const ir=Math.hypot(dx,dy)/.0052;if(ir<1){avLay(o,AVC.iris,sm_(1,.7,ir));if(ir<.45)o.dk=.7;if(Math.hypot(dx+.0015,dy-.0018)<.0013)o.lt=.6}
+        if(dy>.0035)o.dk=Math.max(o.dk,.45*sm_(.0035,.0068,dy));o.h=.48}
+      else if(r<1.35){o.dk=Math.max(o.dk,dy>0?.55*(1.35-r)/.35:.25*(1.35-r)/.35);o.h=.47}
+      if(dy<-.004&&dy>-.016&&Math.abs(dx)<.016)o.dk=Math.max(o.dk,.18*sm_(-.016,-.008,dy));               // under-eye
+      const bdy=y-(1.69+.004*Math.cos(dx/.02*1.4)),bd=Math.abs(bdy);
+      if(Math.abs(dx)<.021&&bd<.0042*(1-Math.abs(dx+.004*Math.sign(ex))/.03)){avLay(o,AVC.brow,sm_(.0045,.002,bd)*.95);o.h=.58}
+    }
+    /* mouth */
+    const my=y-1.592;
+    if(ax<.022&&Math.abs(my)<.0065){const lp=sm_(.0065,.003,Math.abs(my))*sm_(.022,.016,ax);avLay(o,AVC.lip,lp);if(Math.abs(my)<.0011)o.dk=Math.max(o.dk,.65*sm_(.022,.012,ax));o.h=.52}
+    /* forehead creases */
+    if(y>1.7&&y<1.725&&ax<.035){const f=Math.sin(y*900+Math.sin(X*120)*.8);if(f>.9)o.dk=Math.max(o.dk,.1*sm_(.035,.015,ax))}
+  }
+  /* beard and moustache (a mask: the palette decides beard or stubble). Up the cheek from the mouth corner to the sideburn at the ear,
+     down under the jaw; soft, ragged edges */
+  let bd=0;
+  if(fr>-.3&&y<1.68&&y>1.5){
+    const sideK=sm_(.75,.05,fr),top=lerp(lerp(1.612,1.655,sm_(.025,.075,ax)),1.672,sideK)+(pfb(s,t,40,20,783,2)-.5)*.008;
+    const bot=lerp(1.538,1.575,sm_(.4,-.1,fr));
+    bd=sm_(top+.004,top-.006,y)*sm_(bot-.006,bot+.006,y)*sm_(-.3,-.05,fr);
+    if(fr>.6&&ax<.025&&Math.abs(y-1.592)<.008)bd*=sm_(.008,.012,Math.hypot(ax*.4,y-1.592)*1.2)*.6;   // lips stay mostly clear
+    if(fr<.85&&fr>.4&&y>1.62)bd*=sm_(1.66,1.64,y);
+  }
+  if(fr>.4&&y>1.596&&y<1.613)bd=Math.max(bd,sm_(.036,.024,ax)*sm_(1.613,1.607,y)*sm_(1.596,1.6,y));   // moustache
+  if(bd>0){const st=pfb(s,t,140,60,779,1);o.bd=bd*(.6+.4*st);o.h+=bd*(st-.5)*.12}
+  /* the scalp under the hair, so no skin shows through a gap */
+  const he=1.675-.05*Math.cos(s*TAU);                                             // mirrors the hair shell's edge (front is s = .5)
+  if(y>he+.012){avLay(o,AVC.hair,1);o.h=.5+pfb(s,t,140,30,781,1)*.1;o.dk=.25}
+}
+function avPaintHair(s,t,o){
+  const st=pfb(s,t,90,10,791,2),st2=pfb(s,t,200,16,793,1),cl=pfb(s,t,9,3,795,3);
+  avLay(o,AVC.hair,1);o.h=.45+st*.35+st2*.1;o.gr=(st2-.5)*2.6;o.dk=sm_(.55,.2,st)*.45+sm_(.15,0,t)*.15+sm_(.3,.8,t)*0;
+  o.lt=sm_(.6,.9,st)*.35*sm_(.2,.9,t)+sm_(.55,.85,cl)*.15;o.dt=sm_(.6,.9,pfb(s,t,5,4,797,3))*.25;o.gm=sm_(.6,.85,cl)*.2;
+}
+function avPaintHand(s,t,o){
+  const fine=pfb(s,t,60,60,801,1);o.gr=(fine-.5)*1.2;o.h=.5;
+  if(s<.41){                                                                            // palm and back: fingerless glove, wrapped at the wrist
+    avLay(o,AVC.glove,1);o.h=.5+pfb(s,t,30,30,803,3)*.12;o.dk=sm_(.9,.98,pridge(s,t,12,12,805,2))*.35;o.lt=sm_(.6,.9,pfb(s,t,5,5,807,3))*.3;o.dt=.25;
+    if(t>.72){const ph=((t*14+s*2.4)%1);avLay(o,AVC.wrap,1);o.h=.55+(ph<.18?-.08:.04);o.dk=ph<.18?.35:0;o.dt=.4;o.gm=.25}
+    if(t<.12)o.lt=Math.max(o.lt,.35);                                                    // worn bright over the knuckles
+  }else if(s<.83){                                                                      // fingers: glove to the middle joint, then skin and nail
+    if(t>.52){avLay(o,AVC.glove,1);o.h=.52+pfb(s,t,40,20,809,2)*.1;o.dk=t<.56?.45:0;o.dt=.25}
+    else{avLay(o,AVC.skin,1);o.dt=.3;o.gm=.25+sm_(.2,0,t)*.3;o.cheek=.15;
+      const u=((s-.42)/.4*4)%1;                                                         // nails on the back of each finger (u≈.75 for the right hand)
+      if(t<.2&&Math.abs(u-.5)<.16){o.lt=.25;o.h=.56;o.dk=Math.abs(u-.5)>.13?.3:0}
+      if(Math.abs(t-.28)<.012)o.dk=Math.max(o.dk,.2)}
+  }else{
+    if(t>.45){avLay(o,AVC.glove,1);o.dt=.25;o.h=.55}else{avLay(o,AVC.skin,1);o.dt=.3;o.gm=.3;o.cheek=.15}
+  }
+}
+function avPaintBoot(s,t,o){
+  const fine=pfb(s,t,60,60,811,1),dn=pfb(s,t,6,6,813,3);
+  o.gr=(fine-.5)*1.4;o.h=.52+pfb(s,t,24,24,815,3)*.1;
+  const sole=Math.abs(avD(s,.5));
+  if(sole<.2){avLay(o,AVC.sole,1);o.h=.45+((t*60)%1<.5?.1:0)*sm_(.2,.12,sole);o.dt=.45;o.lt=0;
+    if(sole>.16){o.h=.6;o.dk=sole<.17?.5:0}return}
+  avLay(o,AVC.boot,1);o.dt=.35+sm_(.5,.85,dn)*.4;o.lt=sm_(.6,.9,pfb(s,t,5,5,817,3))*.3+sm_(.8,1,t)*.35*sm_(.25,.0,Math.abs(avD(s,0)));
+  o.dk=sm_(.9,.98,pridge(s,t,6,14,819,2))*.35;
+  if(sole<.24)o.dk=Math.max(o.dk,.3);                                                  // welt
+  if(Math.abs(t-.72)<.06&&Math.abs(avD(s,0))<.25){const f=Math.sin(t*200);o.h+=f*.05;o.dk=Math.max(o.dk,sm_(.4,1,-f)*.25)}   // flex creases
+  if(t>.25&&t<.62&&Math.abs(avD(s,0))<.06){const ph=(t*40)%1,lx=Math.abs(avD(s,0))/.06;o.dk=Math.max(o.dk,.4);if(Math.abs(lx-Math.abs(ph*2-1))<.2){avLay(o,AVC.rope,1);o.h=.72;o.dk=0}}
+  if(t<.18)o.dk=Math.max(o.dk,.15);                                                    // heel counter
+}
+function avPaintLth(s,t,o){
+  const fine=pfb(s,t,60,60,821,1);o.gr=(fine-.5)*1.3;
+  avLay(o,AVC.lth,1);o.h=.5+pfb(s,t,20,60,823,3)*.12;o.dk=sm_(.9,.98,pridge(s,t,10,40,825,2))*.35;o.lt=sm_(.6,.9,pfb(s,t,5,10,827,3))*.3;o.dt=.25;
+  for(const e of [.07,.18,.32,.43])if(Math.abs(s-e)<.006&&((t*200)%1)<.55){o.lt=Math.max(o.lt,.45);o.h+=.04}
+}
+function avPaintRope(s,t,o){
+  const ph=((s*3+t*140)%1);avLay(o,AVC.rope,1);o.h=.5+Math.sin(ph*Math.PI)*.35;o.dk=sm_(.25,0,Math.min(ph,1-ph))*.45;o.gr=(pfb(s,t,40,300,831,1)-.5)*2;o.dt=.25+sm_(.5,.85,pfb(s,t,4,30,833,3))*.3;
+}
+function avPaintScarf(s,t,o){
+  const f=Math.sin(s*TAU*3+t*40+pfb(s,t,3,8,841,3)*6);avLay(o,AVC.scarf,1);o.h=.5+f*.12+avWeave(s,t,700)*.03;o.dk=sm_(.3,1,-f)*.3;o.lt=sm_(.5,1,f)*.15;
+  o.dt=.25+sm_(.55,.85,pfb(s,t,4,10,843,3))*.35;o.gr=(pfb(s,t,80,200,845,1)-.5)*1.4;
+}
+function avPaintMetal(s,t,o){avLay(o,AVC.metal,1);const e=Math.min(s,1-s,t,1-t);o.h=.6+(e<.15?-.1:0);o.dk=sm_(.6,.85,pfb(s,t,4,8,851,3))*.4;o.gr=(pfb(s,t,30,60,853,1)-.5)*1.4;o.dt=.2}
+function avPaintPouch(s,t,o){
+  const lth=s<.5,u=lth?s*2:(s-.5)*2;
+  if(lth){avLay(o,AVC.lth,1);o.h=.5+pfb(u,t,16,16,861,3)*.12;o.dk=sm_(.9,.98,pridge(u,t,8,8,863,2))*.3;o.lt=sm_(.6,.9,pfb(u,t,4,4,865,3))*.3;o.dt=.3}
+  else{avLay(o,AVC.pocket,1);o.h=.5+avWeave(u,t,900)*.05;o.dt=.3;o.lt=sm_(.6,.9,pfb(u,t,4,4,867,3))*.2}
+  if(t<.3&&Math.abs(avD(u,0))<.25){o.h+=.06;if(t>.26)o.dk=.45}                         // the flap over the top
+  if(Math.abs(t-.14)<.004&&((u*120)%1)<.55)o.lt=.4;
+  o.gr=(pfb(u,t,50,50,869,1)-.5)*1.3;
+}
+const AV_PAINT=[['JKT',avPaintJkt],['LEG',avPaintLeg],['ARM',avPaintArm],['HEAD',avPaintHead],['HAIR',avPaintHair],['HAND',avPaintHand],
+  ['BOOT',avPaintBoot],['LTH',avPaintLth],['ROPE',avPaintRope],['SCARF',avPaintScarf],['METAL',avPaintMetal],['POUCH',avPaintPouch]];
+/* the shared layers: classes, masks, height → normal and roughness/metal maps (built once) */
+function avBaseBuild(){
+  if(AV.base)return AV.base;
+  const n=AV.n,N=n*n,c1=new Uint8Array(N),c2=new Uint8Array(N),mx=new Uint8Array(N),dk=new Uint8Array(N),lt=new Uint8Array(N),dt=new Uint8Array(N),gm=new Uint8Array(N),
+    bd=new Uint8Array(N),ck=new Uint8Array(N),gr=new Int8Array(N),H=new Float32Array(N).fill(.5);
+  const o={c:0,c2:0,m:0,dk:0,lt:0,dt:0,gm:0,gr:0,h:.5,bd:0,cheek:0};
+  for(const [R,fn] of AV_PAINT){
+    const r=AVR[R],i0=Math.floor(r[0]*n),i1=Math.floor(r[2]*n),j0=Math.floor(r[1]*n),j1=Math.floor(r[3]*n);
+    for(let j=j0;j<j1;j++)for(let i=i0;i<i1;i++){
+      o.c=0;o.c2=0;o.m=0;o.dk=0;o.lt=0;o.dt=0;o.gm=0;o.gr=0;o.h=.5;o.bd=0;o.cheek=0;
+      fn((i-i0+.5)/(i1-i0),1-(j-j0+.5)/(j1-j0),o);
+      const k=j*n+i;c1[k]=o.c;c2[k]=o.m>0?o.c2:o.c;mx[k]=clamp(o.m,0,1)*255;dk[k]=clamp(o.dk,0,1)*255;lt[k]=clamp(o.lt,0,1)*255;dt[k]=clamp(o.dt,0,1)*255;
+      gm[k]=clamp(o.gm,0,1)*255;bd[k]=clamp(o.bd,0,1)*255;ck[k]=clamp(o.cheek,0,1)*255;gr[k]=clamp(o.gr,-1,1)*127;H[k]=o.h;
+    }
+  }
+  /* normal map from height (the forge's rule: wide footprint, tilt capped) and the ORM sheet from the classes */
+  const nrm=new Uint8ClampedArray(N*4),orm=new Uint8ClampedArray(N*4),st=2.2*n/256,TMAX=.42;
+  const Hh=(i,j)=>H[clamp(j,0,n-1)*n+clamp(i,0,n-1)];
+  for(let j=0;j<n;j++)for(let i=0;i<n;i++){
+    const hx=.6*(Hh(i+1,j)-Hh(i-1,j))+.2*(Hh(i+2,j)-Hh(i-2,j)),hy=.6*(Hh(i,j+1)-Hh(i,j-1))+.2*(Hh(i,j+2)-Hh(i,j-2));
+    let dx=hx*st,dy=hy*st;const m=Math.hypot(dx,dy);if(m>TMAX){dx*=TMAX/m;dy*=TMAX/m}
+    const l=Math.hypot(dx,dy,1),k=j*n+i,q=k*4;
+    nrm[q]=127.5*(-dx/l+1);nrm[q+1]=127.5*(dy/l+1);nrm[q+2]=127.5*(1/l+1);nrm[q+3]=255;
+    const w=mx[k]/255,ro=lerp(AV_RO[c1[k]],AV_RO[c2[k]],w)+dt[k]/255*.12,me=lerp(AV_ME[c1[k]],AV_ME[c2[k]],w)*(1-dt[k]/255);
+    orm[q]=255;orm[q+1]=clamp(ro,0,1)*255;orm[q+2]=clamp(me,0,1)*255;orm[q+3]=255;
+  }
+  const mk=(arr)=>{const c=cvs(n),x=c.getContext('2d'),im=x.createImageData(n,n);im.data.set(arr);x.putImageData(im,0,0);return c};
+  const T=(c,srgb)=>{const t=new THREE.CanvasTexture(c);t.anisotropy=8;if(srgb)t.colorSpace=THREE.SRGBColorSpace;t.needsUpdate=true;return t};
+  AV.base={c1,c2,mx,dk,lt,dt,gm,bd,ck,gr};AV.nrm=T(mk(nrm),false);AV.orm=T(mk(orm),false);
+  return AV.base;
+}
+/* one person's colour map: palette lookup and the masks laid over it */
+function avColour(key){
+  const b=avBaseBuild(),n=AV.n,N=n*n,pal=avPalOf(key),out=new Uint8ClampedArray(N*4);
+  const DUST=[184,160,122],GRIME=[52,42,32],BEARD=pal.hairc.map(v=>v*.8),beard=pal.beard;
+  for(let k=0;k<N;k++){
+    const a=pal[b.c1[k]],c=pal[b.c2[k]],w=b.mx[k]/255;
+    let r=a[0]+(c[0]-a[0])*w,g=a[1]+(c[1]-a[1])*w,bb=a[2]+(c[2]-a[2])*w;
+    const ck=b.ck[k]/255;if(ck>0){r+=(r*1.12+14-r)*ck;g+=(g*.92-g)*ck;bb+=(bb*.88-bb)*ck}
+    const bd=b.bd[k]/255;if(bd>0){const f=beard?bd:bd*.35;r+=(BEARD[0]-r)*f;g+=(BEARD[1]-g)*f;bb+=(BEARD[2]-bb)*f}
+    const gr=b.gr[k]/127*14;r+=gr;g+=gr;bb+=gr*.9;
+    const lt=b.lt[k]/255;if(lt>0){r+=(r*1.2+26-r)*lt;g+=(g*1.2+24-g)*lt;bb+=(bb*1.15+20-bb)*lt}
+    const dt=b.dt[k]/255;if(dt>0){r+=(DUST[0]-r)*dt*.55;g+=(DUST[1]-g)*dt*.55;bb+=(DUST[2]-bb)*dt*.55}
+    const gm=b.gm[k]/255;if(gm>0){r+=(GRIME[0]-r)*gm;g+=(GRIME[1]-g)*gm;bb+=(GRIME[2]-bb)*gm}
+    const dk=1-b.dk[k]/255*.62;
+    const q=k*4;out[q]=r*dk;out[q+1]=g*dk;out[q+2]=bb*dk;out[q+3]=255;
+  }
+  const cv=cvs(n),x=cv.getContext('2d'),im=x.createImageData(n,n);im.data.set(out);x.putImageData(im,0,0);
+  return cv;
+}
+function avMat(key){
+  key=AVPAL[key]?key:'drifter';
+  if(AV.mats[key])return AV.mats[key];
+  avBaseBuild();
+  const t=new THREE.CanvasTexture(avColour(key));t.colorSpace=THREE.SRGBColorSpace;t.anisotropy=8;t.needsUpdate=true;
+  const m=new THREE.MeshStandardMaterial({map:t,normalMap:AV.nrm,roughnessMap:AV.orm,metalnessMap:AV.orm,roughness:1,metalness:1});
+  m.userData.av=key;AV.mats[key]=m;return m;
+}
+/* ── instances, poses and reach ──
+   avMake(key) → {root, mesh, b (bones by name), …}. Geometry and the colour/normal maps are shared; each instance has its own bones.
+   A frame's pose is written as target Euler angles (avPoseBegin, then the pose helpers), eased in (avPoseApply), and then any hand
+   that must hold something is placed by avReach: a two-bone reach from the shoulder that puts the hand's grip exactly on a point,
+   with the grip's axis along a given direction. The grip is where a closed fist's hole is: its +Z runs from the little finger to
+   the thumb, its +X back toward the wrist. A tool is built with its own grip at the origin (vmToolMesh), so it sits in either the
+   first-person arm or a third-person hand the same way. */
+const AV_GRIP_P=s=>new THREE.Vector3(-s*.026,-.076,-.004),AV_GX=new THREE.Vector3(0,1,0),AV_GZ=new THREE.Vector3(0,0,-1);
+function avBones(){
+  const bs=AVB.map(b=>{const o=new THREE.Bone();o.name=b[0];return o});
+  AVB.forEach((b,i)=>{if(b[1]){const p=AVB[AVI[b[1]]];bs[AVI[b[1]]].add(bs[i]);bs[i].position.set(b[2]-p[2],b[3]-p[3],b[4]-p[4])}else bs[i].position.set(b[2],b[3],b[4])});
+  return bs;
+}
+function avFrameQ(u0,r0,u1,r1){
+  const a=new THREE.Matrix4().makeBasis(u0,r0,new THREE.Vector3().crossVectors(u0,r0)),b=new THREE.Matrix4().makeBasis(u1,r1,new THREE.Vector3().crossVectors(u1,r1));
+  return new THREE.Quaternion().setFromRotationMatrix(b.multiply(a.transpose()));
+}
+const avPerp=(v,u)=>{const o=v.clone().addScaledVector(u,-v.dot(u));const l=o.length();return l>1e-6?o.multiplyScalar(1/l):null};
+function avMake(key,o){
+  o=o||{};
+  if(!AV.geo)AV.geo=avGeoBuild(null);
+  const geo=o.only?(AV.armGeo[o.only]||(AV.armGeo[o.only]=avGeoBuild(o.only))):AV.geo;
+  const bones=avBones(),mesh=new THREE.SkinnedMesh(geo,avMat(key));
+  mesh.add(bones[0]);mesh.bind(new THREE.Skeleton(bones));
+  mesh.castShadow=!o.only;mesh.receiveShadow=!o.only;mesh.boundingSphere=geo.boundingSphere.clone();
+  const root=new THREE.Group();root.add(mesh);
+  const b={};bones.forEach(x=>b[x.name]=x);
+  const av={root,mesh,b,bones,key,cur:new Float32Array(bones.length*3),tgt:new Float32Array(bones.length*3),hip:0,hipT:0,ph:0,grip:{}};
+  for(const [S,s] of [['R',1],['L',-1]]){
+    const g=new THREE.Object3D();g.name='grip'+S;g.position.copy(AV_GRIP_P(s));
+    g.quaternion.copy(avFrameQ(V3(1,0,0),V3(0,0,1),AV_GX,AV_GZ));            // grip node axes: X toward the wrist, Z along the fist
+    b['hand'+S].add(g);av.grip[S]=g;
+  }
+  return av;
+}
+function avSetKey(av,key){if(av.key===key)return;av.key=key;av.mesh.material=avMat(key)}
+function avPoseBegin(av){av.tgt.fill(0);av.hipT=0}
+function avR(av,n,x,y,z){const i=AVI[n]*3;av.tgt[i]=x;av.tgt[i+1]=y;av.tgt[i+2]=z}
+function avRS(av,n,S,x,y,z){const s=S==='R'?1:-1;avR(av,n+S,x,y*s,z*s)}
+function avAdd(av,n,x,y,z){const i=AVI[n]*3;av.tgt[i]+=x;av.tgt[i+1]+=y;av.tgt[i+2]+=z}
+function avPoseApply(av,k){
+  const c=av.cur,t=av.tgt;k=clamp(k,0,1);
+  for(let i=0;i<c.length;i++)c[i]+=(t[i]-c[i])*k;
+  for(let i=0;i<av.bones.length;i++)av.bones[i].rotation.set(c[i*3],c[i*3+1],c[i*3+2]);
+  av.hip+=(av.hipT-av.hip)*k;av.b.hips.position.y=.96+av.hip;
+}
+/* fingers: f = 0 open … 1 closed round a grip */
+function avFingers(av,S,f,th){avRS(av,'fa',S,0,0,-f*1.38);avRS(av,'fb',S,0,0,-f*1.42);avRS(av,'ta',S,-.25*(th===undefined?f:th),-.3*(th===undefined?f:th),-.45*(th===undefined?f:th));avRS(av,'tb',S,0,0,-.5*(th===undefined?f:th))}
+function avPoseStand(av,t){
+  const br=Math.sin(t*1.7)*.012;
+  avR(av,'spine',br*.5,0,0);avR(av,'chest',br,0,0);avR(av,'neck',-br,0,0);
+  for(const S of ['R','L']){avRS(av,'arm',S,.04+br,0,.05);avRS(av,'fore',S,.18,0,0);avRS(av,'hand',S,0,-.15,0);avFingers(av,S,.32,.2);avRS(av,'thigh',S,0,0,.02);avRS(av,'foot',S,0,0,-.02)}
+}
+/* a walking (or running) cycle; ph in radians, a 0..1 stride, run 0..1 */
+function avPoseWalk(av,ph,a,run){
+  const sw=Math.sin(ph),A=a*(.45+.12*run);
+  for(const [S,o] of [['R',0],['L',Math.PI]]){
+    const s=Math.sin(ph+o),c=Math.cos(ph+o),th=A*s,kn=-(.06+(1.35+.5*run)*A*Math.pow(Math.max(0,c),1.4))-.25*run*A;
+    avRS(av,'thigh',S,th+.08*run*A,0,.02);avRS(av,'shin',S,kn,0,0);avRS(av,'foot',S,-(th+kn)*.55+.1*A*Math.max(0,-c),0,-.02);
+    avRS(av,'arm',S,-A*(.75+.15*run)*s+.05+.1*run,0,.06+.04*run);avRS(av,'fore',S,.2+.35*A+1.1*run,0,0);avFingers(av,S,.38+.3*run,.25);
+  }
+  avR(av,'hips',0,-.09*A*sw,0);avR(av,'spine',-.06*run*A,.1*A*sw,0);avR(av,'chest',-.08*run*A-.02*A,.06*A*sw,0);avR(av,'neck',.08*run*A,-.1*A*sw,0);
+  av.hipT=-.035*A*sw*sw-.04*run*A;
+}
+function avPoseCrouch(av,k){
+  if(k<=0)return;
+  /* a deep squat: the hips drop .59, the head about as far as the crouching eye (.62) */
+  for(const S of ['R','L']){avAdd(av,'thigh'+S,1.4*k,0,(S==='R'?.12:-.12)*k);avAdd(av,'shin'+S,-2.55*k,0,0);avAdd(av,'foot'+S,1.15*k,0,0)}
+  avAdd(av,'spine',-.3*k,0,0);avAdd(av,'neck',.25*k,0,0);av.hipT-=.59*k;
+}
+/* seated: 'chair' (knees square), 'reclined' (legs forward and down: the microlite pod) or 'low' (a seat on the floor, legs out straight: the buggy) */
+function avPoseSit(av,kind){
+  const rec=kind==='reclined',low=kind==='low';
+  for(const S of ['R','L']){
+    if(low){avRS(av,'thigh',S,1.36,-.05,.1);avRS(av,'shin',S,-.16,0,0);avRS(av,'foot',S,-.62,0,0)}            /* a seat on the floor: legs out straight to the pedals */
+    else{avRS(av,'thigh',S,rec?1.42:1.52,rec?-.06:-.04,.08);avRS(av,'shin',S,rec?-.42:-1.5,0,0);avRS(av,'foot',S,rec?-.5:0,0,0)}
+    avRS(av,'arm',S,.35,0,.1);avRS(av,'fore',S,.75,0,0);avRS(av,'hand',S,0,-.4,0);avFingers(av,S,.4,.3);
+  }
+  avR(av,'spine',rec||low?.12:0,0,0);avR(av,'chest',0,0,0);avR(av,'neck',rec||low?-.12:0,0,0);
+}
+const _avpV=[0,1,2,3,4,5,6,7,8,9].map(()=>new THREE.Vector3()),_avpQ=[0,1,2,3,4].map(()=>new THREE.Quaternion());
+/* put hand S's grip on point G (avatar space) with the fist's axis along zg and the wrist toward xg. w blends from the posed arm. */
+function avReach(av,S,G,zg,xg,w,pole){
+  const s=S==='R'?1:-1,b=av.b;if(w===undefined)w=1;if(w<=0)return;
+  av.root.updateMatrixWorld(true);
+  const mInv=_avpQ[0].copy(av.mesh.getWorldQuaternion(_avpQ[1])).invert();
+  const Sp=av.mesh.worldToLocal(b['arm'+S].getWorldPosition(_avpV[0]));
+  const Z=zg.clone().normalize(),X=avPerp(xg,Z)||avPerp(V3(0,0,1),Z);
+  const Qh=avFrameQ(AV_GX,AV_GZ,X,Z);
+  const Wp=G.clone().sub(AV_GRIP_P(s).applyQuaternion(Qh));
+  const A0=avBP('arm'+S),E0=avBP('fore'+S),W0=avBP('hand'+S),a=A0.distanceTo(E0),c=E0.distanceTo(W0);
+  const D=Wp.clone().sub(Sp),d=clamp(D.length(),Math.abs(a-c)+.01,a+c-.002),dir=D.normalize();
+  const cosA=clamp((a*a+d*d-c*c)/(2*a*d),-1,1),sinA=Math.sqrt(1-cosA*cosA);
+  const pp=avPerp(pole||V3(s*.7,-.5,.6),dir)||avPerp(V3(0,0,1),dir);
+  const E=Sp.clone().addScaledVector(dir,a*cosA).addScaledVector(pp,a*sinA),Wr=Sp.clone().addScaledVector(dir,d);
+  const u0=E0.clone().sub(A0).normalize(),f0=W0.clone().sub(E0).normalize(),u1=E.clone().sub(Sp).normalize(),f1=Wr.clone().sub(E).normalize();
+  const Qu=avFrameQ(u0,avPerp(V3(0,0,1),u0),u1,avPerp(pp,u1)||avPerp(V3(0,0,1),u1));
+  const rp=avPerp(pp,f1)||avPerp(V3(0,0,1),f1),rh=avPerp(V3(0,0,1).applyQuaternion(Qh),f1);
+  let rf=rh?rp.clone().multiplyScalar(.3).addScaledVector(rh,.7):rp;rf=avPerp(rf,f1)||rp;
+  const Qf=avFrameQ(f0,avPerp(V3(0,0,1),f0),f1,rf);
+  const Qc=b['clav'+S].getWorldQuaternion(_avpQ[2]).premultiply(mInv);
+  const la=Qc.clone().invert().multiply(Qu),lf=Qu.clone().invert().multiply(Qf),lh=Qf.clone().invert().multiply(Qh);
+  b['arm'+S].quaternion.slerp(la,w);b['fore'+S].quaternion.slerp(lf,w);b['hand'+S].quaternion.slerp(lh,w);
+}
+
+/* ═══ TRADERS ═══  front is local −Z (the game turns −Z toward the player); feet at y=0. The body is the shared avatar; one cached template
+   per coat colour holds what they carry on top of it (the pack) and their stall */
+const TRADER_TPL={};
+function traderPart(fn){const K=asmKit();fn(K);return K.finish()}
 function traderBuild(ci){
   for(const i of [ci,(ci+3)%6,3])ensureCoat(i);
-  const coat='aCoat'+ci,trou='aCoat'+((ci+3)%6),g=new THREE.Group();
-  /* ── body ── */
-  g.add(traderPart(K=>{
-    const path=[];for(let i=0;i<=16;i++)path.push(V3(0,1.52-i/16*1.02,0));
-    K.tube(coat,ell(.205,.142,16),path,{tile:.7,sc:coatSc,tu:1.3,tv:.7});
-    K.tube(coat,ell(.2,.138,14),[V3(0,1.55,0),V3(0,1.5,0)],{tile:.5,sc:.96});                                    // collar roll
-    const ky=y=>coatSc((1.52-y)/1.02);
-    for(const y of [1.42,1.3,1.18,1.08])K.sphere('aBare',.0125,0,y,-(.142*ky(y)+.006),1,1,.6);              // coat buttons
-    const bk=ky(1.0),belt=[];for(let i=0;i<=24;i++){const a=i/24*TAU;belt.push(V3(Math.cos(a)*(.205*bk+.004),1.0,Math.sin(a)*(.142*bk+.004)))}
-    K.tube('aLeather',profRect(.014,.06),belt,{tile:.3,up:V3(0,1,0)});
-    K.box('aBare',0,1.0,-(.142*bk+.012),.05,.04,.012);
-    for(const [x,rot] of [[-.12,.1],[.1,-.08],[.17,.2]])K.box('aLeather',x,.94,-(.142*bk+.04),.07,.09,.05,0,rot*2,rot);    // belt pouches
-    const bd=[];for(let i=0;i<=10;i++){const t=i/10,x=lerp(.15,-.16,t),y=lerp(1.5,1.04,t),zz=Math.sqrt(Math.max(0,1-Math.pow(x/(.205*ky(y)),2)));bd.push(V3(x,y,-(.142*ky(y)*zz+.01)))}
-    K.tube('aLeather',profRect(.006,.04),bd,{tile:.3});
-    for(let i=0;i<4;i++){const s=pathAt(bd,pathLen(bd)*(.2+i*.2));if(s)K.disc('aBare',.009,.034,s.p.x,s.p.y,s.p.z-.008,'y',null,.1,6)}
-    /* neck wrap, scarf tail, head */
-    K.lathe('aCanvas',[[.085,0],[.138,.005],[.145,.04],[.125,.078],[.098,.09],[.085,.084]],0,1.5,0,14,null,.4);
-    K.mesh(surfGeo(3,7,(u,v)=>[.1+u*.1-v*.02,1.52-v*.46,.07+v*.09+Math.sin(v*5)*.02],.5),'aCanvas',0,0,0);
-    K.sphere('aSkin',.1,0,1.68,0,.95,1.16,1.04);
-    K.sphere('aSkin',.026,0,1.668,-.1,.85,1.25,1);
-    K.lathe('aCanvas',[[0,-.122],[.072,-.11],[.104,-.058],[.108,-.012],[.096,.024],[0,.034]],0,1.665,0,16,null,.4);   // face wrap
-    for(const x of [-.044,.044]){K.disc('aGlass',.027,.01,x,1.706,-.1,'z',null,.2,12);K.mesh(new THREE.TorusGeometry(.03,.0055,4,10),'aBare',x,1.706,-.103,0,0,0)}
-    K.tube('aBare',profCircle(.004,5),[V3(-.014,1.706,-.104),V3(0,1.712,-.108),V3(.014,1.706,-.104)],{tile:.1});
-    K.mesh(new THREE.TorusGeometry(.107,.0075,4,10),'aRubber',0,1.706,0,Math.PI/2,0,0);
-    /* hat: dished brim, dented crown, rope band */
-    const hat=new THREE.Group();hat.position.set(0,1.79,0);hat.rotation.set(-.05,0,.06);K.g.add(hat);
-    K.lathe('aLeather',[[.12,0],[.26,-.012],[.4,-.04],[.46,-.085],[.468,-.092],[.46,-.072],[.4,-.026],[.26,.0],[.12,.01]],0,0,0,18,hat,.5);
-    K.mesh(dentedHat(),'aLeather',0,.005,0,0,0,0,hat);
-    K.mesh(new THREE.TorusGeometry(.123,.011,4,10),'aRope',0,.04,0,Math.PI/2,0,0,hat);
+  const coat='aCoat'+ci,g=new THREE.Group();
+  /* the body is the shared rigged avatar (§AVATARS) in this coat's colours; what is built here is what they carry and wear on top:
+     the pack (on the chest bone, in body coordinates) and the stall. No hat: the face is the person. */
+  const pack=traderPart(K=>{
     /* pack: frame, canvas pack, bedroll, pot and canteen — on the back (+Z) */
-    for(const x of [-.17,.17])K.tube('aBare',profCircle(.009,6),[V3(x,.98,.14),V3(x,1.62,.15)],{tile:.3});
-    K.tube('aBare',profCircle(.009,6),[V3(-.17,1.0,.15),V3(.17,1.0,.16)],{tile:.3});
-    K.box('aOlive',0,1.28,.27,.4,.5,.2);K.box('aOlive',0,1.36,.39,.32,.28,.06,0,.0,0);
-    K.box('aLeather',0,1.25,.375,.42,.035,.028);K.box('aLeather',0,1.42,.375,.34,.035,.028);
-    K.disc('aCanvas',.1,.5,0,1.62,.26,'x',null,.4,16);for(const x of [-.17,.17])K.mesh(new THREE.TorusGeometry(.102,.011,4,10),'aRope',x,1.62,.26,0,Math.PI/2,0);
-    K.lathe('aBare',[[0,0],[.075,0],[.085,.02],[.085,.1],[.08,.105],[0,.105]],.25,.98,.3,12,null,.5);K.pipe('aBare',.006,[V3(.18,1.07,.3),V3(.25,1.14,.3),V3(.32,1.07,.3)],.03,{n:5});
-    K.lathe('aOliveP',[[0,0],[.07,0],[.085,.02],[.085,.17],[.07,.19],[.03,.2],[.03,.23],[0,.23]],-.26,.98,.3,12,null,.5);
-    for(const x of [-.27,.27])K.tube('aLeather',profRect(.008,.03),[V3(x,1.5,.0),V3(x*.7,1.5,.2),V3(x*.5,1.12,.2)],{tile:.3});   // shoulder straps
-  }));
-  /* ── legs (pivot at the hip) ── */
-  for(const [sx,nm] of [[-1,'legL'],[1,'legR']]){
-    const lg=new THREE.Group();lg.name=nm;lg.position.set(sx*.105,.92,0);g.add(lg);
-    lg.add(traderPart(K=>{
-      K.tube(trou,profCircle(.08,10),[V3(0,-.02,0),V3(0,-.46,.006),V3(0,-.72,-.004)],{tile:.5,sc:k=>1-.28*k});
-      K.tube('aLeather',profCircle(.066,10),[V3(0,-.72,0),V3(0,-.9,0)],{tile:.3});
-      for(const y of [-.56,-.62,-.68])K.mesh(new THREE.TorusGeometry(.064+(-y-.56)*.0,.009,4,10),'aCanvas',0,y,0,Math.PI/2,0,0);
-      K.tube('aLeather',{pts:[[-.085,-.92],[.19,-.92],[.215,-.905],[.205,-.878],[.13,-.855],[.05,-.8],[-.04,-.74],[-.085,-.8],[-.088,-.9]],closed:true,hard:true},[V3(-.052,0,0),V3(.052,0,0)],{tile:.3});
-      K.box('aRubber',0,-.918,-.055,.112,.015,.3);
-    }));
-  }
-  /* ── arms (pivot at the shoulder) ── */
-  for(const [sx,nm] of [[-1,'armL'],[1,'armR']]){
-    const am=new THREE.Group();am.name=nm;am.position.set(sx*.272,1.47,0);g.add(am);
-    am.add(traderPart(K=>{
-      K.tube(coat,profCircle(.064,10),[V3(0,-.02,0),V3(0,-.3,-.022),V3(0,-.5,-.07)],{tile:.5,sc:k=>1-.3*k});
-      K.mesh(new THREE.TorusGeometry(.046,.01,4,10),'aLeather',0,-.52,-.075,Math.PI/2+.25,0,0);
-      K.lathe('aLeather',[[0,0],[.038,.006],[.048,.05],[.04,.1],[0,.112]],0,-.63,-.1,10,null,.3);
-      K.sphere('aLeather',.02,sx*-.024,-.59,-.1,1,1.5,1);
-    }));
-  }
+    for(const x of [-.15,.15])K.tube('aBare',profCircle(.009,6),[V3(x,.98,.15),V3(x,1.58,.16)],{tile:.3});
+    K.tube('aBare',profCircle(.009,6),[V3(-.15,1.0,.16),V3(.15,1.0,.17)],{tile:.3});
+    K.box('aOlive',0,1.28,.28,.38,.48,.2);K.box('aOlive',0,1.36,.4,.3,.27,.06,0,.0,0);
+    K.box('aLeather',0,1.25,.385,.4,.035,.028);K.box('aLeather',0,1.42,.385,.32,.035,.028);
+    K.disc('aCanvas',.1,.5,0,1.6,.27,'x',null,.4,16);for(const x of [-.17,.17])K.mesh(new THREE.TorusGeometry(.102,.011,4,10),'aRope',x,1.6,.27,0,Math.PI/2,0);
+    K.lathe('aBare',[[0,0],[.075,0],[.085,.02],[.085,.1],[.08,.105],[0,.105]],.25,.98,.31,12,null,.5);K.pipe('aBare',.006,[V3(.18,1.07,.31),V3(.25,1.14,.31),V3(.32,1.07,.31)],.03,{n:5});
+    K.lathe('aOliveP',[[0,0],[.07,0],[.085,.02],[.085,.17],[.07,.19],[.03,.2],[.03,.23],[0,.23]],-.26,.98,.31,12,null,.5);
+    for(const x of [-.155,.155])K.tube('aLeather',profRect(.008,.03),[V3(x,1.38,-.13),V3(x*1.05,1.49,-.07),V3(x*1.05,1.52,.03),V3(x,1.46,.15)],{tile:.3});   // shoulder straps
+  });
+  pack.name='pack';g.add(pack);
   /* ── the stall: a counter in front (−Z), a tarp over both ── */
   const stall=new THREE.Group();stall.name='stall';stall.visible=false;g.add(stall);
   const inner=new THREE.Group();inner.position.z=-.12;stall.add(inner);
@@ -4663,12 +5249,13 @@ function traderPrewarm(){
 }
 function traderMesh(tr){
   const ci=Math.max(0,COATS.indexOf(tr.coat));
-  const tpl=traderTemplate(ci);
-  const g=tpl.clone(true);
-  tr.legs=[g.getObjectByName('legL'),g.getObjectByName('legR')];
-  tr.arms=[g.getObjectByName('armL'),g.getObjectByName('armR')];
-  tr.stall=g.getObjectByName('stall');tr.canopy=g.getObjectByName('canopy');tr.stall.visible=false;
+  const tpl=traderTemplate(ci),g=new THREE.Group();
+  const av=avMake('t'+ci);g.add(av.root);tr.av=av;
+  const pack=tpl.getObjectByName('pack').clone(true);pack.position.set(0,-1.27,0);av.b.chest.add(pack);
+  const stall=tpl.getObjectByName('stall').clone(true);g.add(stall);
+  tr.stall=stall;tr.canopy=stall.getObjectByName('canopy');tr.stall.visible=false;
   g.traverse(o=>{if(o.isMesh){o.receiveShadow=true;o.userData=Object.assign({},o.userData,{own:false})}});
+  avPoseBegin(av);avPoseStand(av,0);avPoseApply(av,1);
   return g;
 }
 /* the stall is pinned in world space: it keeps the heading it was set up with while the trader turns to watch the player,
@@ -4678,14 +5265,22 @@ function traderStallPin(tr){
   if(tr.stallYaw===undefined)tr.stallYaw=Math.atan2(P.x-tr.x,P.z-tr.z)+Math.PI;
   tr.stall.rotation.y=tr.stallYaw-tr.mesh.rotation.y;
 }
-/* standing at the stall: feet settle, one hand rests on the counter, the other talks */
+/* walking in and out; at the stall one hand rests on the counter and the other talks */
 function traderPose(tr,dt){
-  if(!tr.legs||!tr.stall||!tr.stall.visible)return;
-  const t=now()+tr.id*1.7,k=Math.min(1,dt*6);
-  for(const l of tr.legs)l.rotation.x=lerp(l.rotation.x,0,k);
-  tr.arms[0].rotation.x=lerp(tr.arms[0].rotation.x,.62+Math.sin(t*.8)*.03,k*.8);
-  tr.arms[1].rotation.x=lerp(tr.arms[1].rotation.x,.95+Math.sin(t*1.9)*.22,k*.8);
-  tr.arms[1].rotation.z=lerp(tr.arms[1].rotation.z,-.12+Math.sin(t*1.3)*.1,k*.8);
+  const av=tr.av;if(!av)return;
+  const t=now()+tr.id*1.7;
+  avPoseBegin(av);
+  const stall=tr.stall&&tr.stall.visible;
+  if(stall){
+    avPoseStand(av,t);
+    avFingers(av,'L',.12,.1);
+    avRS(av,'arm','R',.7+Math.sin(t*1.9)*.18,0,.2+Math.sin(t*1.3)*.1);avRS(av,'fore','R',1.3+Math.sin(t*1.5)*.25,0,0);avRS(av,'hand','R',.2,-.7+Math.sin(t*2.3)*.3,0);avFingers(av,'R',.22,.05);
+    avR(av,'head',Math.sin(t*.7)*.05-.08,Math.sin(t*.45)*.12,0);
+  }else if(tr.walking)avPoseWalk(av,tr.ph||0,.9,0);
+  else avPoseStand(av,t);
+  avPoseApply(av,Math.min(1,dt*7));
+  if(stall&&Math.hypot(P.x-tr.x,P.z-tr.z)<40)avReach(av,'L',V3(-.17,.905,-.5),V3(.35,0,-1),V3(-.2,1,.5),1);
+  tr.walking=false;
 }
 
 /* ═══ SIGNAL KITE ═══ patchwork cloth on a bowed bamboo cross; the camera sees the underside, so that's where the frame, lashings and bridle are */
@@ -8255,7 +8850,7 @@ function animateStructures(dt){
 let eLock=false;
 const Keys={};
 const fwd=new THREE.Vector3(),rgt=new THREE.Vector3();
-let viewModel=null,vmTool=null,vmSwing=0,handsLight=null;
+let viewModel=null,vmTool=null,vmSwing=0,handsLight=null,vmPoseKey='none',vmRaise=0;
 let GHOSTMAT=null,ghost=null;
 const Puff={n:140,pos:null,vel:null,life:null,pts:null};
 function initPuffs(){
@@ -8925,7 +9520,7 @@ function planeAnimate(s,dt){
   if(s.pDiscMat)s.pDiscMat.opacity=smooth(18,52,s.propW)*0.3;
   const gs=s.gnd?Math.hypot(s.vel.x,s.vel.z):0;
   for(const w of s.pWheels)w.rotation.x+=gs*dt/0.22;
-  if(s.pPilot)s.pPilot.visible=s.view==='chase';
+  if(s.pPilot)s.pPilot.visible=false;                 /* the drifter's own body sits in the seat now (pavTick) */
   if(s.gnd&&gs>6&&Math.random()<dt*10)puff(s.pos.x,s.y+0.1,s.pos.z-0.3,1,0xcbb896,1.2);
 }
 /* chase cam: smoothed heading + damped horizon.  cockpit cam: bolted to the body quaternion. */
@@ -9362,7 +9957,7 @@ function heliAnimate(s,dt){
   if(s.hTail)s.hTail.rotation.x=s.tailA;
   if(s.hDiscMat)s.hDiscMat.opacity=smooth(0.45,0.95,rpm)*0.17;
   if(s.hTDiscMat)s.hTDiscMat.opacity=smooth(0.45,0.95,rpm)*0.14;
-  if(s.pPilot)s.pPilot.visible=G.drive===s&&s.view==='chase';
+  if(s.pPilot)s.pPilot.visible=false;
 }
 /* a parked helicopter: the rotor winds down on its own, then the blades hang */
 function heliIdle(s,dt){
@@ -9592,6 +10187,7 @@ function playerTick(dt){
   const viewYaw=inBuggy?G.drive.yaw+Math.PI+G.drive.look.yaw:P.yaw;
   const viewPitch=inBuggy?G.drive.look.pitch:P.pitch;
   camera.rotation.set(viewPitch,viewYaw,Math.sin(Drifter.ctx.bobT)*0.004*clamp(spd/4,0,1.4),'YXZ');
+  if(!G.drive&&footTP()&&!Drone.on&&!Bino.on){camera.rotation.z=0;tpCamera(dt,eye)}
   if(isPlane())planeCamera(G.drive,dt);
   if(Drone.on)droneFly(dt);                                       // the camera is the drone's, not yours
   vmSwing=Math.max(0,vmSwing-dt*3.2);
@@ -9599,10 +10195,19 @@ function playerTick(dt){
     const s1=Math.sin(vmSwing*Math.PI)*0.5;
     viewModel.position.set(0.28+Math.sin(Drifter.ctx.bobT)*0.012,-0.26+Math.sin(Drifter.ctx.bobT*2)*0.01-s1*0.1,-0.42+s1*0.14);
     viewModel.rotation.set(-0.3+s1*0.9,0.2-s1*0.3,0.1);
+  /* nothing in your hand: the bare arm stays down by your side, out of view, and only comes up while you work at something */
+  if(vmPoses&&vmPoses.none){
+    const n=vmPoses.none,want=vmPoseKey==='none'&&(Hands.state==='work'||vmSwing>0)?1:0;
+    vmRaise=want?Math.min(1,vmRaise+dt*5):Math.max(0,vmRaise-dt*2.2);
+    if(n.userData.y0===undefined)n.userData.y0=n.position.y;
+    n.position.y=n.userData.y0-(1-vmRaise)*(1-vmRaise)*.45;n.visible=vmPoseKey==='none'&&vmRaise>.02;
+  }
   if(vmLens)vmLens.material=G.findOn?MAT.lampOn:MAT.glow;
   if(vmFlame)vmFlame.scale.y=2.4+Math.sin(now()*17)*.35+Math.sin(now()*7.3)*.25;
   }
   if(handsLight)handsLight.intensity=lerp(handsLight.intensity,(isNight()?2.2:1.7),dt*3);
+  try{pavTick(dt)}catch(e){if(!PAV.err){PAV.err=1;console.warn('avatar',e)}}
+  if(handsLight&&!PAV.lamp)handsLight.position.set(0.2,-0.1,-0.3);
 }
 /* ───────────────────────────────────────────────────────────────────────
    §09d  THE DESERT CRAWLER  —  drive it, walk it, live on it
@@ -14355,7 +14960,7 @@ function trainSeatRelease(T){
 }
 function trainSit(T,ci,sx,lz,lx,ry,ex){
   const c=T.cars[ci];eLock=true;
-  T.pc=ci;T.lever=false;T.seat={ci,sx,lx:lx===undefined?sx*.84:lx,lz,ex:ex===undefined?sx*.22:ex};T.ry=ry===undefined?sx*Math.PI/2:ry;       /* benches face across the aisle */
+  T.pc=ci;T.lever=false;T.seat={ci,sx,lx:lx===undefined?sx*.84:lx,lz,ex:ex===undefined?sx*.22:ex};T.ry=ry===undefined?sx*Math.PI/2:ry;T.seat.face=T.ry;       /* benches face across the aisle */
   P.lx=T.seat.lx;P.lz=lz;P.hy=0;P.vy=0;P.vx=P.vz=0;P.ground=true;
   P.yaw=c.yaw+T.ry;P.pitch=-.04;
   log('seated · the view now turns with the coach · look out of a door or window and let the journey roll by · hold E to stand','gold');SFX('click');
@@ -14817,6 +15422,11 @@ function exitBuggy(){
   SFX('place');
 }
 function toggleView(){
+  if(!G.drive){
+    if(Drone.on||Bino.on)return;
+    SET.footView=footTP()?'fp':'tp';saveSettings();PAV.d=.6;
+    log(footTP()?'third-person view':'first-person view');return;
+  }
   if(isPlane()){G.drive.view=G.drive.view==='chase'?'cockpit':'chase';G.drive.look.y=G.drive.look.p=0;log(G.drive.view+' view');return}
   if((G.drive&&(G.drive.type==='buggy'||G.drive.type==='lorry'||G.drive.type==='crawler'||G.drive.type==='ecliptix'))){
     SET.buggyView=SET.buggyView==='chase'?'cockpit':'chase';saveSettings();
@@ -15098,7 +15708,7 @@ function buildViewModel(){
   if(viewModel)camera.remove(viewModel);
   if(vmPoses)for(const k in vmPoses)vmPoses[k].traverse(o=>{if(o.isMesh&&o.userData.own&&o.geometry)o.geometry.dispose()});
   viewModel=new THREE.Group();
-  vmPoses=vmBuildPoses();
+  vmPoses=vmBuildPoses();if(vmArm)vmArm.pose=null;              /* the arm moves into the new pose groups at the next refresh */
   for(const k in vmPoses){vmPoses[k].visible=false;viewModel.add(vmPoses[k])}
   vmTool=vmPoses.crowbar;
   camera.add(viewModel);scene.add(camera);
@@ -15113,8 +15723,168 @@ function refreshViewModel(){
   if(!vmPoses)return;
   const lamp=G.tool==='lantern'&&(G.inv.lantern||0)>0;
   const pose=G.tool==='crowbar'?'crowbar':lamp?'lantern':(G.tool==='finder'&&(G.inv.finder||0)>0)?'finder':(G.tool==='binoculars'&&(G.inv.binoculars||0)>0)?'binoculars':(G.tool==='drone'&&(G.inv.drone||0)>0)?'drone':(G.tool==='remote'&&(G.inv.remote||0)>0)?'remote':'none';
-  for(const k in vmPoses)vmPoses[k].visible=(k===pose);
+  for(const k in vmPoses)vmPoses[k].visible=(k===pose)&&(k!=='none'||vmRaise>.02);vmPoseKey=pose;
+  if(!vmArm||vmArm.pose!==pose){try{vmArmFit(pose);vmArm.pose=pose}catch(e){console.warn('arm',e)}}
   handsLight.visible=lamp;
+}
+
+/* ═══ THE DRIFTER'S OWN BODY ═══
+   The same rigged mesh as the traders, in the drifter's own colours. It is drawn only when a camera can see it: on foot in the
+   third-person view (V), in any vehicle's chase view (seated, hands on the controls), and while you fly the drone (you stand
+   where you launched it). In first person only the right arm is drawn (vmArm), from the same mesh and atlas. */
+const PAV={av:null,tool:null,toolKind:'',yaw:0,ph:0,par:null,d:2.7,lastT:0};
+const footTP=()=>SET.footView==='tp';
+function pavEnsure(){
+  if(PAV.av)return PAV.av;
+  PAV.av=avMake('drifter');PAV.av.root.visible=false;scene.add(PAV.av.root);PAV.par=scene;
+  /* its own copy of the material (the first-person arm keeps the shared one), dithered so it can fade when the camera is pressed close */
+  PAV.av.mesh.material=PAV.av.mesh.material.clone();PAV.av.mesh.material.alphaHash=true;
+  /* seen from inside (first person): the same skeleton drives a body without a head ('fp'), or without head and right arm ('fp1',
+     while the first-person arm shows). The whole body then moves to layer 1, which only the sun's shadow camera draws, so your
+     shadow keeps its head. */
+  for(const k of ['fp','fp1']){
+    const g=AV.armGeo[k]||(AV.armGeo[k]=avGeoBuild(k)),m=new THREE.SkinnedMesh(g,PAV.av.mesh.material);
+    m.bind(PAV.av.mesh.skeleton,PAV.av.mesh.bindMatrix);m.boundingSphere=g.boundingSphere.clone();m.castShadow=false;m.receiveShadow=true;m.visible=false;
+    PAV.av.root.add(m);PAV[k]=m;
+  }
+  if(sunLight&&sunLight.shadow)sunLight.shadow.camera.layers.enable(1);
+  return PAV.av;
+}
+function pavParent(par){const av=PAV.av;if(PAV.par===par)return;par.add(av.root);PAV.par=par}
+/* the tool in the third-person hand: its own copy, gripped exactly as the first-person one */
+function pavTool(kind){
+  const av=PAV.av,g=av.grip.R;
+  if(PAV.toolKind===kind)return PAV.tool;
+  if(PAV.tool){g.remove(PAV.tool.g);PAV.tool.g.traverse(o=>{if(o.isMesh&&o.userData.own&&o.geometry)o.geometry.dispose()})}
+  PAV.tool=null;PAV.toolKind=kind;
+  if(kind==='none')return null;
+  const t=vmToolMesh(kind),sp=VM_GRIP[kind],Z=V3(...sp.z).normalize(),X=vmGripX(sp,Z,V3(...sp.tp).sub(avBP('armR')).negate());
+  t.g.quaternion.copy(avFrameQ(X,Z,V3(1,0,0),V3(0,0,1)));t.g.traverse(o=>{if(o.isMesh){o.castShadow=true}});
+  g.add(t.g);PAV.tool=t;return t;
+}
+const pavPoseKind=()=>{const lamp=G.tool==='lantern'&&(G.inv.lantern||0)>0;
+  return G.tool==='crowbar'?'crowbar':lamp?'lantern':['finder','binoculars','drone','remote'].find(k=>G.tool===k&&(G.inv[k]||0)>0)||'none'};
+/* where you sit in each vehicle: the hip joint in the vehicle's frame, which way you face there, how you sit, where your hands go */
+function pavSeat(s){
+  const t=s.type;
+  if(t==='buggy'||t==='lorry'){const PW=VPW[t];return{par:s.mesh,hip:V3(PW.eye[0],PW.eye[1]-.7,PW.eye[2]-.08),yaw:Math.PI,kind:t==='buggy'?'low':'chair',wheel:s.vkWheel}}
+  if(t==='plane')return{par:s.mesh,hip:V3(0,-.27,-.14),yaw:Math.PI,kind:'reclined',stick:V3(0,.1,.42),left:V3(.2,-.25,.3)};
+  if(t==='heli')return{par:s.mesh,hip:V3(-.29,-.15,-.12),yaw:Math.PI,kind:'chair',stick:V3(-.285,.12,.57),left:V3(-.47,-.055,.51)};
+  if(t==='crawler')return{par:s.mesh,hip:V3(CR.seat.x,(typeof CRD!=='undefined'?CRD:0)+.66,CR.seat.z+.05),yaw:Math.PI,kind:'chair',reachF:true};
+  if(t==='ecliptix')return{par:s.mesh,hip:V3(ECL.SEAT.x,ECL.ECD+ECL.CHAIR_H+.1,ECL.SEAT.z+.02),yaw:Math.PI,kind:'chair',reachF:true};
+  return null;
+}
+const _pv=[0,1,2,3].map(()=>new THREE.Vector3());
+/* hands on a steering wheel: ten and two on the rim, turning with it */
+function pavWheel(av,inner){
+  const rim=inner.children[0],r=(rim&&rim.geometry&&rim.geometry.parameters&&rim.geometry.parameters.radius)||.2;
+  inner.updateMatrixWorld(true);
+  for(const [S,a] of [['R',Math.PI*.2],['L',Math.PI*.8]]){
+    const p=av.root.worldToLocal(inner.localToWorld(_pv[0].set(Math.cos(a)*r,Math.sin(a)*r,0)));
+    const tg=av.root.worldToLocal(inner.localToWorld(_pv[1].set(Math.cos(a)*r-Math.sin(a)*.1*(S==='R'?-1:1),Math.sin(a)*r+Math.cos(a)*.1*(S==='R'?-1:1),0))).sub(p);
+    const tw=av.root.worldToLocal(inner.localToWorld(_pv[2].set(0,0,1))).sub(av.root.worldToLocal(inner.localToWorld(_pv[3].set(0,0,0))));
+    avReach(av,S,p,S==='R'?tg:tg.negate(),tw,1);
+  }
+}
+function pavTick(dt){
+  const av=pavEnsure();PAV.lamp=false;
+  const s=G.drive,chase=s&&(isPlane()?s.view==='chase':SET.buggyView==='chase');
+  const T=trainOf();
+  const tpFade=(!s&&footTP()&&!Drone.on)?(PAV.fade!=null?PAV.fade:1):1;
+  /* first person: your own body, seen from just in front of your nose (on foot, or in a vehicle's cockpit view) */
+  const fpb=s?!chase:(!Drone.on&&!Bino.on&&(!footTP()||tpFade<=.04));
+  const show=s?true:!Bino.on;
+  av.root.visible=show&&!P.dead;av.mesh.material.opacity=fpb?1:tpFade;
+  if(viewModel&&!s)viewModel.visible=fpb;                       /* no room behind you: it is your own eyes again, hands and all */
+  if(viewModel&&s&&fpb)viewModel.visible=false;                 /* at the controls your own hands are on them */
+  const armUp=!s&&fpb&&(vmPoseKey!=='none'||vmRaise>.02);
+  av.mesh.layers.set(fpb?1:0);if(PAV.fp){PAV.fp.visible=fpb&&!armUp;PAV.fp1.visible=fpb&&armUp}
+  if(!fpb&&tpFade<=.04)av.root.visible=false;
+  if(!av.root.visible)return;
+  const t=now(),k=Math.min(1,dt*10);
+  avPoseBegin(av);
+  if(s){
+    const st=pavSeat(s);
+    if(!st){av.root.visible=false;return}
+    pavParent(st.par);av.root.position.copy(st.hip).sub(V3(0,.96,0));av.root.rotation.set(0,st.yaw,0);
+    avPoseSit(av,st.kind);avR(av,'neck',(s.look?(s.look.pitch||s.look.p||0)*.3:0),0,0);
+    avPoseApply(av,k);
+    pavTool('none');
+    if(st.wheel)pavWheel(av,st.wheel);
+    if(st.stick){avFingers(av,'R',1);avPoseApply(av,1);avReach(av,'R',st.stick.clone().applyAxisAngle(V3(0,1,0),-st.yaw).sub(st.hip.clone().sub(V3(0,.96,0)).applyAxisAngle(V3(0,1,0),-st.yaw)),V3(0,1,-.2),V3(.3,-.2,1),1)}
+    if(st.reachF){for(const S of ['R','L']){const sg=S==='R'?1:-1;avReach(av,S,V3(sg*.2,1.02,-.42),V3(0,1,-.3),V3(sg*.2,0,1),1)}}
+    return;
+  }
+  /* on foot (or aboard a train or a crawler's deck) */
+  pavParent(scene);
+  const seat=T&&T.seat;
+  av.root.position.set(P.x,P.y,P.z);
+  let yaw=P.yaw;if(seat){const c=T.cars[T.seat.ci];yaw=c.yaw+(T.seat.face!=null?T.seat.face:T.ry)}
+  let dy=yaw-PAV.yaw;dy=((dy+Math.PI)%TAU+TAU)%TAU-Math.PI;PAV.yaw+=dy*Math.min(1,dt*(seat||fpb?20:12));
+  av.root.rotation.set(0,PAV.yaw,0);
+  if(seat){
+    avPoseSit(av,'chair');
+    const c=T.cars[T.seat.ci];av.root.position.copy(c.g.localToWorld(_pv[0].set(T.seat.lx,TC.F+.47-.96,T.seat.lz)));
+  }
+  else if(Drone.on){avPoseStand(av,t);avR(av,'neck',.25,0,0);avR(av,'head',.25,0,0)}
+  else{
+    const sp=Math.hypot(P.vx,P.vz),fv=P.vx*fwd.x+P.vz*fwd.z,sv=P.vx*rgt.x+P.vz*rgt.z;
+    const dir=Math.abs(fv)>=Math.abs(sv)*.5?Math.sign(fv)||1:1,run=clamp((sp-4.6)/2.6,0,1),stride=lerp(1.5,2.3,run);
+    PAV.ph+=dir*sp*dt*TAU/stride;
+    const a=clamp(sp/4.2,0,1.15);
+    if(!P.ground){avPoseStand(av,t);for(const S of ['R','L']){avRS(av,'thigh',S,.5,0,.04);avRS(av,'shin',S,-.9,0,0)}}
+    else if(a>.04){avPoseWalk(av,PAV.ph,a,run);if(Math.abs(sv)>Math.abs(fv)*.6){avAdd(av,'hips',0,-Math.sign(sv)*.35,0);avAdd(av,'chest',0,Math.sign(sv)*.2,0)}}
+    else avPoseStand(av,t);
+    avPoseCrouch(av,Drifter.ctx.crouch||0);
+    const pt=clamp(P.pitch,-1,1);avAdd(av,'neck',pt*.35,0,0);avAdd(av,'head',pt*.4,0,0);avAdd(av,'chest',pt*.12,0,0);
+  }
+  /* first person: the eyes (the camera) sit at your position, so the body stands a little behind them: the camera is just in front of the nose */
+  if(fpb)av.root.position.add(_pv[1].set(Math.sin(PAV.yaw)*.2,0,Math.cos(PAV.yaw)*.2));
+  avPoseApply(av,k);
+  /* the held tool */
+  const kind=(Drone.on||fpb)?'none':pavPoseKind();
+  const tl=pavTool(kind);
+  if(kind!=='none'&&!seat){
+    const sp=VM_GRIP[kind],s1=Math.sin(vmSwing*Math.PI)*.5,G0=V3(...sp.tp).add(V3(0,-.16*s1,-.22*s1));
+    const Z=V3(...sp.z).normalize();if(kind==='crowbar')Z.applyAxisAngle(V3(1,0,0),-.35+s1*1.4);
+    avFingers(av,'R',sp.f);avPoseApply(av,1);
+    avReach(av,'R',G0,Z,vmGripX(sp,Z,V3(...sp.tp).sub(avBP('armR')).negate()),1);
+  }
+  if(tl&&tl.flame)tl.flame.scale.y=2.4+Math.sin(t*17)*.35+Math.sin(t*7.3)*.25;
+  if(tl&&tl.lens)tl.lens.material=G.findOn?MAT.lampOn:MAT.glow;
+  /* the lantern's light moves to the lantern in your hand */
+  if(handsLight&&kind==='lantern'&&tl){PAV.lamp=true;av.root.updateMatrixWorld(true);const w=tl.g.localToWorld(_pv[0].set(0,-.2,0));camera.updateMatrixWorld();handsLight.position.copy(camera.worldToLocal(w))}
+}
+/* ── the third-person camera on foot: over the shoulder, behind the head, pulled in by anything in the way ── */
+function tpBlocked(x,y,z){
+  if(y<heightAt(x,z)+.22)return true;
+  const T=trainOf();
+  if(T){const c=T.cars[T.pc];if(c&&c.g){const l=c.g.worldToLocal(_pv[3].set(x,y,z));if(Math.abs(l.x)>TC.hw-.12||l.y>TC.F+TC.H-.05||l.y<TC.F+.1||Math.abs(l.z)>TC.hlI-.1)return true}}
+  for(const s of bpNear(x,z,3.4)){
+    const k=WORKS[s.type]&&WORKS[s.type].bp;if(k!=='edge'&&k!=='cell'&&k!=='stair')continue;
+    for(const b of bpBoxes(s,[])){
+      if(y<b.y0-.12||y>b.y1+.12)continue;
+      const a=bpAx(b.rot),c=bpAz(b.rot),dx=x-b.x,dz=z-b.z,u=dx*a[0]+dz*a[1],w=dx*c[0]+dz*c[1];
+      if(Math.abs(u)<b.hx+.12&&Math.abs(w)<b.hz+.12)return true;
+    }
+  }
+  return false;
+}
+function tpCamera(dt,eye){
+  const T=trainOf(),seat=T&&T.seat;
+  const piv=_pv[0].set(P.x,P.y+eye-.1,P.z),cp=Math.cos(P.pitch);
+  const f=_pv[1].set(-Math.sin(P.yaw)*cp,Math.sin(P.pitch),-Math.cos(P.yaw)*cp),r=_pv[2].set(Math.cos(P.yaw),0,-Math.sin(P.yaw));
+  const want=T?2.0:2.7,sh=.42;
+  let dm=want;
+  for(let d=.3;d<=want+.001;d+=.12){
+    const q=d/want,x=piv.x-f.x*d+r.x*sh*q,y=piv.y-f.y*d+.12*q,z=piv.z-f.z*d+r.z*sh*q;
+    if(tpBlocked(x,y,z)){dm=Math.max(.25,d-.2);break}
+  }
+  PAV.d=dm<PAV.d?dm:lerp(PAV.d,dm,Math.min(1,dt*2.5));
+  PAV.fade=clamp((PAV.d-.4)/.6,0,1);                                  /* pressed up against a wall (a train's side, a corner): the body fades out of the way */
+  const q=PAV.d/want;
+  camera.position.set(piv.x-f.x*PAV.d+r.x*sh*q,piv.y-f.y*PAV.d+.12*q,piv.z-f.z*PAV.d+r.z*sh*q);
+  if(PAV.fade<=.04)camera.position.set(P.x,P.y+eye,P.z);             /* no room at all: back to your own eyes until there is */
 }
 
 /* ───────────────────────────────────────────────────────────────────────
@@ -17447,9 +18217,7 @@ function walkTo(tr,tx,tz,dt){
   tr.x+=dx/d*sp*dt;tr.z+=dz/d*sp*dt;
   tr.mesh.position.set(tr.x,heightAt(tr.x,tr.z),tr.z);
   tr.rot=Math.atan2(dx,dz);
-  const sw=Math.sin(now()*7)*0.5;
-  tr.legs[0].rotation.x=sw;tr.legs[1].rotation.x=-sw;
-  tr.arms[0].rotation.x=-sw*0.7;tr.arms[1].rotation.x=sw*0.7;
+  tr.walking=true;tr.ph=(tr.ph||0)+sp*dt*TAU/1.45;
   tr.mesh.rotation.y=lerp(tr.mesh.rotation.y,tr.rot+Math.PI,dt*3);
   return false;
 }
@@ -17487,7 +18255,7 @@ function priceSell(tr,id){const it=ITEMS[id];if(!it)return 1;return Math.max(1,M
    Everything worth keeping lives in two localStorage keys.
    ─────────────────────────────────────────────────────────────────────── */
 const KEY_SAVE='scrpfrontier.save.v1',KEY_SET='scrpfrontier.set.v1';
-const SET={sens:1,draw:6,shadow:true,audio:true,guide:false,seen:false,fov:74,showFps:false,fpsCap:0,buggyView:'cockpit',logLevel:1};
+const SET={sens:1,draw:6,shadow:true,audio:true,guide:false,seen:false,fov:74,showFps:false,fpsCap:0,buggyView:'cockpit',footView:'fp',logLevel:1};
 const LOG_LEVELS=['','everything','notable and problems','problems only','nothing'];
 const logLevelLabel=i=>LOG_LEVELS[i|0]||LOG_LEVELS[1];
 const FPS_CAPS=[0,30,45,60];
@@ -18513,7 +19281,7 @@ RENDER.help=()=>`<div class="help">
     <span class="kbd">Q</span><span>stow the tool in your hand · again to take it back out</span>
     <span class="kbd">K</span><span>fly / reel the signal kite</span>
     <span class="kbd">F</span><span>scrap-finder on / off (saves charge)</span>
-    <span class="kbd">V</span><span>first / third-person view in the buggy and microlite</span>
+    <span class="kbd">V</span><span>first / third-person view: on foot (over your shoulder; you see yourself and what you carry) and in every vehicle (chase view: you, seated at the controls)</span>
   </div>
   <div class="grp-h"><b>building with kits</b></div>
   <div class="keygrid">
@@ -18572,6 +19340,7 @@ RENDER.help=()=>`<div class="help">
     <li><b>Shunting.</b> Fabricate a <b>diesel loco</b> kit, then assemble it (<code>B</code>) onto any clear laid track — it sets down on the rails you look at, long hood the way you face (<code>R</code> turns it about). Drive it gently into any car and the two couple; standing touching never does. To part two cars, walk to the coupling between them on foot and hold <code>E</code>. Its diesel fillers and sight glasses are under the walkway behind the cab; hold <code>X</code> at its corner steps to lift it off as a kit when nothing is coupled to it.</li>
     <li><b>Tool keys.</b> Hold a tool (salvage bar, lantern, scrap-finder, binoculars, drone, points remote) and press <code>Ctrl</code>+a number to put it on that key. The number then takes it out, or puts it away if it is already in your hand; <code>Shift</code>+the number clears the key. Each tool's card in the satchel also has a key picker. <code>Q</code> stows whatever you hold, and pressed again takes it back out. (In a browser tab, Ctrl+number may switch tabs instead; in the installed app or fullscreen it reaches the game.)</li>
     <li><b>Points remote.</b> Fabricate one, hold it, and press <code>Y</code> or right-click: the next points ahead of the train you ride (or the nearest train within 40 m) are thrown — ahead the way it is going, or the way it last went if it stands. It will not throw points with a wheel on them.</li>
+    <li><b>Seeing yourself.</b> <code>V</code> on foot switches between your own eyes and a view over your shoulder, where you see the drifter — dusty jacket, rope, boots — and whatever tool is in their hand. In any vehicle's chase view you sit at its controls, hands on the wheel or stick; on a train bench you sit on the bench. Fly the drone and you can look back at yourself standing where you launched it. In your own eyes, look down: there is your body, and your boots. With nothing in your hand, your arm stays down by your side until you set it to work. Traders are the same people as you, dressed in their own colours.</li>
     <li><b>Fabricate.</b> <code>C</code> opens the bench. Everything you can make is assembled from parts you have pulled apart.</li>
     <li><b>Assemble.</b> <code>B</code> lists the works. Craft the kit, set it down in the world, and it starts doing its job.</li>
     <li><b>Dismantle.</b> <code>&#96;</code> (the key left of 1) takes an item back apart, one step up the fabricator's list: a batch goes in, and every part that made it comes out. Use it to undo a mistake or to free up a rare part.</li>
@@ -19155,7 +19924,7 @@ let touchSync=()=>{};
     const drv=!!G.drive,pl=isPlane();
     actB.textContent=drv?'exit':'act';
     jumpB.textContent=pl?'thr':'jump';
-    btn('view').classList.toggle('hid',!drv);
+    btn('view').classList.toggle('hid',false);                  /* first / third person: on foot too */
     const crw=crawlerOf();
     btn('halt').classList.toggle('hid',!(crw||trainOf()));btn('tauto').classList.toggle('hid',!trainOf());btn('tlamp').classList.toggle('hid',!trainOf());btn('thead').classList.toggle('hid',!trainOf());
     btn('ctr').classList.toggle('hid',!(crw&&crw.seated));
@@ -19615,7 +20384,7 @@ let keyPanelShortcut=false;
   if(tc)tc.addEventListener('click',keyboardClick);
   if(tc2)tc2.addEventListener('click',keyboardClick);
   // Label dynamically-created mobile actions once, retaining useful visible text.
-  const touchLabels={act:'Hold to interact or exit vehicle',jump:'Jump or toggle aircraft throttle',run:'Toggle run',view:'Change vehicle view',halt:'Stop crawler',ctr:'Centre crawler steering',rec:'Hold to recover an assembly',set:'Place selected assembly',turn:'Rotate selected assembly',scan:'Toggle scrap-finder',bino:'Toggle binoculars or optic',dup:'Raise drone',ddn:'Lower drone',kite:'Fly or reel in signal kite',eat:'Eat the best available food',crouch:'Toggle crouch',stow:'Stow the held tool'};
+  const touchLabels={act:'Hold to interact or exit vehicle',jump:'Jump or toggle aircraft throttle',run:'Toggle run',view:'Change view: first or third person',halt:'Stop crawler',ctr:'Centre crawler steering',rec:'Hold to recover an assembly',set:'Place selected assembly',turn:'Rotate selected assembly',scan:'Toggle scrap-finder',bino:'Toggle binoculars or optic',dup:'Raise drone',ddn:'Lower drone',kite:'Fly or reel in signal kite',eat:'Eat the best available food',crouch:'Toggle crouch',stow:'Stow the held tool'};
   $$('.tcb').forEach(b=>{b.type='button';b.setAttribute('aria-label',touchLabels[b.dataset.k]||b.textContent.trim());if(['run','dup','ddn'].includes(b.dataset.k))b.setAttribute('aria-pressed','false')});
   $('#joy')?.setAttribute('aria-hidden','true');$('#lookr')?.setAttribute('aria-hidden','true');
   if($('#thrl')){const t=$('#thrl');t.setAttribute('role','slider');t.setAttribute('aria-label','Aircraft throttle and brake');t.setAttribute('aria-valuemin','0');t.setAttribute('aria-valuemax','100');t.setAttribute('aria-valuenow','0');t.tabIndex=0;}
