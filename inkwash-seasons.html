@@ -1848,10 +1848,11 @@ const TERRAIN_VS = `
 varying vec2 vUv; varying vec3 vW; varying float vFog;
 void main(){ vUv = uv; vec4 w = modelMatrix * vec4(position,1.); vW = w.xyz; vec4 mv = viewMatrix * w; vFog = -mv.z; gl_Position = projectionMatrix * mv; }`;
 const TERRAIN_FS = `
-uniform sampler2D map; uniform float uTime, uMotion, uFogNear, uFogFar; uniform vec3 uFogColor;
+uniform sampler2D map; uniform float uTime, uMotion, uFogNear, uFogFar; uniform vec3 uFogColor; uniform vec4 uClip;
 ${GLSL_LIGHTS}
 varying vec2 vUv; varying vec3 vW; varying float vFog;
 void main(){
+  if (vW.x < uClip.x || vW.z < uClip.y || vW.x > uClip.z || vW.z > uClip.w) discard; // only the area you are in (rooms share terrain tiles)
   vec4 t = texture2D(map, vUv); vec3 col = t.rgb; float w = t.a;
   if (w > 0.01) {
     float r = sin(vW.x * 2.1 + uTime * 1.1 * uMotion + sin(vW.z * 1.6 + uTime * 0.6 * uMotion) * 1.6) * sin(vW.z * 2.7 - uTime * 0.85 * uMotion);
@@ -1864,7 +1865,7 @@ void main(){
 
 const R = {
   renderer: null, scene: null, camera: null, U: null, quad: null, chunkMeshes: new Map(), batches: [],
-  shadowMesh: null, shadowCount: 0, particles: null, target: new THREE.Vector3(32, 0, 6), camPos: new THREE.Vector3(), zoom: 17,
+  shadowMesh: null, shadowCount: 0, particles: null, target: new THREE.Vector3(32, 0, 6), camPos: new THREE.Vector3(), zoom: 17, zoomTarget: 17,
   init(container) {
     const r = this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     r.outputColorSpace = THREE.LinearSRGBColorSpace;
@@ -1876,7 +1877,7 @@ const R = {
     this.camera = new THREE.PerspectiveCamera(38, 1, 0.5, 200);
     const lights = [], cols = []; for (let i = 0; i < MAX_LIGHTS; i++) { lights.push(new THREE.Vector4(0, 0, 1, 0)); cols.push(new THREE.Vector3()); }
     this.U = {
-      uTime: { value: 0 }, uMotion: { value: 1 }, uLean: { value: 0.32 },
+      uTime: { value: 0 }, uMotion: { value: 1 }, uLean: { value: 0.32 }, uClip: { value: new THREE.Vector4(-1e4, -1e4, 1e4, 1e4) },
       uAmbient: { value: new THREE.Vector3(1, 1, 1) }, uLights: { value: lights }, uLightCol: { value: cols },
       uFogColor: { value: new THREE.Vector3(0.914, 0.875, 0.784) }, uFogNear: { value: 34 }, uFogFar: { value: 62 },
     };
@@ -1965,7 +1966,7 @@ const R = {
     g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
     g.setIndex([0, 2, 1, 0, 3, 2]); g.computeBoundingSphere();
     const U = this.U;
-    const mat = new THREE.ShaderMaterial({ uniforms: { map: { value: tex }, uTime: U.uTime, uMotion: U.uMotion, uAmbient: U.uAmbient, uLights: U.uLights, uLightCol: U.uLightCol, uFogColor: U.uFogColor, uFogNear: U.uFogNear, uFogFar: U.uFogFar },
+    const mat = new THREE.ShaderMaterial({ uniforms: { map: { value: tex }, uClip: U.uClip, uTime: U.uTime, uMotion: U.uMotion, uAmbient: U.uAmbient, uLights: U.uLights, uLightCol: U.uLightCol, uFogColor: U.uFogColor, uFogNear: U.uFogNear, uFogFar: U.uFogFar },
       vertexShader: TERRAIN_VS, fragmentShader: TERRAIN_FS, side: THREE.DoubleSide });
     const m = new THREE.Mesh(g, mat); m.renderOrder = -1; m.userData.box = [x0, z0, x1, z1]; this.scene.add(m); this.chunkMeshes.set(job.x + ',' + job.z, m);
   },
@@ -2043,6 +2044,8 @@ const R = {
   },
   // ---------- camera ----------
   updateCamera(dt, snap = false) {
+    // ease the zoom level itself, so where the camera looks and where it sits glide together (no lurch then snap)
+    if (snap) this.zoom = this.zoomTarget; else this.zoom += (this.zoomTarget - this.zoom) * (1 - Math.exp(-dt * 9));
     const d = this.zoom, back = d * 0.66, hgt = d * 0.78;
     const want = new THREE.Vector3(this.target.x, hgt, this.target.z - back);
     if (snap) this.camPos.copy(want); else this.camPos.lerp(want, 1 - Math.exp(-dt * 6));
@@ -3881,7 +3884,7 @@ const INPUT = {
     window.addEventListener('blur', () => { this.keys.clear(); this.clearMove(); });
     document.addEventListener('pointerdown', () => AUDIO.start(), { capture: true });
   },
-  zoom(f) { R.zoom = clamp(R.zoom * f, 9, 30); },
+  zoom(f) { R.zoomTarget = clamp(R.zoomTarget * f, 9, 30); },
   /** pointer position in canvas pixels, from the canvas rectangle (the event's own offset values are unreliable in some Safari versions) */
   xy(e) { const r = R.renderer.domElement.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; },
   clearMove() { this.keys.clear(); this.pointers.clear(); this.pinch = null; this.holdMove = null; this.keyCtx = {}; if (PLAYER) PLAYER.move = { x: 0, z: 0 }; },
@@ -3921,13 +3924,13 @@ const INPUT = {
     R.renderer.domElement.setPointerCapture(e.pointerId);
     const [x, y] = this.xy(e);
     this.pointers.set(e.pointerId, { x, y, sx: x, sy: y, t: performance.now(), hit: this.pick(x, y), moved: false });
-    if (this.pointers.size === 2) { const [a, b] = [...this.pointers.values()]; this.pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), z: R.zoom }; this.holdMove = null; }
+    if (this.pointers.size === 2) { const [a, b] = [...this.pointers.values()]; this.pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), z: R.zoomTarget }; this.holdMove = null; }
   },
   moveP(e) {
     const p = this.pointers.get(e.pointerId); if (!p) return;
     if (e.pointerType === 'mouse' && e.buttons === 0) { this.dropPointer(e.pointerId); return; } // release happened elsewhere
     [p.x, p.y] = this.xy(e); if (Math.hypot(p.x - p.sx, p.y - p.sy) > 14) p.moved = true;
-    if (this.pinch && this.pointers.size === 2) { const [a, b] = [...this.pointers.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y); R.zoom = clamp(this.pinch.z * this.pinch.d / Math.max(20, d), 9, 30); }
+    if (this.pinch && this.pointers.size === 2) { const [a, b] = [...this.pointers.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y); R.zoomTarget = clamp(this.pinch.z * this.pinch.d / Math.max(20, d), 9, 30); }
   },
   up(e) {
     const p = this.pointers.get(e.pointerId); this.pointers.delete(e.pointerId);
@@ -4117,7 +4120,13 @@ const GAME = {
     const S = SAVE.S;
     FOES.clear(); HUD.bossBar(false); R.clearWorld(); this.ents.clear(); this.markerMesh = null;
     this.steps = gen.steps;
-    for (const spec of gen.specs) this.spawn(clone(spec), false, S.ents[spec.id]);
+    for (const spec of gen.specs) {
+      if (spec.kind === 'shelf' && spec.z < CFG.L) { // outdoor shelves retired: the generator still drafts them so worlds (and saves) stay identical
+        const sv = S.ents[spec.id], items = (sv && sv.d.items) || [];
+        if (!items.some(i => i.t === 'book' && S.books[i.uid] && S.books[i.uid].text.trim())) continue;
+      }
+      this.spawn(clone(spec), false, S.ents[spec.id]);
+    }
     for (const rec of S.dyn.slice()) this.spawn(clone(rec), true, rec);
     this.campfires = [...this.ents.values()].filter(e => e.kind === 'campfire' || (e.kind === 'hearth' && e.fsm.is('lit')));
     this.torches = [...this.ents.values()].filter(e => e.kind === 'torch');
@@ -4422,6 +4431,7 @@ const GAME = {
   refreshNearby() {
     const px = PLAYER.x, pz = PLAYER.z, list = [], zone = this.zone = WORLD.zoneAt(px, pz);
     for (const b of R.batches) b.visible = !zone;
+    if (zone) R.U.uClip.value.set(zone.x0 - 1, zone.z0 - 1, zone.x1 + 1, zone.z1 + 1); else R.U.uClip.value.set(-1e4, -1e4, 1e4, CFG.L + 20);
     for (const [, m] of R.chunkMeshes) { const [x0, z0, x1, z1] = m.userData.box; m.visible = zone ? (x1 > zone.x0 - 2 && x0 < zone.x1 + 2 && z1 > zone.z0 - 2 && z0 < zone.z1 + 2) : z0 < CFG.L + 16; }
     for (const e of this.ents.values()) {
       const dz = e.z - pz, dx = e.x - px;
