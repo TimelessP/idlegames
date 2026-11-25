@@ -1782,7 +1782,7 @@ const PROVER = {
 const MAX_LIGHTS = 8;
 const GLSL_LIGHTS = `
 uniform vec4 uLights[${MAX_LIGHTS}]; uniform vec3 uLightCol[${MAX_LIGHTS}]; uniform vec3 uAmbient;
-vec3 lightAt(vec2 p){ vec3 l = uAmbient; for(int i=0;i<${MAX_LIGHTS};i++){ vec4 L=uLights[i]; float d=distance(p,L.xy); l += uLightCol[i]*L.w*(1.0-smoothstep(L.z*0.15,L.z,d)); } return l; }`;
+vec3 lightAt(vec2 p){ vec3 l = uAmbient; for(int i=0;i<${MAX_LIGHTS};i++){ vec4 L=uLights[i]; float d=distance(p,L.xy); l += uLightCol[i]*L.w*(1.0-smoothstep(L.z*0.15,L.z,d)); } return min(l, max(uAmbient * 1.12, vec3(0.95, 0.85, 0.72))); }`;
 const PAPER_VS = `
 uniform vec4 uRect; uniform float uFlip; uniform float uBill; uniform float uLean;
 ${GLSL_LIGHTS}
@@ -2231,13 +2231,13 @@ KINDS.npc = {
 KINDS.forge = {
   visual(e) { e.setSprite(`forge_${e.snow ? 1 : 0}`); },
   actions: e => [act('forge', 'Use forge', ['hammer'], () => UI.forge(e), { prio: 4 })],
-  light: e => ({ x: e.x, z: e.z, r: 5, i: 0.9, c: [1, 0.55, 0.2] }), shadow: () => 3.2, pick: 0.7,
+  light: e => ({ x: e.x, z: e.z, r: 5, i: 0.6, c: [1, 0.55, 0.2] }), shadow: () => 3.2, pick: 0.7,
 };
 KINDS.arcane = {
   fsm: { initial: 'idle', states: { idle: { update(e, f) { const fi = Math.floor(f.t * 3) % 4; if (fi !== e.anim && e.mesh) { e.anim = fi; R.setFrame(e.mesh, e.spr, fi); } } } } },
   visual(e) { e.setSprite(`arcane_${e.snow ? 1 : 0}`); },
   actions: e => [act('enchant', 'Arcane forge', ['sparkle'], () => UI.arcane(e), { prio: 4 })],
-  light: e => ({ x: e.x, z: e.z, r: 6, i: 0.9, c: [0.65, 0.4, 1] }), shadow: () => 3.2, pick: 0.7,
+  light: e => ({ x: e.x, z: e.z, r: 6, i: 0.6, c: [0.65, 0.4, 1] }), shadow: () => 3.2, pick: 0.7,
 };
 KINDS.workshop = {
   initial: e => e.d.built ? 'built' : 'idle',
@@ -2315,7 +2315,7 @@ KINDS.campfire = {
     if (has('wheat', 2)) a.push(act('bake', 'Bake bread (2 wheat)', ['bread'], () => { INV.remove('wheat', 2); INV.add('bread', 1); AUDIO.sfx('fire'); }));
     return a;
   },
-  light: e => ({ x: e.x, z: e.z, r: 8, i: 1.25, c: [1, 0.6, 0.25] }), shadow: () => 1.2,
+  light: e => ({ x: e.x, z: e.z, r: 8, i: 0.75, c: [1, 0.6, 0.28] }), shadow: () => 1.2,
 };
 KINDS.crate = {
   fsm: { initial: 'closed', states: { closed: { on: { OPEN: 'open', TAKE: 'gone' } }, open: { on: { CLOSE: 'closed', TAKE: 'gone' } }, gone: {} } },
@@ -2505,8 +2505,14 @@ const PLAYER = {
   },
   walkTo(x, z, then = null) {
     if (this.fsm.is('dead')) return;
-    const path = PATH.toPoint(this.x, this.z, x, z, this.boat ? this.boat.d.body : 0);
-    if (!path) { HUD.toast(this.boat ? 'The boat cannot go there.' : 'You cannot get there from here.', 1800); return false; }
+    let path = PATH.toPoint(this.x, this.z, x, z, this.boat ? this.boat.d.body : 0);
+    if (path && path.partial) { // unreachable: go as close as possible, but only if that actually gets nearer without a long detour
+      const end = path[path.length - 1], now = dist2(this.x, this.z, x, z), after = end ? dist2(end[0], end[1], x, z) : now;
+      if (!end || after > now - 1 || PATH.length(this.x, this.z, path) > now * 1.6 + 4) path = null;
+      else HUD.toast(this.boat ? 'The boat can only get this close.' : 'You cannot get across there - going as close as you can.', 2200);
+    }
+    if (!path) { this.path = []; this.pending = null; this.target = null; HUD.toast(this.boat ? 'The boat cannot go there.' : 'You cannot get there from here.', 1800); return false; }
+    if (!path.partial && PATH.length(this.x, this.z, path) > dist2(this.x, this.z, x, z) * 2 + 8) HUD.toast('Taking the long way round.', 1800);
     if (this.boat && !then && !WORLD.isWaterAt(x, z) && WORLD.walkableAt(x, z)) then = () => { if (GAME.landNear()) { this.leaveBoat(); this.walkTo(x, z); } }; // tap land from a boat: row there and step out
     this.path = path; this.pending = then; this.target = null; if (this.fsm.is('fish', 'rest')) this.fsm.go('idle'); return true;
   },
@@ -2516,7 +2522,8 @@ const PLAYER = {
     const run = () => { const a = GAME.actionsFor(ent).find(a => !a.note); if (a) { AUDIO.sfx('ui'); a.run(); } else { const n = GAME.actionsFor(ent)[0]; if (n) n.run(); } };
     if (dist2(this.x, this.z, ent.x, ent.z) <= reach) { this.path = []; run(); return; }
     const path = PATH.toEntity(this.x, this.z, ent, this.boat ? this.boat.d.body : 0);
-    if (!path) { HUD.toast('You cannot reach that from here.', 1800); return; }
+    if (!path) { this.path = []; this.pending = null; HUD.toast('You cannot reach that from here.', 1800); return; }
+    if (PATH.length(this.x, this.z, path) > dist2(this.x, this.z, ent.x, ent.z) * 2 + 8) HUD.toast('Taking the long way round.', 1800);
     this.path = path; this.pending = () => { if (dist2(this.x, this.z, ent.x, ent.z) <= reach + 0.4) run(); };
   },
   update(dt) {
@@ -2687,7 +2694,7 @@ const FOES = {
 // =============================================================================
 const PATH = {
   passFn(body) { return body ? (i => WORLD.body[i] === body && !(WORLD.flags[i] & F_EDGE)) : (i => WORLD.walkable(i)); },
-  astar(sx, sz, isGoal, hx, hz, body) {
+  astar(sx, sz, isGoal, hx, hz, body, closest = false) {
     const W = CFG.W, L = CFG.L, n = W * L, pass = this.passFn(body);
     const start = WORLD.idx(sx, sz); if (!WORLD.inBounds(sx, sz)) return null;
     if (!this.g || this.g.length !== n) { this.g = new Float32Array(n); this.came = new Int32Array(n); this.closed = new Uint8Array(n); this.stamp = new Uint32Array(n); this.ver = 0; }
@@ -2696,11 +2703,13 @@ const PATH = {
     const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let k = 0; for (;;) { const l = k * 2 + 1, r = l + 1; let m = k; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === k) break; [heap[m], heap[k]] = [heap[k], heap[m]]; k = m; } } return top; };
     const H = i => { const x = i % W + 0.5, z = (i / W | 0) + 0.5; return Math.hypot(x - hx, z - hz); };
     stamp[start] = ver; g[start] = 0; closed[start] = 0; came[start] = -1; push(H(start), start);
-    let nodes = 0;
+    let nodes = 0, best = start, bestH = H(start);
+    const trace = i => { const out = []; let k = i; while (k !== -1) { out.push(k); k = came[k]; } return out.reverse(); };
     while (heap.length && nodes++ < 40000) {
       const [, i] = pop(); if (stamp[i] === ver && closed[i] === 1) continue;
       closed[i] = 1;
-      if (isGoal(i)) { const out = []; let k = i; while (k !== -1) { out.push(k); k = came[k]; } return out.reverse(); }
+      if (isGoal(i)) return trace(i);
+      const hi = H(i); if (hi < bestH - 1e-6 || (Math.abs(hi - bestH) < 1e-6 && g[i] < g[best])) { bestH = hi; best = i; }
       const x = i % W, z = i / W | 0;
       for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
         if (!dx && !dz) continue; const nx = x + dx, nz = z + dz; if (nx < 0 || nz < 0 || nx >= W || nz >= L) continue;
@@ -2712,6 +2721,7 @@ const PATH = {
         g[j] = ng; came[j] = i; push(ng + H(j), j);
       }
     }
+    if (closest && best !== start) { const p = trace(best); p.partial = true; return p; }
     return null;
   },
   smooth(cells, sx, sz, ex, ez, body) {
@@ -2723,6 +2733,7 @@ const PATH = {
     while (k < pts.length) { let far = k; for (let j = pts.length - 1; j > k; j--) if (clear(cx, cz, pts[j][0], pts[j][1])) { far = j; break; } out.push(pts[far]); cx = pts[far][0]; cz = pts[far][1]; k = far + 1; }
     return out;
   },
+  length(sx, sz, pts) { let L = 0, px = sx, pz = sz; for (const [x, z] of pts) { L += dist2(px, pz, x, z); px = x; pz = z; } return L; },
   nearestPassable(x, z, body, r = 3) {
     const pass = this.passFn(body); let best = null, bd = 1e9;
     for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) { const cx = Math.floor(x) + dx, cz = Math.floor(z) + dz; if (!WORLD.inBounds(cx, cz) || !pass(WORLD.idx(cx, cz))) continue; const d = dist2(x, z, cx + 0.5, cz + 0.5); if (d < bd) { bd = d; best = WORLD.idx(cx, cz); } }
@@ -2732,8 +2743,9 @@ const PATH = {
     let goal = WORLD.inBounds(x, z) ? WORLD.idx(x, z) : -1; const pass = this.passFn(body);
     let exact = true;
     if (goal < 0 || !pass(goal)) { goal = this.nearestPassable(x, z, body); exact = false; if (goal == null) return null; }
-    const cells = this.astar(sx, sz, i => i === goal, x, z, body); if (!cells) return null;
-    return this.smooth(cells, sx, sz, exact ? x : undefined, exact ? z : undefined, body);
+    const cells = this.astar(sx, sz, i => i === goal, x, z, body, true); if (!cells) return null;
+    const out = cells.partial ? this.smooth(cells, sx, sz, undefined, undefined, body) : this.smooth(cells, sx, sz, exact ? x : undefined, exact ? z : undefined, body);
+    out.partial = !!cells.partial; return out;
   },
   toEntity(sx, sz, e, body) {
     const W = CFG.W, reach = CFG.REACH + e.r - 0.45, pass = this.passFn(body);
@@ -2755,7 +2767,7 @@ const AUDIO = {
     this.fx = c.createGain(); this.fx.connect(this.master); this.amb = c.createGain(); this.amb.connect(this.master);
     const len = c.sampleRate * 2, buf = c.createBuffer(1, len, c.sampleRate), d = buf.getChannelData(0); for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1; this.noise = buf;
     const loop = (freq, q, type = 'bandpass') => { const s = c.createBufferSource(); s.buffer = buf; s.loop = true; const f = c.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q; const g = c.createGain(); g.gain.value = 0; s.connect(f); f.connect(g); g.connect(this.amb); s.start(); return { s, f, g }; };
-    this.nodes.wind = loop(380, 0.6); this.nodes.water = loop(620, 0.5, 'lowpass'); this.nodes.fire = loop(2600, 0.8);
+    this.nodes.wind = loop(380, 0.6); this.nodes.water = loop(620, 0.5, 'lowpass'); this.nodes.fire = loop(320, 0.7, 'lowpass');
     this.apply();
   },
   apply() { if (!this.ctx) return; const a = SETTINGS.v.audio; this.master.gain.value = a.master; this.fx.gain.value = a.effects; this.amb.gain.value = a.ambient; },
@@ -2814,7 +2826,17 @@ const AUDIO = {
     if (w && w.kind === 'lake' && !frozen && near > 0.1 && (this.lapT = (this.lapT || 0) - dt) <= 0) {
       this.lapT = 1.8 + Math.random() * 2.6; this.burst(520, 0.6, 0.9, 0.05 * near, 0, 'lowpass', 180, this.amb);
     }
-    n.fire.g.gain.setTargetAtTime(o.fire * 0.06 * (0.6 + 0.4 * Math.random()), t, 0.05);
+    const fire = clamp(o.fire, 0, 1);
+    n.fire.g.gain.setTargetAtTime(fire * 0.07 * (0.75 + 0.25 * Math.sin(t * 2.3) * Math.sin(t * 0.9)), t, 0.15); // soft roar of the flames
+    if (fire > 0.02 && (this.crackT = (this.crackT || 0) - dt) <= 0) {
+      this.crackT = (0.03 + Math.random() * 0.16) / (0.5 + fire);
+      const snap = Math.random() < 0.08, n2 = snap ? 1 : 1 + (Math.random() * 3 | 0);
+      for (let k = 0; k < n2; k++) { // little clusters of crackles, now and then a louder snap
+        const f = snap ? 900 + Math.random() * 700 : 1800 + Math.random() * 3800;
+        this.burst(f, snap ? 0.9 : 1.6, snap ? 0.035 : 0.006 + Math.random() * 0.012, fire * (snap ? 0.22 : 0.05 + Math.random() * 0.1), k * (0.012 + Math.random() * 0.03), 'bandpass', f, this.amb);
+      }
+      if (snap) this.tone('sine', 140, 70, 0.06, fire * 0.05, 0, this.amb);
+    }
     if (!o.night && o.season < 3 && (this.birdT -= dt) <= 0) { this.birdT = 1.5 + Math.random() * 5; const f = 2200 + Math.random() * 1800; for (let k = 0; k < 2 + (Math.random() * 3 | 0); k++) this.tone('sine', f, f * (1.2 + Math.random() * 0.4), 0.08, 0.035, k * 0.11, this.amb); }
     if (o.night && (o.season === 1 || o.season === 2) && (this.crickT -= dt) <= 0) { this.crickT = 0.6 + Math.random() * 1.2; for (let k = 0; k < 3; k++) this.tone('sine', 4400, 4400, 0.03, 0.02, k * 0.06, this.amb); }
   },
@@ -3238,9 +3260,9 @@ const UI = {
         h('p', {}, h('strong', { text: 'Now: ' }), o ? o.text : 'The valley is free of winter. Wander as you please.'),
         h('p', { class: 'ui-muted', text: `${season}, ${GAME.isNight() ? 'night' : 'day'}. Seed "${S.seed}". Follow the painted dot at the edge of your view - but you may roam freely.` }),
         h('h3', { class: 'ui-h3', text: 'Quests' }),
-        ...[...GAME.ents.values()].filter(e => e.kind === 'npc' && e.d.quest && e.d.qs).map(e => h('p', { text: `${NPC_LOOKS[e.d.role].name}: ${e.d.qs === 'done' ? 'done' : `bring ${e.d.quest.n} ${ITEMS[e.d.quest.t].name} (have ${INV.count(e.d.quest.t)})`}` })),
-        h('h3', { class: 'ui-h3', text: 'The path so far' }),
-        h('ol', {}, ...GAME.steps.filter(s => GAME.stepDone(s)).map(s => h('li', { text: s.text })))));
+        ...(() => { const qs = [...GAME.ents.values()].filter(e => e.kind === 'npc' && e.d.quest && e.d.qs);
+          return qs.length ? qs.map(e => h('p', { text: `${NPC_LOOKS[e.d.role].name}: ${e.d.qs === 'done' ? 'done' : `bring ${e.d.quest.n} ${ITEMS[e.d.quest.t].name} (have ${INV.count(e.d.quest.t)})`}` }))
+            : [h('p', { class: 'ui-muted', text: 'No quests yet. Folk along the path may ask for your help.' })]; })()));
     });
   },
   dead() {
@@ -3386,6 +3408,8 @@ const INPUT = {
     document.addEventListener('pointerdown', () => AUDIO.start(), { capture: true });
   },
   zoom(f) { R.zoom = clamp(R.zoom * f, 9, 30); },
+  /** pointer position in canvas pixels, from the canvas rectangle (the event's own offset values are unreliable in some Safari versions) */
+  xy(e) { const r = R.renderer.domElement.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; },
   clearMove() { this.keys.clear(); this.pointers.clear(); this.pinch = null; this.holdMove = null; this.keyCtx = {}; if (PLAYER) PLAYER.move = { x: 0, z: 0 }; },
   dropPointer(id) { this.pointers.delete(id); if (!this.pointers.size) this.pinch = null; if (this.holdMove) { this.holdMove = null; PLAYER.move = { x: 0, z: 0 }; } },
   blocked() { return MODAL.isOpen() || GAME.loading || !GAME.ready; },
@@ -3413,13 +3437,14 @@ const INPUT = {
   down(e) {
     if (this.blocked()) return;
     R.renderer.domElement.setPointerCapture(e.pointerId);
-    this.pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY, sx: e.offsetX, sy: e.offsetY, t: performance.now(), hit: this.pick(e.offsetX, e.offsetY), moved: false });
+    const [x, y] = this.xy(e);
+    this.pointers.set(e.pointerId, { x, y, sx: x, sy: y, t: performance.now(), hit: this.pick(x, y), moved: false });
     if (this.pointers.size === 2) { const [a, b] = [...this.pointers.values()]; this.pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), z: R.zoom }; this.holdMove = null; }
   },
   moveP(e) {
     const p = this.pointers.get(e.pointerId); if (!p) return;
     if (e.pointerType === 'mouse' && e.buttons === 0) { this.dropPointer(e.pointerId); return; } // release happened elsewhere
-    p.x = e.offsetX; p.y = e.offsetY; if (Math.hypot(p.x - p.sx, p.y - p.sy) > 14) p.moved = true;
+    [p.x, p.y] = this.xy(e); if (Math.hypot(p.x - p.sx, p.y - p.sy) > 14) p.moved = true;
     if (this.pinch && this.pointers.size === 2) { const [a, b] = [...this.pointers.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y); R.zoom = clamp(this.pinch.z * this.pinch.d / Math.max(20, d), 9, 30); }
   },
   up(e) {
@@ -3428,7 +3453,7 @@ const INPUT = {
     if (this.pinch) { if (this.pointers.size === 0) this.pinch = null; return; }
     if (this.holdMove) { this.holdMove = null; PLAYER.move = { x: 0, z: 0 }; return; }
     if (this.blocked() || p.moved || performance.now() - p.t > 900) return;
-    const hit = this.pick(e.offsetX, e.offsetY);
+    const hit = this.pick(...this.xy(e));
     if (!this.same(p.hit, hit)) return; // press must start and end on the same object
     if (hit.foe) { PLAYER.target = hit.foe; if (dist2(hit.foe.x, hit.foe.z, PLAYER.x, PLAYER.z) < 2) COMBAT.playerAttack(hit.foe); else PLAYER.walkTo(hit.foe.x, hit.foe.z); PLAYER.target = hit.foe; }
     else if (hit.ent) PLAYER.interact(hit.ent);
@@ -3922,7 +3947,8 @@ const GAME = {
     // camera, lights, shadows
     R.target.set(PLAYER.x, 0, PLAYER.z + 2); R.updateCamera(dt);
     const lights = [];
-    for (const e of this.nearbyCache) if (e.K.light) { const l = e.K.light(e); if (l) lights.push(l); }
+    const glowK = 0.2 + 0.8 * this.night; // fire light barely tints the ground by day, glows at night
+    for (const e of this.nearbyCache) if (e.K.light) { const l = e.K.light(e); if (l) { l.i *= glowK; lights.push(l); } }
     if (this.night > 0.05) lights.push({ x: PLAYER.x, z: PLAYER.z, r: 5.5, i: 0.55 * this.night, c: [1, 0.85, 0.6] });
     R.setLights(lights);
     R.shadowsBegin();
@@ -3936,7 +3962,8 @@ const GAME = {
     HUD.dot(this.obj && this.obj.target);
     // ambience
     if (!paused) {
-      let fire = 0; for (const e of this.campfires) fire = Math.max(fire, 1 - dist2(e.x, e.z, PLAYER.x, PLAYER.z) / 8);
+      let fire = 0; for (const e of this.campfires) fire = Math.max(fire, 1 - dist2(e.x, e.z, PLAYER.x, PLAYER.z) / 9);
+      for (const e of this.torches || []) if (e.fsm.is('lit')) fire = Math.max(fire, 0.5 * (1 - dist2(e.x, e.z, PLAYER.x, PLAYER.z) / 6));
       AUDIO.ambient(dt, { season: seasonAt(PLAYER.z), night: this.isNight(), water: WORLD.waterKind(PLAYER.x, PLAYER.z, 5), fire: Math.max(0, fire) });
     }
     R.pumpTerrain(3, 0, 14);
