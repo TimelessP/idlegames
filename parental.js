@@ -215,6 +215,15 @@ window.parental = {
     const s = readState();
     return s.allowed || {};
   },
+  /** drop allow/disallow entries for apps that no longer exist; returns the hrefs removed */
+  pruneAllowed(validHrefs) {
+    const keep = new Set(validHrefs || []);
+    if (!keep.size) return [];   // never wipe everything on an empty or broken catalogue
+    const s = readState();
+    const gone = Object.keys(s.allowed || {}).filter(href => !keep.has(href));
+    if (gone.length) { gone.forEach(href => delete s.allowed[href]); writeState(s); }
+    return gone;
+  },
   setAllowedFor(href, allowed) {
     const s = readState();
     s.allowed = s.allowed || {};
