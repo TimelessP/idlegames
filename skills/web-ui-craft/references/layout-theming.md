@@ -60,17 +60,71 @@ Reuse the same icons as the inline action buttons (tick and cross stamps), so th
 
 ## Toolbars that fit: measure, don't guess
 
-```js
-fitDock() { const d = $('#dock'); d.classList.remove('compact'); if (d.scrollWidth > d.clientWidth + 1) d.classList.add('compact'); },
-// .compact hides labels and makes buttons icon-only (with aria-label kept)
-new ResizeObserver(() => HUD.fitDock()).observe($('#stage'));   // rotation, panels opening, font scaling
+```css
+#top > * { flex-shrink: 0; }                                   /* items keep their natural width ... */
+#top .spacer { flex: 1 1 0; min-width: 0; flex-shrink: 1; }    /* ... only the gap gives way */
+#top.compact .lbl { display: none; } #top.compact .btn.lab { width: var(--tap); padding: 0; }
+#top.tiny h1 { display: none; }
 ```
+
+```js
+function fitTop() {   // compact in stages, re-measuring after each
+  const t = $('#top'), sp = t.querySelector('.spacer');
+  const over = () => t.scrollWidth > t.clientWidth || sp.getBoundingClientRect().width < 8;   // the spacer's width is the room left
+  t.classList.remove('compact', 'tiny'); if (over()) t.classList.add('compact'); if (over()) t.classList.add('tiny');
+}
+new ResizeObserver(fitTop).observe($('#top'));   // rotation, panels opening, font scaling
+```
+
+- **The flex-shrink trap.** Flex items shrink by default. Buttons squeeze until their labels overlap, while `scrollWidth` never exceeds `clientWidth`, so the measurement says "fits" and nothing compacts. This shipped in QR Studio and only showed on a narrow portrait phone. `flex-shrink: 0` on the items fixes it.
+- **Slack goes on the spacer, not on scrollWidth.** `scrollWidth` is never less than `clientWidth`, so a test like `scrollWidth > clientWidth - 4` is always true and the bar compacts even on a wide desktop. This shipped too, and only a desktop screenshot caught it. Measure the spacer instead: it is the room left over.
+- **Stages:** drop button labels first (keep `aria-label`), then the title. Never hide an action.
+
+## Card grids and phone rows
+
+- **Phones:** below about 600px, turn grid cards into compact rows (thumbnail about 124px wide on the left, title and two lines of text beside it). This roughly doubled the number of games visible on the launcher, compared with full-width cards.
+- **The whole card is one link** (picture, title, description); secondary actions (favourite, watch) sit in a footer outside the link, because a link can't contain buttons. No separate "Open" button.
+- **One-line tag rows:** `display: flex; flex-wrap: wrap; height: 1.75em; overflow: hidden;`. Tags that don't fit drop out whole instead of being cut mid-word.
+- **Descriptions:** clamp to two lines (`-webkit-line-clamp: 2`). Keep catalogue descriptions short (about 60 to 110 characters) so they aren't cut off with an ellipsis.
+- **Badges** ("New", "Beta") are text pills over the picture, not colour alone.
 
 ## Galleries
 
 `grid-template-columns: repeat(auto-fill, minmax(168px, 1fr))` gives two columns on a 390px phone and in a 480px side column. 230px gave one huge card per row. Keep overlay buttons (such as a favourite star) out of the photo area if the photo has carousel arrows: put them in the text row.
 
 ## Theming
+
+Let CSS follow the system, so Automatic needs no JavaScript at all. The `<html>` element carries `data-theme="system" | "light" | "dark"`:
+
+```html
+<html lang="en" data-theme="system">
+<head><script>   /* before any CSS paints: no white flash in dark mode */
+  try { const t = localStorage.getItem('app-theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+```
+
+```css
+:root { /* light tokens */ color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { /* dark tokens */ color-scheme: dark; } }
+:root[data-theme="dark"] { /* dark tokens again */ color-scheme: dark; }
+body { background: var(--bg); }   /* always set explicitly */
+```
+
+After a theme change, set `meta[name=theme-color]` to `css('--surface')` so the phone's status bar matches.
+
+### Text selection is part of the theme
+
+The browser's default blue highlight clashes with both themes. Theme it with tokens:
+
+```css
+:root { --sel-bg: #c9cbf6; --sel-fg: #14171c; }                 /* light: soft accent, dark text */
+/* dark: --sel-bg: #454a9c; --sel-fg: #ffffff; */
+::selection { background: var(--sel-bg); color: var(--sel-fg); }
+/* inverted surfaces (a toast is var(--text) on var(--bg)) need their own, or the highlight vanishes */
+.toast::selection, .toast *::selection { background: var(--accent); color: var(--on-accent); }
+```
+
+Example token sets:
 
 ```css
 :root { --bg:#f4f5f7; --surface:#fff; --surface-2:#eef0f3; --line:#d9dde3; --text:#15181d; --text-2:#4b5260; --text-3:#6e7684;
@@ -112,6 +166,17 @@ const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).
 ## Toasts and announcements
 
 - **Behaviour:** an `aria-live="polite"` container with `pointer-events: none`, at most 3 toasts (drop the oldest), and an SVG icon before the text.
+- **Undo toasts:** a toast may carry one action button, which re-enables `pointer-events: auto` on itself only. Keep it up for at least 8 seconds. Snapshot the state before the change (`structuredClone` or JSON) and restore it in the action:
+
+```js
+function toast(msg, type = 'info', ms = 3200, action = null) {
+  const t = h('div', { class: 'toast' }, h('span', { text: msg }));
+  if (action) t.append(h('button', { class: 'act', type: 'button', text: action.label, onclick: () => { t.remove(); action.fn(); } }));
+  $('#toasts').append(t); setTimeout(() => t.remove(), action ? Math.max(ms, 8000) : ms);
+}
+const before = clone(STATE.design); STATE.design = clone(DEFAULTS.design); redraw();
+toast('Design reset.', 'info', 8000, { label: 'Undo', fn: () => { STATE.design = before; redraw(); } });
+```
 - **Position per layout:** above the bottom nav on phones; top of the map column on wide screens, clear of legends and controls.
 - **Use:** confirmations and events ("Favourite G-ABCD is nearby (2.1 nm)"), never for errors the user must act on. Those go in place, e.g. a banner with a button: "No airfield area is set. [Draw the area]".
 

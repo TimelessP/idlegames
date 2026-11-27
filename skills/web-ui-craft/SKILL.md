@@ -29,22 +29,22 @@ Apply all of these by default. They are cheap when designed in and expensive to 
 
 1. **Screen real estate first.** Decoration that costs space is the most common complaint about a UI that looks nice in a screenshot. Prefer flat surfaces, thin borders, one accent colour. Put filters and summaries *inside* the scrolling list so they scroll away. Collapse duplicates into one item: an arrival and its departure become one card, "In 11:57 → Out 12:22 · 25 min", not two rows. On wide screens, show the list and the detail or map side by side permanently. On phones, show one view at a time with a bottom nav. On short landscape phones, use a side rail so the list keeps its height.
 
-2. **Nothing resizes the main view unexpectedly.** Give scrollbars their own lane (`scrollbar-gutter: stable` or an overlay-free layout). Toasts float and never push content. Measure the viewport with `visualViewport` into a CSS variable instead of trusting `100vh` on mobile. If a toolbar might not fit, measure it (`scrollWidth > clientWidth`) and switch it to icon-only. Never guess from breakpoints: a guess clipped the Settings button on a landscape phone.
+2. **Nothing resizes the main view unexpectedly.** Give scrollbars their own lane (`scrollbar-gutter: stable` or an overlay-free layout). Toasts float and never push content. Measure the viewport with `visualViewport` into a CSS variable instead of trusting `100vh` on mobile. If a toolbar might not fit, measure it (`scrollWidth > clientWidth`) and switch it to icon-only. Never guess from breakpoints: a guess clipped the Settings button on a landscape phone. Measuring only works if the bar's items can't shrink: give them `flex-shrink: 0` and let only the spacer shrink, or buttons squeeze until their labels overlap while the bar never "overflows".
 
 3. **Act on release, and only where the press began.** Mouse and touch: use `click`, never `pointerdown`, for actions. Keys: Enter on a button acts on keyup, like Space. Gamepad: act on button release. In every case, ignore a release whose press started in another layer or on another object. This kills a whole family of bugs: a tap that opens a sheet and also activates the button underneath, held keys leaking into a new dialog, and "ghost walks" in games.
 
 4. **Modals are layers backed by browser history.** Each sheet calls `history.pushState`. Back (browser, Android, mouse button, Escape, gamepad B) closes only the top layer. With no layer open, Back leaves the page normally. Every sheet has a visible `<` back button at top left. While a layer is open, the app underneath is `inert`. Presses that began before the layer opened are quarantined. Restore focus to the opener when the layer closes.
 
 5. **Readable for older eyes, fat-finger friendly, every input device.**
-   - Size: base font about 17px, targets at least 48px, generous line height, tabular numbers for times and counts.
+   - Size: base font about 17px, targets at least 48px, generous line height, tabular numbers for times and counts. Never set `user-scalable=no` or `maximum-scale`: pinch-zoom is how many people read small things.
    - Feedback: focus rings visible with `:focus-visible`, WCAG AA contrast in both themes, `prefers-reduced-motion` respected.
    - Input: everything reachable by mouse, touch, keyboard and gamepad. Colour is never the only signal: pair it with a label, an icon, a size or a ring.
 
-6. **No emoji in the UI.** Use inline SVG icons from one `ICON` map, using `currentColor` so they theme. Emoji render differently per platform, can't be themed, and look like clip art next to real UI.
+6. **No emoji in the UI.** Use inline SVG icons from one `ICON` map, using `currentColor` so they theme. Emoji render differently per platform, can't be themed, and look like clip art next to real UI. Data may keep its old `emoji` fields for compatibility; just don't render them. Where an item has no picture, draw a monogram tile (initials on a hue hashed from its id).
 
 7. **Ease camera properties; let direct manipulation be direct.** When the program moves a view (zoom buttons, fit, focusing a target, a 3D camera's position, look-at point, angle or zoom), ease the change with frame-rate-independent damping. Never snap, and never start a new tween from the target (that caused "inverse easing then a snap"). When a finger or mouse is dragging or pinching, follow it exactly with no easing, or it feels laggy.
 
-8. **Theme with tokens.** All colours are CSS custom properties on `:root`, redefined under `[data-theme="dark"]`. Offer Automatic, Light and Dark, and follow the system when set to Automatic. Re-theme third-party widgets (map zoom buttons, attribution) instead of leaving them white in dark mode. Canvas and SVG drawing read colours from the tokens at draw time and redraw when the theme changes.
+8. **Theme with tokens.** All colours are CSS custom properties on `:root`, redefined under `[data-theme="dark"]`. Offer Automatic, Light and Dark, and follow the system when set to Automatic. Re-theme third-party widgets (map zoom buttons, attribution) instead of leaving them white in dark mode. Canvas and SVG drawing read colours from the tokens at draw time and redraw when the theme changes. Theme the details too: text selection (`::selection`), `color-scheme`, `meta[name=theme-color]`, scrollbars and form accents. Apply the saved theme in a tiny inline script in `<head>` so dark mode never flashes white. See `references/layout-theming.md`.
 
 9. **Status colours must stay distinguishable.** When adding a category colour, check it against the existing ones. Gold next to amber is unreadable at a glance, so make "to review" orange. If one category (such as favourites) must not hide another that matters more (such as a security status), encode it in a second channel, e.g. gold fill with a ring in the status colour. Add a small legend.
 
@@ -54,8 +54,13 @@ Apply all of these by default. They are cheap when designed in and expensive to 
     - Keep: the backend API, storage keys and record shape. Add fields only as optional, and keep writing legacy fields that older clients read.
     - If old data is ambiguous: migrate it explicitly, e.g. file the old "This month" note under the current month.
     - Tell the user: which old copies still open in browsers will misbehave, and that everyone should reload after deploy.
+    - When an item is removed (a page, a game, a record type), prune stored data that points at it, generically: "drop entries whose key is not in the current catalogue, keep the rest". Never delete by hard-coded name, and refuse to prune against an empty or failed catalogue.
 
-12. **Report honestly.** Say what was tested, how, and what wasn't: real server, real device, real gamepad, audio, notifications. Tests against mocks prove less than they look. A mock that always answers instantly hid a boot-order bug that broke live sync on real devices.
+12. **Work survives a reload.** Anything the user has typed, chosen or designed autosaves (debounced, about 250 ms) and is flushed on `pagehide` and `visibilitychange`. On load, merge saved data over the defaults key by key, accepting a value only if its type matches the default, and clamp numbers, so old or corrupt saves never break the app. Reversible destructive actions (clear, reset, replace with an import) happen at once with an **Undo** toast instead of a confirm dialog; irreversible ones get a confirm sheet. Validation errors appear in place, next to the field (`role="alert"`), never in `alert()`.
+
+13. **Make the app check its own output** when it produces something another device must read: a QR code, a file, an export. Read it back with the same kind of decoder a phone would use and show the result in plain words ("Scan check passed: reads back exactly"), after every change. A style choice that breaks scanning then shows up before export, not after printing 500 copies.
+
+14. **Report honestly.** Say what was tested, how, and what wasn't: real server, real device, real gamepad, audio, notifications. Tests against mocks prove less than they look. A mock that always answers instantly hid a boot-order bug that broke live sync on real devices.
 
 ## Workflow for a new app or a rework
 
@@ -85,4 +90,8 @@ Apply all of these by default. They are cheap when designed in and expensive to 
 - [ ] Shared saves merge and retry; edits during an in-flight save survive; sync status visible.
 - [ ] Every fetch has a timeout; independent loops don't wait on each other.
 - [ ] Old data and old clients considered; legacy fields still written.
+- [ ] Toolbar items are `flex-shrink: 0` so the fit measurement works; labels drop to icons before they touch.
+- [ ] Selection colour, `color-scheme` and `theme-color` themed; saved theme applied before first paint; pinch-zoom allowed.
+- [ ] Work autosaves and survives a reload; reversible destructive actions offer Undo; errors shown in place, no `alert()`.
+- [ ] Stored references to removed items are pruned generically.
 - [ ] Report says what was and wasn't tested.

@@ -51,6 +51,24 @@ if (keep) { const f = box.querySelector(`[data-k="${CSS.escape(keep)}"]`); if (f
 
 Reset `this.cap` when the day or filter changes. Stamping a card re-renders the list, and with this the user's focus stays on the button they just pressed.
 
+## Cached cards: build once, re-order on filter
+
+For a catalogue (tens to a few hundred items with pictures) that is filtered by search-as-you-type, don't rebuild the DOM per keystroke. Build each card once, keep it in a `Map` by id, and on render only re-order:
+
+```js
+const LIST = { cache: new Map(), lastKey: null,
+  card(item) { let c = this.cache.get(item.id); if (!c) { c = buildCard(item); this.cache.set(item.id, c); } return c; } };
+function render() {
+  const items = visible(), key = items.map(i => i.id).join(',');
+  if (key !== LIST.lastKey) { grid.replaceChildren(...items.map(i => LIST.card(i))); LIST.lastKey = key; }   // unchanged set: touch nothing
+}
+```
+
+- Images stay decoded, `loading="lazy"` keeps working, and in-place updates (a favourite heart) patch one cached card.
+- Clear the cache when something changes how every card is built, e.g. an admin mode that adds a row to each card.
+- If an action removes the focused card from the list (un-favouriting in a favourites-only view), move focus to the card now at the same index.
+- Add `content-visibility: auto; contain-intrinsic-size: auto 320px;` on cards so off-screen ones cost nothing to lay out.
+
 ## Merge rows that belong together
 
 Users scan for "what happened", not "which events were logged". Group events by entity, sort by time, and pair start and end into one item:
