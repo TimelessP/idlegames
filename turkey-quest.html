@@ -282,6 +282,7 @@ body{overflow:hidden}
 .ui-modal.ui-book{height:calc(var(--vvh) - 20px - var(--safe-t) - var(--safe-b))}
 .ui-book .ui-modal-body{display:flex;flex-direction:column;gap:8px}
 .ui-book textarea{flex:1;min-height:5em}
+.ui-book .ui-keep{flex:none}
 
 /* dialog */
 .ui-dialog-portrait{float:left;width:calc(var(--tap)*1.6);height:calc(var(--tap)*2.1);margin:0 14px 6px 0}
@@ -1300,7 +1301,7 @@ const INV = {
   },
   icon(inst, label) { const [a, p] = this.art(inst); return svgIcon(a, p, label); },
   desc(inst) {
-    if (inst.t === 'book') { const b = SAVE.S.books[inst.uid]; const len = b ? b.text.trim().length : 0; return len ? `A ${b.cname.toLowerCase()} book with your writing in it.` : `A blank ${b ? b.cname.toLowerCase() : ''} book. Anything you write stays in this book.`; }
+    if (inst.t === 'book') { const b = SAVE.S.books[inst.uid]; const len = b ? b.text.trim().length : 0; return len ? `A ${b.cname.toLowerCase()} book with your writing in it.${b.keep ? ' Kept for your next journey.' : ''}` : `A blank ${b ? b.cname.toLowerCase() : ''} book. Anything you write stays in this book.`; }
     if (inst.t === 'sword' && inst.ench) return { fire: 'Wreathed in flame. Burns foes - devastating against frost creatures.', ice: 'Rimed with frost. Slows foes and bites deep.', poison: 'Drips with venom. Foes keep taking damage.' }[inst.ench];
     if (inst.t === 'stone') return SAVE.S.returnPos ? 'Glowing: it remembers a place. Use it to return there.' : ITEMS.stone.desc;
     if (inst.t === 'crate') { const its = inst.items || []; if (!its.length) return 'An empty crate. ' + ITEMS.crate.desc; const names = its.slice(0, 5).map(i => (i.n > 1 ? i.n + ' x ' : '') + this.name(i)); return `Packed with ${its.length} thing${its.length > 1 ? 's' : ''}: ${names.join(', ')}${its.length > 5 ? ', and more' : ''}.`; }
@@ -3752,7 +3753,10 @@ const UI = {
       const save = () => { bk.text = ta.value; m.setTitle(tt()); SAVE.touch(); GAME.proxDirty = true; };
       ta.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(save, 200); });
       ta.addEventListener('blur', save);
-      b.append(h('p', { class: 'ui-muted', html: `<span class="ui-swatch" style="background:${bk.c}"></span> ${esc(bk.cname)} book. The first line is its title.` }), ta);
+      const keep = checkbox('Keep this book for my next journey', !!bk.keep, v => { bk.keep = v; SAVE.touch(); GAME.proxDirty = true;
+        HUD.toast(v ? 'Kept. When you start a new game, it will be waiting on the shelf in the first house.' : 'This book stays with this journey.'); });
+      keep.classList.add('ui-keep');
+      b.append(h('p', { class: 'ui-muted', html: `<span class="ui-swatch" style="background:${bk.c}"></span> ${esc(bk.cname)} book. The first line is its title.` }), ta, keep);
       m.onClose = () => { clearTimeout(tm); save(); SAVE.flush(); };
     }, { cls: 'ui-book' });
   },
@@ -4205,6 +4209,7 @@ const GAME = {
     try {
       await this.prepare();
       HUD.loading(true, 0.38, 'Drafting the valley and proving it can be finished...'); await nextFrame();
+      const kept = this.keptBooks(); // read before the old journey is replaced
       const seedNum = hashStr(seedStr), gen = await this.generate(seedNum, 0);
       const st = gen.plan.start;
       const S = { v: VERSION, seed: seedStr, seedNum, attempt: gen.attempt, caves: gen.caves, created: Date.now(), time: 0, clock: 20, start: st,
@@ -4213,10 +4218,28 @@ const GAME = {
       SAVE.S = S;
       for (const uid of gen.plan.bookSpecs) { const b = INV.newBook(); S.books[uid] = S.books[b.uid]; delete S.books[b.uid]; }
       S.inv.push(INV.newBook());
+      const shelf = this.shelveKept(gen, kept);
       SAVE.write(S);
       await this.enter(gen);
+      if (shelf) { const e = this.ents.get(shelf.id); if (e) e.persist(); }
+      if (kept.length) setTimeout(() => HUD.toast(`${kept.length === 1 ? 'Your kept book is' : `Your ${kept.length} kept books are`} ${shelf ? 'on the shelf in the first house' : 'in your bag'}.`, 5000), 1500);
       HUD.toast('Spring, and Christmas is coming. Talk to the Elder nearby to begin.', 4000);
     } catch (err) { console.error(err); HUD.loading(false); APP.go('title'); HUD.toast('Something went wrong: ' + err.message, 6000); }
+  },
+  /** books marked "keep" in the journey being replaced (wherever they lie: bag, ground, chest, crate or shelf). An
+   *  imported journey replaces the save outright, so it brings its own kept books and the old ones are gone. */
+  keptBooks() {
+    const old = SAVE.S || SAVE.read(); if (!old || !old.books) return [];
+    return Object.values(old.books).filter(b => b && b.keep && String(b.text || '').trim()).map(b => ({ c: b.c, cname: b.cname, text: b.text, keep: true }));
+  },
+  /** put kept books on the shelf of the house nearest the start (into the bag if there is none); returns that shelf */
+  shelveKept(gen, kept) {
+    if (!kept.length) return null;
+    const S = SAVE.S, [sx, sz] = gen.plan.start; let home = null, bd = 1e9;
+    for (const c of gen.specs) if (c.kind === 'cottage' && c.d.pocket != null && c.d.v !== 4) { const d = dist2(c.x, c.z, sx, sz); if (d < bd) { bd = d; home = c; } }
+    const p = home && WORLD.pockets[home.d.pocket], shelf = p && gen.specs.find(s => s.kind === 'shelf' && s.x >= p.x0 && s.x <= p.x1 && s.z >= p.z0 && s.z <= p.z1);
+    kept.forEach((b, i) => { const uid = 'k' + (i + 1); S.books[uid] = b; (shelf ? shelf.d.items : S.inv).push({ t: 'book', n: 1, uid }); });
+    return shelf || null;
   },
   async resume() {
     const S = SAVE.read(); if (!S) { APP.go('title'); return; }
@@ -4683,6 +4706,10 @@ ART_DEF.pie = (P, p) => p.kind === 'pumpkin' ? ({ w: 100, h: 100, parts: [A(P.el
   A(P.poly([[18, 66], [82, 56], [74, 74], [22, 80]], 0.6), '#d89040'), A(P.poly([[18, 66], [82, 56], [84, 50], [16, 60]], 0.5), '#e2b070'), A(P.blob(60, 50, 9, 5, 0.2, 6), '#fbf8f0', { inkW: 0.5 })] })
   : ({ w: 100, h: 100, parts: [A(P.ell(50, 64, 34, 18, 0.05), '#d8a860'), A(P.ell(50, 58, 28, 13, 0.05), '#e8c080'), A(P.star(50, 58, 12, 5, 5), '#c88a40', { inkW: 0.6 }),
     W(P.ell(40, 52, 9, 4), '#ffffff', 0.7), K(P.path([[18, 66], [50, 76], [82, 66]]), 0.5)] });
+/** a steaming bowl: soup colour plus a few floating bits [x, y, colour] */
+ART_DEF.bowl = (P, p) => ({ w: 100, h: 100, parts: [K(P.path([[40, 36], [36, 24], [42, 12]]), 0.8), K(P.path([[58, 36], [62, 24], [56, 12]]), 0.8),
+  A(P.curve([[12, 50], [88, 50], [76, 84], [24, 84]], true, 0.8), p.bowl || '#5a8ab8'), A(P.ell(50, 50, 38, 8, 0.04), p.soup || '#c8a070'),
+  ...(p.bits || []).map(([x, y, c]) => A(P.blob(x, y, 6, 5, 0.2, 4), c, { inkW: 0.5 })), W(P.ell(38, 48, 10, 3), '#ffffff', 0.45)] });
 ART_DEF.stuffing = P => ({ w: 100, h: 100, parts: [A(P.curve([[12, 52], [88, 52], [78, 82], [22, 82]], true, 0.8), '#5a8ab8'), A(P.ell(50, 52, 38, 8, 0.04), '#3f6f9c'),
   ...[[34, 48], [50, 44], [66, 48], [42, 54], [58, 54]].map(([x, y]) => A(P.blob(x, y, 9, 5, 0.18, 8), '#9a6a3a', { inkW: 0.6 }))] });
 ART_DEF.cranberry = P => ({ w: 100, h: 100, parts: [A(P.curve([[16, 50], [84, 50], [76, 84], [24, 84]], true, 0.8), '#efe6d4'), A(P.ell(50, 50, 34, 8, 0.04), '#a8203a'),
@@ -4878,6 +4905,7 @@ Object.assign(ITEMS, {
   pumpkin: { name: 'Pumpkin', art: 'pumpkin', kind: 'material', desc: 'A fat autumn pumpkin. Cook it with 2 wheat into a pumpkin pie.' },
   pie_pumpkin: { name: 'Pumpkin Pie', art: 'pie', params: { kind: 'pumpkin' }, kind: 'food', heal: 30, desc: 'A Thanksgiving favourite, spiced and golden. Restores 30 health.' },
   mince_pie: { name: 'Mince Pie', art: 'pie', params: { kind: 'mince' }, kind: 'food', heal: 15, desc: 'Sweet, spiced and dusted with sugar. Restores 15 health.' },
+  mushroom_soup: { name: 'Mushroom Soup', art: 'bowl', params: { soup: '#b08a5a', bits: [[36, 48, '#efe6d4'], [56, 50, '#c0503a'], [66, 46, '#efe6d4']] }, kind: 'food', heal: 28, desc: 'Thick, glowing-mushroom soup to warm a winter night. Restores 28 health.' },
   stuffing: { name: 'Chestnut Stuffing', art: 'stuffing', kind: 'food', heal: 15, desc: 'Bread and chestnuts, rolled into balls. Part of a Festive Feast. Restores 15 health.' },
   cranberry: { name: 'Cranberry Sauce', art: 'cranberry', kind: 'food', heal: 8, desc: 'Tart and bright. Restores 8 health.' },
   turkey: { name: 'Turkey, ready to roast', art: 'roast', kind: 'material', desc: 'From Poulterer Bram. Cook it at a campfire or fireplace.' },
@@ -4917,6 +4945,7 @@ const RECIPES = [
   { t: 'mince_pie', need: [['wheat', 1], ['berries', 2], ['apple', 1]], n: 2 },
   { t: 'pie_pumpkin', need: [['pumpkin', 1], ['wheat', 2]] },
   { t: 'mulled', need: [['apple', 2], ['flask_full', 1]] },
+  { t: 'mushroom_soup', need: [['mushroom', 2], ['flask_full', 1]], back: [['flask_empty', 1]] }, // you get the flask back
 ];
 const VEG = { wheat: { item: 'wheat', n: 3, verb: 'Harvest wheat', extra: ['wheatseed', 1] }, potato: { item: 'potato', n: 3, verb: 'Dig potatoes' }, carrot: { item: 'carrot', n: 3, verb: 'Pull carrots' }, sprout: { item: 'sprout', n: 4, verb: 'Pick sprouts' }, pumpkin: { item: 'pumpkin', n: 1, verb: 'Pick a pumpkin' } };
 Object.assign(NPC_LOOKS, {
@@ -5313,7 +5342,7 @@ const SOURCE_HINT = {
   chestnut: 'gather them under autumn oaks (more every dawn), or trade 2 wood with Chestnut Seller Hazel', berries: 'pick them from bushes (not in winter)', apple: 'lying on the ground, and in chests',
   turkey: 'Poulterer Bram trades one for 3 wheat', fish_raw: 'fish at any water with a rod', flask_full: 'fill a flask at a well or any water',
   holly: 'pick it from winter holly bushes', candy_cane: 'advent calendars and carol singing', golden_star: 'Decorator Ivy, or door 24 of an advent calendar',
-  wood: 'chop trees with an axe', stick: 'chopping trees, and lying on the ground',
+  wood: 'chop trees with an axe', stick: 'chopping trees, and lying on the ground', mushroom: 'pick them in caves',
 };
 const NEXT4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 Object.assign(FESTIVE, {
@@ -5381,6 +5410,7 @@ Object.assign(FESTIVE, {
       case 'holly': return go(this.nearest(e => e.kind === 'bush' && e.season === 3 && e.fsm.is('full')), 'pick holly from a winter holly bush');
       case 'candy_cane': return go(this.nearest(e => e.kind === 'advent' && this.adventReady(e)), "open today's advent door in a house (candy canes are common)");
       case 'wood': return has('axe') ? go(this.nearest(e => e.kind === 'tree' && e.fsm.is('standing')), 'chop a tree for wood') : { text: 'forge an axe (1 iron ore, 1 stick), then chop trees', target: this.at(this.nearest(e => e.kind === 'forge')) };
+      case 'mushroom': return go(this.nearest(e => e.kind === 'cavemouth'), 'pick glowing mushrooms inside a cave') || { text: 'pick glowing mushrooms in a cave', target: null };
       case 'fish_raw': return { text: has('rod') ? 'fish at any stream, pond or lake' : 'forge a fishing rod (2 sticks), then fish at any water', target: null };
       case 'flask_full': return has('flask_empty') ? (go(this.nearest(e => e.kind === 'well'), 'fill your flask at a well') || { text: 'fill your flask at any water', target: null }) : null;
       case 'turkey': { const b = this.find(e => e.kind === 'npc' && e.d.role === 'bram'); if (!b) return null; const w = this.plan('wheat', 3);
@@ -5781,7 +5811,8 @@ UI.kitchen = function () {
         const ok = r.need.every(([t, k]) => INV.has(t, k)), n = r.n || 1;
         const bb = btn(`${n > 1 ? n + ' ' : ''}${ITEMS[r.t].name}: ${r.need.map(([t, k]) => `${k} ${ITEMS[t].name} (have ${INV.count(t)})`).join(', ')}`, { cls: 'ui-wide', icon: svgIcon(...INV.art({ t: r.t })), disabled: !ok, onClick: () => {
           if (!r.need.every(([t, k]) => INV.has(t, k))) return;
-          for (const [t, k] of r.need) INV.remove(t, k); INV.add(r.t, n); AUDIO.sfx('fire'); last = r.t; draw();
+          for (const [t, k] of r.need) INV.remove(t, k); for (const [t, k] of r.back || []) INV.add(t, k, null, true);
+          INV.add(r.t, n); AUDIO.sfx('fire'); last = r.t; draw();
         } });
         bb.dataset.k = r.t; s.append(bb);
         if (!ok) s.append(h('p', { class: 'ui-muted ui-cook-hint', text: FESTIVE.missingText(r.need) }));
