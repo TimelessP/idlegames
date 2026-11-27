@@ -123,12 +123,9 @@ async function ensureVendorAssets() {
     ['postprocessing', 'EffectComposer.js'],
     ['postprocessing', 'Pass.js'],
     ['postprocessing', 'RenderPass.js'],
-    ['postprocessing', 'SSAOPass.js'],
     ['postprocessing', 'ShaderPass.js'],
     ['postprocessing', 'MaskPass.js'],
-    ['shaders', 'CopyShader.js'],
-    ['shaders', 'SSAOShader.js'],
-    ['math', 'SimplexNoise.js']
+    ['shaders', 'CopyShader.js']
   ];
 
   for (const segments of exampleFiles) {
@@ -205,16 +202,6 @@ async function ensureFonts() {
     cssFileName: 'archivo.css',
     outputDirName: 'archivo',
     licenseTarget: 'archivo-OFL.txt',
-  });
-
-  await writeFontFaceSheet({
-    packageName: 'intel-one-mono',
-    family: 'Intel One Mono',
-    weights: [400, 500, 700],
-    filePattern: (weight) => `intel-one-mono-latin-${weight}-normal.woff2`,
-    cssFileName: 'intel-one-mono.css',
-    outputDirName: 'intel-one-mono',
-    licenseTarget: 'intel-one-mono-OFL.txt',
   });
 
   await writeFontFaceSheet({

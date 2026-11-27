@@ -12,10 +12,12 @@ const WIDTH = 640;
 const EXTS = new Set(['.png', '.jpg', '.jpeg', '.svg', '.gif', '.webp', '.avif']);
 
 await fs.mkdir(outDir, { recursive: true });
-let converted = 0, skipped = 0;
+let converted = 0, skipped = 0, pruned = 0;
+const sourceBases = new Set();
 for (const name of await fs.readdir(srcDir)) {
   const ext = path.extname(name).toLowerCase();
   if (!EXTS.has(ext)) continue;
+  sourceBases.add(path.basename(name, path.extname(name)));
   const src = path.join(srcDir, name);
   const dest = path.join(outDir, path.basename(name, path.extname(name)) + '.webp');
   const srcStat = await fs.stat(src);
@@ -28,4 +30,10 @@ for (const name of await fs.readdir(srcDir)) {
     .toFile(dest);
   converted++;
 }
-console.log(`Thumbnails: ${converted} converted, ${skipped} up to date -> assets/thumbnails/webp/`);
+// Remove WebPs whose source thumbnail no longer exists (a removed app), so they are not shipped. Only when sources were found.
+if (sourceBases.size) {
+  for (const name of await fs.readdir(outDir)) {
+    if (path.extname(name).toLowerCase() === '.webp' && !sourceBases.has(path.basename(name, '.webp'))) { await fs.rm(path.join(outDir, name)); pruned++; }
+  }
+}
+console.log(`Thumbnails: ${converted} converted, ${skipped} up to date, ${pruned} orphaned removed -> assets/thumbnails/webp/`);

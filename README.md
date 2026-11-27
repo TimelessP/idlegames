@@ -26,10 +26,6 @@ A cozy, fractal-based Christmas tree decorating game. Draw glowing lights, place
 Unlock daily festive surprises, each hiding a cheerful mini-game or cozy activity. Progress is saved locally.
 - **Tags:** Seasonal, Mini-games
 
-### 🏮 [Lumen Drift](https://timelessp.github.io/idlegames/lumen-drift.html)
-Guide an astral lantern through drifting currents, collect glints, dodge dusk shadows, and chase ever-longer drifts.
-- **Tags:** Relaxing, Arcade, Atmospheric
-
 ### 🛸 [Space Trader](https://timelessp.github.io/idlegames/space-trader.html)
 Retro space trading adventure in a deterministic procedural galaxy. Trade, haggle, refuel, and travel across systems.
 - **Tags:** Trading, Procedural, Space, Retro
@@ -57,10 +53,6 @@ A calm, plant-themed memory match game. Flip cards, find matching garden symbols
 ### 🚀 [Space Scroller](https://timelessp.github.io/idlegames/space-scroller.html)
 Navigate through space in this endless scrolling adventure. Dodge obstacles, collect power-ups.
 - **Tags:** Action, Endless, Space
-
-### 🎲 [Yahtzee](https://timelessp.github.io/idlegames/yahtzee.html)
-Classic dice game with a challenging twist! Roll for combinations, score strategically, and aim for the perfect Yahtzee.
-- **Tags:** Dice, Strategy, Classic
 
 ### 🦴 [Fossil Hunter](https://timelessp.github.io/idlegames/fossil.html)
 Archaeological discovery game with realistic sand brushing mechanics. Excavate ancient fossils.
@@ -227,9 +219,9 @@ If you ever see two workflows running in parallel on GitHub Actions ("pages buil
 ## 🎮 Categories
 
 ### Games
-- **🧩 Puzzle & Strategy:** Fit the Shapes, Jigsaw Puzzle, Sheepdog, Yahtzee, Garden Grower
+- **🧩 Puzzle & Strategy:** Fit the Shapes, Jigsaw Puzzle, Sheepdog, Garden Grower
 - **🧪 Physics & Simulation:** Strange Pebbles, Ballistic Warfare
-- **🚀 Action & Adventure:** Space Trader, Space Scroller, Lumen Drift, Fossil Hunter
+- **🚀 Action & Adventure:** Space Trader, Space Scroller, Fossil Hunter
 - **🎄 Seasonal:** Tree Decorator, Festive Advent
 
 ### Tools
