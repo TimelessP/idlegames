@@ -37,9 +37,9 @@ await fs.writeFile(versionModulePath, versionModuleContent, 'utf8');
 await cleanDist();
 await fs.mkdir(distDir, { recursive: true });
 
-const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.github', '.vscode', '.venv', 'venv', '__pycache__', 'scripts', 'tests', 'skills', '.claude-plugin']);
-const EXCLUDED_FILES = new Set(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'pnpm-lock.yml', 'yarn.lock', 'requirements.txt', '.python-version']);
-const EXCLUDED_FILE_EXTENSIONS = new Set(['.py', '.pyc', '.pyo']);
+const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.github', '.vscode', '.venv', 'venv', '__pycache__', 'scripts', 'tests', 'skills', '.claude-plugin', '.freebuff', '.idea']);
+const EXCLUDED_FILES = new Set(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'pnpm-lock.yml', 'yarn.lock', 'requirements.txt', '.python-version', '.nvmrc', 'build.sh']);
+const EXCLUDED_FILE_EXTENSIONS = new Set(['.py', '.pyc', '.pyo', '.md']);   // .md: developer notes, never loaded by a page
 
 async function copyTree(from, to) {
   await fs.mkdir(to, { recursive: true });
@@ -68,6 +68,8 @@ async function removeIfExists(target) {
 }
 
 await removeIfExists(path.join(distDir, 'README.md'));
+// Only an input to build:voice (the commentator voice embedding); no page loads it.
+await removeIfExists(path.join(distDir, 'assets', 'audio', 'commentator-sample-20s.wav'));
 await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'build.log'));
 await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'README.md'));
 await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'espeak-build'));
@@ -138,6 +140,10 @@ async function ensureVendorAssets() {
   const transformersDest = path.join(distDir, 'assets', 'vendor', 'transformers');
   await fs.rm(transformersDest, { recursive: true, force: true });
   await fs.cp(transformersSrc, transformersDest, { recursive: true });
+  // Node.js builds (transformers.node.*) are never loaded in a browser; the web build plus the ORT .mjs/.wasm are.
+  for (const name of await fs.readdir(transformersDest)) {
+    if (/\.node\.(min\.)?(c|m)?js$/.test(name)) await fs.rm(path.join(transformersDest, name), { force: true });
+  }
 
   const piperSrc = path.join(projectRoot, 'node_modules', 'piper-tts-web', 'dist');
   const piperDest = path.join(distDir, 'assets', 'vendor', 'piper');
@@ -273,7 +279,12 @@ if (await fileExists(gitignoreInDist)) {
   await fs.rm(gitignoreInDist);
 }
 
-const PRECACHE_EXTENSIONS = new Set(['.html', '.css', '.js', '.json', '.webmanifest', '.png', '.svg', '.ico', '.txt', '.woff2', '.wasm', '.data', '.onnx', '.bin', '.npy', '.model', '.safetensors']);
+// Everything a page can load must be here, or it is missing offline. Lazy-loaded images (the launcher's .webp
+// thumbnails) and game sounds (.mp3) are only fetched on demand, so without precaching they break offline.
+const PRECACHE_EXTENSIONS = new Set(['.html', '.css', '.js', '.mjs', '.json', '.webmanifest',
+  '.png', '.svg', '.ico', '.webp', '.jpg', '.jpeg', '.gif', '.avif',
+  '.mp3', '.ogg', '.wav', '.m4a',
+  '.txt', '.woff2', '.wasm', '.data', '.onnx', '.bin', '.npy', '.model', '.safetensors']);
 const precacheSet = new Set();
 
 async function collectPrecache(currentDir) {
