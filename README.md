@@ -18,13 +18,9 @@ The complete collection is hosted on GitHub Pages with a beautiful launcher inte
 A physics sandbox with curious pebbles. Discover their interactions, build complex machines, or just enjoy the chaos.
 - **Tags:** Physics, Sandbox, Simulation
 
-### 🎄 [Tree Decorator](https://timelessp.github.io/idlegames/tree.html)
-A cozy, fractal-based Christmas tree decorating game. Draw glowing lights, place ornaments, and enjoy the festive atmosphere.
-- **Tags:** Creative, Relaxing, Seasonal
-
-### 🎄 [Festive Advent](https://timelessp.github.io/idlegames/advent.html)
-Unlock daily festive surprises, each hiding a cheerful mini-game or cozy activity. Progress is saved locally.
-- **Tags:** Seasonal, Mini-games
+### 🦃 [Turkey Quest](https://timelessp.github.io/idlegames/turkey-quest.html)
+A festive papercraft RPG. Write to Santa, cook a feast and journey to the North Pole. Listed from 1 November to 31 January.
+- **Tags:** Seasonal, Adventure, Mini-games
 
 ### 🛸 [Space Trader](https://timelessp.github.io/idlegames/space-trader.html)
 Retro space trading adventure in a deterministic procedural galaxy. Trade, haggle, refuel, and travel across systems.
@@ -222,7 +218,7 @@ If you ever see two workflows running in parallel on GitHub Actions ("pages buil
 - **🧩 Puzzle & Strategy:** Fit the Shapes, Jigsaw Puzzle, Sheepdog, Garden Grower
 - **🧪 Physics & Simulation:** Strange Pebbles, Ballistic Warfare
 - **🚀 Action & Adventure:** Space Trader, Space Scroller, Fossil Hunter
-- **🎄 Seasonal:** Tree Decorator, Festive Advent
+- **🦃 Seasonal:** Turkey Quest
 
 ### Tools
 - **🎙️ Audio:** AM Radio Console, Dictaphone, RPM Disc Encoder
