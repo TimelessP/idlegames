@@ -73,6 +73,14 @@ await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'README.md'))
 await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'espeak-build'));
 await removeIfExists(path.join(distDir, 'assets', 'vendor', 'tts', 'assets'));
 
+// Thumbnail sources (PNG/SVG/JPEG) are only inputs to build:thumbnails; ship just the generated WebPs.
+const distThumbsDir = path.join(distDir, 'assets', 'thumbnails');
+if (await fileExists(distThumbsDir)) {
+  for (const entry of await fs.readdir(distThumbsDir, { withFileTypes: true })) {
+    if (entry.name !== 'webp') await removeIfExists(path.join(distThumbsDir, entry.name));
+  }
+}
+
 // Remove non-English Pocket TTS language bundles (keep only english_2026-04)
 const pocketOnnxDir = path.join(distDir, 'assets', 'vendor', 'tts', 'pocket-tts', 'onnx');
 if (await fileExists(pocketOnnxDir)) {

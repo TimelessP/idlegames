@@ -80,6 +80,24 @@ new ResizeObserver(fitTop).observe($('#top'));   // rotation, panels opening, fo
 - **Slack goes on the spacer, not on scrollWidth.** `scrollWidth` is never less than `clientWidth`, so a test like `scrollWidth > clientWidth - 4` is always true and the bar compacts even on a wide desktop. This shipped too, and only a desktop screenshot caught it. Measure the spacer instead: it is the room left over.
 - **Stages:** drop button labels first (keep `aria-label`), then the title. Never hide an action.
 
+### Action rows inside cards (grids of wheels, timers, items)
+
+A card's button row shrinks as more cards share the grid. Labels with `white-space: nowrap` in a fixed `grid-template-columns` row then spill over each other, and grid items' default `min-width: auto` lets a button grow instead, so nothing ever "overflows". Measure each row itself:
+
+```css
+.acts .btn { min-width: 0; overflow: hidden; }   /* the label now overflows its own button, so it can be measured */
+.acts.compact .lbl { display: none; }
+```
+
+```js
+function fitActs(acts) { acts.classList.remove('compact'); if ([...acts.querySelectorAll('.btn')].some(b => b.scrollWidth > b.clientWidth - 2)) acts.classList.add('compact'); }
+const actsRO = new ResizeObserver(es => es.forEach(e => fitActs(e.target)));   // one observer for every card's row
+```
+
+- Every button gets `aria-label` and `title` with its full name, set wherever its label changes.
+- **Re-measure when a label changes**, not only on resize: "Resume" or "Restart" is wider than "Start", so a card that fit while running can overflow once paused.
+- Decide per card: a single wide card keeps its labels while narrow cards in a busy grid show icons.
+
 ## Card grids and phone rows
 
 - **Phones:** below about 600px, turn grid cards into compact rows (thumbnail about 124px wide on the left, title and two lines of text beside it). This roughly doubled the number of games visible on the launcher, compared with full-width cards.
@@ -111,6 +129,21 @@ body { background: var(--bg); }   /* always set explicitly */
 ```
 
 After a theme change, set `meta[name=theme-color]` to `css('--surface')` so the phone's status bar matches.
+
+### Hover states are part of the theme
+
+A single `.btn:hover { background: var(--surface-2) }` only suits plain buttons. Filled buttons (primary, solid danger, a per-card colour) then get no feedback, or flip to the plain grey with white text on it. Give every filled variant a hover derived from its own colour, and wrap hovers in `@media (hover: hover)` so touch screens don't keep a sticky hover:
+
+```css
+@media (hover: hover) {
+  .btn.primary:hover:not([disabled]) { background: color-mix(in srgb, var(--accent) 82%, var(--text)); }   /* darker in light, lighter in dark */
+  .btn[aria-pressed="true"]:hover:not([disabled]) { background: color-mix(in srgb, var(--accent-soft) 72%, var(--accent)); }
+  .card .btn.primary:hover:not([disabled]) { background: color-mix(in srgb, var(--card-colour) 82%, var(--text)); }   /* own colour, higher specificity */
+  .btn[disabled]:hover { background: var(--surface); }   /* disabled never reacts */
+}
+```
+
+Check every hand-rolled clickable too (nav items, chips, toast actions, full-screen close buttons): if it has no hover, it looks dead under a mouse.
 
 ### Text selection is part of the theme
 

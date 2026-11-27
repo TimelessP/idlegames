@@ -44,7 +44,7 @@ Apply all of these by default. They are cheap when designed in and expensive to 
 
 7. **Ease camera properties; let direct manipulation be direct.** When the program moves a view (zoom buttons, fit, focusing a target, a 3D camera's position, look-at point, angle or zoom), ease the change with frame-rate-independent damping. Never snap, and never start a new tween from the target (that caused "inverse easing then a snap"). When a finger or mouse is dragging or pinching, follow it exactly with no easing, or it feels laggy.
 
-8. **Theme with tokens.** All colours are CSS custom properties on `:root`, redefined under `[data-theme="dark"]`. Offer Automatic, Light and Dark, and follow the system when set to Automatic. Re-theme third-party widgets (map zoom buttons, attribution) instead of leaving them white in dark mode. Canvas and SVG drawing read colours from the tokens at draw time and redraw when the theme changes. Theme the details too: text selection (`::selection`), `color-scheme`, `meta[name=theme-color]`, scrollbars and form accents. Apply the saved theme in a tiny inline script in `<head>` so dark mode never flashes white. See `references/layout-theming.md`.
+8. **Theme with tokens.** All colours are CSS custom properties on `:root`, redefined under `[data-theme="dark"]`. Offer Automatic, Light and Dark, and follow the system when set to Automatic. Re-theme third-party widgets (map zoom buttons, attribution) instead of leaving them white in dark mode. Canvas and SVG drawing read colours from the tokens at draw time and redraw when the theme changes. Theme the details too: hover states for every filled button variant (derived from its own colour), text selection (`::selection`), `color-scheme`, `meta[name=theme-color]`, scrollbars and form accents. Apply the saved theme in a tiny inline script in `<head>` so dark mode never flashes white. See `references/layout-theming.md`.
 
 9. **Status colours must stay distinguishable.** When adding a category colour, check it against the existing ones. Gold next to amber is unreadable at a glance, so make "to review" orange. If one category (such as favourites) must not hide another that matters more (such as a security status), encode it in a second channel, e.g. gold fill with a ring in the status colour. Add a small legend.
 
@@ -91,6 +91,8 @@ Apply all of these by default. They are cheap when designed in and expensive to 
 - [ ] Every fetch has a timeout; independent loops don't wait on each other.
 - [ ] Old data and old clients considered; legacy fields still written.
 - [ ] Toolbar items are `flex-shrink: 0` so the fit measurement works; labels drop to icons before they touch.
+- [ ] Button rows inside cards measure themselves too (per card, and again whenever a label changes); try it with many cards.
+- [ ] Hover states themed for every filled button variant, under `@media (hover: hover)`.
 - [ ] Selection colour, `color-scheme` and `theme-color` themed; saved theme applied before first paint; pinch-zoom allowed.
 - [ ] Work autosaves and survives a reload; reversible destructive actions offer Undo; errors shown in place, no `alert()`.
 - [ ] Stored references to removed items are pruned generically.

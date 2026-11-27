@@ -1,895 +1,270 @@
 <!DOCTYPE html>
-<html lang="en">
+<!--
+================================================================================
+ Tap Code  -  send messages as Polybius-square taps (sound or dots), and decode
+              taps from the microphone or an audio file
+================================================================================
+ SECTION INDEX (search for the tag, e.g. "§4")
+  §1 CSS ........... tokens (Automatic / Light / Dark) plus the aliases the debug
+                     canvases read (--panel-bg, --text-muted, --grid-active,
+                     --btn-stop), frame (phones: Send / Receive tabs; wide: side
+                     by side), grid, panels, debug views, sheets
+  §2 HTML .......... top bar, Send (grid, message, tone, dots), Receive (output,
+                     record, import, receiver analysis)
+  §3 ENGINE ........ UNCHANGED from the previous version (spliced verbatim):
+                     encoding, symbol escapes, send timeline + WAV export, the
+                     Goertzel / envelope tap detector, debug canvases and the
+                     full-screen analysis view with its frequency and threshold
+                     pickers. Element ids it uses are kept.
+  §4 SHELL ......... theme, help and settings sheets (history-backed), Back on
+                     the analysis view, tabs, top-bar fit
+ STORAGE (unchanged): idlegames-tapcode-theme = "system" | "light" | "dark"
+================================================================================
+-->
+<html lang="en" data-theme="system">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#ffffff">
   <meta name="application-name" content="IdleGames">
-  <meta name="theme-color" content="#2d3748">
-  <link rel="icon" href="favicon.ico" type="image/x-icon">
+  <meta name="color-scheme" content="light dark">
   <script src="assets/js/pwa.js" defer></script>
   <title>Tap Code</title>
+  <meta name="description" content="Send messages as tap code (sound or dots) and decode taps from the microphone or an audio file. Works offline.">
+  <link rel="icon" href="favicon.ico">
+  <script>
+    try { const t = localStorage.getItem('idlegames-tapcode-theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) { /* ignore */ }
+  </script>
   <style>
-    :root {
-      --bg-color: #f7fafc;
-      --text-color: #2d3748;
-      --text-muted: #718096;
-      --panel-bg: #ffffff;
-      --border-color: #e2e8f0;
-      --accent: #4a5568;
-      --accent-hover: #2d3748;
-      --btn-bg: #edf2f7;
-      --btn-hover: #e2e8f0;
-      --btn-active: #cbd5e0;
-      --btn-send: #48bb78;
-      --btn-send-hover: #38a169;
-      --btn-stop: #f56565;
-      --btn-stop-hover: #e53e3e;
-      --grid-highlight: #bee3f8;
-      --grid-active: #3182ce;
-
-      --selection-bg: var(--grid-highlight);
-      --selection-text: var(--text-color);
-
-      --scrollbar-track: var(--panel-bg);
-      --scrollbar-thumb: var(--btn-active);
-      --scrollbar-thumb-hover: var(--accent);
-    }
-
-    [data-theme="dark"] {
-      --bg-color: #1a202c;
-      --text-color: #e2e8f0;
-      --text-muted: #a0aec0;
-      --panel-bg: #2d3748;
-      --border-color: #4a5568;
-      --accent: #a0aec0;
-      --accent-hover: #e2e8f0;
-      --btn-bg: #4a5568;
-      --btn-hover: #718096;
-      --btn-active: #2d3748;
-      --btn-send: #48bb78;
-      --btn-send-hover: #68d391;
-      --btn-stop: #fc8181;
-      --btn-stop-hover: #f56565;
-      --grid-highlight: #2c5282;
-      --grid-active: #63b3ed;
-
-      --selection-bg: var(--grid-highlight);
-      --selection-text: var(--text-color);
-
-      --scrollbar-track: var(--panel-bg);
-      --scrollbar-thumb: var(--btn-hover);
-      --scrollbar-thumb-hover: var(--accent-hover);
-    }
-
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-
-    ::selection {
-      background: var(--selection-bg);
-      color: var(--selection-text);
-    }
-
-    ::-moz-selection {
-      background: var(--selection-bg);
-      color: var(--selection-text);
-    }
-    
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: var(--bg-color);
-      color: var(--text-color);
-      min-height: 100vh;
-      padding: 1rem;
-      transition: background 0.3s, color 0.3s;
-    }
-
-    .container {
-      max-width: 600px;
-      margin: 0 auto;
-    }
-
-    header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-    }
-
-    h1 {
-      font-size: 1.5rem;
-      font-weight: 600;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .theme-btn {
-      background: none;
-      border: none;
-      cursor: pointer;
-      padding: 0.5rem;
-      border-radius: 0.5rem;
-      color: var(--text-color);
-      transition: background 0.2s;
-    }
-
-    .theme-btn:hover {
-      background: var(--btn-hover);
-    }
-
-    .theme-btn svg {
-      width: 24px;
-      height: 24px;
-    }
-
-    /* Tap Code Grid */
-    .grid-section {
-      margin-bottom: 1.5rem;
-    }
-
-    .section-label {
-      font-size: 0.875rem;
-      color: var(--text-muted);
-      margin-bottom: 0.5rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .tap-grid {
-      display: grid;
-      grid-template-columns: auto repeat(5, 1fr);
-      gap: 2px;
-      background: var(--panel-bg);
-      border-radius: 0.75rem;
-      padding: 0.75rem;
-      font-size: 1rem;
-    }
-
-    .grid-header {
-      font-weight: 600;
-      text-align: center;
-      padding: 0.5rem;
-      color: var(--text-muted);
-    }
-
-    .grid-cell {
-      text-align: center;
-      padding: 0.625rem;
-      border-radius: 0.375rem;
-      transition: background 0.15s;
-    }
-
-    .grid-cell.letter {
-      font-weight: 500;
-      font-size: 1.6rem;
-      line-height: 1.1;
-      letter-spacing: 0.02em;
-    }
-
-    .grid-cell.highlight {
-      background: var(--grid-highlight);
-    }
-
-    .grid-cell.active {
-      background: var(--grid-active);
-      color: white;
-    }
-
-    .grid-cell.ck {
-      font-size: 1.1rem;
-      letter-spacing: 0;
-    }
-
-    /* Text areas */
-    .io-section {
-      margin-bottom: 1.5rem;
-    }
-
-    .io-label {
-      font-size: 0.875rem;
-      color: var(--text-muted);
-      margin-bottom: 0.5rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .io-label svg {
-      width: 16px;
-      height: 16px;
-    }
-
-    textarea {
-      width: 100%;
-      min-height: 100px;
-      padding: 0.75rem;
-      border: 1px solid var(--border-color);
-      border-radius: 0.5rem;
-      background: var(--panel-bg);
-      color: var(--text-color);
-      font-family: inherit;
-      font-size: 1rem;
-      resize: vertical;
-      transition: border-color 0.2s;
-
-      scrollbar-width: thin;
-      scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
-    }
-
-    textarea::-webkit-scrollbar {
-      width: 10px;
-      height: 10px;
-    }
-
-    textarea::-webkit-scrollbar-track {
-      background: var(--scrollbar-track);
-      border-radius: 999px;
-    }
-
-    textarea::-webkit-scrollbar-thumb {
-      background-color: var(--scrollbar-thumb);
-      border-radius: 999px;
-      border: 2px solid var(--scrollbar-track);
-    }
-
-    textarea::-webkit-scrollbar-thumb:hover {
-      background-color: var(--scrollbar-thumb-hover);
-    }
-
-    textarea::-webkit-scrollbar-corner {
-      background: var(--scrollbar-track);
-    }
-
-    textarea:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-
-    .mono {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    }
-
-    /* Buttons */
-    .btn-group {
-      display: flex;
-      gap: 0.5rem;
-      margin-top: 0.75rem;
-    }
-
-    .btn {
-      flex: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      padding: 0.75rem 1rem;
-      border: none;
-      border-radius: 0.5rem;
-      font-size: 0.9375rem;
-      font-weight: 500;
-      cursor: pointer;
-      transition: background 0.2s, transform 0.1s;
-    }
-
-    .btn:active {
-      transform: scale(0.98);
-    }
-
-    .btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-      transform: none;
-    }
-
-    .btn svg {
-      width: 18px;
-      height: 18px;
-    }
-
-    .btn-send {
-      background: var(--btn-send);
-      color: white;
-    }
-
-    .btn-send:hover:not(:disabled) {
-      background: var(--btn-send-hover);
-    }
-
-    .btn-stop {
-      background: var(--btn-stop);
-      color: white;
-    }
-
-    .btn-stop:hover:not(:disabled) {
-      background: var(--btn-stop-hover);
-    }
-
-    .btn-receive {
-      background: var(--btn-bg);
-      color: var(--text-color);
-    }
-
-    .btn-receive:hover:not(:disabled) {
-      background: var(--btn-hover);
-    }
-
-    /* TX frequency controls */
-    .freq-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-top: 0.75rem;
-    }
-
-    .freq-row label {
-      font-size: 0.875rem;
-      color: var(--text-muted);
-      white-space: nowrap;
-    }
-
-    .freq-row input[type="number"] {
-      width: 8.5rem;
-      padding: 0.5rem 0.65rem;
-      border: 1px solid var(--border-color);
-      border-radius: 0.5rem;
-      background: var(--panel-bg);
-      color: var(--text-color);
-      font-family: inherit;
-      font-size: 0.9375rem;
-    }
-
-    .freq-row input[type="number"]:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-
-    .freq-row .btn {
-      flex: 0 0 auto;
-      padding: 0.5rem 0.75rem;
-      font-size: 0.875rem;
-    }
-
-    /* Status indicator */
-    .status {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.875rem;
-      color: var(--text-muted);
-      margin-top: 0.5rem;
-      min-height: 1.5rem;
-    }
-
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--text-muted);
-    }
-
-    .status-dot.sending {
-      background: var(--btn-send);
-      animation: pulse 0.5s ease-in-out infinite;
-    }
-
-    .status-dot.recording {
-      background: var(--btn-stop);
-      animation: pulse 1s ease-in-out infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
-    }
-
-    /* Tap visualization */
-    .tap-viz {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-      margin-top: 0.5rem;
-      min-height: 24px;
-      font-family: monospace;
-      font-size: 0.875rem;
-      color: var(--text-muted);
-    }
-
-    /* Info section */
-    .info {
-      background: var(--panel-bg);
-      border-radius: 0.75rem;
-      padding: 1rem;
-      font-size: 0.8125rem;
-      color: var(--text-muted);
-      line-height: 1.6;
-    }
-
-    .info h3 {
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: var(--text-color);
-      margin-bottom: 0.5rem;
-    }
-
-    .info ul {
-      margin: 0.5rem 0;
-      padding-left: 1.25rem;
-    }
-
-    .info li {
-      margin: 0.25rem 0;
-    }
-
-    .info code {
-      background: var(--btn-bg);
-      padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
-      font-size: 0.75rem;
-    }
-
-    /* Debug section */
-    .debug {
-      background: var(--panel-bg);
-      border-radius: 0.75rem;
-      padding: 1rem;
-      border: 1px solid var(--border-color);
-      margin-top: 1.5rem;
-    }
-
-    .debug h3 {
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: var(--text-color);
-      margin-bottom: 0.5rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .debug p {
-      font-size: 0.8125rem;
-      color: var(--text-muted);
-      line-height: 1.5;
-      margin-bottom: 0.75rem;
-    }
-
-    .debug-grid {
-      display: grid;
-      gap: 0.75rem;
-    }
-
-    .debug-card {
-      border: 1px solid var(--border-color);
-      border-radius: 0.5rem;
-      padding: 0.75rem;
-      background: var(--bg-color);
-    }
-
-    .debug-card {
-      cursor: pointer;
-    }
-
-    .debug-card:focus {
-      outline: 2px solid var(--grid-active);
-      outline-offset: 2px;
-    }
-
-    .debug-title {
-      font-size: 0.8125rem;
-      font-weight: 600;
-      color: var(--text-color);
-      margin-bottom: 0.5rem;
-      display: flex;
-      justify-content: space-between;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
-
-    .debug-meta {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    }
-
-    canvas.debug-canvas {
-      width: 100%;
-      height: 140px;
-      display: block;
-      border-radius: 0.375rem;
-      background: var(--panel-bg);
-    }
-
-    /* Fullscreen debug modal */
-    .dbg-modal {
-      position: fixed;
-      inset: 0;
-      z-index: 9999;
-      display: none;
-      background: var(--panel-bg);
-      touch-action: none;
-    }
-
-    .dbg-modal.open {
-      display: block;
-    }
-
-    .dbg-modal canvas {
-      display: block;
-      width: 100vw;
-      height: 100vh;
-    }
-
-    .dbg-modal .dbg-modal-close {
-      position: fixed;
-      top: 0.75rem;
-      right: 0.75rem;
-      z-index: 10000;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      padding: 0.55rem 0.75rem;
-      border: 1px solid var(--border-color);
-      border-radius: 0.65rem;
-      background: rgba(0, 0, 0, 0.06);
-      color: var(--text-color);
-      cursor: pointer;
-      font-size: 0.9rem;
-      font-weight: 600;
-      touch-action: manipulation;
-      user-select: none;
-      -webkit-tap-highlight-color: transparent;
-      backdrop-filter: blur(6px);
-    }
-
-    [data-theme="dark"] .dbg-modal .dbg-modal-close {
-      background: rgba(255, 255, 255, 0.08);
-    }
-
-    .dbg-modal .dbg-modal-close:hover {
-      background: rgba(0, 0, 0, 0.10);
-    }
-
-    [data-theme="dark"] .dbg-modal .dbg-modal-close:hover {
-      background: rgba(255, 255, 255, 0.12);
-    }
-
-    .dbg-modal .dbg-modal-close:active {
-      transform: scale(0.98);
-    }
-
-    .dbg-modal .dbg-modal-close:focus {
-      outline: 2px solid var(--grid-active);
-      outline-offset: 2px;
-    }
-
-    @media (max-width: 480px) {
-      .tap-grid {
-        font-size: 0.75rem;
-      }
-      .grid-cell {
-        padding: 0.5rem 0.25rem;
-      }
-      .grid-cell.letter {
-        font-size: 1.25rem;
-      }
-      .grid-cell.ck {
-        font-size: 0.95rem;
-      }
-    }
-  </style>
+/* ==========================================================================
+   §1 CSS
+   ========================================================================== */
+:root {
+  --bg: #f3f4f6; --surface: #ffffff; --surface-2: #eceef2; --line: #d6dae1; --text: #14171c; --text-2: #4a5160; --text-3: #6b7383;
+  --accent: #0e6b5c; --accent-soft: #dcf2ec; --on-accent: #ffffff; --send: #1d7a43; --stop: #c62828; --rec: #c62828;
+  --cell-hi: #cde9e2; --cell-on: #0e6b5c; --sel-bg: #b9e3d8; --sel-fg: #14171c;
+  --fs: 17px; --tap: 48px; --r: 8px; --app-h: 100dvh;
+  --safe-t: env(safe-area-inset-top, 0px); --safe-r: env(safe-area-inset-right, 0px); --safe-b: env(safe-area-inset-bottom, 0px); --safe-l: env(safe-area-inset-left, 0px);
+  /* names the unchanged debug canvases read */
+  --panel-bg: var(--surface); --text-muted: var(--text-3); --grid-active: var(--accent); --btn-stop: var(--stop);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --surface: #171a20; --surface-2: #20242c; --line: #2e333d; --text: #eef0f4; --text-2: #b8bfcc; --text-3: #8d95a5;
+    --accent: #4fd1b5; --accent-soft: #123a33; --on-accent: #04201a; --send: #5fd08c; --stop: #ff6b6b; --rec: #ff6b6b; --cell-hi: #1d4a41; --cell-on: #4fd1b5; --sel-bg: #1f5a4e; --sel-fg: #ffffff; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1115; --surface: #171a20; --surface-2: #20242c; --line: #2e333d; --text: #eef0f4; --text-2: #b8bfcc; --text-3: #8d95a5;
+  --accent: #4fd1b5; --accent-soft: #123a33; --on-accent: #04201a; --send: #5fd08c; --stop: #ff6b6b; --rec: #ff6b6b; --cell-hi: #1d4a41; --cell-on: #4fd1b5; --sel-bg: #1f5a4e; --sel-fg: #ffffff; color-scheme: dark;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg); color: var(--text); font: var(--fs)/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; -webkit-text-size-adjust: 100%; }
+button, input, select, textarea { font: inherit; color: inherit; }
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+::selection { background: var(--sel-bg); color: var(--sel-fg); }
+:focus { outline: none; } :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.sr { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+[hidden] { display: none !important; }
+svg.i { width: 1.3em; height: 1.3em; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: .45em; min-height: var(--tap); min-width: var(--tap); padding: 0 1em;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); cursor: pointer; white-space: nowrap; touch-action: manipulation; user-select: none; -webkit-user-select: none; text-decoration: none; color: var(--text); }
+.btn:hover { background: var(--surface-2); } .btn[disabled] { opacity: .45; cursor: default; }
+.btn.icon { padding: 0; width: var(--tap); }
+.btn.ghost { background: transparent; border-color: transparent; } .btn.ghost:hover { background: var(--surface-2); }
+.btn.primary, .btn-send { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 650; }
+.btn-stop:not([disabled]) { border-color: var(--stop); color: var(--stop); font-weight: 650; }
+.btn[aria-pressed="true"], .btn[aria-selected="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 650; }
+.btn-group, .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .bar .grow { flex: 1; }
+
+#app { position: fixed; inset: 0; height: var(--app-h); display: grid; grid-template-rows: auto minmax(0, 1fr); grid-template-columns: minmax(0, 1fr); }
+#top { display: flex; align-items: center; gap: 6px; padding: calc(4px + var(--safe-t)) calc(8px + var(--safe-r)) 4px calc(8px + var(--safe-l)); background: var(--surface); border-bottom: 1px solid var(--line); min-height: 58px; }
+#top > * { flex-shrink: 0; }
+#top .spacer { flex: 1 1 0; min-width: 0; flex-shrink: 1; }
+#top h1 { font-size: 1.08em; font-weight: 750; white-space: nowrap; }
+#top.compact .lbl { display: none; } #top.compact .btn.lab { width: var(--tap); padding: 0; }
+#top.tiny h1 { display: none; }
+#tabs { display: flex; gap: 4px; }
+#views { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.view { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; display: none; }
+.view.on { display: block; }
+.wrap { max-width: 720px; margin: 0 auto; padding: 12px calc(12px + var(--safe-r)) calc(24px + var(--safe-b)) calc(12px + var(--safe-l)); display: flex; flex-direction: column; gap: 12px; }
+.vtitle { display: none; font-size: 1em; color: var(--text-2); font-weight: 650; align-items: center; gap: .5em; }
+@media (min-width: 980px) and (min-aspect-ratio: 5/4) {
+  #views { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .view { display: block !important; } #v-send { border-right: 1px solid var(--line); }
+  #tabs { display: none; } .vtitle { display: flex; }
+}
+.panel, .io-section { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.panel > h2, .io-label { font-size: .8em; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); display: flex; align-items: center; gap: 8px; font-weight: 650; }
+.io-label svg { width: 1.3em; height: 1.3em; }
+textarea { width: 100%; min-height: 6.5em; resize: vertical; padding: .6em .75em; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); line-height: 1.5; }
+textarea:focus, input:focus { border-color: var(--accent); }
+textarea[readonly] { background: var(--surface-2); }
+textarea.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .95em; letter-spacing: .08em; }
+
+/* ---- Polybius grid: highlight (row) and active (cell) are shape + colour ---- */
+.tap-grid { display: grid; grid-template-columns: 2em repeat(5, minmax(0, 1fr)); gap: 4px; max-width: 420px; width: 100%; margin: 0 auto; }
+.grid-header { display: flex; align-items: center; justify-content: center; font-size: .8em; color: var(--text-3); font-weight: 650; font-variant-numeric: tabular-nums; min-height: 1.6em; }
+.grid-cell { display: flex; align-items: center; justify-content: center; aspect-ratio: 1.25; min-height: 40px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); font-weight: 700; font-size: 1.05em; transition: background .12s, transform .12s; }
+.grid-cell.ck { font-size: .85em; }
+.grid-cell.highlight { background: var(--cell-hi); border-color: var(--accent); }
+.grid-cell.active { background: var(--cell-on); border-color: var(--cell-on); color: var(--on-accent); transform: scale(1.06); box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+
+.freq-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.freq-row label { color: var(--text-2); font-size: .92em; }
+.freq-row input { width: 7em; min-height: var(--tap); padding: 0 .7em; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); font-variant-numeric: tabular-nums; }
+.status { display: flex; align-items: center; gap: 10px; color: var(--text-2); font-size: .92em; min-height: 28px; }
+.status-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--text-3); flex: none; }
+.status-dot.sending { background: var(--send); box-shadow: 0 0 0 4px var(--accent-soft); animation: pulse 1s ease-in-out infinite; }
+.status-dot.recording { background: var(--rec); box-shadow: 0 0 0 4px color-mix(in srgb, var(--rec) 25%, transparent); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.tap-viz { min-height: 1.6em; font-family: ui-monospace, Menlo, Consolas, monospace; overflow-wrap: anywhere; color: var(--text-2); }
+.tap-viz:empty { display: none; }
+.tap-viz .tap, .tap-viz span { font-variant-numeric: tabular-nums; }
+
+/* ---- receiver analysis ---- */
+details.debug { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+details.debug > summary { cursor: pointer; min-height: var(--tap); display: flex; align-items: center; gap: 8px; padding: 0 12px; color: var(--text-2); font-weight: 600; }
+details.debug > div { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 10px; }
+details.debug p { color: var(--text-2); font-size: .9em; }
+.debug-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 8px; }
+.debug-card { border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: var(--surface-2); cursor: zoom-in; display: flex; flex-direction: column; gap: 6px; }
+.debug-card:hover { border-color: var(--accent); }
+.debug-title { display: flex; justify-content: space-between; gap: 8px; font-size: .85em; font-weight: 600; }
+.debug-meta { color: var(--text-3); font-weight: 400; font-variant-numeric: tabular-nums; text-align: right; }
+.debug-canvas { width: 100%; height: auto; display: block; border-radius: 6px; background: var(--surface); }
+.dbg-modal { position: fixed; inset: 0; z-index: 1200; display: none; background: var(--bg); padding: calc(8px + var(--safe-t)) calc(8px + var(--safe-r)) calc(8px + var(--safe-b)) calc(8px + var(--safe-l)); }
+.dbg-modal.open { display: flex; flex-direction: column; gap: 8px; }
+.dbg-modal canvas { flex: 1; min-height: 0; width: 100%; border-radius: 8px; touch-action: none; }
+.dbg-modal-close { align-self: flex-start; display: inline-flex; align-items: center; gap: .45em; min-height: var(--tap); padding: 0 1em; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); cursor: pointer; font-weight: 600; }
+
+/* ---- sheets ---- */
+#sheets { position: fixed; inset: 0; z-index: 1000; display: none; height: var(--app-h); }
+#sheets.on { display: block; }
+.backdrop { position: absolute; inset: 0; background: rgba(8,10,14,.55); }
+.sheet { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(640px, calc(100vw - 16px)); max-height: calc(var(--app-h) - 16px);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.35); display: flex; flex-direction: column; overflow: hidden; }
+@media (max-width: 760px) { .sheet { left: 0; right: 0; bottom: 0; top: auto; transform: none; width: auto; border-radius: 14px 14px 0 0; max-height: calc(var(--app-h) - 24px - var(--safe-t)); padding-bottom: var(--safe-b); } }
+.s-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.s-head h2 { flex: 1; font-size: 1.1em; }
+.s-body { overflow-y: auto; overscroll-behavior: contain; padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.s-body h3 { font-size: .8em; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
+.s-body p, .s-body li { color: var(--text-2); } .s-body b, .s-body strong { color: var(--text); }
+.s-body ul { padding-left: 1.3em; display: flex; flex-direction: column; gap: 4px; }
+.s-body code { font-family: ui-monospace, Menlo, Consolas, monospace; background: var(--surface-2); padding: .05em .35em; border-radius: 4px; }
+.sec { display: flex; flex-direction: column; gap: 8px; } .sec + .sec { padding-top: 14px; border-top: 1px solid var(--line); }
+.seg { display: flex; gap: 6px; flex-wrap: wrap; } .seg .btn { flex: 1 1 0; }
+kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 2em; height: 2em; padding: 0 .5em; font: 600 .85em/1 ui-monospace, Menlo, Consolas, monospace; background: var(--surface); border: 1px solid var(--line); border-bottom-width: 3px; border-radius: 7px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+  
+/* ---- themed hover states (filled colours move toward the text colour; disabled never reacts) ---- */
+@media (hover: hover) {
+  .btn.primary:hover:not([disabled]), .btn-send:hover:not([disabled]) { background: color-mix(in srgb, var(--primary-bg, var(--accent)) 82%, var(--text)); border-color: color-mix(in srgb, var(--primary-bg, var(--accent)) 82%, var(--text)); }
+  .btn[aria-pressed="true"]:hover:not([disabled]), .btn[aria-selected="true"]:hover:not([disabled]) { background: color-mix(in srgb, var(--accent-soft) 72%, var(--accent)); }
+  .btn.danger.solid:hover:not([disabled]) { background: color-mix(in srgb, var(--bad) 82%, var(--text)); border-color: color-mix(in srgb, var(--bad) 82%, var(--text)); }
+  .btn.danger:not(.solid):hover:not([disabled]) { background: color-mix(in srgb, var(--bad) 12%, var(--surface)); }
+  .btn:not(.primary):not(.ghost)[disabled]:hover { background: var(--surface); }
+  .btn.ghost[disabled]:hover { background: transparent; }
+  .toast .act:hover { background: color-mix(in srgb, currentColor 18%, transparent); }
+  .btn-stop:hover:not([disabled]) { background: color-mix(in srgb, var(--stop) 12%, var(--surface)); }
+  .dbg-modal-close:hover { background: var(--surface-2); }
+}
+</style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1>
-        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-          <line x1="12" y1="19" x2="12" y2="22"/>
-        </svg>
-        Tap Code
-      </h1>
-      <button class="theme-btn" id="themeBtn" aria-label="Toggle theme">
-        <svg id="systemIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
-          <rect x="3" y="4" width="18" height="12" rx="2" />
-          <path d="M8 20h8" />
-          <path d="M12 16v4" />
-        </svg>
-        <svg id="sunIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="5"/>
-          <line x1="12" y1="1" x2="12" y2="3"/>
-          <line x1="12" y1="21" x2="12" y2="23"/>
-          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
-          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-          <line x1="1" y1="12" x2="3" y2="12"/>
-          <line x1="21" y1="12" x2="23" y2="12"/>
-          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
-          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-        </svg>
-        <svg id="moonIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-        </svg>
-      </button>
-    </header>
-
-    <!-- Tap Code Grid -->
-    <section class="grid-section" aria-label="Tap Code Reference Grid">
-      <div class="section-label">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <rect x="3" y="3" width="7" height="7"/>
-          <rect x="14" y="3" width="7" height="7"/>
-          <rect x="14" y="14" width="7" height="7"/>
-          <rect x="3" y="14" width="7" height="7"/>
-        </svg>
-        Polybius Square (5×5)
-      </div>
-      <div class="tap-grid" id="tapGrid" role="grid" aria-label="Tap code grid">
-        <div class="grid-header"></div>
-        <div class="grid-header">1</div>
-        <div class="grid-header">2</div>
-        <div class="grid-header">3</div>
-        <div class="grid-header">4</div>
-        <div class="grid-header">5</div>
-        
-        <div class="grid-header">1</div>
-        <div class="grid-cell letter" data-pos="1,1">A</div>
-        <div class="grid-cell letter" data-pos="1,2">B</div>
-        <div class="grid-cell letter ck" data-pos="1,3">C/K</div>
-        <div class="grid-cell letter" data-pos="1,4">D</div>
-        <div class="grid-cell letter" data-pos="1,5">E</div>
-        
-        <div class="grid-header">2</div>
-        <div class="grid-cell letter" data-pos="2,1">F</div>
-        <div class="grid-cell letter" data-pos="2,2">G</div>
-        <div class="grid-cell letter" data-pos="2,3">H</div>
-        <div class="grid-cell letter" data-pos="2,4">I</div>
-        <div class="grid-cell letter" data-pos="2,5">J</div>
-        
-        <div class="grid-header">3</div>
-        <div class="grid-cell letter" data-pos="3,1">L</div>
-        <div class="grid-cell letter" data-pos="3,2">M</div>
-        <div class="grid-cell letter" data-pos="3,3">N</div>
-        <div class="grid-cell letter" data-pos="3,4">O</div>
-        <div class="grid-cell letter" data-pos="3,5">P</div>
-        
-        <div class="grid-header">4</div>
-        <div class="grid-cell letter" data-pos="4,1">Q</div>
-        <div class="grid-cell letter" data-pos="4,2">R</div>
-        <div class="grid-cell letter" data-pos="4,3">S</div>
-        <div class="grid-cell letter" data-pos="4,4">T</div>
-        <div class="grid-cell letter" data-pos="4,5">U</div>
-        
-        <div class="grid-header">5</div>
-        <div class="grid-cell letter" data-pos="5,1">V</div>
-        <div class="grid-cell letter" data-pos="5,2">W</div>
-        <div class="grid-cell letter" data-pos="5,3">X</div>
-        <div class="grid-cell letter" data-pos="5,4">Y</div>
-        <div class="grid-cell letter" data-pos="5,5">Z</div>
-      </div>
-    </section>
-
-    <!-- Send Section -->
-    <section class="io-section" aria-label="Send message">
-      <label class="io-label" for="sendInput">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <line x1="22" y1="2" x2="11" y2="13"/>
-          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-        </svg>
-        Message to Send
-      </label>
-      <textarea id="sendInput" placeholder="Type message to send as tap code..." aria-describedby="sendHelp"></textarea>
-      <div class="btn-group">
-        <button class="btn btn-receive" id="encodeBtn" aria-label="Encode message to dot lines">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M4 7h16" />
-            <path d="M4 12h10" />
-            <path d="M4 17h16" />
-            <circle cx="18" cy="12" r="1.5" fill="currentColor" stroke="none" />
-            <circle cx="21" cy="12" r="1.5" fill="currentColor" stroke="none" />
-          </svg>
-          Encode
-        </button>
-        <button class="btn btn-send" id="sendBtn" aria-label="Start sending">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polygon points="5 3 19 12 5 21 5 3"/>
-          </svg>
-          Send
-        </button>
-        <button class="btn btn-stop" id="stopSendBtn" disabled aria-label="Stop sending">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <rect x="6" y="6" width="12" height="12" rx="2"/>
-          </svg>
-          Stop
-        </button>
-      </div>
-
-      <div class="freq-row" aria-label="Transmit tone frequency">
-        <label for="txFreqHz">Tone (Hz)</label>
-        <input id="txFreqHz" type="number" inputmode="numeric" min="200" max="4000" step="10" aria-label="Transmit tone frequency in Hz" />
-        <button class="btn btn-receive" id="txFreqResetBtn" type="button" aria-label="Reset tone frequency">Reset</button>
-      </div>
-
-      <div class="btn-group" aria-label="Export audio">
-        <button class="btn btn-receive" id="exportSendWavBtn" type="button" aria-label="Export current send message as WAV">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="7 10 12 15 17 10"/>
-            <line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          Export WAV
-        </button>
-      </div>
-
-      <label class="io-label" for="encodedDots" style="margin-top: 1rem;">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M4 7h16" />
-          <path d="M4 12h16" />
-          <path d="M4 17h16" />
-        </svg>
-        Encoded (dots, one line per character)
-      </label>
-      <textarea id="encodedDots" class="mono" placeholder="Example:\n•• •••\n• •••••\n\n(blank line = space)" aria-label="Encoded dot lines"></textarea>
-      <div class="btn-group">
-        <button class="btn btn-receive" id="decodeDotsBtn" aria-label="Decode dot lines into received message">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M4 7h16" />
-            <path d="M4 12h10" />
-            <path d="M4 17h16" />
-            <path d="M16 10l4 2-4 2" />
-          </svg>
-          Decode
-        </button>
-        <button class="btn btn-receive" id="copyDotsBtn" aria-label="Copy encoded dot lines to clipboard">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="9" y="9" width="13" height="13" rx="2" />
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-          </svg>
-          Copy
-        </button>
-      </div>
-      <div class="status" id="sendStatus">
-        <span class="status-dot" id="sendDot"></span>
-        <span id="sendStatusText">Ready to send</span>
-      </div>
-      <div class="tap-viz" id="sendViz" aria-live="polite"></div>
-    </section>
-
-    <!-- Receive Section -->
-    <section class="io-section" aria-label="Receive message">
-      <label class="io-label" for="receiveOutput">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-          <polyline points="7 10 12 15 17 10"/>
-          <line x1="12" y1="15" x2="12" y2="3"/>
-        </svg>
-        Received Message
-      </label>
-      <textarea id="receiveOutput" readonly placeholder="Decoded message will appear here..."></textarea>
-      <div class="btn-group">
-        <button class="btn btn-receive" id="receiveBtn" aria-label="Start recording">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="10"/>
-            <circle cx="12" cy="12" r="4" fill="currentColor"/>
-          </svg>
-          Record
-        </button>
-        <button class="btn btn-stop" id="stopReceiveBtn" disabled aria-label="Stop recording and decode">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <rect x="6" y="6" width="12" height="12" rx="2"/>
-          </svg>
-          Stop &amp; Decode
-        </button>
-        <button class="btn btn-receive" id="copyReceivedBtn" aria-label="Copy received message to clipboard">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="9" y="9" width="13" height="13" rx="2" />
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-          </svg>
-          Copy
-        </button>
-      </div>
-
-      <div class="btn-group" aria-label="Audio import and export">
-        <button class="btn btn-receive" id="importAudioBtn" type="button" aria-label="Import audio file and decode">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="17 8 12 3 7 8"/>
-            <line x1="12" y1="3" x2="12" y2="15"/>
-          </svg>
-          Import Audio
-        </button>
-        <input id="importAudioFile" type="file" accept="audio/*,.wav,.mp3,.ogg,.webm" style="display:none" />
-      </div>
-      <div class="status" id="receiveStatus">
-        <span class="status-dot" id="receiveDot"></span>
-        <span id="receiveStatusText">Ready to receive</span>
-      </div>
-    </section>
-
-    <!-- Info Section -->
-    <section class="info" aria-label="How it works">
-      <h3>How Tap Code Works</h3>
-      <p>Each letter is encoded as two numbers: <strong>row</strong> then <strong>column</strong>.</p>
-      <ul>
-        <li><strong>H</strong> = row 2, col 3 → <code>•• •••</code> (2 taps, pause, 3 taps)</li>
-        <li><strong>K</strong> uses <strong>C</strong>'s position (1,3)</li>
-        <li><strong>X</strong> alone can mean a full stop (.)</li>
-      </ul>
-      <p><strong>Timing:</strong> Short pause between row/col. Longer pause between letters. Longest pause between words.</p>
-      <p><strong>Symbols:</strong> Numbers spelled out (ONE, TWO...). Special chars: <code>AMP</code> (&amp;), <code>AT</code> (@), etc.</p>
-      <p><strong>Receiver:</strong> Uses 800Hz tone detection with SNR analysis—works even with low volume tones in noisy environments or with speech.</p>
-    </section>
-
-    <!-- Debug Section -->
-    <section class="debug" aria-label="Receiver debug analysis">
-      <h3>
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M4 19h16" />
-          <path d="M4 15l4-4 4 4 4-8 4 4" />
-        </svg>
-        Debug (Receiver)
-      </h3>
-      <p>Shows the spectrum for each processing step (raw → filtered) and the final envelope used for edge detection.</p>
-
-      <div class="debug-grid">
-        <div class="debug-card" data-debug-open="raw-spectrum" role="button" tabindex="0" aria-label="Open raw mic spectrum fullscreen">
-          <div class="debug-title">
-            <span>Raw mic spectrum</span>
-            <span class="debug-meta" id="dbgRawMeta">—</span>
-          </div>
-          <canvas class="debug-canvas" id="dbgRawSpectrum" width="900" height="200" aria-label="Raw spectrum canvas"></canvas>
-        </div>
-
-        <div class="debug-card" data-debug-open="raw-waterfall" role="button" tabindex="0" aria-label="Open raw waterfall fullscreen">
-          <div class="debug-title">
-            <span>Raw waterfall (sideways)</span>
-            <span class="debug-meta" id="dbgRawWaterMeta">—</span>
-          </div>
-          <canvas class="debug-canvas" id="dbgRawWaterfall" width="900" height="220" aria-label="Raw sideways waterfall canvas"></canvas>
-        </div>
-
-        <div class="debug-card" data-debug-open="filtered-spectrum" role="button" tabindex="0" aria-label="Open filtered spectrum fullscreen">
-          <div class="debug-title">
-            <span>Filtered spectrum (band-pass)</span>
-            <span class="debug-meta" id="dbgFiltMeta">—</span>
-          </div>
-          <canvas class="debug-canvas" id="dbgFilteredSpectrum" width="900" height="200" aria-label="Filtered spectrum canvas"></canvas>
-        </div>
-
-        <div class="debug-card" data-debug-open="filtered-waterfall" role="button" tabindex="0" aria-label="Open filtered waterfall fullscreen">
-          <div class="debug-title">
-            <span>Filtered waterfall (sideways)</span>
-            <span class="debug-meta" id="dbgFiltWaterMeta">—</span>
-          </div>
-          <canvas class="debug-canvas" id="dbgFilteredWaterfall" width="900" height="220" aria-label="Filtered sideways waterfall canvas"></canvas>
-        </div>
-
-        <div class="debug-card" data-debug-open="envelope" role="button" tabindex="0" aria-label="Open envelope and detected taps fullscreen">
-          <div class="debug-title">
-            <span>Envelope + detected taps</span>
-            <span class="debug-meta" id="dbgEnvMeta">—</span>
-          </div>
-          <canvas class="debug-canvas" id="dbgEnvelope" width="900" height="200" aria-label="Envelope canvas"></canvas>
-        </div>
-
-        <div class="debug-card" data-debug-open="time-domain" role="button" tabindex="0" aria-label="Open time-domain level and edges fullscreen">
-          <div class="debug-title">
-            <span>Time-domain level + edges (filtered)</span>
-            <span class="debug-meta" id="dbgTimeMeta">—</span>
-          </div>
-          <canvas class="debug-canvas" id="dbgTimeDomain" width="900" height="220" aria-label="Time-domain debug canvas"></canvas>
-        </div>
-      </div>
-    </section>
-
-    <div class="dbg-modal" id="dbgModal" role="dialog" aria-modal="true" aria-label="Debug fullscreen view">
-      <button class="dbg-modal-close" id="dbgModalCloseBtn" type="button" aria-label="Close fullscreen chart">Close</button>
-      <canvas id="dbgModalCanvas"></canvas>
+<!-- ==========================================================================
+     §2 HTML  (ids are the ones the unchanged engine uses)
+     ========================================================================== -->
+<div id="app">
+  <header id="top">
+    <a class="btn ghost lab" id="games" href="index.html" aria-label="Back to Games"></a>
+    <h1>Tap Code</h1>
+    <div id="tabs" role="tablist" aria-label="Mode">
+      <button class="btn lab" type="button" role="tab" id="tab-send" data-view="send" aria-controls="v-send"></button>
+      <button class="btn lab" type="button" role="tab" id="tab-receive" data-view="receive" aria-controls="v-receive"></button>
     </div>
-  </div>
+    <span class="spacer"></span>
+    <button class="btn icon ghost" type="button" id="help-btn" aria-label="How tap code works"></button>
+    <button class="btn icon ghost" type="button" id="settings-btn" aria-label="Settings"></button>
+  </header>
+  <main id="views">
+    <section class="view" id="v-send" aria-label="Send"><div class="wrap">
+      <h2 class="vtitle" id="send-title"></h2>
+      <section class="panel" aria-label="Tap code grid">
+        <h2 id="grid-h"></h2>
+        <div class="tap-grid" id="tapGrid" role="img" aria-label="Tap code grid: rows 1 to 5, columns 1 to 5. Row 1 A B C/K D E, row 2 F G H I J, row 3 L M N O P, row 4 Q R S T U, row 5 V W X Y Z.">
+          <div class="grid-header"></div><div class="grid-header">1</div><div class="grid-header">2</div><div class="grid-header">3</div><div class="grid-header">4</div><div class="grid-header">5</div>
+          <div class="grid-header">1</div><div class="grid-cell letter" data-pos="1,1">A</div><div class="grid-cell letter" data-pos="1,2">B</div><div class="grid-cell letter ck" data-pos="1,3">C/K</div><div class="grid-cell letter" data-pos="1,4">D</div><div class="grid-cell letter" data-pos="1,5">E</div>
+          <div class="grid-header">2</div><div class="grid-cell letter" data-pos="2,1">F</div><div class="grid-cell letter" data-pos="2,2">G</div><div class="grid-cell letter" data-pos="2,3">H</div><div class="grid-cell letter" data-pos="2,4">I</div><div class="grid-cell letter" data-pos="2,5">J</div>
+          <div class="grid-header">3</div><div class="grid-cell letter" data-pos="3,1">L</div><div class="grid-cell letter" data-pos="3,2">M</div><div class="grid-cell letter" data-pos="3,3">N</div><div class="grid-cell letter" data-pos="3,4">O</div><div class="grid-cell letter" data-pos="3,5">P</div>
+          <div class="grid-header">4</div><div class="grid-cell letter" data-pos="4,1">Q</div><div class="grid-cell letter" data-pos="4,2">R</div><div class="grid-cell letter" data-pos="4,3">S</div><div class="grid-cell letter" data-pos="4,4">T</div><div class="grid-cell letter" data-pos="4,5">U</div>
+          <div class="grid-header">5</div><div class="grid-cell letter" data-pos="5,1">V</div><div class="grid-cell letter" data-pos="5,2">W</div><div class="grid-cell letter" data-pos="5,3">X</div><div class="grid-cell letter" data-pos="5,4">Y</div><div class="grid-cell letter" data-pos="5,5">Z</div>
+        </div>
+      </section>
+      <section class="io-section" aria-label="Send a message">
+        <label class="io-label" for="sendInput" id="send-h"></label>
+        <textarea id="sendInput" placeholder="Type a message to send as tap code…"></textarea>
+        <div class="btn-group">
+          <button class="btn btn-send" type="button" id="sendBtn"></button>
+          <button class="btn btn-stop" type="button" id="stopSendBtn" disabled></button>
+          <button class="btn" type="button" id="encodeBtn"></button>
+          <button class="btn" type="button" id="exportSendWavBtn"></button>
+        </div>
+        <div class="freq-row"><label for="txFreqHz">Tone pitch (Hz)</label><input id="txFreqHz" type="number" inputmode="numeric" min="200" max="4000" step="10"><button class="btn" type="button" id="txFreqResetBtn">Reset</button></div>
+        <div class="status" id="sendStatus"><span class="status-dot" id="sendDot"></span><span id="sendStatusText" aria-live="polite">Ready to send</span></div>
+        <div class="tap-viz" id="sendViz" aria-live="polite"></div>
+      </section>
+      <section class="io-section" aria-label="Dots">
+        <label class="io-label" for="encodedDots" id="dots-h"></label>
+        <textarea id="encodedDots" class="mono" placeholder="One line per letter, e.g.&#10;•• •••&#10;• •••••&#10;&#10;(a blank line is a space)"></textarea>
+        <div class="btn-group">
+          <button class="btn" type="button" id="decodeDotsBtn"></button>
+          <button class="btn" type="button" id="copyDotsBtn"></button>
+        </div>
+      </section>
+    </div></section>
 
-  <script>
+    <section class="view" id="v-receive" aria-label="Receive"><div class="wrap">
+      <h2 class="vtitle" id="recv-title"></h2>
+      <section class="io-section" aria-label="Receive a message">
+        <div class="btn-group">
+          <button class="btn btn-send" type="button" id="receiveBtn"></button>
+          <button class="btn btn-stop" type="button" id="stopReceiveBtn" disabled></button>
+          <button class="btn" type="button" id="importAudioBtn"></button>
+          <input id="importAudioFile" type="file" accept="audio/*,.wav,.mp3,.ogg,.webm" hidden>
+        </div>
+        <div class="status" id="receiveStatus"><span class="status-dot" id="receiveDot"></span><span id="receiveStatusText" aria-live="polite">Ready to receive</span></div>
+        <label class="io-label" for="receiveOutput" id="recv-h"></label>
+        <textarea id="receiveOutput" readonly placeholder="The decoded message appears here."></textarea>
+        <div class="btn-group"><button class="btn" type="button" id="copyReceivedBtn"></button></div>
+      </section>
+      <details class="debug"><summary id="dbg-sum"></summary><div>
+        <p>Each view shows a step of the decoder: the raw sound, the band-pass filtered sound around the tone, and the envelope used to find taps. Tap a view to open it full screen; there you can drag to pick the tone frequency, or (on the envelope) the on/off thresholds, and the recording is decoded again when you close it.</p>
+        <div class="debug-grid">
+          <div class="debug-card" data-debug-open="raw-spectrum" role="button" tabindex="0" aria-label="Open the raw spectrum full screen"><div class="debug-title"><span>Raw spectrum</span><span class="debug-meta" id="dbgRawMeta">—</span></div><canvas class="debug-canvas" id="dbgRawSpectrum" width="900" height="200"></canvas></div>
+          <div class="debug-card" data-debug-open="raw-waterfall" role="button" tabindex="0" aria-label="Open the raw waterfall full screen"><div class="debug-title"><span>Raw waterfall</span><span class="debug-meta" id="dbgRawWaterMeta">—</span></div><canvas class="debug-canvas" id="dbgRawWaterfall" width="900" height="220"></canvas></div>
+          <div class="debug-card" data-debug-open="filtered-spectrum" role="button" tabindex="0" aria-label="Open the filtered spectrum full screen"><div class="debug-title"><span>Filtered spectrum</span><span class="debug-meta" id="dbgFiltMeta">—</span></div><canvas class="debug-canvas" id="dbgFilteredSpectrum" width="900" height="200"></canvas></div>
+          <div class="debug-card" data-debug-open="filtered-waterfall" role="button" tabindex="0" aria-label="Open the filtered waterfall full screen"><div class="debug-title"><span>Filtered waterfall</span><span class="debug-meta" id="dbgFiltWaterMeta">—</span></div><canvas class="debug-canvas" id="dbgFilteredWaterfall" width="900" height="220"></canvas></div>
+          <div class="debug-card" data-debug-open="envelope" role="button" tabindex="0" aria-label="Open the envelope and detected taps full screen"><div class="debug-title"><span>Envelope and taps</span><span class="debug-meta" id="dbgEnvMeta">—</span></div><canvas class="debug-canvas" id="dbgEnvelope" width="900" height="200"></canvas></div>
+          <div class="debug-card" data-debug-open="time-domain" role="button" tabindex="0" aria-label="Open the time-domain level and edges full screen"><div class="debug-title"><span>Level and edges</span><span class="debug-meta" id="dbgTimeMeta">—</span></div><canvas class="debug-canvas" id="dbgTimeDomain" width="900" height="220"></canvas></div>
+        </div>
+      </div></details>
+      <p class="sr">Everything happens on this device; nothing is uploaded.</p>
+    </div></section>
+  </main>
+</div>
+<div class="dbg-modal" id="dbgModal" role="dialog" aria-modal="true" aria-label="Receiver analysis, full screen">
+  <button class="dbg-modal-close" id="dbgModalCloseBtn" type="button" aria-label="Close the full-screen view"></button>
+  <canvas id="dbgModalCanvas"></canvas>
+</div>
+<div id="sheets"><div class="backdrop"></div></div>
+
+<script>
+// =============================================================================
+// §3 ENGINE  -  unchanged (spliced verbatim from the previous version)
+// =============================================================================
     // Tap Code Grid: A-Z without K (C/K share position 1,3)
     const TAP_GRID = [
       ['A', 'B', 'C', 'D', 'E'],  // row 1
@@ -1915,10 +1290,11 @@
 
     function withTempButtonLabel(btn, nextLabel, ms = 900) {
       if (!btn) return;
-      const prev = btn.textContent;
-      btn.textContent = nextLabel;
+      const target = btn.querySelector('.lbl') || btn;   // keep the icon: change only the label text
+      const prev = target.textContent;
+      target.textContent = nextLabel;
       window.setTimeout(() => {
-        btn.textContent = prev;
+        target.textContent = prev;
       }, ms);
     }
 
@@ -3868,60 +3244,143 @@
     stopReceiveBtn.addEventListener('click', stopRecording);
     copyReceivedBtn.addEventListener('click', () => handleCopyButton(copyReceivedBtn, receiveOutput.value));
 
-    // Theme handling
-    const themeBtn = document.getElementById('themeBtn');
-    const systemIcon = document.getElementById('systemIcon');
-    const sunIcon = document.getElementById('sunIcon');
-    const moonIcon = document.getElementById('moonIcon');
-    const STORAGE_KEY = 'idlegames-tapcode-theme';
 
-    function getSystemTheme() {
-      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
+// =============================================================================
+// §4 SHELL
+// =============================================================================
+(() => {
+  const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  function h(tag, attrs = {}, ...kids) {
+    const el = document.createElement(tag);
+    for (const k in attrs) { const v = attrs[k]; if (v == null || v === false) continue;
+      if (k === 'class') el.className = v; else if (k === 'text') el.textContent = v; else if (k === 'html') el.innerHTML = v;
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v); else el.setAttribute(k, v === true ? '' : v); }
+    for (const c of kids.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(c));
+    return el;
+  }
+  const S = (d, cls = 'i') => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${d}</svg>`, p = d => `<path d="${d}"/>`;
+  const ICON = {
+    back: S(p('M15 18l-6-6 6-6')), help: S('<circle cx="12" cy="12" r="9"/>' + p('M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4M12 17h.01')),
+    settings: S(p('M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1') + '<circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>'),
+    send: S(p('M4 12l16-8-6 16-3-7-7-1z')), receive: S('<rect x="9" y="3" width="6" height="11" rx="3"/>' + p('M5 11a7 7 0 0 0 14 0M12 18v3')),
+    play: S(p('M7 4l13 8-13 8z')), stop: S('<rect x="6" y="6" width="12" height="12" rx="2"/>'), rec: S('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/>'),
+    dots: S('<circle cx="6" cy="8" r="1.6" fill="currentColor"/><circle cx="11" cy="8" r="1.6" fill="currentColor"/><circle cx="6" cy="16" r="1.6" fill="currentColor"/><circle cx="11" cy="16" r="1.6" fill="currentColor"/><circle cx="16" cy="16" r="1.6" fill="currentColor"/>'),
+    decode: S(p('M4 7h16M4 12h10M4 17h16M16 10l4 2-4 2')), copy: S('<rect x="9" y="9" width="12" height="12" rx="2"/>' + p('M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1')),
+    save: S(p('M12 3v12M7 10l5 5 5-5M4 21h16')), open: S(p('M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z')),
+    grid: S('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'),
+    text: S(p('M4 6h16M4 12h16M4 18h10')), chart: S(p('M4 19h16M4 15l4-4 4 4 4-8 4 4')),
+    sun: S('<circle cx="12" cy="12" r="4"/>' + p('M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4')),
+    moon: S(p('M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z')), auto: S('<circle cx="12" cy="12" r="9"/>' + p('M12 3a9 9 0 0 1 0 18z')),
+  };
+  const lbl = (icon, text) => `${icon}<span class="lbl">${text}</span>`;
+  const set = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
 
-    function updateThemeIcon(themePref) {
-      systemIcon.style.display = themePref === 'system' ? 'block' : 'none';
-      sunIcon.style.display = themePref === 'light' ? 'block' : 'none';
-      moonIcon.style.display = themePref === 'dark' ? 'block' : 'none';
-      themeBtn.setAttribute('aria-label', `Theme: ${themePref}. Click to change.`);
-    }
+  set('games', lbl(ICON.back, 'Games')); set('help-btn', ICON.help); set('settings-btn', ICON.settings);
+  set('tab-send', lbl(ICON.send, 'Send')); set('tab-receive', lbl(ICON.receive, 'Receive'));
+  set('send-title', ICON.send + 'Send'); set('recv-title', ICON.receive + 'Receive');
+  set('grid-h', ICON.grid + '<span>The square: tap the row, pause, tap the column</span>');
+  set('send-h', ICON.text + '<span>Message to send</span>'); set('dots-h', ICON.dots + '<span>As dots (one line per letter)</span>'); set('recv-h', ICON.text + '<span>Received message</span>');
+  set('sendBtn', lbl(ICON.play, 'Play taps')); set('stopSendBtn', lbl(ICON.stop, 'Stop')); set('encodeBtn', lbl(ICON.dots, 'Write as dots')); set('exportSendWavBtn', lbl(ICON.save, 'Save WAV'));
+  set('decodeDotsBtn', lbl(ICON.decode, 'Read the dots')); set('copyDotsBtn', lbl(ICON.copy, 'Copy'));
+  set('receiveBtn', lbl(ICON.rec, 'Listen')); set('stopReceiveBtn', lbl(ICON.stop, 'Stop and decode')); set('importAudioBtn', lbl(ICON.open, 'Open audio…')); set('copyReceivedBtn', lbl(ICON.copy, 'Copy'));
+  set('dbg-sum', ICON.chart + '<span>Receiver analysis</span>'); set('dbgModalCloseBtn', ICON.back + '<span>Close</span>');
 
-    function applyTheme(themePref) {
-      const effectiveTheme = themePref === 'system' ? getSystemTheme() : themePref;
-      document.documentElement.dataset.theme = effectiveTheme;
-      updateThemeIcon(themePref);
-    }
+  // tabs (phones); both views side by side on wide screens
+  const VIEW = { cur: 'send', show(id) { this.cur = id; $$('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + id)); $$('#tabs [data-view]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.view === id))); } };
+  $$('#tabs [data-view]').forEach(b => b.addEventListener('click', () => VIEW.show(b.dataset.view)));
+  VIEW.show('send');
+  // starting to listen or importing jumps to Receive on phones
+  ['receiveBtn', 'importAudioBtn'].forEach(id => document.getElementById(id).addEventListener('click', () => VIEW.show('receive')));
+  document.getElementById('decodeDotsBtn').addEventListener('click', () => { if (document.getElementById('receiveOutput').value) VIEW.show('receive'); });
 
-    function cycleTheme() {
-      const current = localStorage.getItem(STORAGE_KEY) || 'system';
-      let next;
-      
-      if (current === 'system') {
-        next = 'light';
-      } else if (current === 'light') {
-        next = 'dark';
-      } else {
-        next = 'system';
-      }
-      
-      localStorage.setItem(STORAGE_KEY, next);
-      applyTheme(next);
-    }
+  // ---- sheets: history-backed, Back closes the top one, press quarantine ----
+  const LAYERS = {
+    stack: [],
+    init() {
+      addEventListener('popstate', e => { const d = (e.state && e.state.tcLayer) || 0; while (this.stack.length > d) this._close(); });
+      const st = history.state; if (st && (st.tcLayer > 0 || st.tcDbg)) history.go(-(st.tcLayer || 1));
+      this.downAt = 0; this.downIn = null;
+      document.addEventListener('pointerdown', e => { this.downAt = performance.now(); this.downIn = e.target; }, true);
+      const bd = $('#sheets .backdrop');
+      document.addEventListener('click', e => { const t = this.top(); if (!t || !e.isTrusted || e.detail === 0) return;
+        const began = this.downAt >= t.at && (t.el.contains(this.downIn) || (this.downIn === bd && e.target === bd)); if (!began) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
+      bd.addEventListener('click', () => this.back());
+    },
+    top() { return this.stack[this.stack.length - 1]; },
+    open(title, build) {
+      const el = h('section', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': title }), body = h('div', { class: 's-body' });
+      const head = h('div', { class: 's-head' }, h('button', { class: 'btn icon ghost', type: 'button', 'aria-label': 'Back', html: ICON.back, onclick: () => this.back() }), h('h2', { text: title }));
+      el.append(head, body); $('#sheets').append(el);
+      const layer = { el, at: performance.now(), prev: document.activeElement };
+      this.stack.push(layer); history.pushState({ tcLayer: this.stack.length }, ''); build(body); this.apply();
+      requestAnimationFrame(() => head.querySelector('button').focus({ preventScroll: true }));
+    },
+    back() { if (this.stack.length) history.back(); },
+    _close() { const l = this.stack.pop(); if (!l) return; l.el.remove(); this.apply(); if (l.prev && document.contains(l.prev)) l.prev.focus({ preventScroll: true }); },
+    apply() { const n = this.stack.length; $('#sheets').classList.toggle('on', n > 0); this.stack.forEach((l, i) => { l.el.hidden = i !== n - 1; }); $('#app').inert = n > 0; },
+  };
+  LAYERS.init();
 
-    // Initialize theme
-    const savedTheme = localStorage.getItem(STORAGE_KEY) || 'system';
-    applyTheme(savedTheme);
+  // ---- the analysis view joins browser history: Back closes it through its own close path (which may re-decode) ----
+  const dbg = document.getElementById('dbgModal'); let dbgPushed = false, closingByBack = false;
+  new MutationObserver(() => {
+    const open = dbg.classList.contains('open');
+    $('#app').inert = open || LAYERS.stack.length > 0;
+    if (open && !dbgPushed) { history.pushState({ tcDbg: 1 }, ''); dbgPushed = true; }
+    else if (!open && dbgPushed) { dbgPushed = false; if (!closingByBack) history.back(); closingByBack = false; }
+  }).observe(dbg, { attributes: true, attributeFilter: ['class'] });
+  addEventListener('popstate', () => { if (dbgPushed && dbg.classList.contains('open')) { closingByBack = true; closeDebugModalWithOptionalRedecode(); } });
 
-    // Listen for system theme changes
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-      const current = localStorage.getItem(STORAGE_KEY) || 'system';
-      if (current === 'system') {
-        applyTheme('system');
-      }
+  // ---- theme (unchanged key) ----
+  const THEME_KEY = 'idlegames-tapcode-theme';
+  const THEME = {
+    get() { try { const t = localStorage.getItem(THEME_KEY); return t === 'light' || t === 'dark' ? t : 'system'; } catch (e) { return 'system'; } },
+    set(t) { try { localStorage.setItem(THEME_KEY, t); } catch (e) { /* ignore */ } this.apply(); },
+    apply() { document.documentElement.dataset.theme = this.get(); const m = $('meta[name="theme-color"]'); if (m) m.content = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim(); if (dbg.classList.contains('open')) renderModal(); },
+  };
+  THEME.apply(); matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => THEME.apply());
+
+  function openSettings() {
+    LAYERS.open('Settings', b => {
+      const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Theme' }), paint = () => $$('button', seg).forEach(x => x.setAttribute('aria-pressed', String(x.dataset.t === THEME.get())));
+      for (const [t, ic, l] of [['system', ICON.auto, 'Automatic'], ['light', ICON.sun, 'Light'], ['dark', ICON.moon, 'Dark']]) seg.append(h('button', { class: 'btn', type: 'button', 'data-t': t, html: lbl(ic, l), onclick: () => { THEME.set(t); paint(); } }));
+      paint(); b.append(h('div', { class: 'sec' }, h('h3', { text: 'Theme' }), seg));
     });
+  }
+  function openHelp() {
+    LAYERS.open('How tap code works', b => b.append(
+      h('div', { class: 'sec' },
+        h('p', { html: 'Each letter is two numbers from the square: its <b>row</b>, then its <b>column</b>. Tap the row, pause briefly, tap the column.' }),
+        h('ul', {},
+          h('li', { html: '<b>H</b> is row 2, column 3: <code>•• •••</code> (two taps, pause, three taps).' }),
+          h('li', { html: '<b>K</b> shares <b>C</b>’s square (row 1, column 3).' }),
+          h('li', { html: 'A lone <b>X</b> can stand for a full stop.' }),
+          h('li', { html: 'A short pause separates row and column, a longer one separates letters, and the longest separates words.' }),
+          h('li', { html: 'Numbers are spelled out (ONE, TWO…), and some symbols become words, such as <code>AMP</code> for &amp; and <code>AT</code> for @.' }))),
+      h('div', { class: 'sec' }, h('h3', { text: 'Sending and receiving' }),
+        h('ul', {},
+          h('li', { html: '<b>Play taps</b> beeps the message at the tone pitch you choose, lighting up the square as it goes. <b>Save WAV</b> keeps it as a sound file.' }),
+          h('li', { html: '<b>Listen</b> records from the microphone; <b>Stop and decode</b> reads the taps. You can also open an audio file.' }),
+          h('li', { html: 'The receiver looks for the tone and its rhythm, so it copes with quiet tones, background noise and speech. Use the same pitch on both sides for the best results.' }),
+          h('li', { html: '<b>Write as dots</b> turns a message into dot lines you can copy anywhere; <b>Read the dots</b> turns them back into text.' }))),
+      h('div', { class: 'sec' }, h('h3', { text: 'Keyboard' }), h('p', { html: '<kbd>?</kbd> this help · <kbd>Esc</kbd> close a panel or the full-screen analysis. In the tone box, <kbd>Enter</kbd> applies the pitch.' })),
+      h('p', { class: 'small', text: 'Everything happens on this device; nothing is uploaded.' })));
+  }
+  document.getElementById('help-btn').addEventListener('click', openHelp);
+  document.getElementById('settings-btn').addEventListener('click', openSettings);
+  const KEYS = {};
+  addEventListener('keydown', e => { if (!e.repeat) KEYS[e.key] = LAYERS.stack.length; });
+  addEventListener('keyup', e => { const same = KEYS[e.key] === LAYERS.stack.length; delete KEYS[e.key]; if (!same) return;
+    if (e.key === 'Escape' && LAYERS.stack.length) { LAYERS.back(); return; }
+    if (!LAYERS.stack.length && !dbg.classList.contains('open') && e.key === '?' && !(e.target.closest && e.target.closest('input,textarea'))) openHelp(); });
 
-    themeBtn.addEventListener('click', cycleTheme);
-  </script>
-  <script src="parental.js" defer></script>
+  // ---- frame ----
+  function fitTop() { const t = $('#top'), sp = $('.spacer', t), over = () => t.scrollWidth > t.clientWidth || sp.getBoundingClientRect().width < 8; t.classList.remove('compact', 'tiny'); for (const c of ['compact', 'tiny']) if (over()) t.classList.add(c); }
+  function setVH() { const vv = window.visualViewport; document.documentElement.style.setProperty('--app-h', `${Math.round(vv ? vv.height : innerHeight)}px`); }
+  setVH(); if (window.visualViewport) visualViewport.addEventListener('resize', setVH); else addEventListener('resize', setVH);
+  new ResizeObserver(fitTop).observe($('#top')); fitTop();
+})();
+</script>
+<script src="parental.js" defer></script>
 </body>
 </html>
