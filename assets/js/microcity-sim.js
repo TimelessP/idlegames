@@ -102,7 +102,7 @@ export const VT = {
   ute:       { len: 5.3, wid: 1.95, h: 1.8, aMax: 2.0, bComf: 2.4, bMax: 7.0, v0: 0.95 },
   police:    { len: 4.9, wid: 1.9, h: 1.5, aMax: 2.9, bComf: 3.0, bMax: 8.4, v0: 1.05 },
   ambulance: { len: 6.4, wid: 2.25, h: 2.7, aMax: 2.2, bComf: 2.6, bMax: 7.2, v0: 1.0 },
-  fire:      { len: 9.4, wid: 2.5, h: 3.1, aMax: 1.6, bComf: 2.2, bMax: 6.0, v0: 0.92 },
+  fire:      { len: 9.4, wid: 2.5, h: 3.1, aMax: 2.1, bComf: 2.4, bMax: 6.4, v0: 0.98 },
   bus:       { len: 12, wid: 2.55, h: 3.1, aMax: 1.2, bComf: 1.8, bMax: 5.8, v0: 0.85 },
   tow:       { len: 6.6, wid: 2.3, h: 2.4, aMax: 1.8, bComf: 2.4, bMax: 6.6, v0: 0.95 },
   garbage:   { len: 8.6, wid: 2.5, h: 3.2, aMax: 1.3, bComf: 2.0, bMax: 5.8, v0: 0.75 },
@@ -2104,7 +2104,7 @@ function startFire(C, bl) {
   inc.step = (C, dt) => {
     const f = bl.fire; f.t += dt;
     if (f.stage !== 'out') {
-      const grow = f.hoses ? -0.015 * f.hoses : 0.0035;
+      const grow = f.hoses ? -0.015 * f.hoses : (f.k < 0.35 ? 0.0022 : 0.003);
       f.k = clamp(f.k + grow * dt, 0, 1.2);
       if (f.k > 0.32 && f.stage === 'smoke') f.stage = 'burning';
       if (f.stage === 'burning' && R.chance(dt * 0.05 * f.k) && f.rooms.size < bl.rooms.length) {
@@ -2237,7 +2237,9 @@ function parkSomewhere(C, v) {
 }
 function requestTow(C, car, dest) {
   const inc = newIncident(C, 'tow', `Tow truck called for a ${car.type === 'car' ? 'car' : car.type}`, car.x, car.y, car);
-  inc.car = car; inc.wait = 0; car.towWanted = true; car.task = 'Waiting for the tow truck';
+  inc.car = car; inc.wait = 0; car.towWanted = true;
+  if (!car.kerbE && car.mode !== 'parked') { if (car.mode !== 'crashed') { if (car.driver) { const d = car.driver; car.driver = null; alight(C, d); d.busy = null; think(C, d); } car.mode = 'crashed'; car.lights.haz = true; } pushToKerb(C, car); }
+  car.task = 'Waiting for the tow truck';
   inc.step = (C, dt) => {
     if (inc.v) return; inc.wait += dt;
     const d = dispatch(C, inc, 'tow', 1, (v, crew) => {
@@ -2942,8 +2944,22 @@ function stepVehicle(C, v, dt) {
   if (v.mode === 'drive' && v.v < 0.1 && !v.lights.siren) {
     const atRed = v.seg.kind === 'lane' && v.mv && v.mv.node.kind === 'signal' && sigState(v.mv.node, v.mv.axis) !== 'G';
     v.stuckT += atRed ? 0 : dt;
-    if (v.stuckT > (inView(C, v.x, v.y) ? 240 : 80)) rescue(C, v);
+    if (inView(C, v.x, v.y)) { if (v.stuckT > 45) reroute(C, v); }
+    else if (v.stuckT > 80) rescue(C, v);
   } else if (v.v > 0.5) v.stuckT = 0;
+}
+// stuck in view: pick another way to the same goal, or any way on from this junction
+function reroute(C, v) {
+  v.stuckT = 0; v.reroutes = (v.reroutes || 0) + 1;
+  if (v.seg.kind !== 'lane') return;
+  const e = v.seg.edge, g = v.goal;
+  const alts = v.seg.moves.filter(m => m !== v.mv && !m.outLane.edge.closed);
+  if (v.passing) endPass(C, v);
+  if (v.admit) { v.admit.node.committed.delete(v); v.admit = null; }
+  if (g && g.e === e && g.s > v.s) { v.blockT = 3; return; }          // goal is just ahead: keep trying to get round
+  const mv = alts.length ? C.R.pick(alts) : null; if (!mv) return;
+  const next = mv.outLane.edge, r = g ? (next === g.e ? [] : routeEdges(C, next, g.e, { jitter: v.seed + v.reroutes * 13 })) : [];
+  v.route = [next, ...(r || [])]; v.mv = null; planLane(C, v);
 }
 function rescue(C, v) {
   v.stuckT = 0; C.stats.rescues++; if (C.opts.onRescue) C.opts.onRescue(v, C);
@@ -2977,7 +2993,7 @@ function spawners(C) {
     const cands = C.people.filter(p => p.state === 'in' && !p.busy && !p.special && p.bld && p.bld !== C.hospital && p.bld.type !== 'stadium' && !p.bld.fire);
     if (cands.length) { const pt = R.pick(cands); startMedical(C, pt, doorPt(pt.bld)); }
   }
-  if (!n('fire') && R.chance(0.0007)) {
+  if (!n('fire') && R.chance(0.0011)) {
     const bs = C.buildings.filter(b => b.rooms.length > 2 && !b.fire && !['police', 'fire', 'hospital', 'stadium', 'datacentre', 'substation'].includes(b.type));
     if (bs.length) startFire(C, R.pick(bs));
   }

@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash } from '../assets/js/microcity-sim.js';
+import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash, _requestTow } from '../assets/js/microcity-sim.js';
 
 const run = (C, seconds, dt = 1 / 30) => { for (let t = 0; t < seconds; t += dt) { C.step(dt); C.cues.length = 0; } };
 
@@ -101,5 +101,19 @@ test('after a crash everyone goes back to normal: police stand down, the wreck i
   for (const p of C.people) if (p.busy && p.busy.active === false && p.state === 'act') assert.fail(`${p.name} stuck at a finished incident (${p.task})`);
   const tows = C.vehicles.filter(v => v.type === 'tow');
   for (const t of tows) assert.ok(t.mode === 'parked' && t.bay === t.homeBay || t.job, `tow ${t.id} is ${t.mode}: ${t.task}`);
+  assert.ok(!rescued.includes('tow'), 'tow truck had to be rescued');
+});
+
+test('a tow for a car left standing in the lane: it is moved to the kerb and the tow truck drives all the way there', () => {
+  const rescued = [];
+  const C = createCity({ seed: 20261128, startHour: 10, onRescue: v => rescued.push(v.type) });
+  run(C, 90);
+  const car = C.vehicles.find(v => v.type === 'car' && v.mode === 'drive' && v.seg.kind === 'lane' && v.s > 12 && v.s < v.seg.length - 20);
+  assert.ok(car, 'need a car on the road');
+  car.mode = 'stopped'; car.lights.haz = true;
+  _requestTow(C, car, 'scrap');
+  assert.ok(car.kerbE, 'car was pushed to the kerb');
+  for (let t = 0; t < 900 && car.mode !== 'gone'; t += 5) run(C, 5);
+  assert.equal(car.mode, 'gone', 'car was towed away and crushed');
   assert.ok(!rescued.includes('tow'), 'tow truck had to be rescued');
 });
