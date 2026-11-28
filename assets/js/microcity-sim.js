@@ -1860,16 +1860,18 @@ export function busPlan(C, a, b) {
   return best;
 }
 function busTrip(C, p, bt, to, finish) {
+  const task = p.task || 'Heading across town';
   walkTo(C, p, bt.sa.spot, q => {
     q.state = 'wait'; q.waitStop = bt.sa; q.alightAt = bt.sb; q.busRoute = bt.r; q.pose = 'stand'; q.until = C.time + 90; bt.sa.waiting.push(q);
-    q.task = `Waiting for the ${bt.r.name} bus`; q.afterBus = () => walkTo(C, q, to, finish);
+    const onward = /\bbus\b/i.test(task) ? 'Hopped off the bus, strolling on' : task;   // what they're doing once off the bus
+    q.task = `Waiting for the ${bt.r.name} bus`; q.afterBus = () => walkTo(C, q, to, finish, onward);
     q.x = q.bx = bt.sa.spot.x + C.R.range(-2, 2); q.y = q.by = bt.sa.spot.y + C.R.range(-0.6, 0.6);
   }, p.task);
 }
 function stepWait(C, p, dt) {
   p.phase += dt;
   if (p.waitStop && C.time > p.until) { // gave up on the bus
-    const st = p.waitStop; st.waiting.splice(st.waiting.indexOf(p), 1); p.waitStop = null; const f = p.afterBus; p.afterBus = null; f && f();
+    const st = p.waitStop; st.waiting.splice(st.waiting.indexOf(p), 1); p.waitStop = null; p.alightAt = null; p.busRoute = null; const f = p.afterBus; p.afterBus = null; f && f(); p.task = 'Gave up on the bus, walking instead';
   }
 }
 // tiny scheduler (real seconds)
@@ -2750,7 +2752,10 @@ function busRun(C, bus) {
     let boarded = 0;
     for (const p of on) {
       st.waiting.splice(st.waiting.indexOf(p), 1); p.waitStop = null; p.state = 'walk';
-      walkPath(C, p, [{ x: p.x, y: p.y }, vehicleDoor(C, bus, -1)], q => { boardVehicle(C, q, bus); boarded++; q.task = `Riding the ${r.name} bus`; });
+      walkPath(C, p, [{ x: p.x, y: p.y }, vehicleDoor(C, bus, -1)], q => {
+        if (!bus.doorOpen || Math.hypot(bus.x - q.x, bus.y - q.y) > bus.len) { q.state = 'wait'; q.waitStop = st; q.pose = 'stand'; q.until = C.time + 90; st.waiting.push(q); q.task = `Waiting for the next ${r.name} bus`; return; }   // missed it
+        boardVehicle(C, q, bus); boarded++; q.task = `Riding the ${r.name} bus`;
+      });
     }
     const t0 = C.tReal;
     const wait = () => { if ((boarded >= on.length && C.tReal - t0 > 4 + off.length) || C.tReal - t0 > 22) { bus.doorOpen = false; C.cue('busdoor', bus.x, bus.y, 0.5); setTimeout0(C, 1, next); } else setTimeout0(C, 0.5, wait); };
@@ -2961,7 +2966,7 @@ function wandererThink(C, p) {
   add(fire ? 3 : 0, () => standAt(C, p, sidewalkNear(C, fire.bl.door.x + R.range(-10, 10), fire.bl.door.y + (fire.bl.facing === 'S' ? 20 : -20)), R.range(10, 20), 'look', 'Watching the firefighters'));
   add(2.5, () => { // ride a bus somewhere just for the view
     const dests = C.stops.filter(s => s.spot); const st = R.pick(dests); if (!st) return benchSit(C, p, 10);
-    travel(C, p, { pt: st.spot }, q => think(C, q), 'Riding the bus around town');
+    travel(C, p, { pt: st.spot }, q => think(C, q), 'Off for a bus ride around town');
   });
   add(1.5, () => { const t = C.vehicles.find(v => v.type === 'taxi' && !v.job && v.mode === 'drive'); const b = R.pick(C.buildings.filter(b => b.cat)); if (!t || !b) return cafeVisit(C, p); taxiTrip(C, p, t, { bld: b }, doorPt(b), q => { enterBuilding(C, q, b, 'visit'); q.task = `Popping into ${b.label}`; stay(C, q, R.range(10, 25)); }); });
   R.weighted(L)();

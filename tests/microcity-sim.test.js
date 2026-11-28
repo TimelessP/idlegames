@@ -196,3 +196,18 @@ test('vehicles pulling out from the kerb, a car park or a garage never overlap a
     assert.deepEqual([...new Set(hits)], [], `seed ${seed}`);
   }
 });
+
+test('people who get off a bus no longer say they are riding it', () => {
+  const C = createCity({ seed: 1, startHour: 8 });
+  const prev = new Map(); let off = 0; const wrong = new Set();
+  for (let t = 0; t < 400; t += 1 / 30) {
+    C.step(1 / 30); C.cues.length = 0;
+    for (const p of C.people) {
+      if (prev.get(p) === 'ride' && p.state !== 'ride') off++;
+      if (p.state !== 'ride' && /^Riding/.test(p.task || '')) wrong.add(`${p.first} (${p.state}): ${p.task}`);
+      prev.set(p, p.state);
+    }
+  }
+  assert.ok(off > 10, `only ${off} people got off a vehicle`);
+  assert.deepEqual([...wrong], []);
+});
