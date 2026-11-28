@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire } from '../assets/js/microcity-sim.js';
+import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash } from '../assets/js/microcity-sim.js';
 
 const run = (C, seconds, dt = 1 / 30) => { for (let t = 0; t < seconds; t += dt) { C.step(dt); C.cues.length = 0; } };
 
@@ -79,4 +79,27 @@ test('a building fire is fought and put out', () => {
   let out = false;
   for (let t = 0; t < 900 && !out; t += 5) { run(C, 5); out = !b.fire || b.fire.stage === 'out'; }
   assert.ok(out, 'fire still burning after 15 minutes');
+});
+
+test('after a crash everyone goes back to normal: police stand down, the wreck is towed and crushed, the tow truck parks at home', () => {
+  const rescued = [];
+  const C = createCity({ seed: 7, startHour: 10, onRescue: v => rescued.push(v.type) });
+  run(C, 60);
+  run(C, 60);
+  const cars = C.vehicles.filter(v => v.type === 'car' && v.mode === 'drive' && v.seg.kind === 'lane' && v.s > 10 && v.s < v.seg.length - 18);
+  assert.ok(cars.length >= 2, 'need two cars on the road');
+  const [a, b] = cars;
+  _crash(C, a, b, 9);
+  const inc = C.incidents.find(i => i.kind === 'crash');
+  assert.ok(inc, 'crash incident opened');
+  let towed = false;
+  for (let t = 0; t < 900 && !towed; t += 5) { run(C, 5); towed = a.mode === 'gone' && b.mode === 'gone'; }
+  assert.ok(!inc.active, 'crash scene was cleared');
+  assert.ok(towed, `wrecks still ${a.mode}/${b.mode}`);
+  run(C, 120);
+  for (const v of C.vehicles) if (v.job && v.job.active === false) assert.notEqual(v.mode, 'stopped', `${v.type} ${v.id} left waiting on a finished incident (${v.task})`);
+  for (const p of C.people) if (p.busy && p.busy.active === false && p.state === 'act') assert.fail(`${p.name} stuck at a finished incident (${p.task})`);
+  const tows = C.vehicles.filter(v => v.type === 'tow');
+  for (const t of tows) assert.ok(t.mode === 'parked' && t.bay === t.homeBay || t.job, `tow ${t.id} is ${t.mode}: ${t.task}`);
+  assert.ok(!rescued.includes('tow'), 'tow truck had to be rescued');
 });

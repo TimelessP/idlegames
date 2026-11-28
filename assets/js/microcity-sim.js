@@ -1302,7 +1302,23 @@ function nearestLane(C, x, y) {
 function driveTo(C, v, target, done) {
   v.target = target; v.onArrive = done;
   if (target.bay) { if (target.bay.res && target.bay.res !== v) { target.bay = null; } else target.bay.res = v; }
+  if (target.bay && target.bay === v.bay && v.mode === 'parked') { v.target = null; done && done(v); return; }
+  if (target.bay && target.bay.lot && v.mode === 'parked' && v.bay && v.bay.lot === target.bay.lot) { moveWithinLot(C, v, target.bay, done); return; }
   depart(C, v, () => headFor(C, v));
+}
+// from one bay to another in the same car park, following the one-way loop (round again if it is behind us)
+function moveWithinLot(C, v, tb, done) {
+  const bay = v.bay, lot = bay.lot;
+  const park = () => startTrack(C, v, tb.inTrack, 0, tb.inTrack.length, { blocks: { seg: lot.loop, s0: tb.loopS - 6, s1: tb.loopS + 2 } }, () => { parkAt(C, v, tb); v.target = null; done && done(v); });
+  startTrack(C, v, bay.outTrack, 0, bay.outTrack.length, { wait: () => lot.loop.occ.some(u => u.s > bay.loopS - 14 && u.s < bay.loopS + 5) }, () => {
+    freeBay(v);
+    if (tb.inS0 > bay.outS + 1.5) startTrack(C, v, lot.loop, bay.outS, tb.inS0, { shared: true }, park);
+    else startTrack(C, v, lot.loop, bay.outS, lot.loop.length, { shared: true }, () => {
+      const j = lot.outTrack.join;   // behind us on the loop: out to the street and straight back in
+      startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => !laneClearFor(C, j.lane, j.s, 10) }, () => { joinLane(C, v, j.lane, j.s); headFor(C, v); });
+    });
+  });
+  v.tBlocks = { seg: lot.loop, s0: bay.loopS - 6, s1: bay.loopS + 3 };
 }
 function headFor(C, v) {
   const t = v.target, done = v.onArrive;
@@ -1416,6 +1432,7 @@ function crash(C, a, b, rv) {
   onCrash(C, a, b, rv);
 }
 function stepCrashed(C, v, dt) {
+  if (v.slide && typeof v.slide === 'object') { const sl = v.slide; sl.t = Math.min(1, sl.t + dt / sl.dur); const k = sl.t * sl.t * (3 - 2 * sl.t); v.x = lerp(sl.x0, sl.x1, k); v.y = lerp(sl.y0, sl.y1, k); v.hd = sl.h0 + angDiff(sl.h0, sl.h1) * k; if (sl.t >= 1) v.slide = 0; v.v = 0; return; }
   if (v.slide > 0) { v.slide = Math.max(0, v.slide - 9 * dt); v.x += Math.cos(v.hd) * v.slide * dt; v.y += Math.sin(v.hd) * v.slide * dt; v.hd += v.spin * dt * 2; }
   v.v = 0;
 }
@@ -1941,14 +1958,16 @@ function dispatch(C, inc, type, nCrew, onReady, o = {}) {
   const cands = freeVehicle(C, type, !o.calm); if (!cands.length) return null;
   const v = o.near ? cands.sort((a, b) => Math.hypot(a.x - o.near.x, a.y - o.near.y) - Math.hypot(b.x - o.near.x, b.y - o.near.y))[0] : cands[0];
   if (v.job && v.job.kind === 'patrol') { // divert a patrol car: the crew is already aboard
-    v.job = inc; for (const p of v.crew) { p.busy = inc; p.task = o.task || 'Responding to a call'; }
+    v.job = inc; v.unitCrew = v.crew.slice(); (inc.units || (inc.units = [])).push(v);
+    for (const p of v.crew) { p.busy = inc; p.task = o.task || 'Responding to a call'; }
     v.target = null; v.goal = null; v.onArrive = null; setTimeout0(C, 0.2, () => onReady(v, v.crew.slice()));
     return { v, crew: v.crew.slice() };
   }
   const st = homeFor(C, type);
   let crew = staffIn(C, st, ROLE_FOR[type]).slice(0, nCrew);
   if (!crew.length) return null;
-  v.job = inc; for (const p of crew) { p.busy = inc; p.task = o.task || 'Responding to a call'; }
+  v.job = inc; v.unitCrew = crew.slice(); (inc.units || (inc.units = [])).push(v);
+  for (const p of crew) { p.busy = inc; p.task = o.task || 'Responding to a call'; }
   if (type === 'fire') C.cue('bell', st.door.x, st.door.y, 1);
   let n = 0;
   crew.forEach((p, i) => {
@@ -1969,6 +1988,22 @@ function releaseCrew(C, v, inc) {
   v.job = null; v.lights.siren = null; v.lights.beacon = false; v.task = 'Parked at base';
   if (inc) endIncident(C, inc);
 }
+// wait until a vehicle is not halfway through a manoeuvre before giving it new orders
+function whenSettled(C, v, fn) { if (v.mode === 'track') setTimeout0(C, 0.5, () => whenSettled(C, v, fn)); else fn(); }
+// end a unit's part in an incident: crew who are out walk back and get in, then the vehicle goes home
+function standDown(C, v, inc) {
+  if (!v || v.mode === 'gone' || v.standingDown) return;
+  v.standingDown = true; v.lights.siren = null; v.lights.beacon = false;
+  const crew = (v.unitCrew || []).filter(p => p.vehicle !== v && p.state !== 'gone' && p.state !== 'in');
+  const go = () => whenSettled(C, v, () => { v.standingDown = false; v.lights.haz = false; if (v.mode === 'crashed') return; returnToBase(C, v, null); });
+  if (!crew.length) { go(); return; }
+  let n = 0;
+  crew.forEach((p, i) => {
+    p.carry = null; p.next = null; p.hoseFrom = null; p.aim = null; p.lookAt = null; p.spd = p.spdBase; p.busy = inc || p.busy;
+    walkTo(C, p, vehicleDoor(C, v, i % 2 ? -1 : 1), q => { boardVehicle(C, q, v); if (++n === crew.length) go(); }, 'Heading back to the vehicle');
+  });
+}
+function standDownAll(C, inc) { for (const v of inc.units || []) if (v.job === inc) standDown(C, v, inc); }
 function returnToBase(C, v, inc) {
   v.lights.siren = null; v.lights.haz = false; v.task = 'Returning to base';
   v.lights.beacon = false;
@@ -2095,6 +2130,7 @@ function startFire(C, bl) {
     if (d) { inc.engines.push(d.v); if (inc.phase === 'dispatch') inc.phase = 'enroute'; }
   };
   const onScene = (v, crew) => {
+    if (!bl.fire || bl.fire.stage === 'out' || inc.phase === 'packing' || inc.phase === 'gone') { standDown(C, v, inc); return; }
     inc.phase = 'fighting'; v.lights.siren = null; v.lights.beacon = true; v.lights.haz = true; v.task = 'Fighting the fire';
     crew.forEach((p, i) => {
       alight(C, p, i % 2 ? -1 : 1);
@@ -2115,13 +2151,8 @@ function startFire(C, bl) {
   const packUp = () => {
     inc.phase = 'packing';
     setTimeout0(C, 12, () => {
-      for (const v of inc.engines) {
-        const crew = C.people.filter(p => p.busy === inc && p.role === 'firefighter');
-        let n = 0; const mine = crew.filter(p => p.hoseFrom === v || !p.hoseFrom);
-        if (!mine.length) { returnToBase(C, v, null); continue; }
-        for (const p of mine) { p.carry = null; p.hoseFrom = null; walkTo(C, p, vehicleDoor(C, v, (n % 2) ? -1 : 1), q => { boardVehicle(C, q, v); if (++n === mine.length) { v.lights.beacon = false; v.lights.haz = false; returnToBase(C, v, null); } }, 'Packing up the hoses'); }
-      }
-      bl.fire.hoses = 0;
+      if (bl.fire) bl.fire.hoses = 0;
+      standDownAll(C, inc);
       for (const p of inc.watchers) if (p.busy === inc) { p.busy = null; p.lookAt = null; think(C, p); }
       inc.phase = 'gone';
     });
@@ -2155,29 +2186,49 @@ function onCrash(C, a, b, rv) {
     const e = curEdge(a) || curEdge(b);
     const tgt = e ? { kerb: true, e, s: clamp((a.seg && a.seg.kind === 'lane' ? a.s : 10) - 14, 4, e.len - 14) } : kerbNear(C, x, y);
     driveTo(C, v, tgt, () => {
+      if (!inc.active) { standDown(C, v, inc); return; }            // the scene was cleared while we were on the way
       v.lights.siren = null; v.lights.beacon = true; v.lights.haz = true; v.task = 'At the crash scene';
-      const o = crew[0]; alight(C, o, 1); o.task = 'Taking statements';
-      walkTo(C, o, sidewalkNear(C, x, y), q => { q.state = 'act'; q.pose = 'notes'; q.until = Infinity; q.lookAt = { x, y }; setTimeout0(C, C.R.range(25, 45), () => resolve(v, o)); }, 'Walking over to the crash');
+      const o = crew[0]; alight(C, o, 1);
+      walkTo(C, o, sidewalkNear(C, x, y), q => {
+        if (!inc.active) { standDown(C, v, inc); return; }
+        q.state = 'act'; q.pose = 'notes'; q.until = Infinity; q.lookAt = { x, y }; q.task = 'Taking statements at the crash';
+        setTimeout0(C, C.R.range(25, 45), () => close());
+      }, 'Walking over to the crash');
     });
   }, { near: { x, y } });
-  if (!d) setTimeout0(C, 50, () => resolve(null, null));
-  setTimeout0(C, 160, () => { if (inc.active) resolve(inc.police || null, inc.police && inc.police.crew.length === 0 ? C.people.find(p => p.busy === inc && p.role === 'police') : null); });
-  const resolve = (pv, officer) => {
+  if (!d) setTimeout0(C, 50, () => close());
+  setTimeout0(C, 160, () => close());                                // nobody could get here in time: clear it anyway
+  const close = () => {
     if (!inc.active) return; inc.active = false;
     for (const car of inc.cars) {
       const dr = inc.people.find(p => p.car === car || p.vehicle === car || p === car.driver) || inc.people[inc.cars.indexOf(car)];
-      if (car.damage > 7 || inc.rv > 7) { requestTow(C, car, 'scrap'); if (dr) { dr.busy = null; if (dr.car === car) dr.car = null; dr.bubble = { t: '…', ttl: 3 }; think(C, dr); } }
+      if (car.damage > 7 || inc.rv > 7) { pushToKerb(C, car); requestTow(C, car, 'scrap'); if (dr) { dr.busy = null; dr.lookAt = null; if (dr.car === car) dr.car = null; dr.bubble = { t: '…', ttl: 3 }; think(C, dr); } }
       else if (dr) {
         walkTo(C, dr, vehicleDoor(C, car), q => {
-          q.busy = null; boardVehicle(C, q, car); car.driver = q; car.mode = 'drive'; car.crashInc = null; car.lights.haz = false; car.task = 'Driving on, a little dented';
+          q.busy = null; q.lookAt = null; boardVehicle(C, q, car); car.driver = q; car.mode = 'drive'; car.crashInc = null; car.lights.haz = false; car.task = 'Driving on, a little dented';
           if (!car.seg || car.seg.kind !== 'lane') { const ln = nearestLane(C, car.x, car.y); joinLane(C, car, ln.lane, ln.s); }
           if (car.target) headFor(C, car); else parkSomewhere(C, car);
         }, 'Back to the car');
       } else { car.mode = 'drive'; car.lights.haz = false; parkSomewhere(C, car); }
     }
-    if (officer && pv) walkTo(C, officer, vehicleDoor(C, pv), q => { boardVehicle(C, q, pv); pv.lights.beacon = false; returnToBase(C, pv, null); }, 'Heading back to the car');
+    for (const p of inc.people) if (p.busy === inc && !inc.cars.some(c => c.driver === p)) { if (p.state === 'act') { p.busy = null; p.lookAt = null; think(C, p); } }
+    standDownAll(C, inc);
     endIncident(C, inc);
   };
+}
+// push a wreck out of the traffic lane into the parking lane beside it, ready for the tow truck
+function pushToKerb(C, car) {
+  const e = curEdge(car) || nearestLane(C, car.x, car.y).lane.edge;
+  const s0 = clamp(car.seg && car.seg.kind === 'lane' ? car.s : 9, 9, e.len - 18);
+  const clear = s => !e.bays.some(b => b.occ && b.occ !== car && Math.abs(b.s - s) < (b.len + car.len) / 2 + 0.3) && !e.drives.some(d => s > d.s0 - 3 && s < d.s1 + 3) && !e.zebras.some(z => Math.abs(z.s - s) < 6);
+  let sk = null; for (let k = 0; k <= 22 && sk === null; k += 2) for (const sg of k ? [1, -1] : [1]) { const ss = s0 + sg * k; if (ss > 8 && ss < e.len - 17 && clear(ss)) { sk = ss; break; } }
+  if (sk === null) return false;
+  detach(C, car);
+  for (const b of e.bays) if (Math.abs(b.s - sk) < (b.len + car.len) / 2 && !b.occ) b.res = car;
+  const q = edgePoint(e, sk, e.parkOff);
+  car.slide = { x0: car.x, y0: car.y, h0: car.hd, x1: q.x, y1: q.y, h1: Math.atan2(e.dy, e.dx), t: 0, dur: 4 };
+  car.kerbE = e; car.kerbS = sk; car.mode = 'crashed'; car.task = 'Pushed to the kerb, waiting for the tow truck';
+  return true;
 }
 function parkSomewhere(C, v) {
   const bay = findBay(C, v.x, v.y, { kinds: ['park'], maxD: 300, seed: v.seed });
@@ -2191,17 +2242,17 @@ function requestTow(C, car, dest) {
     if (inc.v) return; inc.wait += dt;
     const d = dispatch(C, inc, 'tow', 1, (v, crew) => {
       inc.v = v; inc.focus = v; v.lights.beacon = true; v.task = 'On the way to a tow job';
-      const e = curEdge(car) || nearestLane(C, car.x, car.y).lane.edge;
-      const s = car.seg && car.seg.kind === 'lane' ? clamp(car.s + car.len / 2 + v.len / 2 + 2, 3, e.len - 4) : clamp(8, 3, e.len - 4);
-      const sameLane = car.seg && car.seg.kind === 'lane' ? car.seg : e.lanes[e.nl - 1];
+      const e = car.kerbE || curEdge(car) || nearestLane(C, car.x, car.y).lane.edge;
+      const cs = car.kerbE ? car.kerbS : car.seg && car.seg.kind === 'lane' ? car.s : 8;
+      const s = clamp(cs + car.len / 2 + v.len / 2 + 2.5, 3, e.len - 4);
       driveTo(C, v, { kerb: true, e, s }, () => {
-        v.lights.haz = true; const drv = crew[0]; alight(C, drv, 1);
-        walkTo(C, drv, rearPoint(v, 0.6), q => { q.state = 'act'; q.pose = 'crouch'; q.task = 'Hooking up the car'; q.until = Infinity;
-          setTimeout0(C, 7, () => { boardVehicle(C, q, v); hook(C, v, car); v.lights.haz = false; v.task = dest === 'scrap' ? 'Towing to the scrapyard' : 'Towing to the pound';
+        v.lights.haz = true; v.task = 'Hooking up the wreck'; const drv = crew[0]; alight(C, drv, 1);
+        walkPath(C, drv, [{ x: drv.x, y: drv.y }, rearPoint(v, 0.6)], q => { q.state = 'act'; q.pose = 'crouch'; q.task = 'Hooking up the car'; q.until = Infinity;
+          setTimeout0(C, 7, () => { boardVehicle(C, q, v); hook(C, v, car); v.lights.haz = false; v.mode = 'stopped'; v.task = dest === 'scrap' ? 'Towing to the scrapyard' : 'Towing to the pound';
             const bay = findBay(C, C.scrap.door.x, C.scrap.door.y, { kinds: ['lot'], maxD: 400, lotKinds: ['scrap'] }) || v.homeBay;
-            driveTo(C, v, { bay }, () => { unhookAndCrush(C, v, car); setTimeout0(C, 3, () => { if (bay !== v.homeBay) returnToBase(C, v, inc); else releaseCrew(C, v, inc); }); });
-          }); }, 'Walking to the wreck');
-        void sameLane;
+            setTimeout0(C, 3.2, () => driveTo(C, v, { bay }, () => { unhookAndCrush(C, v, car); setTimeout0(C, 3, () => { if (bay !== v.homeBay) returnToBase(C, v, inc); else releaseCrew(C, v, inc); }); }));
+          }); });
+        drv.task = 'Walking round to the hook';
       });
     }, { task: 'Tow job' });
     if (!d && inc.wait > 200) { // nobody to tow it: it gets pushed to the kerb and scrapped later
@@ -2212,7 +2263,9 @@ function requestTow(C, car, dest) {
 }
 function hook(C, tow, car) {
   detach(C, car); freeBay(car);
-  car.mode = 'towed'; car.towedBy = tow; tow.towing = car; car.lights.haz = true; car.v = 0;
+  for (const b of C.bays) if (b.res === car) b.res = null;
+  car.mode = 'towed'; car.towedBy = tow; tow.towing = car; car.lights.haz = true; car.v = 0; car.kerbE = null;
+  car.winch = { x0: car.x, y0: car.y, h0: car.hd, t: 0 };       // a short visible winch onto the hitch
 }
 function unhookAndCrush(C, tow, car) {
   tow.towing = null; car.towedBy = null; car.mode = 'crushing'; car.crushT = 0; car.lights.haz = false;
@@ -2223,6 +2276,7 @@ function unhookAndCrush(C, tow, car) {
 function stepTowed(C, v, dt) {
   const t = v.towedBy; if (!t) return;
   const bx = t.x - Math.cos(t.hd) * (t.len / 2 + v.len / 2 + 0.4), by = t.y - Math.sin(t.hd) * (t.len / 2 + v.len / 2 + 0.4);
+  if (v.winch) { const w = v.winch; w.t = Math.min(1, w.t + dt / 3); const k = w.t * w.t * (3 - 2 * w.t); v.x = lerp(w.x0, bx, k); v.y = lerp(w.y0, by, k); v.hd = w.h0 + angDiff(w.h0, t.hd) * k; if (w.t >= 1) v.winch = null; return; }
   v.x += (bx - v.x) * Math.min(1, dt * 8); v.y += (by - v.y) * Math.min(1, dt * 8);
   v.hd += angDiff(v.hd, Math.atan2(t.y - v.y, t.x - v.x)) * Math.min(1, dt * 3);
 }
@@ -2553,7 +2607,7 @@ function taxiTrip(C, p, taxi, dest, to, finish) {
 function startPatrol(C) {
   const job = { kind: 'patrol' };
   dispatch(C, job, 'police', 1, v => {
-    const R = C.R; let n = R.int(2, 4); v.task = 'On patrol';
+    const R = C.R; let n = R.int(2, 4); v.task = 'On patrol'; for (const p of v.crew) p.task = 'On patrol';
     const go = () => { if (n-- <= 0 || v.job !== job) { returnToBase(C, v, null); return; } const e = R.pick(C.edges.filter(e => !e.closed && e.len > 50)); setGoal(C, v, e, e.len / 2, 7, go); };
     depart(C, v, go);
   }, { calm: true, task: 'Heading out on patrol' });
@@ -3024,4 +3078,4 @@ function describe(C, e) {
   return null;
 }
 export { vehicleDoor, rearPoint, curEdge };
-export { startJaywalk as _startJaywalk, startFire as _startFire, startCarjack as _startCarjack, startPickpocket as _startPickpocket, startRoadworks as _startRoadworks, startMedical as _startMedical, sideDist as _sideDist, projectOnEdge as _proj };
+export { crash as _crash, requestTow as _requestTow, startJaywalk as _startJaywalk, startFire as _startFire, startCarjack as _startCarjack, startPickpocket as _startPickpocket, startRoadworks as _startRoadworks, startMedical as _startMedical, sideDist as _sideDist, projectOnEdge as _proj };
