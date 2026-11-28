@@ -518,7 +518,7 @@ function makeGarages(C, b, bl) {
     const sOut = Math.min(e.len - 1, s + 10);
     lane.at(sOut, TMP);
     bay.outTrack = new PathSeg('track', cubic(P(bay.x, bay.y), P(bay.x, bay.y - inward * 6), P(TMP.x - e.dx * 5, TMP.y - e.dy * 5), P(TMP.x, TMP.y), 16));
-    bay.outTrack.join = { lane, s: sOut };
+    bay.outTrack.join = { lane, s: sOut }; bay.outTrack.pull = 'garage'; bay.outTrack.blocks = { lane, s0: sOut - 14, s1: sOut + 7 };
     // in: stop past the doors in the kerb lane, then reverse in
     const sIn = Math.min(e.len - 1, s + 12); lane.at(sIn, TMP);
     const rt = new PathSeg('track', cubic(P(TMP.x, TMP.y), P(TMP.x - e.dx * 5, TMP.y - e.dy * 5), P(bay.x, bay.y - inward * 6), P(bay.x, bay.y), 18));
@@ -580,11 +580,12 @@ function makeLot(C, b, r, facing, kind, o = {}) {
   const sE = projectOnEdge(e, ein.x, ein.y), sX = projectOnEdge(e, eout.x, eout.y);
   const s0 = clamp(sE - 9, 0.5, e.len - 1); lane.at(s0, TMP);
   lot.inTrack = new PathSeg('track', cubic(P(TMP.x, TMP.y), P(TMP.x + e.dx * 4.5, TMP.y + e.dy * 4.5), P(ein.x, ein.y - inY * 4.5), ein, 14));
-  lot.inTrack.speed = 3.4; lot.inS = s0;
+  lot.inTrack.speed = 3.4; lot.inS = s0; lot.inTrack.blocks = { lane, s0: s0 - 3, s1: s0 + 9 };   // turning in across the lane: others can see it
   const s1 = clamp(sX + 9, 1, e.len - 0.5); lane.at(s1, TMP);
   lot.outTrack = new PathSeg('track', cubic(eout, P(eout.x, eout.y - inY * 4.5), P(TMP.x - e.dx * 4.5, TMP.y - e.dy * 4.5), P(TMP.x, TMP.y), 14));
-  lot.outTrack.speed = 3.0; lot.outTrack.join = { lane, s: s1 }; lot.outTrack.blocks = { lane, s0: s1 - 9, s1: s1 + 5 };
-  e.drives.push({ s0: Math.min(sE, sX) - 4, s1: Math.max(sE, sX) + 4, lot });
+  lot.outTrack.speed = 3.6; lot.outTrack.pull = 'lot'; lot.outTrack.join = { lane, s: s1 }; lot.outTrack.blocks = { lane, s0: s1 - 9, s1: s1 + 5 };
+  lot.inTrack.next = loop; loop.next = lot.outTrack;
+  e.drives.push({ s0: Math.min(sE, sX) - 9.5, s1: Math.max(sE, sX) + 6, lot });   // no parking across the turn-in and pull-out sweeps
   b.lots.push(lot); C.lots.push(lot);
   return lot;
 }
@@ -605,7 +606,7 @@ function genKerbBays(C) {
     for (const st of e.stops || []) st.bay = mk(st.s - 8, st.s + 8, 'bus');
     // a loading zone beside commercial frontage
     const commercial = C.buildings.some(b => b.cat && b.type !== 'office' && Math.abs(projectOnEdge(e, b.door.x, b.door.y) - e.len / 2) < e.len / 2 && sideOf(e, b.door) > 0 && Math.abs(sideDist(e, b.door)) < e.kerbOff + SW + 2);
-    let s = 3.5; const end = e.len - 7; let madeLoad = !commercial;
+    let s = 8; const end = e.len - 9; let madeLoad = !commercial;   // no parking close to junctions
     while (s + 6 <= end) {
       if (!madeLoad && s > e.len * 0.3 && free(s, s + 9.5)) { mk(s, s + 9.5, 'load'); s += 10; madeLoad = true; continue; }
       if (free(s, s + 6.1)) { mk(s, s + 6.1, R.chance(0.03) ? 'taxi' : 'park'); s += 6.3; } else s += 1;
@@ -893,7 +894,7 @@ function detach(C, v) {
   if (v.seg) { occDel(v.seg, v); if (v.seg.kind === 'move') v.seg.node.committed.delete(v); }
   if (v.admit) v.admit.node.committed.delete(v);
   for (const n of C.nodes) { if (n.committed.has(v)) n.committed.delete(v); }
-  if (v.track) { occDel(v.track, v); if (v.tIntr) intrDel(v.tIntr.seg, v.tIntr); }
+  if (v.track) { occDel(v.track, v); } clearTrackBlock(v);
   if (v.pIntr) { intrDel(v.pIntr.seg, v.pIntr); v.pIntr = null; }
   if (v.stopIntr) { intrDel(v.stopIntr.seg, v.stopIntr); v.stopIntr = null; }
   v.seg = null; v.track = null; v.tIntr = null; v.admit = null; v.mv = null; v.passing = null;
@@ -952,6 +953,7 @@ function considerSeg(C, v, seg, base, best, isOwn) {
   for (const it of seg.intr) {
     if (it.v === v) continue;
     if (isOwn && it.s1 < v.s - v.len / 2) continue;
+    if (isOwn && it.tag === 'park' && it.s0 < v.s + v.len / 2 - 0.5) continue;      // already past the start of someone's pull-out zone: keep going and clear it
     if (v.passing && Math.abs(v.d) > 1.4 && (it.tag === 'works' || it.v === v.passing.obj)) continue;
     if (it.tag === 'pass' && v.lights.siren) continue;
     const g = base + it.s0 - (isOwn ? v.s : 0) - v.len / 2;
@@ -1132,7 +1134,7 @@ function stepDrive(C, v, dt) {
   v.s += v.v * dt;
   // lateral
   if (v.swerveT > 0) { v.swerveT -= dt; if (v.swerveT <= 0) { v.swerveT = 0; if (!v.passing) v.dT = 0; } }
-  const rate = v.swerveT > 0 ? 3.2 : v.passing ? 1.6 : 1.2;
+  const rate = Math.min(v.swerveT > 0 ? 3.2 : v.passing ? 1.6 : 1.2, 0.2 + 0.45 * Math.abs(v.v));   // you can only steer sideways while rolling
   const dd = clamp(v.dT - v.d, -rate * dt, rate * dt); v.dv = dd / dt; v.d += dd;
   if (v.lcT > 0) v.lcT -= dt;
   advance(C, v);
@@ -1214,22 +1216,33 @@ function stepYield(C) {
       const bayOcc = (ln.edge.bays || []).some(b => b.occ && Math.abs(b.s - u.s) < (b.len + u.len) / 2 + 0.5);
       u.dT = bayOcc ? 0.6 : 1.9;
     }
-    if (e.nl === 1) em.dT = em.passing ? em.dT : -0.9;
+    if (e.nl === 1 && !em.passing) em.dT = em.seg.occ.some(u => u !== em && u.yielding && u.s > em.s && u.s - em.s < 30) ? -0.9 : 0;   // only edge over to squeeze past someone pulling over
   }
 }
 // §B4b tracks (manoeuvres) -------------------------------------------------------
 function startTrack(C, v, track, s0, s1, o, done) {
   if (v.seg) { occDel(v.seg, v); if (v.seg.kind === 'move') v.seg.node.committed.delete(v); v.seg = null; }
   if (v.admit) { v.admit.node.committed.delete(v); v.admit = null; }
-  if (v.track) { occDel(v.track, v); if (v.tIntr) intrDel(v.tIntr.seg, v.tIntr); v.tIntr = null; }
+  if (v.track) occDel(v.track, v); clearTrackBlock(v);
   if (v.passing) endPass(C, v);
   v.mode = 'track'; v.track = track; v.s = s0; v.tEnd = s1; v.tDone = done; v.tWait = o.wait || null; v.tWaitT = 0; v.tShared = !!o.shared; v.d = 0;
+  if (v.tShared) { const w0 = v.tWait; v.tWait = u0 => (w0 && w0(u0)) || track.occ.some(u => u !== v && Math.abs(u.s - s0) < (u.len + v.len) / 2 + 0.5 && (u.tStarted !== false || u.id < v.id)); }   // never two waiting on each other
   v.tStarted = !v.tWait; v.v = Math.min(v.v, 3);
   if (v.tShared) occAdd(track, v);
   v.tBlocks = track.blocks || o.blocks || null;
   if (v.tStarted) addTrackBlock(v);
 }
-function addTrackBlock(v) { const bl = v.tBlocks; if (!bl || v.tIntr) return; const seg = bl.lane || bl.seg; v.tIntr = { s0: bl.s0, s1: bl.s1, tag: 'park', v, seg }; seg.intr.push(v.tIntr); }
+let HOLD_SEQ = 0;   // older holds have priority over newer ones
+function addTrackBlock(v) {
+  const bl = v.tBlocks; if (!bl || v.tIntr) return; const seg = bl.lane || bl.seg;
+  v.tIntr = { s0: bl.s0, s1: bl.s1, tag: 'park', v, seg, seq: ++HOLD_SEQ }; seg.intr.push(v.tIntr);
+  if (bl.lane && v.len > 6) {
+    v.tIntrX = []; const e = bl.lane.edge;
+    for (const ln of e.lanes) if (ln !== bl.lane) { const it = { s0: bl.s0, s1: bl.s1, tag: 'park', v, seg: ln }; ln.intr.push(it); v.tIntrX.push(it); }
+    if (e.nl === 1) { const oc = e.rev.lanes[0], it = { s0: e.len - bl.s1, s1: e.len - bl.s0, tag: 'park', v, seg: oc }; oc.intr.push(it); v.tIntrX.push(it); }
+  }
+}
+function clearTrackBlock(v) { if (v.tIntr) intrDel(v.tIntr.seg, v.tIntr); v.tIntr = null; if (v.tIntrX) for (const it of v.tIntrX) intrDel(it.seg, it); v.tIntrX = null; }
 function stepTrack(C, v, dt) {
   const tr = v.track;
   if (!v.tStarted) {
@@ -1241,6 +1254,7 @@ function stepTrack(C, v, dt) {
   let gap = 900, vl = 30;
   if (v.tShared) for (const u of tr.occ) { if (u === v) continue; const g = u.s - v.s - (u.len + v.len) / 2; if (g > -0.5 && g < gap) { gap = Math.max(0.05, g); vl = u.v; } }
   for (const it of tr.intr) { if (it.v === v) continue; const g = it.s0 - v.s - v.len / 2; if (g > -v.len && g < gap) { gap = Math.max(0.05, g); vl = 0; } }
+  if (tr.next && v.tEnd >= tr.length - 0.05) for (const u of tr.next.occ) { if (u === v) continue; const g = (tr.length - v.s) + u.s - (u.len + v.len) / 2; if (g < gap) { gap = Math.max(0.05, g); vl = u.v; } }   // the next piece of track
   const hx = Math.cos(v.hd) * (rev ? -1 : 1), hy = Math.sin(v.hd) * (rev ? -1 : 1);
   const fx = v.x + hx * v.len / 2, fy = v.y + hy * v.len / 2;
   for (const p of pedsNear(C, fx, fy, 2.0)) { if (p.state !== 'walk' || p.vehicle) continue; gap = Math.min(gap, 0.3); vl = 0; }
@@ -1252,14 +1266,28 @@ function stepTrack(C, v, dt) {
   if (v.tIntr && v.tIntr.seg === tr) { /* loop intrusion follows the bay */ }
   if (rem < 0.25 || (rem < 0.8 && v.v < 0.15)) {
     v.s = v.tEnd; trackPos(C, v, dt);
-    const done = v.tDone; occDel(tr, v); if (v.tIntr) { intrDel(v.tIntr.seg, v.tIntr); v.tIntr = null; }
+    const done = v.tDone; occDel(tr, v); clearTrackBlock(v);
     v.track = null; v.tDone = null; v.mode = 'stopped'; v.v = 0; v.lights.rev = false;
     if (done) done(v);
     return;
   }
   trackPos(C, v, dt);
 }
-function joinTaken(v) { const j = v.track.join; if (!j) return false; return j.lane.occ.some(u => u !== v && Math.abs(u.s - j.s) < (u.len + v.len) / 2 + 1); }
+function holdBeats(it, v) { return !it.v || it.tag !== 'park' || it.v.mode !== 'track' || it.v.tStarted !== false || !v.tIntr || it.seq < v.tIntr.seq; }
+// someone else is part-way through pulling in or out across the stretch we are about to use
+function othersManoeuvring(v, lane, bl) { return lane.intr.some(it => it.v && it.v !== v && it.tag === 'park' && it.s1 > bl.s0 - 0.5 && it.s0 < bl.s1 + 0.5); }
+// wait in the lane (stopped, so everyone can see us) until nobody else is manoeuvring across our stretch
+function whenZoneFree(C, v, lane, bl, fn, t0 = C.tReal) {
+  if (!othersManoeuvring(v, lane, bl) || C.tReal - t0 > 30) { if (v.mode === 'stopped') v.mode = 'drive'; fn(); return; }
+  v.mode = 'stopped'; v.v = 0; v.lights.brake = true;
+  setTimeout0(C, 0.4, () => whenZoneFree(C, v, lane, bl, fn, t0));
+}
+function startTrackWhenFree(C, v, lane, zone, track, s0, s1, o, done) { whenZoneFree(C, v, lane, zone, () => startTrack(C, v, track, s0, s1, o, done)); }
+function joinTaken(v) {
+  const tr = v.track, bl = tr.blocks, j = tr.join, ln = (bl && bl.lane) || (j && j.lane); if (!ln) return false;
+  const s0 = bl && bl.lane ? bl.s0 : j.s - v.len / 2 - 1, s1 = bl && bl.lane ? bl.s1 : j.s + v.len / 2 + 1;
+  return ln.occ.some(u => u !== v && u.s + u.len / 2 > s0 && u.s - u.len / 2 < s1) || ln.intr.some(it => it.v && it.v !== v && it.v.tStarted !== false && it.s1 > s0 && it.s0 < s1);
+}
 function trackPos(C, v, dt) {
   v.track.at(v.s, TMP);
   v.x = TMP.x; v.y = TMP.y;
@@ -1267,15 +1295,67 @@ function trackPos(C, v, dt) {
   v.hd += angDiff(v.hd, tgt) * Math.min(1, dt * 10);
 }
 // wait for a gap; after waiting a while, ask for one: traffic still far enough away stops to let us out
-function courtesyLot(v, loop, at) {
-  const close = loop.occ.some(u => u !== v && u.s > at - 5 && u.s < at + 4);
-  if (!v.tIntr && v.tWaitT > 2 && !loop.occ.some(u => u !== v && u.s > at - 8 && u.s < at + 4)) addTrackBlock(v);
-  return close || (!v.tIntr && loop.occ.some(u => u !== v && u.s > at - 14 && u.s < at + 5));
+// backing out onto a car park loop: compare whole lengths (buses are 12 m long), and treat the entry ramp,
+// the loop and the exit ramp as one line, so nobody lands on a vehicle sitting at the join between them
+function lotLine(lot) {
+  const L = [];
+  for (const u of lot.inTrack.occ) L.push([u, u.s - lot.inTrack.length]);
+  for (const u of lot.loop.occ) L.push([u, u.s]);
+  for (const u of lot.outTrack.occ) L.push([u, lot.loop.length + u.s]);
+  return L;
 }
-function courtesyLane(C, v, lane, s, ahead) {
-  if (laneClearFor(C, lane, s, ahead)) return false;
-  if (!v.tIntr && v.tWaitT > 5 && !lane.occ.some(u => u.mode !== 'track' && u.s < s + ahead && u.s > s - 12 - u.v * 1.4)) addTrackBlock(v);
-  return !v.tIntr || lane.occ.some(u => u.mode !== 'track' && u.s < s + ahead && u.s > s - 7);
+function courtesyLot(v, lot, at) {
+  const line = lotLine(lot);
+  const near = slack => line.some(([u, s]) => u !== v && Math.abs(s - at) < (u.len + v.len) / 2 + slack) || lot.loop.intr.some(it => it.v !== v && it !== v.tIntr && it.s1 > at - v.len / 2 - 0.5 && it.s0 < at + v.len / 2 + 0.5);
+  const coming = extra => line.some(([u, s]) => u !== v && s < at && at - s < (u.len + v.len) / 2 + extra + u.v * 2.5);
+  if (!v.tIntr && v.tWaitT > 2 && !near(1) && !coming(3)) addTrackBlock(v);
+  return near(1) || (!v.tIntr && coming(8));
+}
+// is the strip of lane [s0, s1] we are about to sweep free, with nobody coming up behind or turning in?
+function pullOutClear(C, v, lane, s0, s1) {
+  const tRamp = v.track ? clamp(v.track.length / (v.track.speed || 2.5), 3, 6.5) : 3.4;
+  const lanes = v.len > 6 ? lane.edge.lanes : [lane];
+  for (const ln of lanes) {
+    for (const u of ln.occ) {
+      if (u === v) continue; const a = u.s - u.len / 2, b = u.s + u.len / 2;
+      if (b > s0 - 0.6 && a < s1 + 0.6) return false;                                   // in the strip we will sweep
+      if (b <= s0 && s0 - b < 3 + (u.v > 0.3 ? 3 + u.v * tRamp : 0)) return false;       // coming up behind, or creeping
+    }
+    for (const it of ln.intr) if (it.v !== v && it.s1 > s0 - 0.6 && it.s0 < s1 + 0.6 && holdBeats(it, v)) return false;
+  }
+  if (lane.edge.nl === 1) {          // a long nose swings over the centre line; anyone may meet traffic drifting over it, or a siren
+    const oc = lane.edge.rev.lanes[0], Lr = lane.edge.len, r0 = Lr - s1, r1 = Lr - s0;
+    for (const u of oc.occ) { if (v.len <= 6 && !u.lights.siren && u.d > -0.4) continue; const a = u.s - u.len / 2, b = u.s + u.len / 2; if (b > r0 - 0.6 && a < r1 + 0.6) return false; if (b <= r0 && r0 - b < 3 + (u.v > 0.3 ? 3 + u.v * tRamp : 0)) return false; }
+    for (const it of oc.intr) if (it.v !== v && it.s1 > r0 - 0.6 && it.s0 < r1 + 0.6) return false;
+  }
+  for (const mv of lane.edge.from.moves) {                                               // about to turn into this street
+    if (mv.outLane.edge !== lane.edge) continue;
+    for (const u of mv.occ) if (u !== v && (mv.length - u.s) + s0 < 6 + u.len / 2 + Math.max(7, u.v) * tRamp) return false;
+    for (const u of mv.inLane.occ) if (u !== v && u.mv === mv && (mv.inLane.length - u.s) + mv.length + s0 < 6 + u.len / 2 + Math.max(7, u.v) * tRamp) return false;
+  }
+  return true;
+}
+// traffic heading into this lane through the junction, with its distance (in this lane's s) behind the lane start
+function comingIn(lane, v) {
+  const out = [];
+  for (const mv of lane.edge.from.moves) {
+    if (mv.outLane !== lane) continue;
+    for (const u of mv.occ) if (u !== v) out.push([u, -(mv.length - u.s)]);
+    for (const u of mv.inLane.occ) if (u !== v && u.mv === mv) out.push([u, -(mv.inLane.length - u.s + mv.length)]);
+  }
+  return out;
+}
+// wait for a gap; after a while ask for one: traffic still far enough back stops to let us out
+function courtesyLane(C, v, lane, s0, s1, askAfter = 4) {
+  if (pullOutClear(C, v, lane, s0, s1)) return false;
+  const others = lane.intr.filter(it => it.v !== v && it !== v.tIntr && it.s1 > s0 - 0.6 && it.s0 < s1 + 0.6);
+  const inStrip = lane.occ.some(u => u !== v && u.s + u.len / 2 > s0 - 0.6 && u.s - u.len / 2 < s1 + 0.6) || others.some(it => holdBeats(it, v));
+  const entrance = lane.occ.some(u => u !== v && u.s + u.len / 2 > s0 - 0.5 && u.s - u.len / 2 < s0 + 1.5);
+  const stopDist = u => u.v * u.v / 5.2 + u.v * ((u.react || 0.5) + 0.3) + 1.5;   // allows for each driver's own reaction time
+  const cannotStop = lane.occ.some(u => u !== v && u.s + u.len / 2 <= s0 && s0 - (u.s + u.len / 2) < stopDist(u)) || comingIn(lane, v).some(([u, at]) => s0 - (at + u.len / 2) < stopDist(u) + 6);
+  if (!v.tIntr && v.tWaitT > askAfter && !entrance && !cannotStop && !others.length) addTrackBlock(v);   // someone already asked: wait our turn
+  if (v.tIntr) { const h0 = Math.min(s0, v.tIntr.s0); return inStrip || lane.occ.some(u => u !== v && u.v > 0.3 && u.s - u.len / 2 < s1 + 0.6 && u.s + u.len / 2 > h0 - (u.v * u.v / 5.2 + u.v * 0.5)) || comingIn(lane, v).some(([u, at]) => h0 - (at + u.len / 2) < stopDist(u) + 4); }   // moving and already past the hold, or unable to stop for it
+  return true;
 }
 function laneClearFor(C, lane, s, ahead = 12) {
   for (const u of lane.occ) { if (u.mode === 'track') continue; if (u.s < s + ahead && u.s > s - (10 + u.v * 3.8)) return false; }
@@ -1294,30 +1374,46 @@ function depart(C, v, then) {
   if (bay.kind === 'garage') {
     const tr = bay.outTrack; const j = tr.join;
     freeBay(v); v.mode = 'stopped';
-    startTrack(C, v, tr, 0, tr.length, { wait: () => !laneClearFor(C, j.lane, j.s, 6) && !v.lights.siren }, () => { joinLane(C, v, j.lane, j.s); then(v); });
+    startTrack(C, v, tr, 0, tr.length, { wait: () => !v.lights.siren && courtesyLane(C, v, j.lane, j.s - v.len / 2 - 3, j.s + v.len / 2 + 2) }, () => { joinLane(C, v, j.lane, j.s); then(v); });
     return;
   }
   if (bay.lot) {
     const lot = bay.lot;
-    startTrack(C, v, bay.outTrack, 0, bay.outTrack.length, { wait: () => courtesyLot(v, lot.loop, bay.loopS) },
+    startTrack(C, v, bay.outTrack, 0, bay.outTrack.length, { wait: () => courtesyLot(v, lot, bay.outS) },
       () => {
         freeBay(v);
         startTrack(C, v, lot.loop, bay.outS, lot.loop.length, { shared: true }, () => {
           const j = lot.outTrack.join;
-          startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => courtesyLane(C, v, j.lane, j.s, 10) }, () => { joinLane(C, v, j.lane, j.s); then(v); });
+          startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => courtesyLane(C, v, j.lane, j.s - v.len / 2 - 2, j.s + v.len / 2 + 2, 2) }, () => { joinLane(C, v, j.lane, j.s); then(v); });
         });
       });
-    v.tBlocks = { seg: lot.loop, s0: bay.loopS - 6, s1: bay.loopS + 3 };
+    v.tBlocks = { seg: lot.loop, s0: bay.outS - v.len / 2 - 2, s1: bay.loopS + v.len / 2 + 1 };
     return;
   }
-  // kerb bay: pull out forward
-  const e = bay.e, lane = e.lanes[e.nl - 1], sOut = Math.min(e.len - 1, bay.s + 9);
-  lane.at(sOut, TMP);
-  const tr = new PathSeg('track', cubic(P(bay.x, bay.y), P(bay.x + e.dx * 3.5, bay.y + e.dy * 3.5), P(TMP.x - e.dx * 3.5, TMP.y - e.dy * 3.5), P(TMP.x, TMP.y), 12));
-  tr.speed = 2.6; tr.blocks = { lane, s0: bay.s - 3, s1: sOut + v.len / 2 };
-  startTrack(C, v, tr, 0, tr.length, { wait: () => courtesyLane(C, v, lane, bay.s, 12) || lane.intr.some(i => i.v !== v && i.s1 > bay.s - 3 && i.s0 < sOut + 3) },
-    () => { freeBay(v); joinLane(C, v, lane, sOut); then(v); });
+  // kerb bay: shuffle back if there is room, then pull out on a curve that clears the car in front
+  const e = bay.e, lane = e.lanes[e.nl - 1];
+  const parkedNear = (lo, hi) => e.bays.filter(b => b !== bay && b.occ && b.s > lo && b.s < hi).map(b => b.occ);
+  const behind = parkedNear(bay.s - 9, bay.s).map(u => u === v ? -Infinity : bayEdgeS(u, e) + u.len / 2), ahead = parkedNear(bay.s, bay.s + 9).map(u => bayEdgeS(u, e) - u.len / 2);
+  const roomBack = (bay.s - v.len / 2) - Math.max(bay.s0 !== undefined ? bay.s0 - 1.5 : bay.s - v.len / 2 - 1.2, ...behind);
+  const neighbourBusy = parkedNear(bay.s - 9, bay.s + 9).some(u => u !== v && u.mode === 'track');            // the car behind or in front is manoeuvring
+  const back = neighbourBusy ? 0 : clamp(roomBack - 0.45, 0, 1.0);
+  const sStart = bay.s - (back > 0.25 ? back : 0);
+  const gapAhead = ahead.length ? Math.min(...ahead) - sStart : 9, long = v.len > 6;
+  // steer out early and hard, as steep as the gap to the vehicle in front needs (fitted so the front corner clears it with margin)
+  const gk = long && !ahead.length ? Math.max(1.25, v.len / 5) : clamp(0.36 * gapAhead - 0.45 - 0.05 * (v.len - 4.4), 0.4, 1.25);
+  const AL = [0, 1.5, 3.2, 5.4, 8.0].map(a => a * gk), LAT = [0, 0.85, 2.1, 2.75, 2.9].map(l => l * (LANE_W / 2 + PARK_W / 2) / 2.9);
+  const pts = []; for (let i = 0; i < AL.length - 1; i++) for (let k = 0; k < 5; k++) { const t = k / 5, p0 = Math.max(0, i - 1), p3 = Math.min(AL.length - 1, i + 2), cr = (a, b, c, d) => 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (-a + 3 * b - 3 * c + d) * t * t * t); const al = cr(AL[p0], AL[i], AL[i + 1], AL[p3]), la = cr(LAT[p0], LAT[i], LAT[i + 1], LAT[p3]); pts.push(edgePoint(e, sStart + al, e.parkOff - la, { x: 0, y: 0 })); }
+  const sOut = Math.min(e.len - 1, sStart + AL[AL.length - 1]); pts.push(edgePoint(e, sOut, lane.off, { x: 0, y: 0 }));
+  const tr = new PathSeg('track', pts);
+  tr.speed = 2.2; tr.blocks = { lane, s0: sStart - v.len / 2 - 1.5, s1: sOut + v.len / 2 + 1 }; tr.pull = 'kerb'; tr.join = { lane, s: sOut };
+  const neighbourMoving = () => C.vehicles.some(u => u !== v && u.mode === 'track' && u.track && !u.track.pull && u.bay && u.bay.e === e && Math.abs(u.bay.s - bay.s) < 9);
+  const go = () => startTrack(C, v, tr, 0, tr.length, { wait: () => neighbourMoving() || courtesyLane(C, v, lane, tr.blocks.s0, tr.blocks.s1) }, () => { freeBay(v); joinLane(C, v, lane, sOut); then(v); });
+  if (back > 0.25) { // a short reverse to make room, without leaving the bay
+    const a = edgePoint(e, bay.s, e.parkOff), b = edgePoint(e, sStart, e.parkOff), rt = new PathSeg('track', [P(a.x, a.y), P(b.x, b.y)]);
+    rt.reverse = true; rt.speed = 0.8; startTrack(C, v, rt, 0, rt.length, {}, () => { v.mode = 'parked'; v.x = b.x; v.y = b.y; go(); });
+  } else go();
 }
+const bayEdgeS = (u, e) => u.bay && u.bay.e === e ? u.bay.s : projectOnEdge(e, u.x, u.y);
 function nearestLane(C, x, y) {
   let best = null, bd = Infinity;
   for (const e of C.edges) for (const ln of e.lanes) { const s = ln.project(x, y); ln.at(s, TMP); const d = (TMP.x - x) ** 2 + (TMP.y - y) ** 2; if (d < bd && s > 2 && s < ln.length - 4) { bd = d; best = { lane: ln, s }; } }
@@ -1335,15 +1431,15 @@ function driveTo(C, v, target, done) {
 function moveWithinLot(C, v, tb, done) {
   const bay = v.bay, lot = bay.lot;
   const park = () => startTrack(C, v, tb.inTrack, 0, tb.inTrack.length, { blocks: { seg: lot.loop, s0: tb.loopS - 6, s1: tb.loopS + 2 } }, () => { parkAt(C, v, tb); v.target = null; done && done(v); });
-  startTrack(C, v, bay.outTrack, 0, bay.outTrack.length, { wait: () => courtesyLot(v, lot.loop, bay.loopS) }, () => {
+  startTrack(C, v, bay.outTrack, 0, bay.outTrack.length, { wait: () => courtesyLot(v, lot, bay.outS) }, () => {
     freeBay(v);
     if (tb.inS0 > bay.outS + 1.5) startTrack(C, v, lot.loop, bay.outS, tb.inS0, { shared: true }, park);
     else startTrack(C, v, lot.loop, bay.outS, lot.loop.length, { shared: true }, () => {
       const j = lot.outTrack.join;   // behind us on the loop: out to the street and straight back in
-      startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => courtesyLane(C, v, j.lane, j.s, 10) }, () => { joinLane(C, v, j.lane, j.s); headFor(C, v); });
+      startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => courtesyLane(C, v, j.lane, j.s - v.len / 2 - 2, j.s + v.len / 2 + 2, 2) }, () => { joinLane(C, v, j.lane, j.s); headFor(C, v); });
     });
   });
-  v.tBlocks = { seg: lot.loop, s0: bay.loopS - 6, s1: bay.loopS + 3 };
+  v.tBlocks = { seg: lot.loop, s0: bay.outS - v.len / 2 - 2, s1: bay.loopS + v.len / 2 + 1 };
 }
 function headFor(C, v) {
   const t = v.target, done = v.onArrive;
@@ -1351,12 +1447,12 @@ function headFor(C, v) {
   const bay = t.bay;
   if (bay && bay.kind === 'garage') {
     setGoal(C, v, bay.e, bay.inS, 0, () => {
-      startTrack(C, v, bay.inTrack, 0, bay.inTrack.length, {}, () => { parkAt(C, v, bay); v.target = null; done && done(v); });
+      startTrackWhenFree(C, v, bay.inTrack.blocks.lane, bay.inTrack.blocks, bay.inTrack, 0, bay.inTrack.length, {}, () => { parkAt(C, v, bay); v.target = null; done && done(v); });
     });
   } else if (bay && bay.lot) {
     const lot = bay.lot;
     setGoal(C, v, lot.e, lot.inS, 3.2, () => {
-      startTrack(C, v, lot.inTrack, 0, lot.inTrack.length, { shared: true }, () => {
+      startTrackWhenFree(C, v, lot.e.lanes[lot.e.nl - 1], { s0: lot.inS - v.len / 2 - 1, s1: lot.inS + 9 }, lot.inTrack, 0, lot.inTrack.length, { shared: true }, () => {
         startTrack(C, v, lot.loop, 0, bay.inS0, { shared: true }, () => {
           startTrack(C, v, bay.inTrack, 0, bay.inTrack.length, { blocks: { seg: lot.loop, s0: bay.loopS - 6, s1: bay.loopS + 2 } }, () => { parkAt(C, v, bay); v.target = null; done && done(v); });
         });
@@ -1371,7 +1467,7 @@ function headFor(C, v) {
         lane.at(sA, TMP);
         const tr = new PathSeg('track', cubic(P(TMP.x, TMP.y), P(TMP.x + e.dx * 4, TMP.y + e.dy * 4), P(bay.x - e.dx * 4, bay.y - e.dy * 4), P(bay.x, bay.y), 12));
         tr.speed = 2.6; tr.blocks = { lane, s0: sA - v.len / 2, s1: bay.s + 1 };
-        startTrack(C, v, tr, 0, tr.length, {}, () => { parkAt(C, v, bay); v.target = null; done && done(v); });
+        whenZoneFree(C, v, lane, tr.blocks, () => startTrack(C, v, tr, 0, tr.length, {}, () => { parkAt(C, v, bay); v.target = null; done && done(v); }));
       });
     } else {
       const sStop = Math.min(e.len - 2, bay.s + Math.max(3.4, bay.len / 2 - v.len / 2 + 3.6));
@@ -1380,13 +1476,13 @@ function headFor(C, v) {
         const tr = new PathSeg('track', cubic(P(TMP.x, TMP.y), P(TMP.x - e.dx * k, TMP.y - e.dy * k), P(bay.x + e.dx * k, bay.y + e.dy * k), P(bay.x, bay.y), 12));
         tr.reverse = true; tr.speed = 1.5; tr.blocks = { lane, s0: bay.s - 3, s1: sStop + v.len / 2 + 1 };
         v.lights.ind = C.LHT ? -1 : 1;
-        startTrack(C, v, tr, 0, tr.length, {}, () => { parkAt(C, v, bay); v.target = null; done && done(v); });
+        whenZoneFree(C, v, lane, tr.blocks, () => startTrack(C, v, tr, 0, tr.length, {}, () => { parkAt(C, v, bay); v.target = null; done && done(v); }));
       });
     }
   } else if (t.lotSearch) {
     const lot = t.lotSearch[t.li];
     setGoal(C, v, lot.e, lot.inS, 3.2, () => {
-      startTrack(C, v, lot.inTrack, 0, lot.inTrack.length, { shared: true }, () => {
+      startTrackWhenFree(C, v, lot.e.lanes[lot.e.nl - 1], { s0: lot.inS - v.len / 2 - 1, s1: lot.inS + 9 }, lot.inTrack, 0, lot.inTrack.length, { shared: true }, () => {
         // the first free bay we will pass on the one-way loop
         const free = lot.bays.filter(b => b.kind === 'lot' && !b.occ && !b.res).sort((a, b) => a.inS0 - b.inS0)[0];
         if (free) {
@@ -1397,7 +1493,7 @@ function headFor(C, v) {
         v.task = 'Car park full, going round';
         startTrack(C, v, lot.loop, 0, lot.loop.length, { shared: true }, () => {
           const j = lot.outTrack.join;
-          startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => courtesyLane(C, v, j.lane, j.s, 10) }, () => {
+          startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => courtesyLane(C, v, j.lane, j.s - v.len / 2 - 2, j.s + v.len / 2 + 2, 2) }, () => {
             joinLane(C, v, j.lane, j.s);
             t.li++;
             if (t.li >= t.lotSearch.length) { t.li = 0; t.tries++; }
@@ -1737,7 +1833,7 @@ function carTrip(C, p, car, dest, to, finish) {
   walkTo(C, p, door, q => {
     if (car.mode !== 'parked' || car.job) { walkTo(C, q, to, finish); return; }
     boardVehicle(C, q, car); car.driver = q; car.task = `Driving ${q.first} ${dest.bld ? 'to ' + dest.bld.label : ''}`;
-    const lots = dest.bld && (dest.bld === C.stadium || dest.bld === C.mall) ? dest.bld.block.lots.filter(l => l.bays.length) : null;
+    const lots = dest.bld && (dest.bld === C.stadium || dest.bld === C.mall) ? dest.bld.block.lots.filter(l => l.bays.length).map(l => [l, l.bays.filter(b => !b.occ && !b.res).length + C.R.f()]).sort((a, b) => b[1] - a[1]).map(x => x[0]) : null;   // emptiest car park first
     const bay = lots && lots.length ? null : findBay(C, to.x, to.y, { kinds: ['park'], maxD: 110, seed: q.seed }) || findBay(C, to.x, to.y, { kinds: ['lot'], maxD: 260, seed: q.seed, lotKinds: ['public', 'mall', 'stadium', 'hospital'] }) || findBay(C, to.x, to.y, { kinds: ['park', 'lot'], maxD: 900, lotKinds: ['public', 'mall', 'stadium', 'hospital'] });
     if (!bay && !(lots && lots.length)) { alight(C, q); walkTo(C, q, to, finish); return; }
     car.lights.head = C.dark > 0.3;
@@ -1817,6 +1913,11 @@ export function think(C, p) {
   const R = C.R, h = C.hour;
   if (p.asleep) { if (sleepy(p, h)) { p.until = nextWake(C, p); return; } p.asleep = false; markLit(C, p.bld, p.room); p.task = 'Up and about'; }
   if (p.commit) { const c = p.commit; if (C.time >= c.end) p.commit = null; else if (C.time >= c.go) { c.fn(C, p); return; } }
+  if (p.preferCar && p.car && p.car.mode === 'parked' && p.car.owner === p && !p.car.job) {
+    const next = sleepy(p, h) || R.chance(0.6) ? null : nearest(openShops(C, ['cafe', 'bar', 'pizza', 'noodle', 'deli', 'gelato', 'grocer']), here(p), 8, R) || (C.mall && C.hour > 9 && C.hour < 20.5 ? C.mall : null);
+    if (next) { travel(C, p, { bld: next, kind: 'visit' }, q => { q.task = `Stopped by ${next.label} after the match`; stay(C, q, R.range(25, 70)); }, 'Driving on after the match'); return; }
+    goHome(C, p, 'after the match'); return;
+  }
   const sh = shiftNow(C, p);
   if (p.lunchChance && p.lunchDay !== C.day) { p.lunchDay = C.day; p.lunchAt = R.chance(p.lunchChance) ? C.day * 1440 + R.range(12, 13.1) * 60 : null; }
   if (sh) {
@@ -2071,7 +2172,8 @@ function standDown(C, v, inc) {
   let n = 0;
   crew.forEach((p, i) => {
     p.carry = null; p.next = null; p.hoseFrom = null; p.aim = null; p.lookAt = null; p.spd = p.spdBase; p.busy = inc || p.busy;
-    walkTo(C, p, vehicleDoor(C, v, i % 2 ? -1 : 1), q => { boardVehicle(C, q, v); if (++n === crew.length) go(); }, 'Heading back to the vehicle');
+    const kerbSide = v.mode === 'stopped' || v.mode === 'drive';   // stopped in the lane: get in from the footpath side
+    walkTo(C, p, vehicleDoor(C, v, kerbSide ? -1 : (i % 2 ? -1 : 1)), q => { boardVehicle(C, q, v); if (++n === crew.length) go(); }, 'Heading back to the vehicle');
   });
 }
 function standDownAll(C, inc) { for (const v of inc.units || []) if (v.job === inc) standDown(C, v, inc); }
@@ -2259,8 +2361,9 @@ function onCrash(C, a, b, rv) {
     driveTo(C, v, tgt, () => {
       if (!inc.active) { standDown(C, v, inc); return; }            // the scene was cleared while we were on the way
       v.lights.siren = null; v.lights.beacon = true; v.lights.haz = true; v.task = 'At the crash scene';
-      const o = crew[0]; alight(C, o, 1);
-      walkTo(C, o, sidewalkNear(C, x, y), q => {
+      const o = crew[0]; alight(C, o, -1);                         // out on the kerb side, onto the near footpath
+      const pe = curEdge(v), spot = pe ? edgePoint(pe, clamp(projectOnEdge(pe, x, y), 2, pe.len - 2), pe.kerbOff + SW / 2) : sidewalkNear(C, x, y);
+      walkTo(C, o, spot, q => {
         if (!inc.active) { standDown(C, v, inc); return; }
         q.state = 'act'; q.pose = 'notes'; q.until = Infinity; q.lookAt = { x, y }; q.task = 'Taking statements at the crash';
         setTimeout0(C, C.R.range(25, 45), () => close());
@@ -2291,7 +2394,7 @@ function onCrash(C, a, b, rv) {
 function pushToKerb(C, car) {
   const e = curEdge(car) || nearestLane(C, car.x, car.y).lane.edge;
   const s0 = clamp(car.seg && car.seg.kind === 'lane' ? car.s : 9, 9, e.len - 18);
-  const clear = s => !e.bays.some(b => b.occ && b.occ !== car && Math.abs(b.s - s) < (b.len + car.len) / 2 + 0.3) && !e.drives.some(d => s > d.s0 - 3 && s < d.s1 + 3) && !e.zebras.some(z => Math.abs(z.s - s) < 6);
+  const clear = s => !e.bays.some(b => ((b.occ && b.occ !== car) || (b.res && b.res !== car)) && Math.abs(b.s - s) < (b.len + car.len) / 2 + 0.3) && !e.drives.some(d => s > d.s0 - 3 && s < d.s1 + 3) && !e.zebras.some(z => Math.abs(z.s - s) < 6);
   let sk = null; for (let k = 0; k <= 22 && sk === null; k += 2) for (const sg of k ? [1, -1] : [1]) { const ss = s0 + sg * k; if (ss > 8 && ss < e.len - 17 && clear(ss)) { sk = ss; break; } }
   if (sk === null) return false;
   detach(C, car);
@@ -2977,8 +3080,9 @@ function stepVisitors(C) {
   const R = C.R, h = C.hour, want = h > 6.5 && h < 22 ? (h > 7 && h < 9.5 || h > 16 && h < 19 ? 34 : 24) : 6;
   const vis = C.vehicles.filter(v => v.visitor);
   if (vis.length < want && R.chance(0.25)) {
-    const e = R.pick(C.edges.filter(e => !e.closed && e.len > 40 && !inView(C, e.ax, e.ay)));
-    if (e) { const v = makeVehicle(C, 'car'); v.visitor = true; joinLane(C, v, e.lanes[0], R.range(4, 12)); posFromSeg(C, v, 1); visitorNext(C, v); }
+    const e = R.pick(C.edges.filter(e => !e.closed && e.len > 40 && !inView(C, e.ax, e.ay))), s0 = R.range(4, 12);
+    const free = e && !e.lanes[0].occ.some(u => Math.abs(u.s - s0) < 15) && !e.lanes[0].intr.some(it => it.s1 > s0 - 15 && it.s0 < s0 + 15) && !e.from.moves.some(m => m.outLane === e.lanes[0] && m.occ.length);
+    if (free) { const v = makeVehicle(C, 'car'); v.visitor = true; joinLane(C, v, e.lanes[0], s0); posFromSeg(C, v, 1); visitorNext(C, v); }   // only arrive where the lane is clear
   }
   for (const v of vis) if (v.mode === 'parked' && v.leaveAt && C.tReal > v.leaveAt) { v.leaveAt = 0; if (vis.length > want || R.chance(0.3)) { v.leaving = true; } visitorNext(C, v); }
 }
@@ -3172,4 +3276,4 @@ function describe(C, e) {
   return null;
 }
 export { vehicleDoor, rearPoint, curEdge };
-export { crash as _crash, requestTow as _requestTow, startJaywalk as _startJaywalk, startFire as _startFire, startCarjack as _startCarjack, startPickpocket as _startPickpocket, startRoadworks as _startRoadworks, startMedical as _startMedical, sideDist as _sideDist, projectOnEdge as _proj };
+export { obbOverlap as _obbOverlap, crash as _crash, requestTow as _requestTow, startJaywalk as _startJaywalk, startFire as _startFire, startCarjack as _startCarjack, startPickpocket as _startPickpocket, startRoadworks as _startRoadworks, startMedical as _startMedical, sideDist as _sideDist, projectOnEdge as _proj };

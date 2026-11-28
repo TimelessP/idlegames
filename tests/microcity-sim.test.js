@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash, _requestTow, FLEET, FLOOR_H, FLOOR_ROW, busPlan } from '../assets/js/microcity-sim.js';
+import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash, _requestTow, FLEET, FLOOR_H, FLOOR_ROW, busPlan, _obbOverlap } from '../assets/js/microcity-sim.js';
 
 const run = (C, seconds, dt = 1 / 30) => { for (let t = 0; t < seconds; t += dt) { C.step(dt); C.cues.length = 0; } };
 
@@ -180,4 +180,19 @@ test('match day: fans drive and fill about a third of the stadium car park, get 
   assert.ok(st.inside.size > 60, `only ${st.inside.size} fans inside after kick-off`);
   while (C.hour < 17.75) run(C, 10);
   assert.ok(occ() < peak * 0.7, `car park still holds ${occ()} of its ${peak} cars after the match`);
+});
+
+test('vehicles pulling out from the kerb, a car park or a garage never overlap another vehicle', () => {
+  for (const [seed, hour] of [[20261128, 16.5], [11, 7.5]]) {
+    const C = createCity({ seed, startHour: hour });
+    const hits = [];
+    for (let t = 0; t < 360; t += 1 / 30) {
+      C.step(1 / 30); C.cues.length = 0;
+      for (const v of C.vehicles) {
+        if (v.mode !== 'track' || !v.track || !v.track.pull || !v.tStarted) continue;
+        for (const u of C.vehicles) if (u !== v && u.mode !== 'gone' && !u.towedBy && Math.abs(u.x - v.x) < 14 && Math.abs(u.y - v.y) < 14 && _obbOverlap(v, u, 0.15)) hits.push(`${v.track.pull} ${v.type}#${v.id} into ${u.type}#${u.id} (${u.mode})`);
+      }
+    }
+    assert.deepEqual([...new Set(hits)], [], `seed ${seed}`);
+  }
 });
