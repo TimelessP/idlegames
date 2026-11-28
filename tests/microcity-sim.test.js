@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash, _requestTow, FLEET } from '../assets/js/microcity-sim.js';
+import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash, _requestTow, FLEET, FLOOR_H, FLOOR_ROW } from '../assets/js/microcity-sim.js';
 
 const run = (C, seconds, dt = 1 / 30) => { for (let t = 0; t < seconds; t += dt) { C.step(dt); C.cues.length = 0; } };
 
@@ -28,6 +28,21 @@ test('every service fleet is complete, with a yard to park in, on many different
     for (const [type, n] of Object.entries(FLEET)) assert.equal(C.vehicles.filter(v => v.type === type).length, n, `seed ${seed}: ${type}`);
     for (const k of ['police', 'warehouse', 'dealer', 'scrap', 'works']) assert.ok(C[k] && C[k].yard, `seed ${seed}: ${k} has no yard`);
     for (const v of C.vehicles) if (v.type !== 'car' && v.type !== 'taxi') assert.ok(v.homeBay, `seed ${seed}: ${v.type} has no home bay`);
+  }
+});
+
+test('every storey is one standard row and the roof always keeps at least one row', () => {
+  for (const seed of [20261128, 7, 42]) {
+    const C = createCity({ seed });
+    for (const b of C.buildings) {
+      if (b.type === 'stadium') continue;
+      const D = b.fp.y1 - b.fp.y0, msg = `seed ${seed}: ${b.label} (${b.floors} floors, ${D.toFixed(1)} m deep)`;
+      assert.ok(b.floors >= 1, msg);
+      assert.equal(b.gh, FLOOR_H, msg); assert.equal(b.fh, FLOOR_H, msg);
+      assert.ok(Math.abs(b.H - b.floors * FLOOR_H) < 1e-9, msg);
+      if (b.floors > 1) assert.ok(D - b.floors * FLOOR_ROW >= FLOOR_ROW - 1e-6, msg + ' leaves less than a row of roof');
+      assert.ok(Math.max(...b.rooms.map(r => r.f), 0) < b.floors, msg + ' has rooms above its top floor');
+    }
   }
 });
 

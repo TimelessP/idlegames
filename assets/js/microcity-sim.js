@@ -92,6 +92,9 @@ const TMP = { x: 0, y: 0, tx: 1, ty: 0 }, TMP2 = { x: 0, y: 0, tx: 1, ty: 0 };
 
 // §A3 ------------------------------------------------------------------------
 export const LANE_W = 3.3, PARK_W = 2.5, SW = 4.5;
+// Buildings are drawn inside their ground rectangle, which is divided into rows of one standard storey.
+// The facade gets one row per floor; the roof gets at least one row plus whatever depth is left over.
+export const VIEW_HZ = 0.74, FLOOR_H = 3.2, FLOOR_ROW = FLOOR_H * VIEW_HZ;
 const ROADCLS = { avenue: { lanes: 2, speed: 13.5 }, street: { lanes: 1, speed: 11 } };
 export const halfW = cls => ROADCLS[cls].lanes * LANE_W + PARK_W;
 
@@ -426,7 +429,7 @@ function makeBuilding(C, b, lot, type, facing, brandCat) {
   const R = C.R, S = BSPEC[type] || BSPEC.shop;
   let fp = { ...lot };
   if (type === 'house') { const fr = R.range(3.5, 6), bk = R.range(4, 9); fp = { x0: lot.x0 + R.range(1, 2), x1: lot.x1 - R.range(1, 2), y0: facing === 'S' ? lot.y0 + bk : lot.y0 + fr, y1: facing === 'S' ? lot.y1 - fr : lot.y1 - bk }; }
-  else if (type !== 'stadium' && type !== 'mall' && type !== 'hospital' && type !== 'depot') {
+  else if (type !== 'stadium' && type !== 'mall' && type !== 'hospital' && type !== 'depot' && type !== 'office' && type !== 'apartment' && type !== 'hotel' && type !== 'commerce') {
     const back = R.chance(0.5) ? R.range(0, 7) : 0;
     if (facing === 'S') fp.y0 += back; else fp.y1 -= back;
   }
@@ -435,12 +438,17 @@ function makeBuilding(C, b, lot, type, facing, brandCat) {
   if (b.kind === 'residential' && type === 'apartment') floors = Math.min(floors, 6);
   const w = fp.x1 - fp.x0, pitch = S.pitch * R.range(0.95, 1.08);
   const cols = Math.max(1, Math.floor((w - 1.0) / pitch));
-  const parapet = type === 'house' || type === 'terrace' ? 0 : R.range(0.5, 1.3);
-  const H = S.gh + (floors - 1) * S.fh + parapet;
+  let gh = S.gh, fh = S.fh, parapet = 0, H;
+  if (type === 'stadium') { parapet = R.range(0.5, 1.3); H = S.gh + (floors - 1) * S.fh + parapet; }
+  else { // whole standard storeys only, as many as fit while leaving at least one row of roof
+    const rows = Math.floor((fp.y1 - fp.y0) / FLOOR_ROW + 1e-6);
+    floors = clamp(floors, 1, Math.max(1, rows - 1));
+    gh = fh = FLOOR_H; H = floors * FLOOR_H;
+  }
   const cat = brandCat || (type === 'shop' ? R.weighted(SHOP_CATS) : BRAND[type] ? type : null);
   const branded = !!cat && (type !== 'office' || R.chance(0.7));
   const bl = {
-    id: C.buildings.length, type, cat, block: b, lot, fp, facing, floors, gh: S.gh, fh: S.fh, H, parapet,
+    id: C.buildings.length, type, cat, block: b, lot, fp, facing, floors, gh, fh, H, parapet,
     win: { cols, pitch, mx: (w - cols * pitch) / 2 }, rooms: [], units: [], residents: [], workers: [], inside: new Set(),
     brand: branded ? makeBrand(R, cat) : null, seed: R.int(1, 2 ** 30), fire: null, hours: cat ? shopHours(cat) : null,
     door: null, doorNode: -1, garages: null, yard: null, roof: type === 'house' ? 'pitched' : (type === 'terrace' ? 'pitched' : 'flat'),
