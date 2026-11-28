@@ -111,7 +111,7 @@ export const VT = {
   garbage:   { len: 8.6, wid: 2.5, h: 3.2, aMax: 1.3, bComf: 2.0, bMax: 5.8, v0: 0.75 },
 };
 // Share targets for the non-private fleet (absolute counts, fixed by depots).
-export const FLEET = { police: 3, ambulance: 2, fire: 2, tow: 2, ute: 1, van: 5, garbage: 1, taxi: 5, bus: 4 };
+export const FLEET = { police: 3, ambulance: 2, fire: 2, tow: 2, ute: 1, van: 5, garbage: 1, taxi: 5, bus: 10 };
 
 const CAR_COLOURS = ['#b8322c', '#2e4f8f', '#d9c27a', '#e9e4d6', '#2f6b4a', '#6b3b6b', '#d17a2a', '#3a3a3e', '#8d939b', '#9c2b45', '#3d6f86', '#c9b8a0', '#1f2a3a', '#77806b'];
 const SKIN = ['#f1d3b6', '#e2b48f', '#c98f62', '#9a6340', '#6e4329', '#4a2e1d'];
@@ -583,7 +583,7 @@ function makeLot(C, b, r, facing, kind, o = {}) {
   lot.inTrack.speed = 3.4; lot.inS = s0;
   const s1 = clamp(sX + 9, 1, e.len - 0.5); lane.at(s1, TMP);
   lot.outTrack = new PathSeg('track', cubic(eout, P(eout.x, eout.y - inY * 4.5), P(TMP.x - e.dx * 4.5, TMP.y - e.dy * 4.5), P(TMP.x, TMP.y), 14));
-  lot.outTrack.speed = 3.0; lot.outTrack.join = { lane, s: s1 };
+  lot.outTrack.speed = 3.0; lot.outTrack.join = { lane, s: s1 }; lot.outTrack.blocks = { lane, s0: s1 - 9, s1: s1 + 5 };
   e.drives.push({ s0: Math.min(sE, sX) - 4, s1: Math.max(sE, sX) + 4, lot });
   b.lots.push(lot); C.lots.push(lot);
   return lot;
@@ -832,7 +832,8 @@ function routeToNode(C, from, node) {
   return best;
 }
 function genBusRoutes(C) {
-  const W = [[[1, 1], [7, 1], [7, 5], [1, 5]], [[3, 0], [5, 0], [5, 6], [3, 6]]];
+  const W = [[[1, 1], [7, 1], [7, 5], [1, 5]], [[3, 0], [5, 0], [5, 6], [3, 6]], [[0, 2], [8, 2], [8, 4], [0, 4]], [[0, 0], [3, 0], [3, 3], [0, 3]], [[5, 3], [8, 3], [8, 6], [5, 6]]];
+  const LOOK = [['#2b7bd9', 'Route 1 · Ring'], ['#d9632b', 'Route 2 · Spine'], ['#2f9a5a', 'Route 3 · Crosstown'], ['#7a4fc8', 'Route 4 · Westside'], ['#c8342a', 'Route 5 · Eastside']];
   C.busRoutes = []; C.stops = [];
   for (const [ri, wps] of W.entries()) {
     const nodes = wps.map(([i, j]) => C.nodeAt(i, j));
@@ -840,13 +841,16 @@ function genBusRoutes(C) {
     let route = [first], cur = first;
     for (const nd of [...nodes.slice(1), nodes[0]]) { if (cur.to === nd) continue; const leg = routeToNode(C, cur, nd); if (!leg) break; route.push(...leg); cur = route[route.length - 1]; }
     const close = routeEdges(C, cur, first); if (close && close.length) route.push(...close.slice(0, -1));
-    const r = { id: ri, edges: route, stops: [], colour: ri ? '#d9632b' : '#2b7bd9', name: ri ? 'Route 2' : 'Route 1' };
+    const r = { id: ri, edges: route, stops: [], colour: LOOK[ri][0], name: LOOK[ri][1], pos: new Map(), len: 0 };
     route.forEach((e, k) => {
       if (k % 2 || e.len < 50) return;
       if (C.stops.some(s => s.e === e || s.e === e.rev)) { const ex = C.stops.find(s => s.e === e); if (ex && !ex.routes.includes(r)) { ex.routes.push(r); r.stops.push(ex); } return; }
       const st = { id: C.stops.length, e, s: e.len * 0.55, routes: [r], waiting: [], spot: null, pnode: -1, bay: null };
       e.stops = e.stops || []; e.stops.push(st); C.stops.push(st); r.stops.push(st);
     });
+    let cum = 0; const at = new Map(); for (const e of route) { if (!at.has(e)) at.set(e, cum); cum += e.len + 12; }
+    r.len = cum; for (const st of r.stops) r.pos.set(st, at.get(st.e) + st.s);
+    r.stops.sort((a, b) => r.pos.get(a) - r.pos.get(b));
     C.busRoutes.push(r);
   }
 }
@@ -1230,7 +1234,7 @@ function stepTrack(C, v, dt) {
   const tr = v.track;
   if (!v.tStarted) {
     v.tWaitT += dt; v.v = 0; v.lights.brake = true;
-    if (v.tWait(v) && v.tWaitT < 40) { trackPos(C, v, dt); return; }
+    if (v.tWait(v) && (v.tWaitT < 40 || joinTaken(v))) { trackPos(C, v, dt); return; }
     v.tStarted = true; addTrackBlock(v);
   }
   const rev = tr.reverse, sp = (tr.speed || 2.5) * (v.lights.siren ? 1.5 : 1);
@@ -1255,11 +1259,23 @@ function stepTrack(C, v, dt) {
   }
   trackPos(C, v, dt);
 }
+function joinTaken(v) { const j = v.track.join; if (!j) return false; return j.lane.occ.some(u => u !== v && Math.abs(u.s - j.s) < (u.len + v.len) / 2 + 1); }
 function trackPos(C, v, dt) {
   v.track.at(v.s, TMP);
   v.x = TMP.x; v.y = TMP.y;
   const tgt = Math.atan2(TMP.ty, TMP.tx) + (v.track.reverse ? Math.PI : 0);
   v.hd += angDiff(v.hd, tgt) * Math.min(1, dt * 10);
+}
+// wait for a gap; after waiting a while, ask for one: traffic still far enough away stops to let us out
+function courtesyLot(v, loop, at) {
+  const close = loop.occ.some(u => u !== v && u.s > at - 5 && u.s < at + 4);
+  if (!v.tIntr && v.tWaitT > 2 && !loop.occ.some(u => u !== v && u.s > at - 8 && u.s < at + 4)) addTrackBlock(v);
+  return close || (!v.tIntr && loop.occ.some(u => u !== v && u.s > at - 14 && u.s < at + 5));
+}
+function courtesyLane(C, v, lane, s, ahead) {
+  if (laneClearFor(C, lane, s, ahead)) return false;
+  if (!v.tIntr && v.tWaitT > 5 && !lane.occ.some(u => u.mode !== 'track' && u.s < s + ahead && u.s > s - 12 - u.v * 1.4)) addTrackBlock(v);
+  return !v.tIntr || lane.occ.some(u => u.mode !== 'track' && u.s < s + ahead && u.s > s - 7);
 }
 function laneClearFor(C, lane, s, ahead = 12) {
   for (const u of lane.occ) { if (u.mode === 'track') continue; if (u.s < s + ahead && u.s > s - (10 + u.v * 3.8)) return false; }
@@ -1283,12 +1299,12 @@ function depart(C, v, then) {
   }
   if (bay.lot) {
     const lot = bay.lot;
-    startTrack(C, v, bay.outTrack, 0, bay.outTrack.length, { wait: () => lot.loop.occ.some(u => u.s > bay.loopS - 14 && u.s < bay.loopS + 5) },
+    startTrack(C, v, bay.outTrack, 0, bay.outTrack.length, { wait: () => courtesyLot(v, lot.loop, bay.loopS) },
       () => {
         freeBay(v);
         startTrack(C, v, lot.loop, bay.outS, lot.loop.length, { shared: true }, () => {
           const j = lot.outTrack.join;
-          startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => !laneClearFor(C, j.lane, j.s, 10) }, () => { joinLane(C, v, j.lane, j.s); then(v); });
+          startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => courtesyLane(C, v, j.lane, j.s, 10) }, () => { joinLane(C, v, j.lane, j.s); then(v); });
         });
       });
     v.tBlocks = { seg: lot.loop, s0: bay.loopS - 6, s1: bay.loopS + 3 };
@@ -1299,7 +1315,7 @@ function depart(C, v, then) {
   lane.at(sOut, TMP);
   const tr = new PathSeg('track', cubic(P(bay.x, bay.y), P(bay.x + e.dx * 3.5, bay.y + e.dy * 3.5), P(TMP.x - e.dx * 3.5, TMP.y - e.dy * 3.5), P(TMP.x, TMP.y), 12));
   tr.speed = 2.6; tr.blocks = { lane, s0: bay.s - 3, s1: sOut + v.len / 2 };
-  startTrack(C, v, tr, 0, tr.length, { wait: () => !laneClearFor(C, lane, bay.s, 12) || !!lane.intr.length && lane.intr.some(i => i.s1 > bay.s - 3 && i.s0 < sOut + 3 && i.v !== v) },
+  startTrack(C, v, tr, 0, tr.length, { wait: () => courtesyLane(C, v, lane, bay.s, 12) || lane.intr.some(i => i.v !== v && i.s1 > bay.s - 3 && i.s0 < sOut + 3) },
     () => { freeBay(v); joinLane(C, v, lane, sOut); then(v); });
 }
 function nearestLane(C, x, y) {
@@ -1319,12 +1335,12 @@ function driveTo(C, v, target, done) {
 function moveWithinLot(C, v, tb, done) {
   const bay = v.bay, lot = bay.lot;
   const park = () => startTrack(C, v, tb.inTrack, 0, tb.inTrack.length, { blocks: { seg: lot.loop, s0: tb.loopS - 6, s1: tb.loopS + 2 } }, () => { parkAt(C, v, tb); v.target = null; done && done(v); });
-  startTrack(C, v, bay.outTrack, 0, bay.outTrack.length, { wait: () => lot.loop.occ.some(u => u.s > bay.loopS - 14 && u.s < bay.loopS + 5) }, () => {
+  startTrack(C, v, bay.outTrack, 0, bay.outTrack.length, { wait: () => courtesyLot(v, lot.loop, bay.loopS) }, () => {
     freeBay(v);
     if (tb.inS0 > bay.outS + 1.5) startTrack(C, v, lot.loop, bay.outS, tb.inS0, { shared: true }, park);
     else startTrack(C, v, lot.loop, bay.outS, lot.loop.length, { shared: true }, () => {
       const j = lot.outTrack.join;   // behind us on the loop: out to the street and straight back in
-      startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => !laneClearFor(C, j.lane, j.s, 10) }, () => { joinLane(C, v, j.lane, j.s); headFor(C, v); });
+      startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => courtesyLane(C, v, j.lane, j.s, 10) }, () => { joinLane(C, v, j.lane, j.s); headFor(C, v); });
     });
   });
   v.tBlocks = { seg: lot.loop, s0: bay.loopS - 6, s1: bay.loopS + 3 };
@@ -1367,6 +1383,31 @@ function headFor(C, v) {
         startTrack(C, v, tr, 0, tr.length, {}, () => { parkAt(C, v, bay); v.target = null; done && done(v); });
       });
     }
+  } else if (t.lotSearch) {
+    const lot = t.lotSearch[t.li];
+    setGoal(C, v, lot.e, lot.inS, 3.2, () => {
+      startTrack(C, v, lot.inTrack, 0, lot.inTrack.length, { shared: true }, () => {
+        // the first free bay we will pass on the one-way loop
+        const free = lot.bays.filter(b => b.kind === 'lot' && !b.occ && !b.res).sort((a, b) => a.inS0 - b.inS0)[0];
+        if (free) {
+          free.res = v; v.target = { bay: free }; v.task = 'Pulling into a parking bay';
+          startTrack(C, v, lot.loop, 0, free.inS0, { shared: true }, () => startTrack(C, v, free.inTrack, 0, free.inTrack.length, { blocks: { seg: lot.loop, s0: free.loopS - 6, s1: free.loopS + 2 } }, () => { parkAt(C, v, free); v.target = null; done && done(v); }));
+          return;
+        }
+        v.task = 'Car park full, going round';
+        startTrack(C, v, lot.loop, 0, lot.loop.length, { shared: true }, () => {
+          const j = lot.outTrack.join;
+          startTrack(C, v, lot.outTrack, 0, lot.outTrack.length, { shared: true, wait: () => courtesyLane(C, v, j.lane, j.s, 10) }, () => {
+            joinLane(C, v, j.lane, j.s);
+            t.li++;
+            if (t.li >= t.lotSearch.length) { t.li = 0; t.tries++; }
+            if (t.tries < 2) { headFor(C, v); return; }
+            const bay = findBay(C, t.near.x, t.near.y, { kinds: ['park'], maxD: 400, seed: v.seed }) || findBay(C, t.near.x, t.near.y, { kinds: ['park', 'lot'], maxD: 900, lotKinds: ['public', 'mall'] });
+            if (bay) { bay.res = v; v.target = { bay }; headFor(C, v); } else { v.target = null; done && done(v); }
+          });
+        });
+      });
+    });
   } else if (t.kerb) {
     setGoal(C, v, t.e, t.s, 0, () => { stopInLane(C, v); v.target = null; done && done(v); });
   } else if (t.pass) {
@@ -1647,7 +1688,7 @@ function stepIndoor(C, p) {
       p.nextRoomAt = C.time + C.R.range(18, 55);
       const rooms = p.unit.rooms.map(i => bl.rooms[i]);
       const bed = rooms.find(r => r.kind === 'bed') || rooms[0];
-      const sleepy = (h >= p.sleepAt || h < p.wakeAt - 0.2);
+      const sleepy = isSleepy(p, h);
       const r = sleepy ? bed : C.R.pick(rooms.filter(r => r.kind !== 'bed' || rooms.length === 1) .concat(rooms.length ? [] : []));
       if (r && r !== p.room) moveRoom(C, p, r);
       if (sleepy && p.room === bed) { p.asleep = true; markLit(C, bl, p.room); }
@@ -1679,11 +1720,13 @@ function travel(C, p, dest, then, task) {
   const D = Math.hypot(to.x - from.x, to.y - from.y);
   p.task = task || p.task;
   const finish = q => { if (dest.bld) { q.state = 'act'; enterBuilding(C, q, dest.bld, dest.kind || 'visit'); then && then(q); } else then && then(q); };
+  if (dest.drive && p.car && p.car.mode === 'parked' && p.car.owner === p && !p.car.job) { carTrip(C, p, p.car, dest, to, finish); return; }
+  if (p.preferCar) { p.preferCar = false; if (p.car && p.car.mode === 'parked' && p.car.owner === p && !p.car.job && D > 60) { carTrip(C, p, p.car, dest, to, finish); return; } }
   if (p.car && p.car.mode === 'parked' && p.car.owner === p && !p.car.job && D > 280 && p.age !== 'kid' && C.R.chance(0.8)) {
     const car = p.car, cd = { x: car.x, y: car.y };
     if (Math.hypot(cd.x - from.x, cd.y - from.y) < 260) { carTrip(C, p, car, dest, to, finish); return; }
   }
-  if (D > 560) {
+  if (D > 300) {
     const bt = busPlan(C, from, to);
     if (bt) { busTrip(C, p, bt, to, finish); return; }
   }
@@ -1694,20 +1737,30 @@ function carTrip(C, p, car, dest, to, finish) {
   walkTo(C, p, door, q => {
     if (car.mode !== 'parked' || car.job) { walkTo(C, q, to, finish); return; }
     boardVehicle(C, q, car); car.driver = q; car.task = `Driving ${q.first} ${dest.bld ? 'to ' + dest.bld.label : ''}`;
-    const bay = findBay(C, to.x, to.y, { kinds: ['park'], maxD: 110, seed: q.seed }) || findBay(C, to.x, to.y, { kinds: ['lot'], maxD: 260, seed: q.seed, lotKinds: ['public', 'mall', 'stadium', 'hospital'] }) || findBay(C, to.x, to.y, { kinds: ['park', 'lot'], maxD: 900, lotKinds: ['public', 'mall', 'stadium', 'hospital'] });
-    if (!bay) { alight(C, q); walkTo(C, q, to, finish); return; }
+    const lots = dest.bld && (dest.bld === C.stadium || dest.bld === C.mall) ? dest.bld.block.lots.filter(l => l.bays.length) : null;
+    const bay = lots && lots.length ? null : findBay(C, to.x, to.y, { kinds: ['park'], maxD: 110, seed: q.seed }) || findBay(C, to.x, to.y, { kinds: ['lot'], maxD: 260, seed: q.seed, lotKinds: ['public', 'mall', 'stadium', 'hospital'] }) || findBay(C, to.x, to.y, { kinds: ['park', 'lot'], maxD: 900, lotKinds: ['public', 'mall', 'stadium', 'hospital'] });
+    if (!bay && !(lots && lots.length)) { alight(C, q); walkTo(C, q, to, finish); return; }
     car.lights.head = C.dark > 0.3;
-    driveTo(C, car, { bay }, () => {
+    driveTo(C, car, bay ? { bay } : { lotSearch: lots, li: 0, tries: 0, near: to }, () => {
       car.driver = null; car.task = 'Parked';
       setTimeout0(C, 1.2, () => { alight(C, q); walkTo(C, q, to, finish); });
     });
   }, p.task);
 }
-function busPlan(C, a, b) {
-  let best = null;
-  for (const r of C.busRoutes) for (const sa of r.stops) { if (!sa.spot) continue; const da = Math.hypot(sa.spot.x - a.x, sa.spot.y - a.y); if (da > 320) continue;
-    for (const sb of r.stops) { if (sb === sa || !sb.spot) continue; const db = Math.hypot(sb.spot.x - b.x, sb.spot.y - b.y); if (db > 320) continue;
-      const tot = da + db; if (tot < Math.hypot(b.x - a.x, b.y - a.y) * 0.55 && (!best || tot < best.tot)) best = { r, sa, sb, tot }; } }
+// A bus ride is worth it when a route has a stop near the start and a different stop near the end,
+// and runs roughly the way you're going (the ride is not a long detour round its loop).
+export function busPlan(C, a, b) {
+  const direct = Math.hypot(b.x - a.x, b.y - a.y); let best = null;
+  for (const r of C.busRoutes) for (const sa of r.stops) {
+    if (!sa.spot) continue; const da = Math.hypot(sa.spot.x - a.x, sa.spot.y - a.y); if (da > 260) continue;
+    for (const sb of r.stops) {
+      if (sb === sa || !sb.spot) continue; const db = Math.hypot(sb.spot.x - b.x, sb.spot.y - b.y); if (db > 260) continue;
+      const ride = ((r.pos.get(sb) - r.pos.get(sa)) % r.len + r.len) % r.len;
+      if (ride > direct * 1.7 + 150) continue;                      // the bus would take you the long way round
+      const cost = da + db + ride * 0.35 + 140;                      // walking metres; the bus is ~3x faster, plus a wait
+      if (cost < direct * 0.9 && (!best || cost < best.cost)) best = { r, sa, sb, cost, ride };
+    }
+  }
   return best;
 }
 function busTrip(C, p, bt, to, finish) {
@@ -1742,7 +1795,8 @@ function shiftNow(C, p, lead = 40) {
   }
   return null;
 }
-const sleepy = (p, h) => h >= p.sleepAt || h < p.wakeAt;
+const isSleepy = (p, h) => sleepy(p, h);
+const sleepy = (p, h) => p.sleepAt < p.wakeAt ? h >= p.sleepAt && h < p.wakeAt : h >= p.sleepAt || h < p.wakeAt;
 function stay(C, p, min) { p.until = C.time + min; }
 function nextWake(C, p) { const h = C.hour; let add = (p.wakeAt - h) * 60; if (add < 0) add += 1440; return C.time + add; }
 function goHome(C, p, why) {
@@ -1772,6 +1826,7 @@ export function think(C, p) {
     if (p.role === 'hotdog' || p.role === 'newsie' || p.role === 'vendor' || p.role === 'busker') { vendorShift(C, p, sh); return; }
   }
   if (sleepy(p, h) && !(p.role === 'none' && h < 1 && R.chance(0.3))) { goHome(C, p, 'sleep'); return; }
+  if (p.job && p.state === 'in' && p.bld === p.job && R.chance(0.65)) { p.task = 'Knocking off'; goHome(C, p, 'rest'); return; }   // end of a shift: home to rest first
   leisure(C, p);
 }
 function workTask(p) { const r = p.role; return { police: 'On duty at the police station', medic: 'On shift with the ambulance crew', firefighter: 'On shift at the fire station', kid: 'At school' }[r] || (p.age === 'kid' ? 'At school' : `Working at ${p.job.label}`); }
@@ -1927,6 +1982,13 @@ function genPeople(C) {
   // school for kids
   for (const p of C.people) if (p.age === 'kid' && C.school) { p.role = 'kid'; p.job = C.school; p.shift = [8.7, 15.2]; p.workDays = WEEK; p.jobRoom = R.pick(C.school.rooms.filter(r => r.kind === 'class') || C.school.rooms).id; }
   for (const p of C.people) if (p.role === 'none' && p.age !== 'kid') p.role = 'leisure';
+  // sleep around the shift: night crews sleep in the morning, early starters go to bed early, late finishers sleep in
+  for (const p of C.people) {
+    if (!p.shift) continue; const [s0, e0] = p.shift;
+    if (e0 > 24) { p.sleepAt = (e0 - 24) + R.range(1, 1.8); p.wakeAt = p.sleepAt + R.range(6.5, 7.5); }
+    else if (s0 < 7) { p.wakeAt = (s0 - R.range(0.9, 1.3) + 24) % 24; p.sleepAt = R.range(20, 21.5); }
+    else if (e0 > 22.5) { p.sleepAt = (e0 + R.range(0.8, 1.5)) % 24; p.wakeAt = (p.sleepAt + R.range(7, 8)) % 24; }
+  }
   for (const p of C.people) if (p.shift && p.lunchChance) p.lunchAt = null;
   // cars
   const target = Math.round(C.people.length * (C.opts.carRate || 0.16));
@@ -2642,7 +2704,14 @@ function startEvent(C, ev, pool) {
   const pick = n => R.shuffle(pool()).slice(0, n);
   if (ev.kind === 'stadium') {
     const st = C.stadium; inc.x = st.door.x; inc.y = st.door.y; inc.focus = st;
-    for (const p of pick(150)) p.commit = { go: ev.K - R.range(25, 95), end: ev.end, fn: (C, q) => travel(C, q, { bld: st, kind: 'event' }, r => { r.task = 'Watching the match'; r.until = ev.end + R.range(0, 12); }, 'Heading to the match') };
+    const lots = st.block.lots.filter(l => l.bays.length), cap = lots.reduce((a, l) => a + l.bays.filter(b => b.kind === 'lot').length, 0), taken = lots.reduce((a, l) => a + l.bays.filter(b => b.occ || b.res).length, 0);
+    const nDrive = Math.max(0, Math.round(cap / 3) - taken), everyone = pool();
+    const drivers = R.shuffle(everyone.filter(p => p.age === 'adult' && p.car && p.car.owner === p && p.car.mode === 'parked' && !p.car.job && !p.busy)).slice(0, nDrive);
+    const walkers = R.shuffle(everyone.filter(p => !drivers.includes(p))).slice(0, 150 - drivers.length);
+    const watch = r => { r.task = 'Watching the match'; r.until = ev.end + R.range(0, 12); };
+    for (const p of drivers) p.commit = { go: ev.K - R.range(70, 115), end: ev.end, fn: (C, q) => travel(C, q, { bld: st, kind: 'event', drive: true }, r => { watch(r); r.preferCar = true; }, 'Driving to the match') };
+    for (const p of walkers) p.commit = { go: ev.K - R.range(30, 95), end: ev.end, fn: (C, q) => travel(C, q, { bld: st, kind: 'event' }, watch, 'Heading to the match') };
+    ev.drivers = drivers;
     atGameTime(C, ev.K, () => { C.events.stadium.live = true; C.cue('whistle', st.door.x, st.door.y, 1); C.log('Kick-off at the stadium!', 'stadium'); });
     atGameTime(C, ev.end - 5, () => { C.events.stadium.live = false; C.cue('roar', st.door.x, st.door.y, 1); });
     atGameTime(C, ev.end + 30, () => endIncident(C, inc));
@@ -2697,6 +2766,8 @@ function startEvent(C, ev, pool) {
     atGameTime(C, ev.K, () => { M.live = true; C.cue('horn', start.x, start.y, 1, 'start'); C.log('And they’re off — the marathon has started!', 'marathon'); });
     atGameTime(C, ev.end, () => { for (const e of route) { e.closed = false; e.rev.closed = false; } M.closed = false; M.live = false; C.log('Marathon roads have reopened', 'marathon'); endIncident(C, inc); });
   }
+  // everyone going re-plans at their departure time, even if they were settled at home or at work
+  for (const p of C.people) if (p.commit && p.commit.go > C.time - 1 && p.state === 'in' && !p.busy) p.until = Math.min(p.until, Math.max(C.time, p.commit.go));
 }
 function stepEvents(C, dt) {
   const E = C.events, R = C.R;
@@ -2797,10 +2868,7 @@ function claudeThink(C, p) {
   const R = C.R, h = C.hour, wk = C.dow < 5;
   p.asleep = false;
   const dc = C.datacentre;
-  if (h >= 23.4 || h < 6.5) {
-    if (dc) { if (p.bld === dc) { p.task = 'Resting among the servers'; p.until = nextWake(C, p); return; } travel(C, p, { bld: dc, kind: 'server' }, q => { q.task = 'Resting among the servers'; q.until = nextWake(C, q); }, 'Heading back to the data centre'); return; }
-    goHome(C, p, 'sleep'); return;
-  }
+  if (h >= 23.4 || h < 6.5) { goHome(C, p, 'sleep'); return; }
   const go = (bl, kind, task, min, walkTask) => { if (!bl) return false; travel(C, p, { bld: bl, kind }, q => { q.task = task; stay(C, q, min); }, walkTask); return true; };
   // a chance meeting with the wanderer
   const fen = C.people.find(q => q.special === 'wanderer');
@@ -2832,7 +2900,8 @@ function makeSpecials(C) {
   if (hotelUnit) { f.home = C.hotel; f.unit = hotelUnit; hotelUnit.residents.push(f); }
   const c = makePerson(C, { age: 'adult', role: 'special' });
   Object.assign(c, { first: 'Claude', last: '', name: 'Claude', special: 'claude', top: '#d97757', bottom: '#3d3929', hat: null, hair: '#3b2618', skin: '#f1d3b6', dog: null, distracted: false, spdBase: 1.3, wakeAt: 6.5, sleepAt: 23.4 });
-  if (C.datacentre) { c.home = C.datacentre; const r = C.datacentre.rooms.find(r => r.kind === 'server'); if (r) { c.unit = { id: -1, rooms: [r.id], residents: [c] }; } }
+  { const flats = C.buildings.filter(b => b.type === 'apartment' && b.units.length); const hb = flats.find(b => b.units.some(u => !u.residents.length)) || R.pick(flats);
+    if (hb) { const u = hb.units.find(u => !u.residents.length) || R.pick(hb.units); c.home = hb; c.unit = u; u.residents.push(c); hb.residents.push(c); } }
   C.fennel = f; C.claude = c;
   void R;
 }
@@ -3010,7 +3079,7 @@ function spawners(C) {
   if (!n('carjack') && h > 8 && h < 23 && R.chance(0.0016)) startCarjack(C);
   if (h > 7 && h < 21.5 && R.chance(0.035)) startJaywalk(C);
   for (const t of C.vehicles) if (t.type === 'taxi' && !t.job && t.mode === 'drive' && !t.goal && !t.target) taxiRoam(C, t);
-  for (const b of C.vehicles) if (b.type === 'bus' && !b.job && b.mode === 'parked' && busHours(C) && R.chance(0.08)) busRun(C, b);
+  if (busHours(C) && C.tReal > (C.nextBusOut || 0)) { const b = C.vehicles.find(b => b.type === 'bus' && !b.job && b.mode === 'parked'); if (b) { busRun(C, b); C.nextBusOut = C.tReal + 25; } }
 }
 function stepLighting(C) {
   const B = C.buildings, n = 24;
@@ -3056,10 +3125,10 @@ function genFleet(C) {
   if (C.works && C.works.yard) { put('ute', FLEET.ute, C.works.yard.bays); put('garbage', FLEET.garbage, C.works.yard.bays); }
   if (C.warehouse && C.warehouse.yard) put('van', FLEET.van, C.warehouse.yard.bays);
   const depotLot = C.lots.find(l => l.kind === 'depot');
-  if (depotLot) { put('bus', FLEET.bus, depotLot.bays); C.vehicles.filter(v => v.type === 'bus').forEach((b, k) => { b.busRoute = C.busRoutes[k % C.busRoutes.length]; b.si = Math.floor(k / C.busRoutes.length) * Math.floor(b.busRoute.stops.length / 2); }); }
+  if (depotLot) { put('bus', FLEET.bus, depotLot.bays); C.vehicles.filter(v => v.type === 'bus').forEach((b, k) => { const r = C.busRoutes[k % C.busRoutes.length], j = Math.floor(k / C.busRoutes.length); b.busRoute = r; b.si = j * Math.floor(r.stops.length / 2); b.num = r.id + 1; b.color = r.colour; }); }
   for (let k = 0; k < FLEET.taxi; k++) { const e = R.pick(C.edges); const t = makeVehicle(C, 'taxi'); joinLane(C, t, e.lanes[0], R.range(5, e.len - 10)); posFromSeg(C, t, 1); }
   if (C.dealer && C.dealer.yard) for (const b of C.dealer.yard.bays.slice(0, 5)) { const v = makeVehicle(C, 'car'); v.forSale = true; v.age = 0; v.task = 'For sale'; parkAt(C, v, b); }
-  C.vehicles.filter(v => v.type === 'bus').forEach((b, k) => setTimeout0(C, 2 + k * 30, () => { if (busHours(C) && !b.job) busRun(C, b); }));
+  C.nextBusOut = 2;
 }
 // §E4 public API ------------------------------------------------------------------------------
 export function createCity(opts = {}) {
@@ -3067,7 +3136,7 @@ export function createCity(opts = {}) {
   const seed = (opts.seed >>> 0) || 20261128;
   const C = {
     opts, seed, R: makeRng(seed), LHT: opts.driveSide !== 'right', vehicles: [], people: [], vById: new Map(), pById: new Map(), bays: [], incidents: [], timers: [], gtimers: [],
-    cues: [], logs: [], roadPeds: [], hist: [], startDow: 4, time: (opts.startHour ?? 15.6) * 60, tReal: 0, view: null, wind: 0.5, windNow: 0.5, spawnT: 1, econT: 0, histT: 0, lightI: 0,
+    cues: [], logs: [], roadPeds: [], hist: [], startDow: 4, time: ((opts.startDay || 0) * 24 + (opts.startHour ?? 15.6)) * 60, tReal: 0, view: null, wind: 0.5, windNow: 0.5, spawnT: 1, econT: 0, histT: 0, lightI: 0,
     stats: { crashes: 0, crashesToday: 0, scrapped: 0, sold: 0, jaywalks: 0, rescues: 0, helped: 0, found: 0 },
     events: { market: { active: false, open: false }, hotdog: { open: false, queue: [], t: 0 }, news: { open: false }, busker: { open: false }, stadium: { live: false }, concert: { queue: [], doors: false, live: false }, rally: { live: false }, marathon: { live: false, route: [], runners: [] } },
   };

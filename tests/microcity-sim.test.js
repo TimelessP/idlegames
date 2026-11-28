@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash, _requestTow, FLEET, FLOOR_H, FLOOR_ROW } from '../assets/js/microcity-sim.js';
+import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash, _requestTow, FLEET, FLOOR_H, FLOOR_ROW, busPlan } from '../assets/js/microcity-sim.js';
 
 const run = (C, seconds, dt = 1 / 30) => { for (let t = 0; t < seconds; t += dt) { C.step(dt); C.cues.length = 0; } };
 
@@ -140,4 +140,44 @@ test('a tow for a car left standing in the lane: it is moved to the kerb and the
   for (let t = 0; t < 900 && car.mode !== 'gone'; t += 5) run(C, 5);
   assert.equal(car.mode, 'gone', 'car was towed away and crushed');
   assert.ok(!rescued.includes('tow'), 'tow truck had to be rescued');
+});
+
+test('everyone has a home in a residential building', () => {
+  const C = createCity({ seed: 20261128 });
+  const RES = new Set(['house', 'terrace', 'walkup', 'apartment', 'shop', 'hotel']);
+  for (const p of C.people) { assert.ok(p.home && RES.has(p.home.type), `${p.name} lives in ${p.home && p.home.type}`); assert.ok(p.unit && p.unit.rooms.length, `${p.name} has no flat`); }
+});
+
+test('there are several bus routes, and a trip along one of them takes the bus', () => {
+  const C = createCity({ seed: 20261128 });
+  assert.ok(C.busRoutes.length >= 5);
+  for (const r of C.busRoutes) assert.ok(r.stops.length >= 3, `${r.name} has ${r.stops.length} stops`);
+  let tried = 0, rode = 0;
+  for (const r of C.busRoutes) for (let i = 0; i + 2 < r.stops.length; i++) {
+    const a = r.stops[i].spot, b = r.stops[i + 2].spot; if (!a || !b) continue;
+    const ride = r.pos.get(r.stops[i + 2]) - r.pos.get(r.stops[i]), direct = Math.hypot(b.x - a.x, b.y - a.y);
+    if (direct < 320 || ride > direct * 1.4) continue;   // only trips that really run along the route
+    tried++; if (busPlan(C, { x: a.x + 15, y: a.y }, { x: b.x - 15, y: b.y })) rode++;
+  }
+  assert.ok(tried > 3, 'found trips along routes');
+  assert.ok(rode / tried > 0.8, `only ${rode}/${tried} aligned trips chose the bus`);
+});
+
+test('night-shift workers sleep at home in the late morning', () => {
+  const C = createCity({ seed: 20261128, startHour: 11 });
+  const night = C.people.filter(p => p.shift && p.shift[0] >= 18 && p.shift[1] > 24);   // starts in the evening, ends next morning
+  assert.ok(night.length > 10);
+  for (const p of night) { assert.equal(p.bld, p.home, `${p.name} (${p.role}) is not at home`); assert.ok(p.asleep, `${p.name} (${p.role}) is awake`); }
+});
+
+test('match day: fans drive and fill about a third of the stadium car park, get inside before kick-off, and drive away after', () => {
+  const C = createCity({ seed: 20261128, startDay: 1, startHour: 13 });
+  const st = C.stadium, lots = st.block.lots, cap = lots.reduce((a, l) => a + l.bays.filter(b => b.kind === 'lot').length, 0);
+  const occ = () => lots.reduce((a, l) => a + l.bays.filter(b => b.occ).length, 0);
+  let peak = 0;
+  while (C.hour < 15.25) { run(C, 10); peak = Math.max(peak, occ()); }
+  assert.ok(peak / cap > 0.2 && peak / cap < 0.5, `stadium car park peaked at ${peak}/${cap}`);
+  assert.ok(st.inside.size > 60, `only ${st.inside.size} fans inside after kick-off`);
+  while (C.hour < 17.75) run(C, 10);
+  assert.ok(occ() < peak * 0.7, `car park still holds ${occ()} of its ${peak} cars after the match`);
 });
