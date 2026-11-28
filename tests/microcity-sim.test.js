@@ -1,0 +1,82 @@
+// Micro City simulation core: generation, routing, lighting and a short live run.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire } from '../assets/js/microcity-sim.js';
+
+const run = (C, seconds, dt = 1 / 30) => { for (let t = 0; t < seconds; t += dt) { C.step(dt); C.cues.length = 0; } };
+
+test('generation is deterministic for a seed', () => {
+  const a = createCity({ seed: 42 }), b = createCity({ seed: 42 });
+  assert.equal(a.buildings.length, b.buildings.length);
+  assert.equal(a.people.length, b.people.length);
+  assert.deepEqual(a.buildings.slice(0, 20).map(x => x.label), b.buildings.slice(0, 20).map(x => x.label));
+});
+
+test('the city has every civic and special place, and one of each special character', () => {
+  const C = createCity({ seed: 7 });
+  for (const k of ['police', 'fireStation', 'hospital', 'stadium', 'mall', 'concert', 'school', 'dealer', 'scrap', 'works', 'warehouse', 'depot', 'university', 'lab', 'commerce', 'datacentre', 'substation']) assert.ok(C[k], `missing ${k}`);
+  assert.equal(C.people.filter(p => p.special === 'wanderer').length, 1);
+  assert.equal(C.people.filter(p => p.special === 'claude').length, 1);
+  assert.ok(C.pool && C.fish.length > 0, 'fountain pool with fish');
+  assert.ok(C.fireStation.garages.length >= 2);
+});
+
+test('brand names fit on a sign', () => {
+  const C = createCity({ seed: 7 });
+  for (const b of C.buildings) if (b.brand) assert.ok(b.brand.name.length <= 14, b.brand.name);
+});
+
+test('movement conflicts are symmetric and never pair a lane with itself', () => {
+  const C = createCity({ seed: 7 });
+  for (const m of C.moves) for (const c of m.conf) { assert.ok(c.conf.includes(m)); assert.notEqual(c.inLane, m.inLane); }
+});
+
+test('every directed road can be reached from any other without U-turns', () => {
+  const C = createCity({ seed: 9 });
+  const from = C.edges[0];
+  for (const e of C.edges) if (e !== from) assert.ok(routeEdges(C, from, e), `no route to edge ${e.id}`);
+});
+
+test('pedestrian routes start and end where asked', () => {
+  const C = createCity({ seed: 9 });
+  const a = C.buildings[3].door, b = C.buildings[C.buildings.length - 4].door;
+  const p = pedRoute(C, a, b);
+  assert.ok(p.length >= 2);
+  assert.deepEqual([p[0].x, p[0].y], [a.x, a.y]);
+  assert.deepEqual([p[p.length - 1].x, p[p.length - 1].y], [b.x, b.y]);
+});
+
+test('a room light is only on when an awake person is in it', () => {
+  const C = createCity({ seed: 7, startHour: 21 });
+  for (const b of C.buildings) for (const r of b.rooms) {
+    if (r.kind === 'server' || (b.fire && b.fire.rooms.has(r.id))) continue;
+    if (roomLitWanted(C, b, r)) assert.ok(r.occ.some(p => !p.asleep), `${b.label} room ${r.id} lit while empty`);
+  }
+});
+
+test('a few minutes of city life: traffic moves, people come and go, cars stay in balance', () => {
+  const C = createCity({ seed: 7 });
+  const cars0 = C.vehicles.filter(v => v.type === 'car' && !v.forSale && !v.visitor).length;
+  run(C, 8 * 60);
+  const moving = C.vehicles.filter(v => v.mode === 'drive' && v.v > 0.5).length;
+  const outside = C.people.filter(p => ['walk', 'act', 'wait'].includes(p.state)).length;
+  assert.ok(moving > 5, `only ${moving} vehicles moving`);
+  assert.ok(outside > 50, `only ${outside} people outside`);
+  assert.ok(C.stats.rescues < 30, `${C.stats.rescues} stuck vehicles had to be rescued`);
+  const cars1 = C.vehicles.filter(v => v.type === 'car' && !v.forSale && !v.visitor).length;
+  assert.ok(Math.abs(cars1 - cars0) <= 6, `private cars drifted from ${cars0} to ${cars1}`);
+  for (const p of C.people) assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y), `${p.name} has no position`);
+  for (const v of C.vehicles) assert.ok(Number.isFinite(v.x) && Number.isFinite(v.y), `vehicle ${v.id} has no position`);
+});
+
+test('a building fire is fought and put out', () => {
+  const C = createCity({ seed: 7, startHour: 10 });
+  run(C, 20);
+  const b = C.buildings.find(x => x.type === 'walkup' && x.rooms.length > 4);
+  _startFire(C, b);
+  assert.equal(b.inside.size, [...b.inside].filter(p => p.busy).length, 'everyone not otherwise busy left');
+  let out = false;
+  for (let t = 0; t < 900 && !out; t += 5) { run(C, 5); out = !b.fire || b.fire.stage === 'out'; }
+  assert.ok(out, 'fire still burning after 15 minutes');
+});
