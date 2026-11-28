@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash, _requestTow } from '../assets/js/microcity-sim.js';
+import { createCity, routeEdges, pedRoute, roomLitWanted, _startFire, _crash, _requestTow, FLEET } from '../assets/js/microcity-sim.js';
 
 const run = (C, seconds, dt = 1 / 30) => { for (let t = 0; t < seconds; t += dt) { C.step(dt); C.cues.length = 0; } };
 
@@ -20,6 +20,15 @@ test('the city has every civic and special place, and one of each special charac
   assert.equal(C.people.filter(p => p.special === 'claude').length, 1);
   assert.ok(C.pool && C.fish.length > 0, 'fountain pool with fish');
   assert.ok(C.fireStation.garages.length >= 2);
+});
+
+test('every service fleet is complete, with a yard to park in, on many different cities', () => {
+  for (const seed of [20261128, 7, 9, 11, 42, 123, 999, 31337, 2024, 555]) {
+    const C = createCity({ seed });
+    for (const [type, n] of Object.entries(FLEET)) assert.equal(C.vehicles.filter(v => v.type === type).length, n, `seed ${seed}: ${type}`);
+    for (const k of ['police', 'warehouse', 'dealer', 'scrap', 'works']) assert.ok(C[k] && C[k].yard, `seed ${seed}: ${k} has no yard`);
+    for (const v of C.vehicles) if (v.type !== 'car' && v.type !== 'taxi') assert.ok(v.homeBay, `seed ${seed}: ${v.type} has no home bay`);
+  }
 });
 
 test('brand names fit on a sign', () => {

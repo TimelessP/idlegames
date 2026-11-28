@@ -399,18 +399,19 @@ function pickGeneric(C, kind, row) {
   if (kind === 'industrial') return R.weighted([['warehouse', 3], ['walkup', 1]]);
   return R.weighted([['house', 4], ['terrace', 3], ['walkup', 2], ['apartment', 1], ['shop', row === 'S' ? 1 : 0.3]]);
 }
+const YARD_W = 19.5;   // narrowest service yard that still fits two rows of bays and two one-way aisles, with margin
 function placeLot(C, b, r, facing, t, it) {
   const R = C.R, w = r.x1 - r.x0;
   switch (t) {
-    case 'police': { const bw = 22; const bl = makeBuilding(C, b, { ...r, x1: r.x0 + bw }, 'police', facing); C.police = bl; bl.yard = makeLot(C, b, { ...r, x0: r.x0 + bw + 0.5 }, facing, 'police'); return; }
+    case 'police': { const bw = Math.min(22, w - YARD_W - 0.5); const bl = makeBuilding(C, b, { ...r, x1: r.x0 + bw }, 'police', facing); C.police = bl; bl.yard = makeLot(C, b, { ...r, x0: r.x0 + bw + 0.5 }, facing, 'police'); return; }
     case 'fire': { const bl = makeBuilding(C, b, r, 'fire', facing); C.fireStation = bl; makeGarages(C, b, bl); return; }
-    case 'dealer': { const bw = 17; C.dealer = makeBuilding(C, b, { ...r, x1: r.x0 + bw }, 'dealer', facing); C.dealer.yard = makeLot(C, b, { ...r, x0: r.x0 + bw + 0.5 }, facing, 'dealer'); return; }
+    case 'dealer': { const bw = Math.min(17, w - YARD_W - 0.5); C.dealer = makeBuilding(C, b, { ...r, x1: r.x0 + bw }, 'dealer', facing); C.dealer.yard = makeLot(C, b, { ...r, x0: r.x0 + bw + 0.5 }, facing, 'dealer'); return; }
     case 'warehouse': {
-      if (it.special) { const bw = w - 18; C.warehouse = makeBuilding(C, b, { ...r, x1: r.x0 + bw }, 'warehouse', facing); C.warehouse.yard = makeLot(C, b, { ...r, x0: r.x0 + bw + 0.5 }, facing, 'warehouse'); return; }
+      if (it.special) { const bw = Math.min(w - YARD_W - 0.5, 22); C.warehouse = makeBuilding(C, b, { ...r, x1: r.x0 + bw }, 'warehouse', facing); C.warehouse.yard = makeLot(C, b, { ...r, x0: r.x0 + bw + 0.5 }, facing, 'warehouse'); return; }
       makeBuilding(C, b, r, 'warehouse', facing); return;
     }
     case 'scrapyard': { C.scrap = makeBuilding(C, b, { ...r, x1: r.x0 + 9, y0: facing === 'S' ? r.y1 - 10 : r.y0, y1: facing === 'S' ? r.y1 : r.y0 + 10 }, 'shed', facing, 'scrapyard'); C.scrap.yard = makeLot(C, b, { ...r, x0: r.x0 + 10 }, facing, 'scrap'); return; }
-    case 'works': { C.works = makeBuilding(C, b, { ...r, x1: r.x0 + 14 }, 'works', facing); C.works.yard = makeLot(C, b, { ...r, x0: r.x0 + 15 }, facing, 'works'); return; }
+    case 'works': { const bw = Math.min(14, w - YARD_W - 1); C.works = makeBuilding(C, b, { ...r, x1: r.x0 + bw }, 'works', facing); C.works.yard = makeLot(C, b, { ...r, x0: r.x0 + bw + 1 }, facing, 'works'); return; }
     case 'carpark': splitLots(C, b, r, facing, 'public'); return;
     case 'school': { const fy = facing === 'S' ? { y0: r.y0, y1: r.y1 - 12 } : { y0: r.y0 + 12, y1: r.y1 }; const bl = makeBuilding(C, b, { ...r, ...fy }, 'school', facing); C.school = bl; bl.playground = facing === 'S' ? { x0: r.x0 + 2, x1: r.x1 - 2, y0: r.y1 - 11, y1: r.y1 - 1 } : { x0: r.x0 + 2, x1: r.x1 - 2, y0: r.y0 + 1, y1: r.y0 + 11 }; return; }
     default: {
