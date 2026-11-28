@@ -2141,7 +2141,7 @@ function startFire(C, bl) {
       walkTo(C, p, pt, q => {
         q.state = 'act'; q.until = Infinity; q.pose = role === 'hose' ? 'hose' : role === 'hydrant' ? 'crouch' : 'look'; q.hoseFrom = v;
         const rr = [...bl.fire.rooms].map(id => bl.rooms[id]).filter(Boolean);
-        q.aim = rr.length ? roomCentre(bl, C.R.pick(rr)) : { x: bl.door.x, y: bl.fp.y1, z: bl.H * 0.5 };
+        q.aim = rr.length ? roomCentre(bl, C.R.pick(rr)) : { x: bl.door.x, y: bl.fp.y1, z: bl.H * 0.5, bid: bl.id };
         q.lookAt = q.aim;
         if (role === 'hose') bl.fire.hoses++;
       }, p.task);
@@ -2161,7 +2161,7 @@ function startFire(C, bl) {
 }
 export function roomCentre(bl, r) {
   const w = bl.win, x = bl.fp.x0 + w.mx + (r.c0 + r.c1 + 1) / 2 * w.pitch, z = r.f === 0 ? bl.gh * 0.5 : bl.gh + (r.f - 1) * bl.fh + bl.fh * 0.5;
-  return { x, y: bl.fp.y1, z };
+  return { x, y: bl.fp.y1, z, bid: bl.id };
 }
 function nearestHydrant(C, x, y) { let b = null, bd = Infinity; for (const h of C.props.hydrants) { const d = Math.hypot(h.x - x, h.y - y); if (d < bd) { bd = d; b = h; } } return b ? { x: b.x + 0.6, y: b.y + 0.4 } : sidewalkNear(C, x, y); }
 // §D4 crashes, towing ------------------------------------------------------------------------
